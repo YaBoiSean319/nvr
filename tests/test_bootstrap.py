@@ -447,7 +447,8 @@ class BootstrapTests(unittest.TestCase):
             added = self.client.post("/api/cameras", json={"name":"Test Camera", "stream_url":stream_url})
         self.assertEqual(added.status_code, 201)
         self.assertEqual(added.json()["recording_mode"], "motion")
-        self.assertEqual(added.json()["recording_status"], "unsupported")
+        self.assertFalse(added.json()["recording_enabled"])
+        self.assertEqual(added.json()["recording_status"], "stopped")
         response_text = added.text + self.client.get("/api/cameras").text
         self.assertNotIn("CameraSecret2026", response_text)
         self.assertNotIn("NeverReturnThis", response_text)
@@ -459,6 +460,44 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(Path(os.environ["NVR_CREDENTIAL_KEY_PATH"]).stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.client.delete(f"/api/cameras/{added.json()['id']}").status_code, 204)
         self.assertEqual(self.client.get("/api/cameras").json()["cameras"], [])
+
+    def test_motion_recording_requires_enablement_and_encrypts_event_credentials(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
+        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+            response = self.client.post("/api/cameras", json={
+                "name":"Motion policy camera", "stream_url":"rtsp://127.0.0.1/stream",
+                "recording_mode":"motion", "motion_service_url":"http://127.0.0.1/onvif/device_service",
+                "motion_username":"onvif-user", "motion_password":"MotionSecret2026",
+            })
+        self.assertEqual(response.status_code, 201, response.text)
+        camera = response.json()
+        self.assertFalse(camera["recording_enabled"])
+        self.assertEqual(camera["recording_status"], "stopped")
+        self.assertTrue(camera["motion_source_configured"])
+        self.assertNotIn("MotionSecret2026", response.text)
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
+            ciphertext = db.execute("SELECT motion_credentials_ciphertext FROM cameras WHERE id=?", (camera["id"],)).fetchone()[0]
+        self.assertNotIn(b"MotionSecret2026", ciphertext)
+        enabled = self.client.patch(f"/api/cameras/{camera['id']}", json={"recording_enabled":True})
+        self.assertEqual(enabled.status_code, 200, enabled.text)
+        self.assertTrue(enabled.json()["recording_enabled"])
+        self.assertEqual(enabled.json()["recording_status"], "connecting")
+        disabled = self.client.patch(f"/api/cameras/{camera['id']}", json={"recording_mode":"disabled"})
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        self.assertFalse(disabled.json()["recording_enabled"])
+
+    def test_bulk_recording_enablement_updates_only_selected_cameras(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
+        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+            first = self.client.post("/api/cameras", json={"name":"Bulk first","stream_url":"rtsp://127.0.0.1/one"}).json()
+            second = self.client.post("/api/cameras", json={"name":"Bulk second","stream_url":"rtsp://127.0.0.1/two"}).json()
+        updated = self.client.post("/api/cameras/bulk-update", json={"camera_ids":[first["id"]],"recording_enabled":True})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        cameras = {camera["id"]:camera for camera in self.client.get("/api/cameras").json()["cameras"]}
+        self.assertTrue(cameras[first["id"]]["recording_enabled"])
+        self.assertFalse(cameras[second["id"]]["recording_enabled"])
 
     @unittest.skipUnless(__import__("shutil").which("ffprobe"), "FFprobe is required for the stream test")
     def test_real_probe_failure_is_reported_without_echoing_credentials(self):
@@ -480,6 +519,7 @@ class BootstrapTests(unittest.TestCase):
                 "name":"Unavailable test feed",
                 "stream_url":"rtsp://feed-user:FeedSecret2026@127.0.0.1:1/stream",
                 "recording_mode":"continuous",
+                "recording_enabled":True,
             })
         self.assertEqual(created.status_code, 201)
         camera_id = created.json()["id"]
@@ -508,6 +548,7 @@ class BootstrapTests(unittest.TestCase):
             "name":"Simulated RTSP camera",
             "stream_url":os.environ["NVR_RTSP_TEST_URL"],
             "recording_mode":"continuous",
+            "recording_enabled":True,
         })
         self.assertEqual(created.status_code, 201, created.text)
         camera_id = created.json()["id"]
