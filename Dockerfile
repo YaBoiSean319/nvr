@@ -6,11 +6,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt \
     && groupadd --system --gid 10001 nvr \
     && useradd --system --uid 10001 --gid nvr --home-dir /nonexistent nvr \
-    && mkdir -p /data /recordings \
-    && chown -R nvr:nvr /app /data /recordings
+    && mkdir -p /data /secrets /recordings \
+    && chown -R nvr:nvr /app /data /secrets /recordings
 COPY --chown=nvr:nvr app ./app
 USER nvr
 EXPOSE 8080

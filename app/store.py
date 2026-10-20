@@ -38,5 +38,30 @@ def initialize() -> None:
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
+            CREATE TABLE IF NOT EXISTS cameras (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                stream_url_ciphertext BLOB NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+                recording_mode TEXT NOT NULL DEFAULT 'motion' CHECK (recording_mode IN ('motion','continuous','disabled')),
+                recording_status TEXT NOT NULL DEFAULT 'stopped',
+                video_codec TEXT,
+                video_width INTEGER,
+                video_height INTEGER,
+                last_probe_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS recording_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL UNIQUE,
+                starts_at TEXT NOT NULL,
+                ends_at TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS recording_camera_time_idx ON recording_segments(camera_id, starts_at, ends_at);
             """
         )
