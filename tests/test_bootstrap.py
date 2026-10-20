@@ -479,6 +479,14 @@ class BootstrapTests(unittest.TestCase):
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             ciphertext = db.execute("SELECT motion_credentials_ciphertext FROM cameras WHERE id=?", (camera["id"],)).fetchone()[0]
         self.assertNotIn(b"MotionSecret2026", ciphertext)
+        malformed_auth = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
+            "service_url":"http://127.0.0.1/onvif/device_service", "username":"only-user"
+        })
+        self.assertEqual(malformed_auth.status_code, 422)
+        malformed_port = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
+            "service_url":"http://127.0.0.1:70000/onvif/device_service"
+        })
+        self.assertEqual(malformed_port.status_code, 422)
         enabled = self.client.patch(f"/api/cameras/{camera['id']}", json={"recording_enabled":True})
         self.assertEqual(enabled.status_code, 200, enabled.text)
         self.assertTrue(enabled.json()["recording_enabled"])
