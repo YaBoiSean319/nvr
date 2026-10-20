@@ -28,6 +28,7 @@ async function refresh() {
     document.querySelector("#status h2").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
     document.querySelector("#status-list").classList.toggle("hidden", !admin);
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
+    document.querySelector("#diagnostics-admin").classList.toggle("hidden", !admin);
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
     document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
     document.querySelector("#bulk-admin").classList.toggle("hidden", !admin);
@@ -36,6 +37,7 @@ async function refresh() {
       const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
       document.querySelector("#status-list").replaceChildren(...rows.flatMap(([k,v]) => { const dt=document.createElement("dt"), dd=document.createElement("dd"); dt.textContent=k; dd.textContent=v; return [dt,dd]; }));
       await refreshSessions();
+      await refreshDiagnostics();
     }
     const inventory = await api("/api/cameras");
     if (admin) await refreshGroups();
@@ -47,6 +49,14 @@ async function refresh() {
       currentRole = null; await showLogin();
     } else { message.textContent = error.message; }
   }
+}
+async function refreshDiagnostics() {
+  const state = await api("/api/diagnostics/status");
+  const button = document.querySelector("#diagnostics-toggle");
+  button.textContent = state.enabled ? "Stop diagnostics capture" : "Enable diagnostics capture";
+  document.querySelector("#diagnostics-message").textContent = state.enabled
+    ? `Capture is on until ${new Date(state.capture_until).toLocaleString()} · ${state.event_count} event(s) collected.`
+    : `${state.event_count} event(s) available for download. Capture is off.`;
 }
 async function refreshGroups() {
   const {groups}=await api("/api/camera-groups");
@@ -208,6 +218,23 @@ document.querySelector("#discover-cameras").addEventListener("click", async () =
     await refreshDiscovery();
   } catch(error) { message.textContent=error.message; }
   finally { button.disabled=false; }
+});
+document.querySelector("#diagnostics-toggle").addEventListener("click", async () => {
+  const button=document.querySelector("#diagnostics-toggle"); button.disabled=true;
+  try {
+    const enabled=button.textContent.startsWith("Enable");
+    await api("/api/diagnostics/capture",{method:"POST",body:JSON.stringify({enabled,hours:Number(document.querySelector("#diagnostics-hours").value)})});
+    await refreshDiagnostics();
+  } catch(error) { document.querySelector("#diagnostics-message").textContent=error.message; }
+  finally { button.disabled=false; }
+});
+document.querySelector("#diagnostics-download").addEventListener("click", async () => {
+  try {
+    const response=await fetch("/api/diagnostics/bundle",{credentials:"same-origin"});
+    if(!response.ok) throw new Error("Could not download diagnostics bundle");
+    const url=URL.createObjectURL(await response.blob());
+    const link=document.createElement("a"); link.href=url; link.download="nvr-diagnostics.json"; link.click(); URL.revokeObjectURL(url);
+  } catch(error) { document.querySelector("#diagnostics-message").textContent=error.message; }
 });
 document.querySelector("#group-form").addEventListener("submit",async event=>{
   event.preventDefault();
