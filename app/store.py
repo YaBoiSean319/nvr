@@ -29,10 +29,13 @@ def initialize() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 password_hash TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('administrator')),
+                role TEXT NOT NULL CHECK (role IN ('administrator','operator')),
+                provider_issuer TEXT,
+                provider_subject TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT NOT NULL UNIQUE,
                 token_hash TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 expires_at TEXT NOT NULL,
@@ -66,3 +69,47 @@ def initialize() -> None:
             CREATE INDEX IF NOT EXISTS recording_camera_time_idx ON recording_segments(camera_id, starts_at, ends_at);
             """
         )
+        # Migrate installations created by the first implementation, which only
+        # allowed administrator accounts and did not assign stable session IDs.
+        user_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()[0]
+        user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+        if "operator" not in user_sql:
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""CREATE TABLE users_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('administrator','operator')),
+                provider_issuer TEXT,
+                provider_subject TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )""")
+            db.execute("INSERT INTO users_new(id,username,password_hash,role,created_at) SELECT id,username,password_hash,role,created_at FROM users")
+            db.execute("CREATE TEMP TABLE sessions_backup AS SELECT lower(hex(randomblob(16))) AS session_id,token_hash,user_id,expires_at,created_at FROM sessions")
+            db.execute("DROP TABLE sessions")
+            db.execute("DROP TABLE users")
+            db.execute("ALTER TABLE users_new RENAME TO users")
+            db.execute("""CREATE TABLE sessions (
+                session_id TEXT NOT NULL UNIQUE,
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )""")
+            db.execute("INSERT INTO sessions(session_id,token_hash,user_id,expires_at,created_at) SELECT session_id,token_hash,user_id,expires_at,created_at FROM sessions_backup")
+            db.execute("DROP TABLE sessions_backup")
+            db.execute("CREATE INDEX sessions_expiry_idx ON sessions(expires_at)")
+            db.commit()
+            db.execute("PRAGMA foreign_keys = ON")
+        else:
+            if "provider_issuer" not in user_columns:
+                db.execute("ALTER TABLE users ADD COLUMN provider_issuer TEXT")
+            if "provider_subject" not in user_columns:
+                db.execute("ALTER TABLE users ADD COLUMN provider_subject TEXT")
+            session_columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+            if "session_id" not in session_columns:
+                db.execute("ALTER TABLE sessions ADD COLUMN session_id TEXT")
+                db.execute("UPDATE sessions SET session_id=lower(hex(randomblob(16))) WHERE session_id IS NULL")
+                db.execute("CREATE UNIQUE INDEX sessions_id_idx ON sessions(session_id)")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_provider_identity_idx ON users(provider_issuer, provider_subject) WHERE provider_issuer IS NOT NULL AND provider_subject IS NOT NULL")

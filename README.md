@@ -25,6 +25,13 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_PORT` | `8080` | Host port for the web application |
 | `NVR_SESSION_HOURS` | `12` | Session lifetime, clamped to 1–168 hours |
 | `NVR_COOKIE_SECURE` | `false` | Set `true` behind HTTPS so session cookies are HTTPS-only |
+| `NVR_PUBLIC_URL` | unset | Public HTTPS origin used to construct the fixed Entra callback URL |
+| `NVR_OIDC_TENANT_ID` | unset | Microsoft Entra workforce tenant GUID |
+| `NVR_OIDC_CLIENT_ID` | unset | Entra app registration client ID |
+| `NVR_OIDC_CLIENT_SECRET` | unset | Entra app registration client secret; supply through a secret manager |
+| `NVR_OIDC_SESSION_SECRET` | unset | Long random key for the short-lived signed OIDC state cookie |
+| `NVR_OIDC_ADMIN_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR administrators |
+| `NVR_OIDC_OPERATOR_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR operators |
 
 Do not expose the initial HTTP setup screen to untrusted networks. Place it behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
 
@@ -37,6 +44,10 @@ Do not expose the initial HTTP setup screen to untrusted networks. Place it behi
 - `POST /api/cameras/test` checks an RTSP/RTSPS video stream with FFprobe.
 - `POST /api/cameras` saves the stream URL encrypted and reports tested video capability; credentials and query parameters are omitted from API responses.
 - `GET /api/cameras/{id}/segments` returns indexed coverage; authenticated media routes serve stored MP4 segments.
+- Entra OIDC is enabled only when all five `NVR_PUBLIC_URL` and `NVR_OIDC_*` connection values are set. The configured public URL must be HTTPS except for localhost development. Register its exact callback URL, `<NVR_PUBLIC_URL>/api/auth/oidc/callback`, as a **Web** redirect URI in the Entra app registration.
+- Assign Entra application roles to staff and map their exact role values with `NVR_OIDC_ADMIN_ROLES` and `NVR_OIDC_OPERATOR_ROLES`. Accounts without an explicit mapping are denied. Role mapping is read from the verified ID token; group overage and unassigned accounts do not grant access.
+- The OIDC authorization-code flow uses Authlib for discovery, state/nonce validation, ID-token signature and claim validation, and PKCE. Set `NVR_OIDC_SESSION_SECRET` to a long random value and keep it stable across restarts. A provider outage returns a clear sign-in error while the emergency local administrator can still sign in at `/api/auth/login`.
+- Operators can list cameras and view indexed footage. Camera configuration, system status, and session administration require an administrator. Administrators can review and terminate active sessions at `/api/admin/sessions`; session lifetimes are capped at 168 hours by `NVR_SESSION_HOURS`.
 
 Choose **Continuous** explicitly to start recording. The product default remains **Motion**, but motion detection is not implemented yet; that mode is shown as unsupported and does not silently record continuously. FFmpeg remuxes the source video without re-encoding into target one-minute MP4 segments; actual segment boundaries follow source keyframes and may be longer. Browser playback depends on the camera codec. H.264/AVC in MP4 is a pragmatic compatibility target, while HEVC/H.265 and vendor-specific codecs may not play in every browser or operating system. Audio is omitted in this slice. FFmpeg and FFprobe are included in the image, and the recorder retries interrupted RTSP/TCP connections.
 
@@ -56,4 +67,4 @@ uvicorn app.main:app --reload
 
 ## Current boundary
 
-Motion detection, Entra ID sign-in, camera discovery, multi-camera load controls, retention, and the remaining approved NVR features are still to be implemented. This first recorder path has not been qualified for 200+ cameras or a production retention workload; compatibility and capacity tests are required before replacement use.
+Motion detection, camera discovery, multi-camera load controls, retention, and the remaining approved NVR features are still to be implemented. Entra sign-in and role enforcement are implemented in this slice, but the installation still needs tenant-specific setup and validation. This first recorder path has not been qualified for 200+ cameras or a production retention workload; compatibility and capacity tests are required before replacement use.
