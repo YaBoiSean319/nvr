@@ -81,15 +81,20 @@ class MotionClipAssembler:
         self.post_roll_seconds = max(1, min(int(post_roll_seconds), 600))
         self.capture: _Capture | None = None
         self.segment_seconds = 2
+        self._lock = asyncio.Lock()
 
     async def ingest(self, event: CameraMotionEvent) -> None:
+        async with self._lock:
+            await self._ingest(event)
+
+    async def _ingest(self, event: CameraMotionEvent) -> None:
         received = datetime.now(timezone.utc)
         capture = self.capture
         if event.active and capture is not None and not capture.active and received > capture.capture_until:
             # A notification may race the periodic polling loop. Finalize the
             # expired clip before starting another; if its end is not yet
             # buffered, keep the current capture and merge the transition.
-            await self.poll()
+            await self._poll()
             capture = self.capture
         if event.active:
             if capture is None:
@@ -105,8 +110,8 @@ class MotionClipAssembler:
                 with connect() as db:
                     db.execute(
                         "INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,pre_roll_complete,status,source_events_json) "
-                        "VALUES(?,?,'onvif',?,?,?,?,?,0,'recording','[]')",
-                        (capture.event_id, self.camera_id, event.topic, event.event_time.isoformat(), received.isoformat(),
+                        "VALUES(?,?,?,?,?,?,?,?,0,'recording','[]')",
+                        (capture.event_id, self.camera_id, event.source, event.topic, event.event_time.isoformat(), received.isoformat(),
                          capture.requested_start.isoformat(), capture.capture_until.isoformat()),
                     )
             else:
@@ -118,12 +123,16 @@ class MotionClipAssembler:
         if capture is None:
             return
         if len(capture.source_events) < 128:
-            capture.source_events.append({"source_event_at": event.event_time.isoformat(), "received_at": received.isoformat(), "topic": event.topic, "active": event.active})
+            capture.source_events.append({"source": event.source, "source_event_at": event.event_time.isoformat(), "received_at": received.isoformat(), "topic": event.topic, "active": event.active})
         with connect() as db:
             db.execute("UPDATE motion_events SET requested_end=?,source_events_json=? WHERE id=?",
                        (capture.capture_until.isoformat(), json.dumps(capture.source_events, separators=(",", ":")), capture.event_id))
 
     async def poll(self) -> None:
+        async with self._lock:
+            await self._poll()
+
+    async def _poll(self) -> None:
         capture = self.capture
         if capture is None:
             return
@@ -211,6 +220,7 @@ class MotionClipAssembler:
         shutil.rmtree(capture.staging_dir, ignore_errors=True)
 
     async def stop(self) -> None:
-        if self.capture is not None:
-            await self._mark_failed(self.capture, "Motion recorder stopped before post-roll completed")
-            self.capture = None
+        async with self._lock:
+            if self.capture is not None:
+                await self._mark_failed(self.capture, "Motion recorder stopped before post-roll completed")
+                self.capture = None

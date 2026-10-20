@@ -62,6 +62,10 @@ def initialize() -> None:
                 motion_pre_roll_seconds INTEGER NOT NULL DEFAULT 10,
                 motion_post_roll_seconds INTEGER NOT NULL DEFAULT 30,
                 motion_source_status TEXT NOT NULL DEFAULT 'untested',
+                motion_fallback_enabled INTEGER NOT NULL DEFAULT 0 CHECK (motion_fallback_enabled IN (0,1)),
+                motion_zones_json TEXT NOT NULL DEFAULT '[]',
+                motion_sensitivity INTEGER NOT NULL DEFAULT 50,
+                server_motion_status TEXT NOT NULL DEFAULT 'disabled',
                 video_codec TEXT,
                 video_width INTEGER,
                 video_height INTEGER,
@@ -136,6 +140,10 @@ def initialize() -> None:
             ("motion_pre_roll_seconds", "INTEGER NOT NULL DEFAULT 10"),
             ("motion_post_roll_seconds", "INTEGER NOT NULL DEFAULT 30"),
             ("motion_source_status", "TEXT NOT NULL DEFAULT 'untested'"),
+            ("motion_fallback_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK (motion_fallback_enabled IN (0,1))"),
+            ("motion_zones_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("motion_sensitivity", "INTEGER NOT NULL DEFAULT 50"),
+            ("server_motion_status", "TEXT NOT NULL DEFAULT 'disabled'"),
         ):
             if name not in camera_columns:
                 db.execute(f"ALTER TABLE cameras ADD COLUMN {name} {definition}")

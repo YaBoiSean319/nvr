@@ -15,7 +15,8 @@ from urllib.parse import urlsplit, urlunsplit
 from .credentials import decrypt
 from .store import connect
 from .motion import MotionClipAssembler
-from .onvif_events import subscribe_and_pull
+from .onvif_events import CameraMotionEvent, subscribe_and_pull
+from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 
 SEGMENT_SECONDS = max(10, min(int(os.environ.get("NVR_SEGMENT_SECONDS", "60")), 3600))
 RECONNECT_MAX_SECONDS = 30
@@ -206,14 +207,15 @@ class RecordingManager:
         if row is None or not row["enabled"] or not row["recording_enabled"]:
             self._set_status(camera_id, "stopped")
             return False
-        if not row["motion_service_url"]:
+        fallback_enabled = bool(row["motion_fallback_enabled"])
+        if not row["motion_service_url"] and not fallback_enabled:
             with connect() as db:
-                db.execute("UPDATE cameras SET recording_status='unsupported',motion_source_status='unsupported',last_error='Configure an ONVIF event service to use motion recording' WHERE id=?", (camera_id,))
+                db.execute("UPDATE cameras SET recording_status='unsupported',motion_source_status='unsupported',server_motion_status='disabled',last_error='Configure an ONVIF event service or enable server motion fallback' WHERE id=?", (camera_id,))
             return False
         executable = shutil.which("ffmpeg")
         if not executable:
             with connect() as db:
-                db.execute("UPDATE cameras SET recording_status='unavailable',motion_source_status='unavailable',last_error='FFmpeg is not installed' WHERE id=?", (camera_id,))
+                db.execute("UPDATE cameras SET recording_status='unavailable',motion_source_status='unavailable',server_motion_status=?,last_error='FFmpeg is not installed' WHERE id=?", ("unavailable" if fallback_enabled else "disabled", camera_id))
             return False
         try:
             source = decrypt(row["stream_url_ciphertext"])
@@ -229,9 +231,13 @@ class RecordingManager:
         assembler = MotionClipAssembler(camera_id, spool, row["motion_pre_roll_seconds"], row["motion_post_roll_seconds"])
         self._set_status(camera_id, "buffering")
         with connect() as db:
-            db.execute("UPDATE cameras SET motion_source_status='connecting',last_error=NULL WHERE id=?", (camera_id,))
+            db.execute("UPDATE cameras SET motion_source_status=?,server_motion_status=?,last_error=NULL WHERE id=?",
+                       ("connecting" if row["motion_service_url"] else "unsupported", "waiting" if fallback_enabled else "disabled", camera_id))
         event_task: asyncio.Task[None] | None = None
+        fallback_task: asyncio.Task[None] | None = None
         proc: asyncio.subprocess.Process | None = None
+        source_state = {"value": "connecting" if row["motion_service_url"] else "unsupported"}
+        source_changed = asyncio.Event()
         try:
             list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
             args = [
@@ -252,20 +258,35 @@ class RecordingManager:
             proc.stdin.close()
 
             def source_status(value: str) -> None:
+                source_state["value"] = value
+                source_changed.set()
                 healthy = value == "healthy"
                 status = "buffering" if healthy else ("reconnecting" if value == "unavailable" else "degraded")
                 error = None if healthy else ("ONVIF event subscription is unavailable" if value == "unavailable" else "ONVIF event service is not usable")
+                if not healthy and fallback_enabled:
+                    error = "ONVIF events are degraded; server motion fallback is starting"
                 with connect() as db:
-                    db.execute("UPDATE cameras SET recording_status=?,motion_source_status=?,last_error=? WHERE id=?",
-                               (status, value, error, camera_id))
+                    db.execute("UPDATE cameras SET recording_status=?,motion_source_status=?,server_motion_status=?,last_error=? WHERE id=?",
+                               (status, value, "waiting" if healthy and fallback_enabled else ("disabled" if not fallback_enabled else "detecting"), error, camera_id))
 
             async def on_event(event) -> None:
                 await assembler.ingest(event)
 
-            event_task = asyncio.create_task(
-                subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status),
-                name=f"onvif-events-{camera_id}",
-            )
+            if row["motion_service_url"]:
+                event_task = asyncio.create_task(
+                    subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status),
+                    name=f"onvif-events-{camera_id}",
+                )
+            else:
+                source_status("unsupported")
+            if fallback_enabled:
+                fallback_task = asyncio.create_task(
+                    self._watch_server_motion_fallback(
+                        camera_id, source, json.loads(row["motion_zones_json"]), row["motion_sensitivity"],
+                        source_state, source_changed, assembler,
+                    ),
+                    name=f"server-motion-{camera_id}",
+                )
             while not self.stopping:
                 await assembler.poll()
                 if proc.returncode is not None:
@@ -281,6 +302,9 @@ class RecordingManager:
             if event_task:
                 event_task.cancel()
                 await asyncio.gather(event_task, return_exceptions=True)
+            if fallback_task:
+                fallback_task.cancel()
+                await asyncio.gather(fallback_task, return_exceptions=True)
             await assembler.stop()
             if proc and proc.returncode is None:
                 proc.terminate()
@@ -293,6 +317,95 @@ class RecordingManager:
                 self._set_status(camera_id, "stopped")
             shutil.rmtree(spool, ignore_errors=True)
         return True
+
+    async def _watch_server_motion_fallback(
+        self,
+        camera_id: str,
+        source: str,
+        zones: list[dict[str, float]],
+        sensitivity: int,
+        source_state: dict[str, str],
+        source_changed: asyncio.Event,
+        assembler: MotionClipAssembler,
+    ) -> None:
+        while not self.stopping:
+            if source_state["value"] in {"healthy", "connecting"}:
+                with connect() as db:
+                    db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
+                source_changed.clear()
+                if source_state["value"] in {"healthy", "connecting"}:
+                    await source_changed.wait()
+                continue
+            try:
+                await self._detect_server_motion(camera_id, source, zones, sensitivity, source_state, assembler)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError):
+                if source_state["value"] in {"healthy", "connecting"}:
+                    with connect() as db:
+                        db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
+                else:
+                    with connect() as db:
+                        db.execute("UPDATE cameras SET server_motion_status='unavailable',recording_status='unavailable',last_error='ONVIF events and server motion fallback are unavailable' WHERE id=?", (camera_id,))
+            if source_state["value"] not in {"healthy", "connecting"} and not self.stopping:
+                await asyncio.sleep(2)
+
+    async def _detect_server_motion(
+        self,
+        camera_id: str,
+        source: str,
+        zones: list[dict[str, float]],
+        sensitivity: int,
+        source_state: dict[str, str],
+        assembler: MotionClipAssembler,
+    ) -> None:
+        executable = shutil.which("ffmpeg")
+        if not executable:
+            raise OSError("FFmpeg is not installed")
+        detector = FrameMotionDetector(zones, sensitivity)
+        args = [
+            executable, "-hide_banner", "-nostats", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
+            "-i", "pipe:0", "-map", "0:v:0", "-vf", f"fps=2,scale={FRAME_WIDTH}:{FRAME_HEIGHT}:flags=area,format=gray",
+            "-an", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1",
+        ]
+        process: asyncio.subprocess.Process | None = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            if process.stdin is None or process.stdout is None:
+                raise OSError("Unable to start server motion detector")
+            process.stdin.write(_manifest_bytes(source))
+            await process.stdin.drain()
+            process.stdin.close()
+            with connect() as db:
+                db.execute("UPDATE cameras SET server_motion_status='detecting',recording_status='buffering',last_error='ONVIF events are degraded; server motion fallback is active' WHERE id=?", (camera_id,))
+            frame_size = FRAME_WIDTH * FRAME_HEIGHT
+            while not self.stopping and source_state["value"] not in {"healthy", "connecting"}:
+                frame = await asyncio.wait_for(process.stdout.readexactly(frame_size), timeout=5)
+                transition = detector.process(frame)
+                if transition is not None:
+                    await assembler.ingest(CameraMotionEvent(
+                        transition, datetime.now(timezone.utc), "server-motion-difference", source="server",
+                    ))
+                if process.returncode is not None:
+                    raise OSError("Server motion detector stopped")
+        finally:
+            if detector.active:
+                await assembler.ingest(CameraMotionEvent(
+                    False, datetime.now(timezone.utc), "server-motion-difference", source="server",
+                ))
+            if process and process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+            if source_state["value"] in {"healthy", "connecting"}:
+                with connect() as db:
+                    db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
 
     async def _run_continuous(self, camera_id: str) -> None:
         executable = shutil.which("ffmpeg")

@@ -507,6 +507,41 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(cameras[first["id"]]["recording_enabled"])
         self.assertFalse(cameras[second["id"]]["recording_enabled"])
 
+    def test_server_motion_fallback_configuration_is_validated_and_exposed(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
+        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+            camera = self.client.post("/api/cameras", json={
+                "name":"Fallback policy camera", "stream_url":"rtsp://127.0.0.1/stream"
+            }).json()
+        response = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
+            "fallback_enabled":True,
+            "zones":[{"x":0.1,"y":0.2,"width":0.5,"height":0.6}],
+            "sensitivity":72,
+            "pre_roll_seconds":10,
+            "post_roll_seconds":30,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["motion_fallback_enabled"])
+        self.assertEqual(response.json()["motion_sensitivity"], 72)
+        self.assertEqual(response.json()["server_motion_status"], "waiting")
+        self.assertEqual(response.json()["motion_zones"], [{"x":0.1,"y":0.2,"width":0.5,"height":0.6}])
+        partial = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={"sensitivity":80})
+        self.assertEqual(partial.status_code, 200, partial.text)
+        self.assertEqual(partial.json()["motion_pre_roll_seconds"], 10)
+        self.assertEqual(partial.json()["motion_post_roll_seconds"], 30)
+        custom = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
+            "fallback_enabled":True, "pre_roll_seconds":7, "post_roll_seconds":19
+        })
+        self.assertEqual(custom.status_code, 200, custom.text)
+        partial = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={"sensitivity":60})
+        self.assertEqual(partial.json()["motion_pre_roll_seconds"], 7)
+        self.assertEqual(partial.json()["motion_post_roll_seconds"], 19)
+        invalid_zone = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
+            "fallback_enabled":True, "zones":[{"x":0.9,"y":0,"width":0.2,"height":1}]
+        })
+        self.assertEqual(invalid_zone.status_code, 422)
+
     @unittest.skipUnless(__import__("shutil").which("ffprobe"), "FFprobe is required for the stream test")
     def test_real_probe_failure_is_reported_without_echoing_credentials(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
