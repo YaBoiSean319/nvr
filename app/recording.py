@@ -37,7 +37,8 @@ def safe_stream_url(raw: str) -> str:
 
 def _manifest_bytes(source: str) -> bytes:
     # Feed the source URL to FFmpeg over stdin so camera credentials never appear in argv.
-    return f"ffconcat version 1.0\nfile {source}\n".encode("utf-8")
+    # RTSP options belong to the nested file opened by the concat demuxer.
+    return f"ffconcat version 1.0\nfile {source}\noption rtsp_transport tcp\noption rw_timeout 15000000\n".encode("utf-8")
 
 
 _PROTOCOLS = "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto"
