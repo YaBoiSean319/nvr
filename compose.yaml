@@ -17,6 +17,7 @@ services:
       NVR_OIDC_SESSION_SECRET: ${NVR_OIDC_SESSION_SECRET:-}
       NVR_OIDC_ADMIN_ROLES: ${NVR_OIDC_ADMIN_ROLES:-}
       NVR_OIDC_OPERATOR_ROLES: ${NVR_OIDC_OPERATOR_ROLES:-}
+      NVR_DISCOVERY_INTERFACE: ${NVR_DISCOVERY_INTERFACE:-}
     volumes:
       - nvr-data:/data
       - nvr-secrets:/secrets

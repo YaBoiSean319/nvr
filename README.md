@@ -6,8 +6,11 @@ A self-hosted network video recorder for workplace cameras. The current implemen
 
 - Docker Engine with the Compose plugin
 - A host with a persistent filesystem for the Compose volumes
+- Docker Compose 2.24 or newer when using the optional camera-discovery network override
 
 ## Start the stack
+
+For a basic install, use the default isolated Docker bridge network:
 
 ```sh
 docker compose up -d --build
@@ -32,6 +35,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_OIDC_SESSION_SECRET` | unset | Long random key for the short-lived signed OIDC state cookie |
 | `NVR_OIDC_ADMIN_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR administrators |
 | `NVR_OIDC_OPERATOR_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR operators |
+| `NVR_DISCOVERY_INTERFACE` | unset | Optional IPv4 address of the NVR host interface attached to the camera VLAN |
 
 Do not expose the initial HTTP setup screen to untrusted networks. Place it behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
 
@@ -42,6 +46,7 @@ Do not expose the initial HTTP setup screen to untrusted networks. Place it behi
 - `POST /api/setup/admin` creates the one-time local administrator. Passwords require at least 14 characters, including a letter and a number.
 - `GET /api/system/status` requires an authenticated administrator session.
 - `POST /api/cameras/test` checks an RTSP/RTSPS video stream with FFprobe.
+- Administrators can enable opt-in support diagnostics for 1–24 hours and download a bounded JSON bundle. Capture is off by default. The bundle contains only scan/probe outcomes, aggregate counts, and timings; it excludes camera inventory, names, addresses, stream/service URLs, credentials, sessions, and footage. It is capped at 1,000 events and 7 days.
 - `POST /api/cameras` saves the stream URL encrypted and reports tested video capability; credentials and query parameters are omitted from API responses.
 - `GET /api/cameras/{id}/segments` returns indexed coverage; authenticated media routes serve stored MP4 segments.
 - Entra OIDC is enabled only when the five `NVR_PUBLIC_URL` and `NVR_OIDC_*` connection values are set and at least one role mapping is configured. The configured public URL must be HTTPS except for localhost development. Register its exact callback URL, `<NVR_PUBLIC_URL>/api/auth/oidc/callback`, as a **Web** redirect URI in the Entra app registration.
@@ -49,6 +54,10 @@ Do not expose the initial HTTP setup screen to untrusted networks. Place it behi
 - The OIDC authorization-code flow uses Authlib for discovery, state/nonce validation, ID-token signature and claim validation, and PKCE. Set `NVR_OIDC_SESSION_SECRET` to a long random value and keep it stable across restarts. A provider outage returns a clear sign-in error while the emergency local administrator can still sign in at `/api/auth/login`.
 - Operators can list cameras and view indexed footage. Camera configuration, system status, and session administration require an administrator. Administrators can review and terminate active sessions at `/api/admin/sessions`; session lifetimes are capped at 168 hours by `NVR_SESSION_HOURS`.
 - Administrators can remove a camera and its stored footage. The API removes footage before deleting the camera record; if footage cleanup fails, the camera record is retained. Operators receive `403` for camera deletion requests.
+- ONVIF WS-Discovery is an explicit administrator action at **Scan camera VLAN**. The default Docker bridge does not reliably pass camera VLAN multicast. On a Linux Docker host with a camera VLAN interface, configure `NVR_DISCOVERY_INTERFACE` to that host interface's IPv4 address and run the stack with `docker compose -f compose.yaml -f compose.discovery.yaml up -d --build`. Host networking lets multicast replies reach the app; it removes the normal Docker port isolation and binds the app directly to host port `8080`, so protect that port with the host firewall or approved gateway. Keep both Compose files on future `up`/`down` commands. Cameras which do not answer ONVIF discovery can still be added manually.
+- To collect evidence for a discovery issue, enable **Support diagnostics** in the administrator UI, run one camera-VLAN scan, and download the diagnostics bundle. Also note the NVR host OS, whether it is Docker/Compose, and whether the intended camera VLAN interface is present on that host. The bundle deliberately omits IP addresses and device inventory. The live check requires the NVR host to be attached to that VLAN. Report whether the scan finds zero devices or fails with the generic network-configuration error. Do not send camera passwords, RTSP URLs, raw packet captures, or footage.
+- Discovery returns review candidates only and never starts recording. Review each candidate, supply its RTSP/RTSPS stream URL and name, and use **Test and add camera** to validate video before adding it. Device UUIDs deduplicate repeat discovery and link later scans to manually added cameras when the UUID is known. Discovery service URLs are sanitized. WS-Discovery and tested video streams are shown as supported; an inspected stream with no audio track is shown as unsupported audio; failed video probes are shown as unavailable; motion events and PTZ remain untested because credentialed device tests are not implemented yet. Audio capability detection does not mean audio is recorded or playable in this release slice.
+- Administrators can create camera groups, select cameras for bulk group/recording-mode changes, and rotate a camera's saved stream URL. A credential rotation is probed before the encrypted URL is replaced; failures keep the old URL, camera ID, and footage association. Bulk CSV onboarding is available from the admin screen: preview the file first, then test accepted streams and apply rows. Required columns are `name,stream_url`; optional columns are `recording_mode,group_name,onvif_uuid`. Imports are limited to 500 rows per request, return row-level status without echoing stream URLs, and create a camera only after its video probe succeeds. The API exposes `POST /api/cameras/import/preview`, `POST /api/cameras/import/apply`, `POST /api/cameras/bulk-update`, `POST /api/cameras/{id}/credentials`, and `GET /api/camera-groups`.
 
 Choose **Continuous** explicitly to start recording. The product default remains **Motion**, but motion detection is not implemented yet; that mode is shown as unsupported and does not silently record continuously. FFmpeg remuxes the source video without re-encoding into target one-minute MP4 segments; actual segment boundaries follow source keyframes and may be longer. Browser playback depends on the camera codec. H.264/AVC in MP4 is a pragmatic compatibility target, while HEVC/H.265 and vendor-specific codecs may not play in every browser or operating system. Audio is omitted in this slice. FFmpeg and FFprobe are included in the image, and the recorder retries interrupted RTSP/TCP connections.
 
@@ -68,4 +77,4 @@ uvicorn app.main:app --reload
 
 ## Current boundary
 
-Motion detection, camera discovery, multi-camera load controls, retention, and the remaining approved NVR features are still to be implemented. Entra sign-in and role enforcement are implemented in this slice, but the installation still needs tenant-specific setup and validation. This first recorder path has not been qualified for 200+ cameras or a production retention workload; compatibility and capacity tests are required before replacement use.
+Motion detection, multi-camera load controls, retention, and the remaining approved NVR features are still to be implemented. Entra sign-in and role enforcement are implemented in this slice, but the installation still needs tenant-specific setup and validation. This recorder path has not been qualified for 200+ cameras or a production retention workload; compatibility and capacity tests are required before replacement use.

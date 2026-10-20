@@ -59,8 +59,7 @@ async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, obje
         return {"reachable": False, "reason": "Media probe is unavailable"}
     args = [
         executable, "-v", "error", "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
-        "-show_entries",
-        "stream=codec_type,codec_name,width,height", "-of", "json", "pipe:0",
+        "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", "pipe:0",
     ]
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -83,6 +82,7 @@ async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, obje
         return {"reachable": False, "reason": "Camera stream has no video track"}
     return {
         "reachable": True,
+        "audio": any(s.get("codec_type") == "audio" for s in streams),
         "video": {
             "codec": str(video.get("codec_name", "unknown")),
             "width": video.get("width"),
