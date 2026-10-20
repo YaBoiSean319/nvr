@@ -85,6 +85,17 @@ def initialize() -> None:
                 last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 reviewed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS diagnostic_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS diagnostic_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                event_type TEXT NOT NULL,
+                fields_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS diagnostic_events_created_idx ON diagnostic_events(created_at);
             """
         )
         # Migrate installations created by the first implementation, which only
