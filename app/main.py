@@ -749,7 +749,7 @@ async def scan_cameras(
     with connect() as db:
         for device in result.devices:
             linked = db.execute("SELECT id FROM cameras WHERE onvif_uuid=?", (device.device_uuid,)).fetchone()
-            existing = db.execute("SELECT id FROM discovery_candidates WHERE device_uuid=?", (device.device_uuid,)).fetchone()
+            existing = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device.device_uuid,)).fetchone()
             candidate_id = existing["id"] if existing else str(uuid.uuid4())
             capabilities = {
                 "onvif_discovery": "supported",
@@ -758,6 +758,8 @@ async def scan_cameras(
                 "audio": "untested",
                 "ptz": "untested",
             }
+            if existing:
+                capabilities.update(json.loads(existing["capabilities"]))
             db.execute(
                 "INSERT INTO discovery_candidates(id,device_uuid,service_urls,scopes,capabilities,linked_camera_id,first_seen_at,last_seen_at) "
                 "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(device_uuid) DO UPDATE SET "
