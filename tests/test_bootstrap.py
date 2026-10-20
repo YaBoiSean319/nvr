@@ -5,6 +5,10 @@ import tempfile
 import time
 import unittest
 import uuid
+import base64
+import hashlib
+import time as clock
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +23,7 @@ class BootstrapTests(unittest.TestCase):
         os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(Path(self.tmp.name) / "credentials.key")
         os.environ["NVR_COOKIE_SECURE"] = "false"
         os.environ["NVR_SEGMENT_SECONDS"] = "10"
+        os.environ["NVR_SESSION_HOURS"] = "12"
         for key in ("NVR_PUBLIC_URL", "NVR_OIDC_TENANT_ID", "NVR_OIDC_CLIENT_ID", "NVR_OIDC_CLIENT_SECRET", "NVR_OIDC_SESSION_SECRET", "NVR_OIDC_ADMIN_ROLES", "NVR_OIDC_OPERATOR_ROLES"):
             os.environ.pop(key, None)
         from app.main import app
@@ -33,6 +38,7 @@ class BootstrapTests(unittest.TestCase):
         os.environ.pop("NVR_CREDENTIAL_KEY_PATH", None)
         os.environ.pop("NVR_COOKIE_SECURE", None)
         os.environ.pop("NVR_SEGMENT_SECONDS", None)
+        os.environ.pop("NVR_SESSION_HOURS", None)
         for key in ("NVR_PUBLIC_URL", "NVR_OIDC_TENANT_ID", "NVR_OIDC_CLIENT_ID", "NVR_OIDC_CLIENT_SECRET", "NVR_OIDC_SESSION_SECRET", "NVR_OIDC_ADMIN_ROLES", "NVR_OIDC_OPERATOR_ROLES"):
             os.environ.pop(key, None)
 
@@ -66,6 +72,18 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/setup/admin", json={"username":"a", "password":"short"}).status_code, 422)
         self.assertEqual(self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"longpasswordonly"}).status_code, 422)
 
+    def test_session_lifetime_is_clamped_to_bounded_range(self):
+        from app.main import _session_hours
+        os.environ["NVR_SESSION_HOURS"]="1000"
+        self.assertEqual(_session_hours(),168)
+        os.environ["NVR_SESSION_HOURS"]="0"
+        self.assertEqual(_session_hours(),1)
+        os.environ["NVR_SESSION_HOURS"]="1"
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
+            db.execute("UPDATE sessions SET expires_at='2000-01-01T00:00:00+00:00'")
+        self.assertEqual(self.client.get("/api/auth/me").status_code,401)
+
     def test_operator_can_view_but_cannot_change_camera_configuration(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
         from app.security import hash_password
@@ -78,6 +96,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/cameras/test", json={"stream_url":"rtsp://camera/stream"}).status_code, 403)
         self.assertEqual(self.client.post("/api/cameras", json={"name":"Unauthorized", "stream_url":"rtsp://camera/stream"}).status_code, 403)
         self.assertEqual(self.client.patch("/api/cameras/missing", json={"recording_mode":"disabled"}).status_code, 403)
+        self.assertEqual(self.client.delete("/api/cameras/missing").status_code, 403)
 
     def test_administrator_can_terminate_another_session(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
@@ -156,6 +175,87 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(query.get("code_challenge"))
         self.assertEqual(query.get("code_challenge_method"), ["S256"])
 
+    def test_oidc_callback_validates_state_nonce_signature_and_pkce_with_fake_provider(self):
+        import httpx
+        from authlib.integrations.httpx_client import AsyncOAuth2Client
+        from authlib.integrations.starlette_client.apps import StarletteOAuth2App
+        from authlib.jose import JsonWebKey, jwt
+        from unittest.mock import patch
+
+        tenant="11111111-1111-4111-8111-111111111111"
+        client_id="client-id"
+        issuer=f"https://login.microsoftonline.com/{tenant}/v2.0"
+        jwks_url=f"https://login.microsoftonline.com/{tenant}/keys"
+        private_key=JsonWebKey.generate_key("RSA",2048,options={"kid":"fake-key"},is_private=True)
+        observed={"challenge":None,"nonce":None,"bad_nonce":False}
+
+        def provider(request):
+            if request.url.path.endswith(".well-known/openid-configuration"):
+                return httpx.Response(200,json={
+                    "issuer":issuer,
+                    "authorization_endpoint":"https://idp.test/authorize",
+                    "token_endpoint":"https://idp.test/token",
+                    "jwks_uri":jwks_url,
+                    "response_types_supported":["code"],
+                    "subject_types_supported":["public"],
+                    "id_token_signing_alg_values_supported":["RS256"],
+                    "token_endpoint_auth_methods_supported":["client_secret_basic"],
+                })
+            if request.url.path == "/token":
+                form=parse_qs(request.content.decode())
+                verifier=form["code_verifier"][0]
+                challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+                if challenge != observed["challenge"]:
+                    return httpx.Response(400,json={"error":"invalid_grant"})
+                now=int(clock.time())
+                token=jwt.encode({"alg":"RS256","kid":"fake-key"},{
+                    "iss":issuer,"aud":client_id,"sub":"fake-subject","tid":tenant,
+                    "iat":now,"exp":now+600,
+                    "nonce":"wrong-nonce" if observed["bad_nonce"] else observed["nonce"],
+                    "preferred_username":"fake-operator@example.test","roles":["NVR.Operator"],
+                },private_key).decode()
+                return httpx.Response(200,json={"access_token":"fake-access","token_type":"Bearer","expires_in":600,"id_token":token})
+            if request.url == jwks_url:
+                return httpx.Response(200,json={"keys":[private_key.as_dict(is_private=False)]})
+            return httpx.Response(404)
+
+        class FakeProviderClient(AsyncOAuth2Client):
+            def __init__(self,*args,**kwargs):
+                kwargs["transport"]=httpx.MockTransport(provider)
+                kwargs["trust_env"]=False
+                super().__init__(*args,**kwargs)
+
+        os.environ.update({
+            "NVR_PUBLIC_URL":"https://nvr.example.test",
+            "NVR_OIDC_TENANT_ID":tenant,
+            "NVR_OIDC_CLIENT_ID":client_id,
+            "NVR_OIDC_CLIENT_SECRET":"client-secret",
+            "NVR_OIDC_SESSION_SECRET":"test-session-signing-secret-long-enough",
+            "NVR_OIDC_OPERATOR_ROLES":"NVR.Operator",
+        })
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+        with patch.object(StarletteOAuth2App,"client_cls",FakeProviderClient):
+            login=self.client.get("https://testserver.local/api/auth/oidc/login",follow_redirects=False)
+            query=parse_qs(urlsplit(login.headers["location"]).query)
+            self.assertEqual(query["redirect_uri"],["https://nvr.example.test/api/auth/oidc/callback"])
+            observed["challenge"]=query["code_challenge"][0]
+            observed["nonce"]=query["nonce"][0]
+            wrong_state=self.client.get(f"https://testserver.local/api/auth/oidc/callback?code=valid&state=incorrect",follow_redirects=False)
+            self.assertEqual(wrong_state.status_code,401)
+            valid=self.client.get(f"https://testserver.local/api/auth/oidc/callback?code=valid&state={query['state'][0]}",follow_redirects=False)
+            self.assertEqual(valid.status_code,303,valid.text)
+            self.assertEqual(self.client.get("https://testserver.local/api/auth/me").json()["role"],"operator")
+            replay=self.client.get(f"https://testserver.local/api/auth/oidc/callback?code=valid&state={query['state'][0]}",follow_redirects=False)
+            self.assertEqual(replay.status_code,401)
+            self.client.post("/api/auth/logout")
+            second=self.client.get("https://testserver.local/api/auth/oidc/login",follow_redirects=False)
+            second_query=parse_qs(urlsplit(second.headers["location"]).query)
+            observed["challenge"]=second_query["code_challenge"][0]
+            observed["nonce"]=second_query["nonce"][0]
+            observed["bad_nonce"]=True
+            invalid_nonce=self.client.get(f"https://testserver.local/api/auth/oidc/callback?code=badnonce&state={second_query['state'][0]}",follow_redirects=False)
+            self.assertEqual(invalid_nonce.status_code,401)
+
     def test_oidc_provider_outage_does_not_disable_local_administrator(self):
         os.environ.update({
             "NVR_PUBLIC_URL":"https://nvr.example.test",
@@ -163,6 +263,7 @@ class BootstrapTests(unittest.TestCase):
             "NVR_OIDC_CLIENT_ID":"client-id",
             "NVR_OIDC_CLIENT_SECRET":"client-secret",
             "NVR_OIDC_SESSION_SECRET":"test-session-signing-secret-long-enough",
+            "NVR_OIDC_OPERATOR_ROLES":"NVR.Operator",
         })
         from unittest.mock import AsyncMock, patch
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
@@ -189,6 +290,8 @@ class BootstrapTests(unittest.TestCase):
             ciphertext = db.execute("SELECT stream_url_ciphertext FROM cameras").fetchone()[0]
         self.assertNotIn(b"CameraSecret2026", ciphertext)
         self.assertEqual(Path(os.environ["NVR_CREDENTIAL_KEY_PATH"]).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.client.delete(f"/api/cameras/{added.json()['id']}").status_code, 204)
+        self.assertEqual(self.client.get("/api/cameras").json()["cameras"], [])
 
     @unittest.skipUnless(__import__("shutil").which("ffprobe"), "FFprobe is required for the stream test")
     def test_real_probe_failure_is_reported_without_echoing_credentials(self):
@@ -314,6 +417,10 @@ class BootstrapTests(unittest.TestCase):
             capture_output=True, text=True, check=True, timeout=10,
         )
         self.assertGreater(float(probe.stdout.strip()), 0)
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.assertEqual(self.client.delete(f"/api/cameras/{camera_id}").status_code, 204)
+        self.assertFalse((media_root / camera_id).exists())
 
 
 if __name__ == "__main__":

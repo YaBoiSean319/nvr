@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -59,6 +60,8 @@ def _oidc_settings() -> dict[str, str] | None:
     required = ("NVR_PUBLIC_URL", "NVR_OIDC_TENANT_ID", "NVR_OIDC_CLIENT_ID", "NVR_OIDC_CLIENT_SECRET", "NVR_OIDC_SESSION_SECRET")
     values = {key: os.environ.get(key, "").strip() for key in required}
     if not all(values.values()) or len(values["NVR_OIDC_SESSION_SECRET"]) < 32:
+        return None
+    if not any(os.environ.get(key, "").strip() for key in ("NVR_OIDC_ADMIN_ROLES", "NVR_OIDC_OPERATOR_ROLES")):
         return None
     public_url = values["NVR_PUBLIC_URL"].rstrip("/")
     parsed_url = urlsplit(public_url)
@@ -462,6 +465,29 @@ async def update_camera(
     with connect() as db:
         row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
     return _camera_view(row)
+
+
+@app.delete("/api/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_camera(
+    camera_id: str,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> Response:
+    with connect() as db:
+        exists = db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    await request.app.state.recorders.remove(camera_id)
+    root = recordings_path()
+    camera_dir = (root / camera_id).resolve()
+    if camera_dir.parent == root and camera_dir.is_dir():
+        try:
+            shutil.rmtree(camera_dir)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Stored footage could not be removed; camera configuration was retained") from exc
+    with connect() as db:
+        db.execute("DELETE FROM cameras WHERE id=?", (camera_id,))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/cameras/{camera_id}/segments")
