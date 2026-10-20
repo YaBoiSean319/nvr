@@ -55,7 +55,13 @@ def initialize() -> None:
                 stream_url_ciphertext BLOB NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
                 recording_mode TEXT NOT NULL DEFAULT 'motion' CHECK (recording_mode IN ('motion','continuous','disabled')),
+                recording_enabled INTEGER NOT NULL DEFAULT 0 CHECK (recording_enabled IN (0,1)),
                 recording_status TEXT NOT NULL DEFAULT 'stopped',
+                motion_service_url TEXT,
+                motion_credentials_ciphertext BLOB,
+                motion_pre_roll_seconds INTEGER NOT NULL DEFAULT 10,
+                motion_post_roll_seconds INTEGER NOT NULL DEFAULT 30,
+                motion_source_status TEXT NOT NULL DEFAULT 'untested',
                 video_codec TEXT,
                 video_width INTEGER,
                 video_height INTEGER,
@@ -74,6 +80,24 @@ def initialize() -> None:
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE INDEX IF NOT EXISTS recording_camera_time_idx ON recording_segments(camera_id, starts_at, ends_at);
+            CREATE TABLE IF NOT EXISTS motion_events (
+                id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                source_topic TEXT NOT NULL,
+                source_event_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                requested_start TEXT NOT NULL,
+                requested_end TEXT NOT NULL,
+                actual_start TEXT,
+                actual_end TEXT,
+                pre_roll_complete INTEGER NOT NULL DEFAULT 0 CHECK (pre_roll_complete IN (0,1)),
+                status TEXT NOT NULL CHECK (status IN ('recording','complete','failed')),
+                failure_reason TEXT,
+                segment_id INTEGER REFERENCES recording_segments(id) ON DELETE SET NULL,
+                source_events_json TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS motion_events_camera_time_idx ON motion_events(camera_id, received_at);
             CREATE TABLE IF NOT EXISTS discovery_candidates (
                 id TEXT PRIMARY KEY,
                 device_uuid TEXT NOT NULL UNIQUE,
@@ -105,6 +129,16 @@ def initialize() -> None:
             db.execute("ALTER TABLE cameras ADD COLUMN onvif_uuid TEXT")
         if "group_id" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL")
+        for name, definition in (
+            ("recording_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK (recording_enabled IN (0,1))"),
+            ("motion_service_url", "TEXT"),
+            ("motion_credentials_ciphertext", "BLOB"),
+            ("motion_pre_roll_seconds", "INTEGER NOT NULL DEFAULT 10"),
+            ("motion_post_roll_seconds", "INTEGER NOT NULL DEFAULT 30"),
+            ("motion_source_status", "TEXT NOT NULL DEFAULT 'untested'"),
+        ):
+            if name not in camera_columns:
+                db.execute(f"ALTER TABLE cameras ADD COLUMN {name} {definition}")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS cameras_onvif_uuid_idx ON cameras(onvif_uuid) WHERE onvif_uuid IS NOT NULL")
         user_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()[0]
         user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}

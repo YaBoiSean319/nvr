@@ -84,15 +84,19 @@ async function refreshDiscovery() {
       const name=document.createElement("input"); name.maxLength=120; name.required=true; name.value=`Camera ${candidate.device_uuid.slice(0,8)}`;
       const streamLabel=document.createElement("label"); streamLabel.textContent="RTSP or RTSPS stream URL";
       const stream=document.createElement("input"); stream.type="url"; stream.autocomplete="off"; stream.required=true; stream.placeholder="rtsp://user:password@camera/stream";
+      const userLabel=document.createElement("label"); userLabel.textContent="ONVIF username (optional)";
+      const user=document.createElement("input"); user.autocomplete="off";
+      const passLabel=document.createElement("label"); passLabel.textContent="ONVIF password (optional)";
+      const pass=document.createElement("input"); pass.type="password"; pass.autocomplete="new-password";
       const add=document.createElement("button"); add.type="button"; add.textContent="Test and add camera";
       add.addEventListener("click",async()=>{
         try {
-          const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value,stream_url:stream.value,recording_mode:"motion"})});
-          document.querySelector("#discovery-message").textContent=`${camera.name} added. Review and explicitly select a supported recording mode.`;
+          const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value,stream_url:stream.value,recording_mode:"motion",recording_enabled:false,motion_username:user.value||null,motion_password:pass.value||null})});
+          document.querySelector("#discovery-message").textContent=`${camera.name} added with recording disabled. Configure its event source and explicitly enable recording when ready.`;
           await refresh();
         } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
       });
-      card.append(nameLabel,name,streamLabel,stream,add);
+      card.append(nameLabel,name,streamLabel,stream,userLabel,user,passLabel,pass,add);
       if (inventory.cameras.length) {
         const linkLabel=document.createElement("label"); linkLabel.textContent="Or link this device to an existing manually added camera";
         const select=document.createElement("select");
@@ -139,24 +143,55 @@ function renderCameras(cameras) {
     }
     const summary = document.createElement("p");
     const video = camera.video || {};
-    summary.textContent = `${camera.group_name ? `${camera.group_name} · ` : ""}${camera.recording_mode} · ${camera.recording_status} · ${video.codec || "unknown codec"}${video.width && video.height ? ` ${video.width}×${video.height}` : ""}`;
+    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · " + camera.recording_mode + " · " + camera.recording_status + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status : "") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
     card.append(title, summary);
     if (camera.last_error) { const note=document.createElement("p"); note.textContent=camera.last_error; card.append(note); }
     const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
     button.addEventListener("click", () => loadSegments(camera)); card.append(button);
     if (currentRole !== "administrator") return card;
     const mode=document.createElement("select"); mode.setAttribute("aria-label",`Recording mode for ${camera.name}`);
-    for (const [value,label] of [["motion","Motion (not available yet)"],["continuous","Continuous"],["disabled","Disabled"]]) {
+    for (const [value,label] of [["motion","Motion (ONVIF events)"],["continuous","Continuous"],["disabled","Disabled"]]) {
       const option=document.createElement("option"); option.value=value; option.textContent=label; mode.append(option);
     }
     mode.value=camera.recording_mode;
-    const save=document.createElement("button"); save.type="button"; save.textContent="Apply recording mode";
+    const enabledLabel=document.createElement("label"); enabledLabel.textContent="Enable recording ";
+    const enabled=document.createElement("input"); enabled.type="checkbox"; enabled.checked=camera.recording_enabled;
+    enabledLabel.append(enabled);
+    const pre=document.createElement("input"); pre.type="number"; pre.min="0"; pre.max="120"; pre.value=camera.motion_pre_roll_seconds; pre.setAttribute("aria-label","Motion pre-roll seconds");
+    const post=document.createElement("input"); post.type="number"; post.min="1"; post.max="600"; post.value=camera.motion_post_roll_seconds; post.setAttribute("aria-label","Motion post-roll seconds");
+    const save=document.createElement("button"); save.type="button"; save.textContent="Apply recording policy";
     save.addEventListener("click", async () => {
       try {
-        await api(`/api/cameras/${encodeURIComponent(camera.id)}`, { method:"PATCH", body:JSON.stringify({recording_mode:mode.value}) });
+        await api(`/api/cameras/${encodeURIComponent(camera.id)}`, { method:"PATCH", body:JSON.stringify({recording_mode:mode.value,recording_enabled:enabled.checked,motion_pre_roll_seconds:Number(pre.value),motion_post_roll_seconds:Number(post.value)}) });
         document.querySelector("#camera-message").textContent=`${camera.name}: recording mode updated.`;
         await refresh();
       } catch (error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
+    const motionUrlLabel=document.createElement("label"); motionUrlLabel.textContent="ONVIF device service URL for motion events";
+    const motionUrl=document.createElement("input"); motionUrl.type="url"; motionUrl.autocomplete="off"; motionUrl.placeholder="http://camera/onvif/device_service";
+    const motionUserLabel=document.createElement("label"); motionUserLabel.textContent="ONVIF username";
+    const motionUser=document.createElement("input"); motionUser.autocomplete="off";
+    const motionPassLabel=document.createElement("label"); motionPassLabel.textContent="ONVIF password";
+    const motionPass=document.createElement("input"); motionPass.type="password"; motionPass.autocomplete="new-password";
+    const configureMotion=document.createElement("button"); configureMotion.type="button"; configureMotion.textContent="Save motion event source";
+    configureMotion.addEventListener("click",async()=>{
+      try {
+        await api(`/api/cameras/${encodeURIComponent(camera.id)}/motion-source`,{method:"POST",body:JSON.stringify({service_url:motionUrl.value,username:motionUser.value,password:motionPass.value,pre_roll_seconds:Number(pre.value),post_roll_seconds:Number(post.value)})});
+        motionUser.value=""; motionPass.value=""; await refresh();
+      } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
+    const events=document.createElement("button"); events.type="button"; events.textContent="View motion events";
+    events.addEventListener("click",async()=>{
+      try {
+        const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/motion-events`);
+        const target=document.querySelector("#segment-list");
+        target.replaceChildren(...result.events.map(event=>{
+          const row=document.createElement("p");
+          row.textContent=new Date(event.source_event_at).toLocaleString()+" · "+event.source+" · "+event.status+" · pre-roll "+(event.pre_roll_complete ? "complete" : "incomplete/unknown")+(event.media_url ? " · playable clip available" : "");
+          if(event.media_url) { const play=document.createElement("button"); play.type="button"; play.textContent="Play"; play.addEventListener("click",()=>{const player=document.querySelector("#playback");player.src=event.media_url;player.classList.remove("hidden");player.play().catch(()=>{});}); row.append(play); }
+          return row;
+        }));
+      } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
     const remove=document.createElement("button"); remove.type="button"; remove.textContent="Remove camera";
     remove.addEventListener("click", async () => {
@@ -174,7 +209,7 @@ function renderCameras(cameras) {
         rotateInput.value=""; await refresh();
       } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
     });
-    card.append(mode,save,remove,rotateLabel,rotateInput,rotate);
+    card.append(mode,enabledLabel,pre,post,save,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,configureMotion,events,remove,rotateLabel,rotateInput,rotate);
     return card;
   }));
 }
@@ -249,8 +284,10 @@ document.querySelector("#apply-bulk").addEventListener("click",async()=>{
   const payload={camera_ids};
   const group=document.querySelector("#bulk-group").value;
   const mode=document.querySelector("#bulk-recording-mode").value;
+  const recordingEnabled=document.querySelector("#bulk-recording-enabled").value;
   if(group!=="__unchanged__") payload.group_name=group || null;
   if(mode) payload.recording_mode=mode;
+  if(recordingEnabled) payload.recording_enabled=recordingEnabled==="true";
   try {
     const result=await api("/api/cameras/bulk-update",{method:"POST",body:JSON.stringify(payload)});
     document.querySelector("#bulk-message").textContent=`Updated ${result.cameras.length} camera(s).`;
@@ -293,7 +330,13 @@ document.querySelector("#camera-form").addEventListener("submit", async event =>
     const result=await api("/api/cameras", { method:"POST", body:JSON.stringify({
       name:document.querySelector("#camera-name").value,
       stream_url:document.querySelector("#stream-url").value,
-      recording_mode:document.querySelector("#recording-mode").value
+      recording_mode:document.querySelector("#recording-mode").value,
+      recording_enabled:document.querySelector("#recording-enabled").checked,
+      motion_service_url:document.querySelector("#motion-service-url").value || null,
+      motion_username:document.querySelector("#motion-username").value || null,
+      motion_password:document.querySelector("#motion-password").value || null,
+      motion_pre_roll_seconds:Number(document.querySelector("#motion-pre-roll").value),
+      motion_post_roll_seconds:Number(document.querySelector("#motion-post-roll").value)
     }) });
     document.querySelector("#camera-form").reset();
     message.textContent=`${result.name} added · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}`;

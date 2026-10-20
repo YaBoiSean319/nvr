@@ -131,9 +131,26 @@ class CameraProbeRequest(BaseModel):
     stream_url: str = Field(min_length=8, max_length=2048)
 
 
+def _validate_onvif_service_url(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    parsed = urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("ONVIF motion service must be an HTTP(S) device-service URL without credentials, query, or fragment")
+    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+        raise ValueError("Invalid ONVIF service port")
+    return value.strip()
+
+
 class CameraCreateRequest(CameraProbeRequest):
     name: str = Field(min_length=1, max_length=120)
     recording_mode: Literal["motion", "continuous", "disabled"] = "motion"
+    recording_enabled: bool = False
+    motion_service_url: str | None = Field(default=None, max_length=2048)
+    motion_username: str | None = Field(default=None, max_length=256)
+    motion_password: str | None = Field(default=None, max_length=1024)
+    motion_pre_roll_seconds: int = Field(default=10, ge=0, le=120)
+    motion_post_roll_seconds: int = Field(default=30, ge=1, le=600)
     onvif_uuid: str | None = Field(default=None, min_length=36, max_length=36)
 
     @field_validator("onvif_uuid")
@@ -145,6 +162,16 @@ class CameraCreateRequest(CameraProbeRequest):
             return str(uuid.UUID(value))
         except ValueError as exc:
             raise ValueError("ONVIF identity must be a UUID") from exc
+
+    @field_validator("motion_service_url")
+    @classmethod
+    def validate_motion_service_url(cls, value: str | None) -> str | None:
+        return _validate_onvif_service_url(value)
+
+    @field_validator("motion_username", "motion_password")
+    @classmethod
+    def trim_motion_credentials(cls, value: str | None) -> str | None:
+        return value if value else None
 
 
 class CameraImportRequest(BaseModel):
@@ -187,6 +214,7 @@ class CameraBulkUpdateRequest(BaseModel):
     camera_ids: list[str] = Field(min_length=1, max_length=500)
     group_name: str | None = Field(default=None, max_length=80)
     recording_mode: Literal["motion", "continuous", "disabled"] | None = None
+    recording_enabled: bool | None = None
 
     @field_validator("group_name")
     @classmethod
@@ -199,8 +227,32 @@ class CameraCredentialRotateRequest(CameraProbeRequest):
     pass
 
 
+class MotionSourceUpdateRequest(BaseModel):
+    service_url: str = Field(min_length=8, max_length=2048)
+    username: str = Field(default="", max_length=256)
+    password: str = Field(default="", max_length=1024)
+    pre_roll_seconds: int = Field(default=10, ge=0, le=120)
+    post_roll_seconds: int = Field(default=30, ge=1, le=600)
+
+    @field_validator("service_url")
+    @classmethod
+    def validate_service_url(cls, value: str) -> str:
+        validated = _validate_onvif_service_url(value)
+        if validated is None:
+            raise ValueError("ONVIF motion service URL is required")
+        return validated
+
+
 class CameraUpdateRequest(BaseModel):
-    recording_mode: Literal["motion", "continuous", "disabled"]
+    recording_mode: Literal["motion", "continuous", "disabled"] | None = None
+    recording_enabled: bool | None = None
+    motion_pre_roll_seconds: int | None = Field(default=None, ge=0, le=120)
+    motion_post_roll_seconds: int | None = Field(default=None, ge=1, le=600)
+
+    @field_validator("recording_mode")
+    @classmethod
+    def require_update_fields(cls, value: str | None) -> str | None:
+        return value
 
 
 class CameraGroupCreateRequest(BaseModel):
@@ -219,6 +271,11 @@ class DiagnosticCaptureRequest(BaseModel):
 class DiscoveredCameraAddRequest(CameraProbeRequest):
     name: str = Field(min_length=1, max_length=120)
     recording_mode: Literal["motion", "continuous", "disabled"] = "motion"
+    recording_enabled: bool = False
+    motion_username: str | None = Field(default=None, max_length=256)
+    motion_password: str | None = Field(default=None, max_length=1024)
+    motion_pre_roll_seconds: int = Field(default=10, ge=0, le=120)
+    motion_post_roll_seconds: int = Field(default=30, ge=1, le=600)
 
 
 class DiscoveredCameraLinkRequest(BaseModel):
@@ -500,7 +557,12 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
         "stream_url": visible_url,
         "enabled": bool(row["enabled"]),
         "recording_mode": row["recording_mode"],
+        "recording_enabled": bool(row["recording_enabled"]),
         "recording_status": row["recording_status"],
+        "motion_source_status": row["motion_source_status"],
+        "motion_source_configured": bool(row["motion_service_url"]),
+        "motion_pre_roll_seconds": row["motion_pre_roll_seconds"],
+        "motion_post_roll_seconds": row["motion_post_roll_seconds"],
         "video": {"codec": row["video_codec"], "width": row["video_width"], "height": row["video_height"]},
         "last_probe_at": row["last_probe_at"],
         "last_error": row["last_error"],
@@ -516,18 +578,34 @@ def _insert_camera(
     capability: dict[str, object],
     onvif_uuid: str | None = None,
     group_id: str | None = None,
+    recording_enabled: bool = False,
+    motion_service_url: str | None = None,
+    motion_username: str | None = None,
+    motion_password: str | None = None,
+    motion_pre_roll_seconds: int = 10,
+    motion_post_roll_seconds: int = 30,
 ) -> str:
     """Persist a camera only after its stream has passed the shared probe."""
     video = capability["video"]
     if not isinstance(video, dict):
         raise ValueError("A successful stream probe must include video metadata")
     camera_id = str(uuid.uuid4())
-    status = "unsupported" if recording_mode == "motion" else ("stopped" if recording_mode == "disabled" else "connecting")
-    error = "Motion detection is not enabled in this implementation slice" if recording_mode == "motion" else None
+    recording_enabled = bool(recording_enabled and recording_mode != "disabled")
+    status = "stopped" if not recording_enabled else ("connecting" if recording_mode == "continuous" or motion_service_url else "unsupported")
+    error = "Configure an ONVIF event service to use motion recording" if recording_enabled and recording_mode == "motion" and not motion_service_url else None
+    credentials = None
+    if motion_username or motion_password:
+        if not motion_username or not motion_password:
+            raise ValueError("Provide both ONVIF motion username and password")
+        credentials = encrypt(json.dumps({"username": motion_username, "password": motion_password}, separators=(",", ":")))
     db.execute(
-        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,recording_mode,recording_status,last_error,video_codec,video_width,video_height,last_probe_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), recording_mode, status, error,
+        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,recording_mode,recording_enabled,recording_status," 
+        "motion_service_url,motion_credentials_ciphertext,motion_pre_roll_seconds,motion_post_roll_seconds,motion_source_status,last_error," 
+        "video_codec,video_width,video_height,last_probe_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), recording_mode, int(recording_enabled), status,
+         motion_service_url, credentials, motion_pre_roll_seconds, motion_post_roll_seconds,
+         "untested" if motion_service_url else "unsupported", error,
          video.get("codec"), video.get("width"), video.get("height")),
     )
     return camera_id
@@ -873,6 +951,12 @@ async def add_discovered_camera(
                 name=payload.name,
                 stream_url=payload.stream_url,
                 recording_mode=payload.recording_mode,
+                recording_enabled=payload.recording_enabled,
+                motion_service_url=json.loads(candidate["service_urls"])[0] if candidate["service_urls"] else None,
+                motion_username=payload.motion_username,
+                motion_password=payload.motion_password,
+                motion_pre_roll_seconds=payload.motion_pre_roll_seconds,
+                motion_post_roll_seconds=payload.motion_post_roll_seconds,
                 onvif_uuid=candidate["device_uuid"],
             ),
             request,
@@ -902,6 +986,8 @@ async def create_camera(
         safe_stream_url(payload.stream_url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if bool(payload.motion_username) != bool(payload.motion_password):
+        raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
     capability = await probe_stream(payload.stream_url)
     if not capability.get("reachable"):
         raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
@@ -910,11 +996,17 @@ async def create_camera(
             camera_id = _insert_camera(
                 db, name=name, stream_url=payload.stream_url, recording_mode=payload.recording_mode,
                 capability=capability, onvif_uuid=payload.onvif_uuid,
+                recording_enabled=payload.recording_enabled,
+                motion_service_url=payload.motion_service_url,
+                motion_username=payload.motion_username,
+                motion_password=payload.motion_password,
+                motion_pre_roll_seconds=payload.motion_pre_roll_seconds,
+                motion_post_roll_seconds=payload.motion_post_roll_seconds,
             )
             _record_discovery_probe(db, payload.onvif_uuid, capability)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="A camera with that name or ONVIF identity already exists") from exc
-    if payload.recording_mode == "continuous":
+    if payload.recording_enabled and payload.recording_mode != "disabled":
         request.app.state.recorders.ensure(camera_id)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
@@ -928,16 +1020,30 @@ async def update_camera(
     request: Request,
     _: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
+    if not any(name in payload.model_fields_set for name in ("recording_mode", "recording_enabled", "motion_pre_roll_seconds", "motion_post_roll_seconds")):
+        raise HTTPException(status_code=422, detail="Specify a recording mode, enablement, or buffer duration")
     with connect() as db:
-        cur = db.execute(
-            "UPDATE cameras SET recording_mode=?, "
-            "recording_status=CASE WHEN ?='motion' THEN 'unsupported' ELSE 'stopped' END, "
-            "last_error=CASE WHEN ?='motion' THEN 'Motion detection is not enabled in this implementation slice' ELSE NULL END, "
-            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
-            (payload.recording_mode, payload.recording_mode, payload.recording_mode, camera_id),
-        )
-        if cur.rowcount == 0:
+        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if row is None:
             raise HTTPException(status_code=404, detail="Camera not found")
+        mode = payload.recording_mode or row["recording_mode"]
+        enabled = payload.recording_enabled if payload.recording_enabled is not None else bool(row["recording_enabled"])
+        if mode == "disabled":
+            enabled = False
+        assignments = ["recording_mode=?", "recording_enabled=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
+        values: list[object] = [mode, int(enabled)]
+        if payload.motion_pre_roll_seconds is not None:
+            assignments.append("motion_pre_roll_seconds=?"); values.append(payload.motion_pre_roll_seconds)
+        if payload.motion_post_roll_seconds is not None:
+            assignments.append("motion_post_roll_seconds=?"); values.append(payload.motion_post_roll_seconds)
+        if not enabled:
+            assignments.extend(("recording_status='stopped'", "last_error=NULL"))
+        elif mode == "motion" and not row["motion_service_url"]:
+            assignments.extend(("recording_status='unsupported'", "last_error='Configure an ONVIF event service to use motion recording'"))
+        else:
+            assignments.extend(("recording_status='connecting'", "last_error=NULL"))
+        values.append(camera_id)
+        db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values)
     await request.app.state.recorders.sync_camera(camera_id)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
@@ -950,8 +1056,8 @@ async def bulk_update_cameras(
     request: Request,
     _: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
-    if "group_name" not in payload.model_fields_set and payload.recording_mode is None:
-        raise HTTPException(status_code=422, detail="Specify a group assignment or recording mode")
+    if "group_name" not in payload.model_fields_set and payload.recording_mode is None and payload.recording_enabled is None:
+        raise HTTPException(status_code=422, detail="Specify a group assignment, recording mode, or enablement")
     if len(set(payload.camera_ids)) != len(payload.camera_ids):
         raise HTTPException(status_code=422, detail="Camera IDs must be unique")
     with connect() as db:
@@ -973,15 +1079,23 @@ async def bulk_update_cameras(
             assignments.append("group_id=?")
             values.append(group_id)
         if payload.recording_mode is not None:
-            assignments.extend(("recording_mode=?", "recording_status=?", "last_error=?"))
-            values.extend((payload.recording_mode,
-                           "unsupported" if payload.recording_mode == "motion" else ("stopped" if payload.recording_mode == "disabled" else "connecting"),
-                           "Motion detection is not enabled in this implementation slice" if payload.recording_mode == "motion" else None))
+            assignments.append("recording_mode=?")
+            values.append(payload.recording_mode)
+            if payload.recording_mode == "disabled":
+                assignments.extend(("recording_enabled=0", "recording_status='stopped'", "last_error=NULL"))
+        if payload.recording_enabled is not None:
+            assignments.append("recording_enabled=?")
+            values.append(int(payload.recording_enabled and payload.recording_mode != "disabled"))
+            assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL THEN 'Configure an ONVIF event service to use motion recording' ELSE NULL END"))
+            effective_enabled = int(payload.recording_enabled and payload.recording_mode != "disabled")
+            values.extend((effective_enabled, effective_enabled))
+        elif payload.recording_mode is not None and payload.recording_mode != "disabled":
+            assignments.extend(("recording_status=CASE WHEN recording_enabled=1 THEN 'connecting' ELSE 'stopped' END", "last_error=NULL"))
         assignments.append("updated_at=?")
         values.append(datetime.now(timezone.utc).isoformat())
         values.extend(payload.camera_ids)
         db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", values)
-    if payload.recording_mode is not None:
+    if payload.recording_mode is not None or payload.recording_enabled is not None:
         await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id) for camera_id in payload.camera_ids))
     with connect() as db:
         updated = db.execute(
@@ -1019,6 +1133,53 @@ async def rotate_camera_credentials(
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
+
+
+@app.post("/api/cameras/{camera_id}/motion-source")
+async def configure_motion_source(
+    camera_id: str,
+    payload: MotionSourceUpdateRequest,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    if bool(payload.username) != bool(payload.password):
+        raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
+    credentials = encrypt(json.dumps({"username": payload.username, "password": payload.password}, separators=(",", ":")))
+    with connect() as db:
+        row = db.execute("SELECT recording_mode,recording_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        db.execute(
+            "UPDATE cameras SET motion_service_url=?,motion_credentials_ciphertext=?,motion_pre_roll_seconds=?,motion_post_roll_seconds=?,motion_source_status='untested',"
+            "recording_status=CASE WHEN recording_enabled=1 AND recording_mode='motion' THEN 'connecting' ELSE recording_status END,"
+            "last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+            (payload.service_url, credentials, payload.pre_roll_seconds, payload.post_roll_seconds, camera_id),
+        )
+    await request.app.state.recorders.sync_camera(camera_id)
+    with connect() as db:
+        camera = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
+    return _camera_view(camera)
+
+
+@app.get("/api/cameras/{camera_id}/motion-events")
+def list_camera_motion_events(
+    camera_id: str,
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, object]:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        rows = db.execute(
+            "SELECT id,source,source_topic,source_event_at,received_at,requested_start,requested_end,actual_start,actual_end,pre_roll_complete,status,failure_reason,segment_id "
+            "FROM motion_events WHERE camera_id=? ORDER BY received_at DESC LIMIT 200", (camera_id,)
+        ).fetchall()
+    events = []
+    for row in rows:
+        item = dict(row)
+        item["pre_roll_complete"] = bool(item["pre_roll_complete"])
+        item["media_url"] = f"/api/cameras/{camera_id}/segments/{item['segment_id']}/media" if item["segment_id"] else None
+        events.append(item)
+    return {"events": events}
 
 
 @app.delete("/api/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
