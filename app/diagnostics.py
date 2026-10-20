@@ -39,8 +39,15 @@ def _capture_until(db) -> datetime | None:
         return None
 
 
+def _prune(db) -> None:
+    cutoff = (_now() - timedelta(days=RETENTION_DAYS)).isoformat()
+    db.execute("DELETE FROM diagnostic_events WHERE created_at < ?", (cutoff,))
+    db.execute("DELETE FROM diagnostic_events WHERE id NOT IN (SELECT id FROM diagnostic_events ORDER BY id DESC LIMIT ?)", (MAX_EVENTS,))
+
+
 def capture_status() -> dict[str, object]:
     with connect() as db:
+        _prune(db)
         until = _capture_until(db)
         count = db.execute("SELECT COUNT(*) FROM diagnostic_events").fetchone()[0]
     return {"enabled": until is not None, "capture_until": until.isoformat() if until else None, "event_count": count,
@@ -84,13 +91,12 @@ def record_event(event_type: str, **fields: object) -> None:
         if _capture_until(db) is None:
             return
         db.execute("INSERT INTO diagnostic_events(event_type,fields_json) VALUES(?,?)", (event_type, json.dumps(safe, separators=(",", ":"))))
-        cutoff = (_now() - timedelta(days=RETENTION_DAYS)).isoformat()
-        db.execute("DELETE FROM diagnostic_events WHERE created_at < ?", (cutoff,))
-        db.execute("DELETE FROM diagnostic_events WHERE id NOT IN (SELECT id FROM diagnostic_events ORDER BY id DESC LIMIT ?)", (MAX_EVENTS,))
+        _prune(db)
 
 
 def bundle() -> dict[str, object]:
     with connect() as db:
+        _prune(db)
         until = _capture_until(db)
         rows = db.execute("SELECT created_at,event_type,fields_json FROM diagnostic_events ORDER BY id DESC LIMIT ?", (MAX_EVENTS,)).fetchall()
     events = []
