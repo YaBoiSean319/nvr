@@ -131,6 +131,17 @@ class CameraProbeRequest(BaseModel):
     stream_url: str = Field(min_length=8, max_length=2048)
 
 
+def _validate_onvif_service_url(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    parsed = urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("ONVIF motion service must be an HTTP(S) device-service URL without credentials, query, or fragment")
+    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+        raise ValueError("Invalid ONVIF service port")
+    return value.strip()
+
+
 class CameraCreateRequest(CameraProbeRequest):
     name: str = Field(min_length=1, max_length=120)
     recording_mode: Literal["motion", "continuous", "disabled"] = "motion"
@@ -155,14 +166,7 @@ class CameraCreateRequest(CameraProbeRequest):
     @field_validator("motion_service_url")
     @classmethod
     def validate_motion_service_url(cls, value: str | None) -> str | None:
-        if value is None or not value.strip():
-            return None
-        parsed = urlsplit(value.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("ONVIF motion service must be an HTTP(S) device-service URL without credentials, query, or fragment")
-        if parsed.port is not None and not 1 <= parsed.port <= 65535:
-            raise ValueError("Invalid ONVIF service port")
-        return value.strip()
+        return _validate_onvif_service_url(value)
 
     @field_validator("motion_username", "motion_password")
     @classmethod
@@ -233,10 +237,10 @@ class MotionSourceUpdateRequest(BaseModel):
     @field_validator("service_url")
     @classmethod
     def validate_service_url(cls, value: str) -> str:
-        parsed = urlsplit(value.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("ONVIF motion service must be an HTTP(S) device-service URL without credentials, query, or fragment")
-        return value.strip()
+        validated = _validate_onvif_service_url(value)
+        if validated is None:
+            raise ValueError("ONVIF motion service URL is required")
+        return validated
 
 
 class CameraUpdateRequest(BaseModel):
