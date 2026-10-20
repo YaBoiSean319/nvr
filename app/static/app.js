@@ -1,6 +1,15 @@
 const sections = ["setup", "login", "status"];
 const message = document.querySelector("#message");
+let currentRole = null;
 function show(name) { for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
+async function showLogin() {
+  const state = await api("/api/setup/status");
+  show(state.setup_required ? "setup" : "login");
+  if (!state.setup_required) {
+    try { document.querySelector("#entra-login").classList.toggle("hidden", !(await api("/api/auth/oidc/status")).enabled); }
+    catch { document.querySelector("#entra-login").classList.add("hidden"); }
+  }
+}
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...options.headers }, credentials: "same-origin" });
   if (response.status === 204) return null;
@@ -12,18 +21,39 @@ async function refresh() {
   message.textContent = "";
   try {
     const who = await api("/api/auth/me");
-    const data = await api("/api/system/status");
-    const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
-    document.querySelector("#status-list").replaceChildren(...rows.flatMap(([k,v]) => { const dt=document.createElement("dt"), dd=document.createElement("dd"); dt.textContent=k; dd.textContent=v; return [dt,dd]; }));
-    document.querySelector("#status h2").textContent = `System status · ${who.username}`;
+    currentRole = who.role;
+    const admin = currentRole === "administrator";
+    document.querySelector("#status h2").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
+    document.querySelector("#status-list").classList.toggle("hidden", !admin);
+    document.querySelector("#session-admin").classList.toggle("hidden", !admin);
+    document.querySelector("#camera-form").classList.toggle("hidden", !admin);
+    if (admin) {
+      const data = await api("/api/system/status");
+      const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
+      document.querySelector("#status-list").replaceChildren(...rows.flatMap(([k,v]) => { const dt=document.createElement("dt"), dd=document.createElement("dd"); dt.textContent=k; dd.textContent=v; return [dt,dd]; }));
+      await refreshSessions();
+    }
     const inventory = await api("/api/cameras");
     renderCameras(inventory.cameras);
     show("status");
   } catch (error) {
     if (error.message === "Authentication required" || error.message === "Session expired") {
-      const state = await api("/api/setup/status"); show(state.setup_required ? "setup" : "login");
+      currentRole = null; await showLogin();
     } else { message.textContent = error.message; }
   }
+}
+async function refreshSessions() {
+  const target = document.querySelector("#sessions-list");
+  const {sessions} = await api("/api/admin/sessions");
+  target.replaceChildren(...sessions.map(session => {
+    const row=document.createElement("p");
+    const text=document.createElement("span");
+    text.textContent=`${session.username} (${session.role}) · expires ${new Date(session.expires_at).toLocaleString()} `;
+    const end=document.createElement("button"); end.type="button"; end.textContent="End session";
+    end.addEventListener("click", async () => { await api(`/api/admin/sessions/${encodeURIComponent(session.session_id)}`, {method:"DELETE"}); await refreshSessions(); });
+    row.append(text,end); return row;
+  }));
+  if (!sessions.length) target.textContent="No active sessions.";
 }
 function renderCameras(cameras) {
   const list = document.querySelector("#camera-list");
@@ -38,6 +68,7 @@ function renderCameras(cameras) {
     if (camera.last_error) { const note=document.createElement("p"); note.textContent=camera.last_error; card.append(note); }
     const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
     button.addEventListener("click", () => loadSegments(camera)); card.append(button);
+    if (currentRole !== "administrator") return card;
     const mode=document.createElement("select"); mode.setAttribute("aria-label",`Recording mode for ${camera.name}`);
     for (const [value,label] of [["motion","Motion (not available yet)"],["continuous","Continuous"],["disabled","Disabled"]]) {
       const option=document.createElement("option"); option.value=value; option.textContent=label; mode.append(option);
@@ -51,7 +82,13 @@ function renderCameras(cameras) {
         await refresh();
       } catch (error) { document.querySelector("#camera-message").textContent=error.message; }
     });
-    card.append(mode, save);
+    const remove=document.createElement("button"); remove.type="button"; remove.textContent="Remove camera";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`Remove ${camera.name} and its saved footage?`)) return;
+      try { await api(`/api/cameras/${encodeURIComponent(camera.id)}`, {method:"DELETE"}); await refresh(); }
+      catch (error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
+    card.append(mode, save, remove);
     return card;
   }));
 }
@@ -110,4 +147,16 @@ document.querySelector("#login-form").addEventListener("submit", async event => 
   catch (error) { message.textContent = error.message; }
 });
 document.querySelector("#logout").addEventListener("click", async () => { await api("/api/auth/logout", { method:"POST" }); show("login"); });
+document.querySelector("#entra-login").addEventListener("click", async () => {
+  const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
+  try {
+    const response=await fetch("/api/auth/oidc/login?format=json", {credentials:"same-origin"});
+    const result=await response.json();
+    if (!response.ok) throw new Error(result.detail || "Entra sign-in is unavailable");
+    window.location.assign(result.authorization_url);
+  } catch (error) {
+    message.textContent=`${error.message}. You can still sign in with the emergency local administrator account.`;
+    button.disabled=false;
+  }
+});
 refresh();

@@ -41,10 +41,15 @@
         <label for="login-pass">Password</label><input id="login-pass" type="password" autocomplete="current-password" required>
         <button>Sign in</button>
       </form>
+      <button id="entra-login" type="button" class="hidden">Sign in with Microsoft Entra</button>
     </section>
     <section id="status" class="hidden">
       <h2>System status</h2><p class="badge">● Application healthy</p>
       <dl id="status-list"></dl>
+      <section id="session-admin" class="hidden" aria-labelledby="sessions-heading">
+        <h2 id="sessions-heading">Active sessions</h2>
+        <div id="sessions-list"></div>
+      </section>
       <section aria-labelledby="camera-heading">
         <h2 id="camera-heading">Cameras</h2>
         <form id="camera-form">
