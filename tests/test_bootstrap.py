@@ -149,6 +149,7 @@ class BootstrapTests(unittest.TestCase):
         response = self.client.get(f"/api/cameras/{camera_id}/segments/{segment_id}/media")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "video/mp4")
+        self.assertIn("inline", response.headers["content-disposition"])
         self.assertGreater(len(response.content), 100)
         partial = self.client.get(
             f"/api/cameras/{camera_id}/segments/{segment_id}/media", headers={"Range":"bytes=0-99"}

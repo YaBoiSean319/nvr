@@ -369,4 +369,4 @@ def play_segment(
     path = (root / row["relative_path"]).resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
-    return FileResponse(path, media_type="video/mp4", filename=path.name)
+    return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="inline")
