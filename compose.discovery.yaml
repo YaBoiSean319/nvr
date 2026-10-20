@@ -1,0 +1,6 @@
+# Use with compose.yaml on Linux when ONVIF multicast discovery must reach the
+# camera VLAN. Host networking is opt-in because it removes port isolation.
+services:
+  nvr:
+    network_mode: host
+    ports: !reset []

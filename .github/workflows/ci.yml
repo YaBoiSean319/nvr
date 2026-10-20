@@ -55,7 +55,9 @@ jobs:
       - name: Check browser JavaScript
         run: node --check app/static/app.js
       - name: Validate Compose configuration
-        run: docker compose config -q
+        run: |
+          docker compose config -q
+          docker compose -f compose.yaml -f compose.discovery.yaml config -q
       - name: Build container image
         run: docker build --tag workplace-nvr:ci .
       - name: Smoke test Compose health and persistence

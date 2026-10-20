@@ -6,6 +6,7 @@ import secrets
 import shutil
 import sqlite3
 import uuid
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -22,6 +23,7 @@ from .security import hash_password, new_session_token, token_digest, verify_pas
 from .store import connect, database_path, initialize
 from .credentials import encrypt, decrypt
 from .recording import RecordingManager, masked_stream_url, probe_stream, recordings_path, safe_stream_url
+from .discovery import DiscoveryResult, discover_onvif
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -127,10 +129,34 @@ class CameraProbeRequest(BaseModel):
 class CameraCreateRequest(CameraProbeRequest):
     name: str = Field(min_length=1, max_length=120)
     recording_mode: Literal["motion", "continuous", "disabled"] = "motion"
+    onvif_uuid: str | None = Field(default=None, min_length=36, max_length=36)
+
+    @field_validator("onvif_uuid")
+    @classmethod
+    def validate_onvif_uuid(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            return str(uuid.UUID(value))
+        except ValueError as exc:
+            raise ValueError("ONVIF identity must be a UUID") from exc
 
 
 class CameraUpdateRequest(BaseModel):
     recording_mode: Literal["motion", "continuous", "disabled"]
+
+
+class DiscoveryScanRequest(BaseModel):
+    timeout_seconds: float = Field(default=5, ge=0.5, le=15)
+
+
+class DiscoveredCameraAddRequest(CameraProbeRequest):
+    name: str = Field(min_length=1, max_length=120)
+    recording_mode: Literal["motion", "continuous", "disabled"] = "motion"
+
+
+class DiscoveredCameraLinkRequest(BaseModel):
+    camera_id: str = Field(min_length=1, max_length=64)
 
 
 def _session_hours() -> int:
@@ -411,6 +437,123 @@ def list_cameras(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, 
     return {"cameras": [_camera_view(row) for row in rows]}
 
 
+def _candidate_view(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "id": row["id"],
+        "device_uuid": row["device_uuid"],
+        "service_urls": json.loads(row["service_urls"]),
+        "scopes": json.loads(row["scopes"]),
+        "capabilities": json.loads(row["capabilities"]),
+        "linked_camera_id": row["linked_camera_id"],
+        "reviewed_at": row["reviewed_at"],
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+    }
+
+
+@app.post("/api/discovery/scan")
+async def scan_cameras(
+    payload: DiscoveryScanRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    try:
+        result: DiscoveryResult = await discover_onvif(
+            payload.timeout_seconds,
+            os.environ.get("NVR_DISCOVERY_INTERFACE", "").strip() or None,
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Camera discovery failed; check the NVR discovery network configuration") from exc
+
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        for device in result.devices:
+            linked = db.execute("SELECT id FROM cameras WHERE onvif_uuid=?", (device.device_uuid,)).fetchone()
+            existing = db.execute("SELECT id FROM discovery_candidates WHERE device_uuid=?", (device.device_uuid,)).fetchone()
+            candidate_id = existing["id"] if existing else str(uuid.uuid4())
+            capabilities = {
+                "onvif_discovery": "supported",
+                "video_stream": "untested",
+                "motion_events": "untested",
+                "audio": "untested",
+                "ptz": "untested",
+            }
+            db.execute(
+                "INSERT INTO discovery_candidates(id,device_uuid,service_urls,scopes,capabilities,linked_camera_id,first_seen_at,last_seen_at) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(device_uuid) DO UPDATE SET "
+                "service_urls=excluded.service_urls,scopes=excluded.scopes,capabilities=excluded.capabilities,"
+                "linked_camera_id=COALESCE(excluded.linked_camera_id,discovery_candidates.linked_camera_id),last_seen_at=excluded.last_seen_at",
+                (candidate_id, device.device_uuid, json.dumps(device.service_urls), json.dumps(device.scopes),
+                 json.dumps(capabilities), linked["id"] if linked else None, now, now),
+            )
+        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid").fetchall()
+    partial_failures = [f"Ignored {result.ignored_responses} malformed or unrecognized response(s)"] if result.ignored_responses else []
+    return {
+        "discovered_count": len(result.devices),
+        "ignored_responses": result.ignored_responses,
+        "partial_failures": partial_failures,
+        "candidates": [_candidate_view(row) for row in rows],
+    }
+
+
+@app.get("/api/discovery/candidates")
+def list_discovery_candidates(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    with connect() as db:
+        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid").fetchall()
+    return {"candidates": [_candidate_view(row) for row in rows]}
+
+
+@app.post("/api/discovery/candidates/{candidate_id}/link")
+def link_discovered_camera(
+    candidate_id: str,
+    payload: DiscoveredCameraLinkRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    with connect() as db:
+        candidate = db.execute("SELECT device_uuid,linked_camera_id FROM discovery_candidates WHERE id=?", (candidate_id,)).fetchone()
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Discovery candidate not found")
+        if candidate["linked_camera_id"] and candidate["linked_camera_id"] != payload.camera_id:
+            raise HTTPException(status_code=409, detail="This discovered device is already linked to another camera")
+        try:
+            cursor = db.execute("UPDATE cameras SET onvif_uuid=?,updated_at=? WHERE id=?", (candidate["device_uuid"], datetime.now(timezone.utc).isoformat(), payload.camera_id))
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="This ONVIF identity is already assigned to another camera") from exc
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE id=?", (payload.camera_id, datetime.now(timezone.utc).isoformat(), candidate_id))
+        row = db.execute("SELECT id,name,recording_mode FROM cameras WHERE id=?", (payload.camera_id,)).fetchone()
+    return {"camera": dict(row), "device_uuid": candidate["device_uuid"]}
+
+
+@app.post("/api/discovery/candidates/{candidate_id}/add", status_code=status.HTTP_201_CREATED)
+async def add_discovered_camera(
+    candidate_id: str,
+    payload: DiscoveredCameraAddRequest,
+    request: Request,
+    user: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    with connect() as db:
+        candidate = db.execute("SELECT * FROM discovery_candidates WHERE id=?", (candidate_id,)).fetchone()
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Discovery candidate not found")
+    if candidate["linked_camera_id"]:
+        raise HTTPException(status_code=409, detail="This discovered device is already linked to a camera")
+    camera = await create_camera(
+        CameraCreateRequest(
+            name=payload.name,
+            stream_url=payload.stream_url,
+            recording_mode=payload.recording_mode,
+            onvif_uuid=candidate["device_uuid"],
+        ),
+        request,
+        user,
+    )
+    with connect() as db:
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE id=?", (camera["id"], reviewed_at, candidate_id))
+    return camera
+
+
 @app.post("/api/cameras", status_code=status.HTTP_201_CREATED)
 async def create_camera(
     payload: CameraCreateRequest,
@@ -432,15 +575,15 @@ async def create_camera(
     with connect() as db:
         try:
             db.execute(
-                "INSERT INTO cameras(id, name, stream_url_ciphertext, recording_mode, recording_status, last_error, video_codec, video_width, video_height, last_probe_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                (camera_id, name, encrypt(payload.stream_url.strip()), payload.recording_mode,
+                "INSERT INTO cameras(id, name, onvif_uuid, stream_url_ciphertext, recording_mode, recording_status, last_error, video_codec, video_width, video_height, last_probe_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                (camera_id, name, payload.onvif_uuid, encrypt(payload.stream_url.strip()), payload.recording_mode,
                  "unsupported" if payload.recording_mode == "motion" else "stopped",
                  "Motion detection is not enabled in this implementation slice" if payload.recording_mode == "motion" else None,
                  video["codec"], video["width"], video["height"]),
             )
         except sqlite3.IntegrityError as exc:
-            raise HTTPException(status_code=409, detail="A camera with that name already exists") from exc
+            raise HTTPException(status_code=409, detail="A camera with that name or ONVIF identity already exists") from exc
     if payload.recording_mode == "continuous":
         request.app.state.recorders.ensure(camera_id)
     with connect() as db:

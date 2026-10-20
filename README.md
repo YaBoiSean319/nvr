@@ -6,8 +6,11 @@ A self-hosted network video recorder for workplace cameras. The current implemen
 
 - Docker Engine with the Compose plugin
 - A host with a persistent filesystem for the Compose volumes
+- Docker Compose 2.24 or newer when using the optional camera-discovery network override
 
 ## Start the stack
+
+For a basic install, use the default isolated Docker bridge network:
 
 ```sh
 docker compose up -d --build
@@ -32,6 +35,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_OIDC_SESSION_SECRET` | unset | Long random key for the short-lived signed OIDC state cookie |
 | `NVR_OIDC_ADMIN_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR administrators |
 | `NVR_OIDC_OPERATOR_ROLES` | unset | Comma-separated Entra app-role values mapped to NVR operators |
+| `NVR_DISCOVERY_INTERFACE` | unset | Optional IPv4 address of the NVR host interface attached to the camera VLAN |
 
 Do not expose the initial HTTP setup screen to untrusted networks. Place it behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
 
@@ -49,6 +53,8 @@ Do not expose the initial HTTP setup screen to untrusted networks. Place it behi
 - The OIDC authorization-code flow uses Authlib for discovery, state/nonce validation, ID-token signature and claim validation, and PKCE. Set `NVR_OIDC_SESSION_SECRET` to a long random value and keep it stable across restarts. A provider outage returns a clear sign-in error while the emergency local administrator can still sign in at `/api/auth/login`.
 - Operators can list cameras and view indexed footage. Camera configuration, system status, and session administration require an administrator. Administrators can review and terminate active sessions at `/api/admin/sessions`; session lifetimes are capped at 168 hours by `NVR_SESSION_HOURS`.
 - Administrators can remove a camera and its stored footage. The API removes footage before deleting the camera record; if footage cleanup fails, the camera record is retained. Operators receive `403` for camera deletion requests.
+- ONVIF WS-Discovery is an explicit administrator action at **Scan camera VLAN**. The default Docker bridge does not reliably pass camera VLAN multicast. On a Linux Docker host with a camera VLAN interface, configure `NVR_DISCOVERY_INTERFACE` to that host interface's IPv4 address and run the stack with `docker compose -f compose.yaml -f compose.discovery.yaml up -d --build`. Host networking lets multicast replies reach the app; it removes the normal Docker port isolation and binds the app directly to host port `8080`, so protect that port with the host firewall or approved gateway. Keep both Compose files on future `up`/`down` commands. Cameras which do not answer ONVIF discovery can still be added manually.
+- Discovery returns review candidates only and never starts recording. Review each candidate, supply its RTSP/RTSPS stream URL and name, and use **Test and add camera** to validate video before adding it. Device UUIDs deduplicate repeat discovery and link later scans to manually added cameras when the UUID is known. Discovery service URLs are sanitized; video, motion, audio, and PTZ capabilities remain `untested` until the corresponding credentialed device tests exist.
 
 Choose **Continuous** explicitly to start recording. The product default remains **Motion**, but motion detection is not implemented yet; that mode is shown as unsupported and does not silently record continuously. FFmpeg remuxes the source video without re-encoding into target one-minute MP4 segments; actual segment boundaries follow source keyframes and may be longer. Browser playback depends on the camera codec. H.264/AVC in MP4 is a pragmatic compatibility target, while HEVC/H.265 and vendor-specific codecs may not play in every browser or operating system. Audio is omitted in this slice. FFmpeg and FFprobe are included in the image, and the recorder retries interrupted RTSP/TCP connections.
 
@@ -68,4 +74,4 @@ uvicorn app.main:app --reload
 
 ## Current boundary
 
-Motion detection, camera discovery, multi-camera load controls, retention, and the remaining approved NVR features are still to be implemented. Entra sign-in and role enforcement are implemented in this slice, but the installation still needs tenant-specific setup and validation. This first recorder path has not been qualified for 200+ cameras or a production retention workload; compatibility and capacity tests are required before replacement use.
+Motion detection, multi-camera load controls, retention, and the remaining approved NVR features are still to be implemented. Entra sign-in and role enforcement are implemented in this slice, but the installation still needs tenant-specific setup and validation. This recorder path has not been qualified for 200+ cameras or a production retention workload; compatibility and capacity tests are required before replacement use.

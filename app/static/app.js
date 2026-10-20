@@ -27,6 +27,7 @@ async function refresh() {
     document.querySelector("#status-list").classList.toggle("hidden", !admin);
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
+    document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
     if (admin) {
       const data = await api("/api/system/status");
       const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
@@ -35,12 +36,61 @@ async function refresh() {
     }
     const inventory = await api("/api/cameras");
     renderCameras(inventory.cameras);
+    if (admin) await refreshDiscovery();
     show("status");
   } catch (error) {
     if (error.message === "Authentication required" || error.message === "Session expired") {
       currentRole = null; await showLogin();
     } else { message.textContent = error.message; }
   }
+}
+async function refreshDiscovery() {
+  const [{candidates}, inventory] = await Promise.all([api("/api/discovery/candidates"), api("/api/cameras")]);
+  const target=document.querySelector("#discovery-candidates");
+  if (!candidates.length) { target.textContent="No discovered cameras awaiting review."; return; }
+  target.replaceChildren(...candidates.map(candidate => {
+    const card=document.createElement("article");
+    const title=document.createElement("h4");
+    title.textContent=`ONVIF device ${candidate.device_uuid}`;
+    const state=document.createElement("p");
+    state.textContent=candidate.linked_camera_id ? `Already linked to camera ${candidate.linked_camera_id}` : `First seen ${new Date(candidate.first_seen_at).toLocaleString()} · Last seen ${new Date(candidate.last_seen_at).toLocaleString()}`;
+    const services=document.createElement("p"); services.textContent=`Device service: ${candidate.service_urls.join(", ") || "unavailable"}`;
+    const capabilities=document.createElement("p");
+    capabilities.textContent=`Capabilities · ${Object.entries(candidate.capabilities).map(([name,result])=>`${name}: ${result}`).join(" · ")}`;
+    card.append(title,state,services,capabilities);
+    if (!candidate.linked_camera_id) {
+      const nameLabel=document.createElement("label"); nameLabel.textContent="Camera name";
+      const name=document.createElement("input"); name.maxLength=120; name.required=true; name.value=`Camera ${candidate.device_uuid.slice(0,8)}`;
+      const streamLabel=document.createElement("label"); streamLabel.textContent="RTSP or RTSPS stream URL";
+      const stream=document.createElement("input"); stream.type="url"; stream.autocomplete="off"; stream.required=true; stream.placeholder="rtsp://user:password@camera/stream";
+      const add=document.createElement("button"); add.type="button"; add.textContent="Test and add camera";
+      add.addEventListener("click",async()=>{
+        try {
+          const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value,stream_url:stream.value,recording_mode:"motion"})});
+          document.querySelector("#discovery-message").textContent=`${camera.name} added. Review and explicitly select a supported recording mode.`;
+          await refresh();
+        } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
+      });
+      card.append(nameLabel,name,streamLabel,stream,add);
+      if (inventory.cameras.length) {
+        const linkLabel=document.createElement("label"); linkLabel.textContent="Or link this device to an existing manually added camera";
+        const select=document.createElement("select");
+        for (const camera of inventory.cameras) {
+          const option=document.createElement("option"); option.value=camera.id; option.textContent=camera.name; select.append(option);
+        }
+        const link=document.createElement("button"); link.type="button"; link.textContent="Link identity to selected camera";
+        link.addEventListener("click",async()=>{
+          try {
+            await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/link`,{method:"POST",body:JSON.stringify({camera_id:select.value})});
+            document.querySelector("#discovery-message").textContent="Discovered identity linked to the existing camera; recorded footage and camera identity were preserved.";
+            await refresh();
+          } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
+        });
+        card.append(linkLabel,select,link);
+      }
+    }
+    return card;
+  }));
 }
 async function refreshSessions() {
   const target = document.querySelector("#sessions-list");
@@ -121,6 +171,17 @@ document.querySelector("#test-camera").addEventListener("click", async () => {
     const result=await api("/api/cameras/test", { method:"POST", body:JSON.stringify({ stream_url:document.querySelector("#stream-url").value }) });
     message.textContent=result.reachable ? `Video available · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}` : result.reason;
   } catch (error) { message.textContent=error.message; }
+});
+document.querySelector("#discover-cameras").addEventListener("click", async () => {
+  const message=document.querySelector("#discovery-message");
+  const button=document.querySelector("#discover-cameras");
+  button.disabled=true; message.textContent="Scanning the camera VLAN for ONVIF devices…";
+  try {
+    const result=await api("/api/discovery/scan",{method:"POST",body:JSON.stringify({timeout_seconds:Number(document.querySelector("#discovery-timeout").value)})});
+    message.textContent=`Found ${result.discovered_count} device(s). ${result.partial_failures.join(" ")}`;
+    await refreshDiscovery();
+  } catch(error) { message.textContent=error.message; }
+  finally { button.disabled=false; }
 });
 document.querySelector("#camera-form").addEventListener("submit", async event => {
   event.preventDefault();

@@ -45,6 +45,7 @@ def initialize() -> None:
             CREATE TABLE IF NOT EXISTS cameras (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                onvif_uuid TEXT,
                 stream_url_ciphertext BLOB NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
                 recording_mode TEXT NOT NULL DEFAULT 'motion' CHECK (recording_mode IN ('motion','continuous','disabled')),
@@ -67,10 +68,25 @@ def initialize() -> None:
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE INDEX IF NOT EXISTS recording_camera_time_idx ON recording_segments(camera_id, starts_at, ends_at);
+            CREATE TABLE IF NOT EXISTS discovery_candidates (
+                id TEXT PRIMARY KEY,
+                device_uuid TEXT NOT NULL UNIQUE,
+                service_urls TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                capabilities TEXT NOT NULL,
+                linked_camera_id TEXT REFERENCES cameras(id) ON DELETE SET NULL,
+                first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                reviewed_at TEXT
+            );
             """
         )
         # Migrate installations created by the first implementation, which only
         # allowed administrator accounts and did not assign stable session IDs.
+        camera_columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}
+        if "onvif_uuid" not in camera_columns:
+            db.execute("ALTER TABLE cameras ADD COLUMN onvif_uuid TEXT")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS cameras_onvif_uuid_idx ON cameras(onvif_uuid) WHERE onvif_uuid IS NOT NULL")
         user_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()[0]
         user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
         if "operator" not in user_sql:
