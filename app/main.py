@@ -1138,6 +1138,8 @@ async def configure_motion_source(
     request: Request,
     _: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
+    if bool(payload.username) != bool(payload.password):
+        raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
     credentials = encrypt(json.dumps({"username": payload.username, "password": payload.password}, separators=(",", ":")))
     with connect() as db:
         row = db.execute("SELECT recording_mode,recording_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
