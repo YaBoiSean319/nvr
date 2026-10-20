@@ -58,3 +58,59 @@ jobs:
         run: docker compose config -q
       - name: Build container image
         run: docker build --tag workplace-nvr:ci .
+      - name: Smoke test Compose health and persistence
+        run: |
+          docker compose up -d
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          base = "http://127.0.0.1:8080"
+
+          def get_json(path):
+              with urllib.request.urlopen(base + path, timeout=3) as response:
+                  return response.status, json.load(response)
+
+          for _ in range(40):
+              try:
+                  get_json("/healthz")
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Compose service did not become healthy")
+
+          status, setup = get_json("/api/setup/status")
+          assert status == 200 and setup["setup_required"]
+          payload = json.dumps({"username": "ci-admin", "password": "ComposeTestPassphrase2026"}).encode()
+          request = urllib.request.Request(
+              base + "/api/setup/admin", data=payload,
+              headers={"Content-Type": "application/json"}, method="POST"
+          )
+          with urllib.request.urlopen(request, timeout=5) as response:
+              assert response.status == 201
+          PY
+          docker compose restart nvr
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          base = "http://127.0.0.1:8080"
+          for _ in range(40):
+              try:
+                  with urllib.request.urlopen(base + "/healthz", timeout=3):
+                      pass
+                  with urllib.request.urlopen(base + "/api/setup/status", timeout=3) as response:
+                      setup = json.load(response)
+                  assert not setup["setup_required"], "Administrator state was lost on restart"
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Compose service did not recover with persisted state")
+          PY
+      - name: Tear down Compose stack
+        if: always()
+        run: docker compose down -v
