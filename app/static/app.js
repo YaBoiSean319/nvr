@@ -82,7 +82,13 @@ function renderCameras(cameras) {
         await refresh();
       } catch (error) { document.querySelector("#camera-message").textContent=error.message; }
     });
-    card.append(mode, save);
+    const remove=document.createElement("button"); remove.type="button"; remove.textContent="Remove camera";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`Remove ${camera.name} and its saved footage?`)) return;
+      try { await api(`/api/cameras/${encodeURIComponent(camera.id)}`, {method:"DELETE"}); await refresh(); }
+      catch (error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
+    card.append(mode, save, remove);
     return card;
   }));
 }
@@ -141,5 +147,16 @@ document.querySelector("#login-form").addEventListener("submit", async event => 
   catch (error) { message.textContent = error.message; }
 });
 document.querySelector("#logout").addEventListener("click", async () => { await api("/api/auth/logout", { method:"POST" }); show("login"); });
-document.querySelector("#entra-login").addEventListener("click", () => { window.location.assign("/api/auth/oidc/login"); });
+document.querySelector("#entra-login").addEventListener("click", async () => {
+  const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
+  try {
+    const response=await fetch("/api/auth/oidc/login?format=json", {credentials:"same-origin"});
+    const result=await response.json();
+    if (!response.ok) throw new Error(result.detail || "Entra sign-in is unavailable");
+    window.location.assign(result.authorization_url);
+  } catch (error) {
+    message.textContent=`${error.message}. You can still sign in with the emergency local administrator account.`;
+    button.disabled=false;
+  }
+});
 refresh();

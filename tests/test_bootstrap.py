@@ -233,8 +233,9 @@ class BootstrapTests(unittest.TestCase):
         self.configure_oidc()
         self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
         with patch.object(StarletteOAuth2App,"client_cls",FakeProviderClient):
-            login=self.client.get("https://testserver.local/api/auth/oidc/login",follow_redirects=False)
-            query=parse_qs(urlsplit(login.headers["location"]).query)
+            login=self.client.get("https://testserver.local/api/auth/oidc/login?format=json",follow_redirects=False)
+            self.assertEqual(login.status_code,200,login.text)
+            query=parse_qs(urlsplit(login.json()["authorization_url"]).query)
             self.assertEqual(query["redirect_uri"],["https://nvr.example.test/api/auth/oidc/callback"])
             observed["challenge"]=query["code_challenge"][0]
             observed["nonce"]=query["nonce"][0]
@@ -246,8 +247,8 @@ class BootstrapTests(unittest.TestCase):
             replay=self.client.get(f"https://testserver.local/api/auth/oidc/callback?code=valid&state={query['state'][0]}",follow_redirects=False)
             self.assertEqual(replay.status_code,401)
             self.client.post("/api/auth/logout")
-            second=self.client.get("https://testserver.local/api/auth/oidc/login",follow_redirects=False)
-            second_query=parse_qs(urlsplit(second.headers["location"]).query)
+            second=self.client.get("https://testserver.local/api/auth/oidc/login?format=json",follow_redirects=False)
+            second_query=parse_qs(urlsplit(second.json()["authorization_url"]).query)
             observed["challenge"]=second_query["code_challenge"][0]
             observed["nonce"]=second_query["nonce"][0]
             observed["bad_nonce"]=True
@@ -258,9 +259,11 @@ class BootstrapTests(unittest.TestCase):
         self.configure_oidc()
         from unittest.mock import AsyncMock, patch
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
-        fake=type("FakeOIDC", (), {"authorize_redirect":AsyncMock(side_effect=OSError("provider offline"))})()
+        fake=type("FakeOIDC", (), {"create_authorization_url":AsyncMock(side_effect=OSError("provider offline"))})()
         with patch("app.main._oidc_client", return_value=fake):
-            self.assertEqual(self.client.get("/api/auth/oidc/login", follow_redirects=False).status_code, 503)
+            unavailable=self.client.get("/api/auth/oidc/login?format=json", follow_redirects=False)
+            self.assertEqual(unavailable.status_code, 503)
+            self.assertIn("local administrator sign-in remains available", unavailable.json()["detail"])
         self.assertEqual(self.client.post("/api/auth/login", json={"username":"local-admin", "password":"StrongPassphrase2026"}).status_code, 200)
 
     def test_camera_credentials_are_encrypted_and_not_returned(self):

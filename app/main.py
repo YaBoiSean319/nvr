@@ -270,14 +270,18 @@ def oidc_status() -> dict[str, bool]:
     return {"enabled": _oidc_settings() is not None}
 
 
-@app.get("/api/auth/oidc/login", include_in_schema=False)
-async def oidc_login(request: Request) -> RedirectResponse:
+@app.get("/api/auth/oidc/login", include_in_schema=False, response_model=None)
+async def oidc_login(request: Request) -> dict[str, str] | RedirectResponse:
     config = _oidc_settings()
     client = _oidc_client()
     if config is None or client is None:
         raise HTTPException(status_code=503, detail="Entra sign-in is not configured; use the emergency local administrator account")
     try:
         redirect_uri = config["public_url"] + "/api/auth/oidc/callback"
+        if request.query_params.get("format") == "json":
+            authorize_data = await client.create_authorization_url(redirect_uri)
+            await client.save_authorize_data(request, redirect_uri=redirect_uri, **authorize_data)
+            return {"authorization_url": authorize_data["url"]}
         return await client.authorize_redirect(request, redirect_uri)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Entra sign-in is temporarily unavailable; local administrator sign-in remains available") from exc
