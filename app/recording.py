@@ -260,7 +260,7 @@ class RecordingManager:
                                (status, value, error, camera_id))
 
             async def on_event(event) -> None:
-                assembler.ingest(event)
+                await assembler.ingest(event)
 
             event_task = asyncio.create_task(
                 subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status),
