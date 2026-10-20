@@ -82,11 +82,17 @@ class MotionClipAssembler:
         self.capture: _Capture | None = None
         self.segment_seconds = 2
 
-    def ingest(self, event: CameraMotionEvent) -> None:
+    async def ingest(self, event: CameraMotionEvent) -> None:
         received = datetime.now(timezone.utc)
         capture = self.capture
+        if event.active and capture is not None and not capture.active and received > capture.capture_until:
+            # A notification may race the periodic polling loop. Finalize the
+            # expired clip before starting another; if its end is not yet
+            # buffered, keep the current capture and merge the transition.
+            await self.poll()
+            capture = self.capture
         if event.active:
-            if capture is None or (not capture.active and received > capture.capture_until):
+            if capture is None:
                 capture = _Capture(
                     event_id=str(uuid.uuid4()), first_received_at=received,
                     requested_start=received - timedelta(seconds=self.pre_roll_seconds),
