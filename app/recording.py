@@ -14,6 +14,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .credentials import decrypt
 from .store import connect
+from .motion import MotionClipAssembler
+from .onvif_events import subscribe_and_pull
 
 SEGMENT_SECONDS = max(10, min(int(os.environ.get("NVR_SEGMENT_SECONDS", "60")), 3600))
 RECONNECT_MAX_SECONDS = 30
@@ -21,6 +23,10 @@ RECONNECT_MAX_SECONDS = 30
 
 def recordings_path() -> Path:
     return Path(os.environ.get("NVR_RECORDINGS_PATH", "/recordings")).resolve()
+
+
+def motion_buffer_path() -> Path:
+    return Path(os.environ.get("NVR_MOTION_BUFFER_PATH", "/tmp/nvr-motion-buffer")).resolve()
 
 
 def safe_stream_url(raw: str) -> str:
@@ -99,7 +105,7 @@ class RecordingManager:
     async def start(self) -> None:
         self.stopping = False
         with connect() as db:
-            rows = db.execute("SELECT id FROM cameras WHERE enabled=1 AND recording_mode='continuous'").fetchall()
+            rows = db.execute("SELECT id FROM cameras WHERE enabled=1 AND recording_enabled=1 AND recording_mode IN ('continuous','motion')").fetchall()
         for row in rows:
             self.ensure(row["id"])
 
@@ -125,8 +131,8 @@ class RecordingManager:
     async def sync_camera(self, camera_id: str) -> None:
         await self.remove(camera_id)
         with connect() as db:
-            row = db.execute("SELECT enabled, recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if row and row["enabled"] and row["recording_mode"] == "continuous" and not self.stopping:
+            row = db.execute("SELECT enabled, recording_enabled, recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if row and row["enabled"] and row["recording_enabled"] and row["recording_mode"] in {"continuous", "motion"} and not self.stopping:
             self.ensure(camera_id)
 
     def _camera(self, camera_id: str) -> sqlite3.Row | None:
@@ -176,6 +182,116 @@ class RecordingManager:
         return indexed
 
     async def _run(self, camera_id: str) -> None:
+        failures = 0
+        while not self.stopping:
+            row = self._camera(camera_id)
+            if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] == "disabled":
+                self._set_status(camera_id, "stopped")
+                return
+            if row["recording_mode"] == "motion":
+                await self._run_motion(camera_id)
+                row = self._camera(camera_id)
+                if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] != "motion" or self.stopping:
+                    return
+                failures += 1
+                await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
+            else:
+                await self._run_continuous(camera_id)
+                return
+
+    async def _run_motion(self, camera_id: str) -> None:
+        row = self._camera(camera_id)
+        if row is None or not row["enabled"] or not row["recording_enabled"]:
+            self._set_status(camera_id, "stopped")
+            return
+        if not row["motion_service_url"]:
+            with connect() as db:
+                db.execute("UPDATE cameras SET recording_status='unsupported',motion_source_status='unsupported',last_error='Configure an ONVIF event service to use motion recording' WHERE id=?", (camera_id,))
+            return
+        executable = shutil.which("ffmpeg")
+        if not executable:
+            with connect() as db:
+                db.execute("UPDATE cameras SET recording_status='unavailable',motion_source_status='unavailable',last_error='FFmpeg is not installed' WHERE id=?", (camera_id,))
+            return
+        try:
+            source = decrypt(row["stream_url_ciphertext"])
+            safe_stream_url(source)
+            credentials = json.loads(decrypt(row["motion_credentials_ciphertext"])) if row["motion_credentials_ciphertext"] else {"username": "", "password": ""}
+        except Exception:
+            with connect() as db:
+                db.execute("UPDATE cameras SET recording_status='failed',motion_source_status='configuration_error',last_error='Camera credentials are unavailable' WHERE id=?", (camera_id,))
+            return
+
+        spool = motion_buffer_path() / camera_id
+        spool.mkdir(parents=True, exist_ok=True)
+        assembler = MotionClipAssembler(camera_id, spool, row["motion_pre_roll_seconds"], row["motion_post_roll_seconds"])
+        self._set_status(camera_id, "buffering")
+        with connect() as db:
+            db.execute("UPDATE cameras SET motion_source_status='connecting',last_error=NULL WHERE id=?", (camera_id,))
+        event_task: asyncio.Task[None] | None = None
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
+            args = [
+                executable, "-hide_banner", "-nostats", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
+                "-i", "pipe:0", "-map", "0:v:0", "-an", "-c:v", "copy",
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", str(list_size),
+                "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
+                "-hls_segment_filename", str(spool / "segment-%06d.ts"), str(spool / "live.m3u8"),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            if proc.stdin is None:
+                raise OSError("Unable to pass stream source to FFmpeg")
+            proc.stdin.write(_manifest_bytes(source))
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+            def source_status(value: str) -> None:
+                healthy = value == "healthy"
+                status = "buffering" if healthy else ("reconnecting" if value == "unavailable" else "degraded")
+                error = None if healthy else ("ONVIF event subscription is unavailable" if value == "unavailable" else "ONVIF event service is not usable")
+                with connect() as db:
+                    db.execute("UPDATE cameras SET recording_status=?,motion_source_status=?,last_error=? WHERE id=?",
+                               (status, value, error, camera_id))
+
+            async def on_event(event) -> None:
+                assembler.ingest(event)
+
+            event_task = asyncio.create_task(
+                subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status),
+                name=f"onvif-events-{camera_id}",
+            )
+            while not self.stopping:
+                await assembler.poll()
+                if proc.returncode is not None:
+                    self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying")
+                    break
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ValueError):
+            with connect() as db:
+                db.execute("UPDATE cameras SET recording_status='reconnecting',motion_source_status='unavailable',last_error='Camera motion buffer could not start' WHERE id=?", (camera_id,))
+        finally:
+            if event_task:
+                event_task.cancel()
+                await asyncio.gather(event_task, return_exceptions=True)
+            await assembler.stop()
+            if proc and proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            if self.stopping:
+                self._set_status(camera_id, "stopped")
+            shutil.rmtree(spool, ignore_errors=True)
+
+    async def _run_continuous(self, camera_id: str) -> None:
         executable = shutil.which("ffmpeg")
         if not executable:
             self._set_status(camera_id, "unavailable", "FFmpeg is not installed")
@@ -183,7 +299,7 @@ class RecordingManager:
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
-            if row is None or not row["enabled"] or row["recording_mode"] != "continuous":
+            if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] != "continuous":
                 self._set_status(camera_id, "stopped")
                 return
             try:
