@@ -52,6 +52,14 @@
         <h2 id="sessions-heading">Active sessions</h2>
         <div id="sessions-list"></div>
       </section>
+      <section id="diagnostics-admin" class="hidden" aria-labelledby="diagnostics-heading">
+        <h2 id="diagnostics-heading">Support diagnostics</h2>
+        <p>Optional, administrator-controlled capture of discovery and stream-test outcomes. Captures aggregate counts and timings only; it excludes camera names, addresses, URLs, credentials, sessions, and footage. Events are retained for up to 7 days, with a 1,000-event cap.</p>
+        <label for="diagnostics-hours">Capture window (hours)</label><input id="diagnostics-hours" type="number" min="1" max="24" value="4">
+        <button id="diagnostics-toggle" type="button">Enable diagnostics capture</button>
+        <button id="diagnostics-download" type="button">Download diagnostics bundle</button>
+        <p id="diagnostics-message" role="status" aria-live="polite"></p>
+      </section>
       <section aria-labelledby="camera-heading">
         <h2 id="camera-heading">Cameras</h2>
         <section id="discovery-admin" class="hidden" aria-labelledby="discovery-heading">
