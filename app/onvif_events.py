@@ -21,6 +21,7 @@ class CameraMotionEvent:
     active: bool
     event_time: datetime
     topic: str
+    source: str = "onvif"
 
 
 def _local(tag: str) -> str:

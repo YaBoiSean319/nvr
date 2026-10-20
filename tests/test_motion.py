@@ -14,9 +14,37 @@ from pathlib import Path
 
 from app.motion import MotionClipAssembler, parse_live_playlist
 from app.onvif_events import CameraMotionEvent, parse_motion_notifications, subscribe_and_pull
+from app.server_motion import FrameMotionDetector
 
 
 class MotionTests(unittest.TestCase):
+    def test_server_detector_respects_zones_sensitivity_and_quiet_scene(self):
+        zone = {"x":0.25,"y":0.0,"width":0.5,"height":1.0}
+        detector = FrameMotionDetector([zone], sensitivity=50, frame_width=20, frame_height=10)
+        still = bytes(200)
+        self.assertIsNone(detector.process(still))
+        self.assertIsNone(detector.process(still))
+        outside = bytearray(still)
+        for y in range(10):
+            for x in range(20):
+                if x < 5 or x >= 15:
+                    outside[y * 20 + x] = 255
+        self.assertIsNone(detector.process(bytes(outside)))
+        inside = bytearray(outside)
+        for y in range(10):
+            for x in range(5, 15):
+                inside[y * 20 + x] = 180
+        self.assertIsNone(detector.process(bytes(inside)))
+        self.assertTrue(detector.process(bytes(outside)))
+        self.assertIsNone(detector.process(still))
+        self.assertIsNone(detector.process(still))
+        self.assertFalse(detector.process(still))
+        self.assertLess(FrameMotionDetector(sensitivity=100).threshold, FrameMotionDetector(sensitivity=1).threshold)
+
+    def test_server_detector_rejects_out_of_bounds_zones(self):
+        with self.assertRaises(ValueError):
+            FrameMotionDetector([{"x":0.9,"y":0,"width":0.2,"height":1}])
+
     def test_parse_onvif_motion_transition_and_ignore_non_motion(self):
         xml = b'''<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2" xmlns:tt="http://www.onvif.org/ver10/schema">
           <wsnt:NotificationMessage><wsnt:Topic>tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic>
@@ -178,6 +206,60 @@ class MotionTests(unittest.TestCase):
                     events = db.execute("SELECT id,status FROM motion_events WHERE camera_id=?", (camera_id,)).fetchall()
                 self.assertEqual([(row["id"], row["status"]) for row in events], [(first_capture, "recording")])
                 asyncio.run(assembler.stop())
+            finally:
+                for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH"):
+                    os.environ.pop(key, None)
+
+    def test_server_fallback_failure_and_camera_event_recovery_stay_motion_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            os.environ["NVR_DB_PATH"] = str(root / "state.sqlite3")
+            os.environ["NVR_RECORDINGS_PATH"] = str(root / "recordings")
+            os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(root / "credentials.key")
+            try:
+                from app.store import connect, initialize
+                from app.recording import RecordingManager
+                initialize()
+                camera_id = str(uuid.uuid4())
+                with connect() as db:
+                    db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_enabled,recording_mode,motion_fallback_enabled,recording_status) VALUES(?,?,?,1,'motion',1,'reconnecting')", (camera_id, "Fallback health", b"encrypted"))
+                manager = RecordingManager()
+                source_state = {"value":"unavailable"}
+                async def observe():
+                    changed = asyncio.Event()
+                    attempted = asyncio.Event()
+                    async def detector_stops(*args):
+                        attempted.set()
+                        raise OSError("synthetic detector stoppage")
+                    manager._detect_server_motion = detector_stops
+                    task = asyncio.create_task(manager._watch_server_motion_fallback(camera_id, "rtsp://camera", [], 50, source_state, changed, None))
+                    try:
+                        await asyncio.wait_for(attempted.wait(), timeout=2)
+                        for _ in range(20):
+                            with connect() as db:
+                                row = db.execute("SELECT recording_status,server_motion_status,recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
+                            if row["server_motion_status"] == "unavailable":
+                                break
+                            await asyncio.sleep(0.05)
+                        self.assertEqual(row["recording_status"], "unavailable")
+                        self.assertEqual(row["server_motion_status"], "unavailable")
+                        self.assertEqual(row["recording_mode"], "motion")
+                        source_state["value"] = "healthy"
+                        changed.set()
+                        with connect() as db:
+                            db.execute("UPDATE cameras SET motion_source_status='healthy',recording_status='buffering',last_error=NULL WHERE id=?", (camera_id,))
+                        for _ in range(50):
+                            with connect() as db:
+                                recovered = db.execute("SELECT recording_mode,server_motion_status FROM cameras WHERE id=?", (camera_id,)).fetchone()
+                            if recovered["server_motion_status"] == "waiting":
+                                break
+                            await asyncio.sleep(0.1)
+                        self.assertEqual(recovered["recording_mode"], "motion")
+                        self.assertEqual(recovered["server_motion_status"], "waiting")
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                asyncio.run(observe())
             finally:
                 for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH"):
                     os.environ.pop(key, None)

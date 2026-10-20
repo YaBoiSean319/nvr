@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -142,6 +142,19 @@ def _validate_onvif_service_url(value: str | None) -> str | None:
     return value.strip()
 
 
+class MotionZoneRequest(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def fit_frame(self) -> "MotionZoneRequest":
+        if self.x + self.width > 1 or self.y + self.height > 1:
+            raise ValueError("Motion zone must fit inside the normalized frame")
+        return self
+
+
 class CameraCreateRequest(CameraProbeRequest):
     name: str = Field(min_length=1, max_length=120)
     recording_mode: Literal["motion", "continuous", "disabled"] = "motion"
@@ -151,6 +164,9 @@ class CameraCreateRequest(CameraProbeRequest):
     motion_password: str | None = Field(default=None, max_length=1024)
     motion_pre_roll_seconds: int = Field(default=10, ge=0, le=120)
     motion_post_roll_seconds: int = Field(default=30, ge=1, le=600)
+    motion_fallback_enabled: bool = False
+    motion_zones: list[MotionZoneRequest] = Field(default_factory=list, max_length=16)
+    motion_sensitivity: int = Field(default=50, ge=1, le=100)
     onvif_uuid: str | None = Field(default=None, min_length=36, max_length=36)
 
     @field_validator("onvif_uuid")
@@ -228,18 +244,19 @@ class CameraCredentialRotateRequest(CameraProbeRequest):
 
 
 class MotionSourceUpdateRequest(BaseModel):
-    service_url: str = Field(min_length=8, max_length=2048)
-    username: str = Field(default="", max_length=256)
-    password: str = Field(default="", max_length=1024)
+    service_url: str | None = Field(default=None, max_length=2048)
+    username: str | None = Field(default=None, max_length=256)
+    password: str | None = Field(default=None, max_length=1024)
     pre_roll_seconds: int = Field(default=10, ge=0, le=120)
     post_roll_seconds: int = Field(default=30, ge=1, le=600)
+    fallback_enabled: bool | None = None
+    zones: list[MotionZoneRequest] | None = Field(default=None, max_length=16)
+    sensitivity: int | None = Field(default=None, ge=1, le=100)
 
     @field_validator("service_url")
     @classmethod
-    def validate_service_url(cls, value: str) -> str:
+    def validate_service_url(cls, value: str | None) -> str | None:
         validated = _validate_onvif_service_url(value)
-        if validated is None:
-            raise ValueError("ONVIF motion service URL is required")
         return validated
 
 
@@ -276,6 +293,9 @@ class DiscoveredCameraAddRequest(CameraProbeRequest):
     motion_password: str | None = Field(default=None, max_length=1024)
     motion_pre_roll_seconds: int = Field(default=10, ge=0, le=120)
     motion_post_roll_seconds: int = Field(default=30, ge=1, le=600)
+    motion_fallback_enabled: bool = False
+    motion_zones: list[MotionZoneRequest] = Field(default_factory=list, max_length=16)
+    motion_sensitivity: int = Field(default=50, ge=1, le=100)
 
 
 class DiscoveredCameraLinkRequest(BaseModel):
@@ -563,6 +583,10 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
         "motion_source_configured": bool(row["motion_service_url"]),
         "motion_pre_roll_seconds": row["motion_pre_roll_seconds"],
         "motion_post_roll_seconds": row["motion_post_roll_seconds"],
+        "motion_fallback_enabled": bool(row["motion_fallback_enabled"]),
+        "motion_zones": json.loads(row["motion_zones_json"]),
+        "motion_sensitivity": row["motion_sensitivity"],
+        "server_motion_status": row["server_motion_status"],
         "video": {"codec": row["video_codec"], "width": row["video_width"], "height": row["video_height"]},
         "last_probe_at": row["last_probe_at"],
         "last_error": row["last_error"],
@@ -584,6 +608,9 @@ def _insert_camera(
     motion_password: str | None = None,
     motion_pre_roll_seconds: int = 10,
     motion_post_roll_seconds: int = 30,
+    motion_fallback_enabled: bool = False,
+    motion_zones: list[MotionZoneRequest] | None = None,
+    motion_sensitivity: int = 50,
 ) -> str:
     """Persist a camera only after its stream has passed the shared probe."""
     video = capability["video"]
@@ -591,8 +618,8 @@ def _insert_camera(
         raise ValueError("A successful stream probe must include video metadata")
     camera_id = str(uuid.uuid4())
     recording_enabled = bool(recording_enabled and recording_mode != "disabled")
-    status = "stopped" if not recording_enabled else ("connecting" if recording_mode == "continuous" or motion_service_url else "unsupported")
-    error = "Configure an ONVIF event service to use motion recording" if recording_enabled and recording_mode == "motion" and not motion_service_url else None
+    status = "stopped" if not recording_enabled else ("connecting" if recording_mode == "continuous" or motion_service_url or motion_fallback_enabled else "unsupported")
+    error = "Configure an ONVIF event service or enable server motion fallback" if recording_enabled and recording_mode == "motion" and not motion_service_url and not motion_fallback_enabled else None
     credentials = None
     if motion_username or motion_password:
         if not motion_username or not motion_password:
@@ -600,12 +627,15 @@ def _insert_camera(
         credentials = encrypt(json.dumps({"username": motion_username, "password": motion_password}, separators=(",", ":")))
     db.execute(
         "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,recording_mode,recording_enabled,recording_status," 
-        "motion_service_url,motion_credentials_ciphertext,motion_pre_roll_seconds,motion_post_roll_seconds,motion_source_status,last_error," 
+        "motion_service_url,motion_credentials_ciphertext,motion_pre_roll_seconds,motion_post_roll_seconds,motion_source_status," 
+        "motion_fallback_enabled,motion_zones_json,motion_sensitivity,server_motion_status,last_error," 
         "video_codec,video_width,video_height,last_probe_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
         (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), recording_mode, int(recording_enabled), status,
          motion_service_url, credentials, motion_pre_roll_seconds, motion_post_roll_seconds,
-         "untested" if motion_service_url else "unsupported", error,
+         "untested" if motion_service_url else "unsupported", int(motion_fallback_enabled),
+         json.dumps([zone.model_dump() for zone in (motion_zones or [])], separators=(",", ":")), motion_sensitivity,
+         "waiting" if motion_fallback_enabled else "disabled", error,
          video.get("codec"), video.get("width"), video.get("height")),
     )
     return camera_id
@@ -957,6 +987,9 @@ async def add_discovered_camera(
                 motion_password=payload.motion_password,
                 motion_pre_roll_seconds=payload.motion_pre_roll_seconds,
                 motion_post_roll_seconds=payload.motion_post_roll_seconds,
+                motion_fallback_enabled=payload.motion_fallback_enabled,
+                motion_zones=payload.motion_zones,
+                motion_sensitivity=payload.motion_sensitivity,
                 onvif_uuid=candidate["device_uuid"],
             ),
             request,
@@ -1002,6 +1035,9 @@ async def create_camera(
                 motion_password=payload.motion_password,
                 motion_pre_roll_seconds=payload.motion_pre_roll_seconds,
                 motion_post_roll_seconds=payload.motion_post_roll_seconds,
+                motion_fallback_enabled=payload.motion_fallback_enabled,
+                motion_zones=payload.motion_zones,
+                motion_sensitivity=payload.motion_sensitivity,
             )
             _record_discovery_probe(db, payload.onvif_uuid, capability)
         except sqlite3.IntegrityError as exc:
@@ -1038,8 +1074,8 @@ async def update_camera(
             assignments.append("motion_post_roll_seconds=?"); values.append(payload.motion_post_roll_seconds)
         if not enabled:
             assignments.extend(("recording_status='stopped'", "last_error=NULL"))
-        elif mode == "motion" and not row["motion_service_url"]:
-            assignments.extend(("recording_status='unsupported'", "last_error='Configure an ONVIF event service to use motion recording'"))
+        elif mode == "motion" and not row["motion_service_url"] and not row["motion_fallback_enabled"]:
+            assignments.extend(("recording_status='unsupported'", "last_error='Configure an ONVIF event service or enable server motion fallback'"))
         else:
             assignments.extend(("recording_status='connecting'", "last_error=NULL"))
         values.append(camera_id)
@@ -1086,7 +1122,7 @@ async def bulk_update_cameras(
         if payload.recording_enabled is not None:
             assignments.append("recording_enabled=?")
             values.append(int(payload.recording_enabled and payload.recording_mode != "disabled"))
-            assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL THEN 'Configure an ONVIF event service to use motion recording' ELSE NULL END"))
+            assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL AND motion_fallback_enabled=0 THEN 'Configure an ONVIF event service or enable server motion fallback' ELSE NULL END"))
             effective_enabled = int(payload.recording_enabled and payload.recording_mode != "disabled")
             values.extend((effective_enabled, effective_enabled))
         elif payload.recording_mode is not None and payload.recording_mode != "disabled":
@@ -1142,18 +1178,30 @@ async def configure_motion_source(
     request: Request,
     _: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
-    if bool(payload.username) != bool(payload.password):
+    credentials_supplied = payload.username is not None or payload.password is not None
+    if credentials_supplied and bool(payload.username) != bool(payload.password):
         raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
-    credentials = encrypt(json.dumps({"username": payload.username, "password": payload.password}, separators=(",", ":")))
     with connect() as db:
-        row = db.execute("SELECT recording_mode,recording_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Camera not found")
+        service_url = payload.service_url if "service_url" in payload.model_fields_set else row["motion_service_url"]
+        fallback_enabled = payload.fallback_enabled if payload.fallback_enabled is not None else bool(row["motion_fallback_enabled"])
+        if not service_url and not fallback_enabled:
+            raise HTTPException(status_code=422, detail="Configure an ONVIF event service or enable server motion fallback")
+        assignments = ["motion_service_url=?", "motion_pre_roll_seconds=?", "motion_post_roll_seconds=?", "motion_source_status=?"]
+        values: list[object] = [service_url, payload.pre_roll_seconds, payload.post_roll_seconds, "untested" if service_url else "unsupported"]
+        if credentials_supplied:
+            assignments.append("motion_credentials_ciphertext=?")
+            values.append(encrypt(json.dumps({"username": payload.username or "", "password": payload.password or ""}, separators=(",", ":"))))
+        zones = payload.zones if payload.zones is not None else [MotionZoneRequest.model_validate(zone) for zone in json.loads(row["motion_zones_json"])]
+        sensitivity = payload.sensitivity if payload.sensitivity is not None else row["motion_sensitivity"]
+        assignments.extend(("motion_fallback_enabled=?", "motion_zones_json=?", "motion_sensitivity=?", "server_motion_status=?"))
+        values.extend((int(fallback_enabled), json.dumps([zone.model_dump() for zone in zones], separators=(",", ":")), sensitivity, "waiting" if fallback_enabled else "disabled"))
+        assignments.extend(("recording_status=CASE WHEN recording_enabled=1 AND recording_mode='motion' THEN 'connecting' ELSE recording_status END", "last_error=NULL", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"))
+        values.append(camera_id)
         db.execute(
-            "UPDATE cameras SET motion_service_url=?,motion_credentials_ciphertext=?,motion_pre_roll_seconds=?,motion_post_roll_seconds=?,motion_source_status='untested',"
-            "recording_status=CASE WHEN recording_enabled=1 AND recording_mode='motion' THEN 'connecting' ELSE recording_status END,"
-            "last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
-            (payload.service_url, credentials, payload.pre_roll_seconds, payload.post_roll_seconds, camera_id),
+            f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values,
         )
     await request.app.state.recorders.sync_camera(camera_id)
     with connect() as db:

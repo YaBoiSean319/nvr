@@ -143,7 +143,7 @@ function renderCameras(cameras) {
     }
     const summary = document.createElement("p");
     const video = camera.video || {};
-    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · " + camera.recording_mode + " · " + camera.recording_status + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status : "") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
+    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · " + camera.recording_mode + " · " + camera.recording_status + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status + " · server fallback " + (camera.motion_fallback_enabled ? camera.server_motion_status : "disabled") : "") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
     card.append(title, summary);
     if (camera.last_error) { const note=document.createElement("p"); note.textContent=camera.last_error; card.append(note); }
     const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
@@ -173,10 +173,20 @@ function renderCameras(cameras) {
     const motionUser=document.createElement("input"); motionUser.autocomplete="off";
     const motionPassLabel=document.createElement("label"); motionPassLabel.textContent="ONVIF password";
     const motionPass=document.createElement("input"); motionPass.type="password"; motionPass.autocomplete="new-password";
+    const fallbackLabel=document.createElement("label"); fallbackLabel.textContent="Use server motion detection when ONVIF events are unavailable ";
+    const fallback=document.createElement("input"); fallback.type="checkbox"; fallback.checked=camera.motion_fallback_enabled;
+    fallbackLabel.append(fallback);
+    const zonesLabel=document.createElement("label"); zonesLabel.textContent="Server motion zones (normalized rectangles; empty uses full frame)";
+    const zones=document.createElement("textarea"); zones.spellcheck=false; zones.value=JSON.stringify(camera.motion_zones||[]); zones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';
+    const sensitivityLabel=document.createElement("label"); sensitivityLabel.textContent="Server motion sensitivity (1–100)";
+    const sensitivity=document.createElement("input"); sensitivity.type="number"; sensitivity.min="1"; sensitivity.max="100"; sensitivity.value=camera.motion_sensitivity||50;
     const configureMotion=document.createElement("button"); configureMotion.type="button"; configureMotion.textContent="Save motion event source";
     configureMotion.addEventListener("click",async()=>{
       try {
-        await api(`/api/cameras/${encodeURIComponent(camera.id)}/motion-source`,{method:"POST",body:JSON.stringify({service_url:motionUrl.value,username:motionUser.value,password:motionPass.value,pre_roll_seconds:Number(pre.value),post_roll_seconds:Number(post.value)})});
+        const payload={pre_roll_seconds:Number(pre.value),post_roll_seconds:Number(post.value),fallback_enabled:fallback.checked,zones:JSON.parse(zones.value||"[]"),sensitivity:Number(sensitivity.value)};
+        if(motionUrl.value) payload.service_url=motionUrl.value;
+        if(motionUser.value||motionPass.value){payload.username=motionUser.value;payload.password=motionPass.value;}
+        await api(`/api/cameras/${encodeURIComponent(camera.id)}/motion-source`,{method:"POST",body:JSON.stringify(payload)});
         motionUser.value=""; motionPass.value=""; await refresh();
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
@@ -209,7 +219,7 @@ function renderCameras(cameras) {
         rotateInput.value=""; await refresh();
       } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
     });
-    card.append(mode,enabledLabel,pre,post,save,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,configureMotion,events,remove,rotateLabel,rotateInput,rotate);
+    card.append(mode,enabledLabel,pre,post,save,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,remove,rotateLabel,rotateInput,rotate);
     return card;
   }));
 }
@@ -336,7 +346,10 @@ document.querySelector("#camera-form").addEventListener("submit", async event =>
       motion_username:document.querySelector("#motion-username").value || null,
       motion_password:document.querySelector("#motion-password").value || null,
       motion_pre_roll_seconds:Number(document.querySelector("#motion-pre-roll").value),
-      motion_post_roll_seconds:Number(document.querySelector("#motion-post-roll").value)
+      motion_post_roll_seconds:Number(document.querySelector("#motion-post-roll").value),
+      motion_fallback_enabled:document.querySelector("#motion-fallback-enabled").checked,
+      motion_zones:JSON.parse(document.querySelector("#motion-zones").value||"[]"),
+      motion_sensitivity:Number(document.querySelector("#motion-sensitivity").value)
     }) });
     document.querySelector("#camera-form").reset();
     message.textContent=`${result.name} added · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}`;
