@@ -189,9 +189,11 @@ class RecordingManager:
                 self._set_status(camera_id, "stopped")
                 return
             if row["recording_mode"] == "motion":
-                await self._run_motion(camera_id)
+                should_retry = await self._run_motion(camera_id)
                 row = self._camera(camera_id)
                 if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] != "motion" or self.stopping:
+                    return
+                if not should_retry:
                     return
                 failures += 1
                 await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
@@ -199,20 +201,20 @@ class RecordingManager:
                 await self._run_continuous(camera_id)
                 return
 
-    async def _run_motion(self, camera_id: str) -> None:
+    async def _run_motion(self, camera_id: str) -> bool:
         row = self._camera(camera_id)
         if row is None or not row["enabled"] or not row["recording_enabled"]:
             self._set_status(camera_id, "stopped")
-            return
+            return False
         if not row["motion_service_url"]:
             with connect() as db:
                 db.execute("UPDATE cameras SET recording_status='unsupported',motion_source_status='unsupported',last_error='Configure an ONVIF event service to use motion recording' WHERE id=?", (camera_id,))
-            return
+            return False
         executable = shutil.which("ffmpeg")
         if not executable:
             with connect() as db:
                 db.execute("UPDATE cameras SET recording_status='unavailable',motion_source_status='unavailable',last_error='FFmpeg is not installed' WHERE id=?", (camera_id,))
-            return
+            return False
         try:
             source = decrypt(row["stream_url_ciphertext"])
             safe_stream_url(source)
@@ -220,7 +222,7 @@ class RecordingManager:
         except Exception:
             with connect() as db:
                 db.execute("UPDATE cameras SET recording_status='failed',motion_source_status='configuration_error',last_error='Camera credentials are unavailable' WHERE id=?", (camera_id,))
-            return
+            return False
 
         spool = motion_buffer_path() / camera_id
         spool.mkdir(parents=True, exist_ok=True)
@@ -290,6 +292,7 @@ class RecordingManager:
             if self.stopping:
                 self._set_status(camera_id, "stopped")
             shutil.rmtree(spool, ignore_errors=True)
+        return True
 
     async def _run_continuous(self, camera_id: str) -> None:
         executable = shutil.which("ffmpeg")
