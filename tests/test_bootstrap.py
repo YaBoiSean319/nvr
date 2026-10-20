@@ -119,11 +119,13 @@ class BootstrapTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("NVR_RTSP_TEST_URL"), "A simulated RTSP publisher is required")
     def test_rtsp_stream_is_probed_recorded_indexed_and_playable(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
-        created = self.client.post("/api/cameras", json={
-            "name":"Simulated RTSP camera",
-            "stream_url":os.environ["NVR_RTSP_TEST_URL"],
-            "recording_mode":"continuous",
-        })
+        ffmpeg_log = Path(self.tmp.name) / "ffmpeg-stderr.log"
+        with ffmpeg_log.open("wb") as stderr_log, patch("app.recording.asyncio.subprocess.DEVNULL", stderr_log):
+            created = self.client.post("/api/cameras", json={
+                "name":"Simulated RTSP camera",
+                "stream_url":os.environ["NVR_RTSP_TEST_URL"],
+                "recording_mode":"continuous",
+            })
         self.assertEqual(created.status_code, 201, created.text)
         camera_id = created.json()["id"]
         self.assertTrue(created.json()["video"]["codec"])
@@ -136,7 +138,8 @@ class BootstrapTests(unittest.TestCase):
             if segments:
                 break
             time.sleep(1)
-        self.assertTrue(segments, "FFmpeg did not index a completed segment from the RTSP stream")
+        log_text = ffmpeg_log.read_text(errors="replace")
+        self.assertTrue(segments, f"FFmpeg did not index a completed segment from the RTSP stream. FFmpeg stderr:\n{log_text}")
         playback = self.client.get(segments[0]["media_url"])
         self.assertEqual(playback.status_code, 200)
         self.assertEqual(playback.headers["content-type"], "video/mp4")
