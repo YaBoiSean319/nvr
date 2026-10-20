@@ -120,12 +120,16 @@ class BootstrapTests(unittest.TestCase):
     def test_rtsp_stream_is_probed_recorded_indexed_and_playable(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
         ffmpeg_log = Path(self.tmp.name) / "ffmpeg-stderr.log"
-        with ffmpeg_log.open("wb") as stderr_log, patch("app.recording.asyncio.subprocess.DEVNULL", stderr_log):
-            created = self.client.post("/api/cameras", json={
-                "name":"Simulated RTSP camera",
-                "stream_url":os.environ["NVR_RTSP_TEST_URL"],
-                "recording_mode":"continuous",
-            })
+        stderr_log = ffmpeg_log.open("wb")
+        self.addCleanup(stderr_log.close)
+        stderr_patch = patch("app.recording.asyncio.subprocess.DEVNULL", stderr_log)
+        stderr_patch.start()
+        self.addCleanup(stderr_patch.stop)
+        created = self.client.post("/api/cameras", json={
+            "name":"Simulated RTSP camera",
+            "stream_url":os.environ["NVR_RTSP_TEST_URL"],
+            "recording_mode":"continuous",
+        })
         self.assertEqual(created.status_code, 201, created.text)
         camera_id = created.json()["id"]
         self.assertTrue(created.json()["video"]["codec"])
