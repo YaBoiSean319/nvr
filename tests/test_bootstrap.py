@@ -129,11 +129,21 @@ class BootstrapTests(unittest.TestCase):
         candidate_id=first.json()["candidates"][0]["id"]
         self.assertEqual(self.client.get("/api/cameras").json()["cameras"],[])
 
-        capability={"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
+        with patch("app.main.probe_stream",new=AsyncMock(return_value={"reachable":False,"reason":"Camera stream could not be opened"})):
+            failed=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":"rtsp://10.1.2.30/stream"})
+        self.assertEqual(failed.status_code,422)
+        failed_candidate=self.client.get("/api/discovery/candidates").json()["candidates"][0]
+        self.assertEqual(failed_candidate["capabilities"]["video_stream"],"unavailable")
+
+        capability={"reachable":True,"audio":False,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream",new=AsyncMock(return_value=capability)):
             added=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":"rtsp://user:secret@10.1.2.30/stream"})
         self.assertEqual(added.status_code,201,added.text)
         self.assertNotIn("secret",added.text)
+        added_candidate=self.client.get("/api/discovery/candidates").json()["candidates"][0]
+        self.assertEqual(added_candidate["capabilities"]["video_stream"],"supported")
+        self.assertEqual(added_candidate["capabilities"]["audio"],"unsupported")
+        self.assertEqual(added_candidate["capabilities"]["ptz"],"untested")
         with patch("app.main.discover_onvif",new=AsyncMock(return_value=DiscoveryResult((device,),0))):
             repeated=self.client.post("/api/discovery/scan",json={"timeout_seconds":0.5})
         self.assertEqual(repeated.status_code,200)
