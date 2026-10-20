@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+OIDC_TEST_TENANT = "11111111-1111-4111-8111-111111111111"
+
 
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
@@ -41,6 +43,16 @@ class BootstrapTests(unittest.TestCase):
         os.environ.pop("NVR_SESSION_HOURS", None)
         for key in ("NVR_PUBLIC_URL", "NVR_OIDC_TENANT_ID", "NVR_OIDC_CLIENT_ID", "NVR_OIDC_CLIENT_SECRET", "NVR_OIDC_SESSION_SECRET", "NVR_OIDC_ADMIN_ROLES", "NVR_OIDC_OPERATOR_ROLES"):
             os.environ.pop(key, None)
+
+    def configure_oidc(self, operator_roles="NVR.Operator"):
+        os.environ.update({
+            "NVR_PUBLIC_URL":"https://nvr.example.test",
+            "NVR_OIDC_TENANT_ID":OIDC_TEST_TENANT,
+            "NVR_OIDC_CLIENT_ID":"client-id",
+            "NVR_OIDC_CLIENT_SECRET":"client-secret",
+            "NVR_OIDC_SESSION_SECRET":"test-session-signing-secret-long-enough",
+            "NVR_OIDC_OPERATOR_ROLES":operator_roles,
+        })
 
     def test_bootstrap_closes_setup_and_authenticates_admin(self):
         self.assertEqual(self.client.get("/api/setup/status").json(), {"setup_required": True})
@@ -135,20 +147,13 @@ class BootstrapTests(unittest.TestCase):
         os.environ["NVR_DB_PATH"]=old_path
 
     def test_oidc_maps_roles_denies_unmapped_users_and_keeps_local_login_available(self):
-        os.environ.update({
-            "NVR_PUBLIC_URL":"https://nvr.example.test",
-            "NVR_OIDC_TENANT_ID":"11111111-1111-4111-8111-111111111111",
-            "NVR_OIDC_CLIENT_ID":"client-id",
-            "NVR_OIDC_CLIENT_SECRET":"client-secret",
-            "NVR_OIDC_SESSION_SECRET":"test-session-signing-secret-long-enough",
-            "NVR_OIDC_OPERATOR_ROLES":"NVR-Operator",
-        })
+        self.configure_oidc("NVR-Operator")
         from unittest.mock import AsyncMock, patch
         from app.main import _mapped_role
         self.assertIsNone(_mapped_role({"roles":["Unmapped"]}))
         self.assertEqual(_mapped_role({"roles":["NVR-Operator"]}), "operator")
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
-        tenant_id="11111111-1111-4111-8111-111111111111"
+        tenant_id=OIDC_TEST_TENANT
         claims={"sub":"object-123", "tid":tenant_id, "iss":f"https://login.microsoftonline.com/{tenant_id}/v2.0", "preferred_username":"operator@example.test", "roles":["NVR-Operator"]}
         fake=type("FakeOIDC", (), {"authorize_access_token":AsyncMock(return_value={"userinfo":claims})})()
         with patch("app.main._oidc_client", return_value=fake):
@@ -182,7 +187,7 @@ class BootstrapTests(unittest.TestCase):
         from authlib.jose import JsonWebKey, jwt
         from unittest.mock import patch
 
-        tenant="11111111-1111-4111-8111-111111111111"
+        tenant=OIDC_TEST_TENANT
         client_id="client-id"
         issuer=f"https://login.microsoftonline.com/{tenant}/v2.0"
         jwks_url=f"https://login.microsoftonline.com/{tenant}/keys"
@@ -225,14 +230,7 @@ class BootstrapTests(unittest.TestCase):
                 kwargs["trust_env"]=False
                 super().__init__(*args,**kwargs)
 
-        os.environ.update({
-            "NVR_PUBLIC_URL":"https://nvr.example.test",
-            "NVR_OIDC_TENANT_ID":tenant,
-            "NVR_OIDC_CLIENT_ID":client_id,
-            "NVR_OIDC_CLIENT_SECRET":"client-secret",
-            "NVR_OIDC_SESSION_SECRET":"test-session-signing-secret-long-enough",
-            "NVR_OIDC_OPERATOR_ROLES":"NVR.Operator",
-        })
+        self.configure_oidc()
         self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
         with patch.object(StarletteOAuth2App,"client_cls",FakeProviderClient):
             login=self.client.get("https://testserver.local/api/auth/oidc/login",follow_redirects=False)
@@ -257,14 +255,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(invalid_nonce.status_code,401)
 
     def test_oidc_provider_outage_does_not_disable_local_administrator(self):
-        os.environ.update({
-            "NVR_PUBLIC_URL":"https://nvr.example.test",
-            "NVR_OIDC_TENANT_ID":"11111111-1111-4111-8111-111111111111",
-            "NVR_OIDC_CLIENT_ID":"client-id",
-            "NVR_OIDC_CLIENT_SECRET":"client-secret",
-            "NVR_OIDC_SESSION_SECRET":"test-session-signing-secret-long-enough",
-            "NVR_OIDC_OPERATOR_ROLES":"NVR.Operator",
-        })
+        self.configure_oidc()
         from unittest.mock import AsyncMock, patch
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
         fake=type("FakeOIDC", (), {"authorize_redirect":AsyncMock(side_effect=OSError("provider offline"))})()
