@@ -25,6 +25,7 @@ USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.@-]{3,128}$")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    os.umask(0o077)
     initialize()
     app.state.recorders = RecordingManager()
     await app.state.recorders.start()
