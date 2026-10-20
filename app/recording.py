@@ -59,7 +59,7 @@ async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, obje
         return {"reachable": False, "reason": "Media probe is unavailable"}
     args = [
         executable, "-v", "error", "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
-        "-rtsp_transport", "tcp", "-rw_timeout", "5000000", "-show_entries",
+        "-show_entries",
         "stream=codec_type,codec_name,width,height", "-of", "json", "pipe:0",
     ]
     try:
@@ -199,7 +199,7 @@ class RecordingManager:
             args = [
                 executable, "-hide_banner", "-nostats", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
-                "-rtsp_transport", "tcp", "-rw_timeout", "15000000", "-i", "pipe:0",
+                "-i", "pipe:0",
                 "-map", "0:v:0", "-an", "-c:v", "copy", "-f", "segment",
                 "-segment_time", str(SEGMENT_SECONDS), "-reset_timestamps", "1",
                 "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart",
