@@ -75,6 +75,22 @@ class MotionTests(unittest.TestCase):
                 media = root / "recordings" / segment["relative_path"]
                 probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(media)], capture_output=True, text=True, check=True, timeout=10)
                 self.assertGreater(float(probe.stdout.strip()), 0)
+                from fastapi.testclient import TestClient
+                from app.main import app
+                from app.security import hash_password
+                with connect() as db:
+                    db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", ("test-admin", hash_password("StrongPassphrase2026"), "administrator"))
+                with TestClient(app) as client:
+                    login = client.post("/api/auth/login", json={"username":"test-admin","password":"StrongPassphrase2026"})
+                    self.assertEqual(login.status_code, 200, login.text)
+                    browser_events = client.get(f"/api/cameras/{camera_id}/motion-events")
+                    self.assertEqual(browser_events.status_code, 200, browser_events.text)
+                    view = browser_events.json()["events"][0]
+                    self.assertEqual(view["status"], "complete")
+                    playback = client.get(view["media_url"])
+                    self.assertEqual(playback.status_code, 200, playback.text[:200])
+                    self.assertEqual(playback.headers["content-type"], "video/mp4")
+                    self.assertGreater(len(playback.content), 128)
             finally:
                 for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH"):
                     os.environ.pop(key, None)
