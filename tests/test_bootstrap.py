@@ -18,6 +18,7 @@ class BootstrapTests(unittest.TestCase):
         os.environ["NVR_RECORDINGS_PATH"] = str(Path(self.tmp.name) / "recordings")
         os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(Path(self.tmp.name) / "credentials.key")
         os.environ["NVR_COOKIE_SECURE"] = "false"
+        os.environ["NVR_SEGMENT_SECONDS"] = "10"
         from app.main import app
         self.client_ctx = TestClient(app)
         self.client = self.client_ctx.__enter__()
@@ -29,6 +30,7 @@ class BootstrapTests(unittest.TestCase):
         os.environ.pop("NVR_RECORDINGS_PATH", None)
         os.environ.pop("NVR_CREDENTIAL_KEY_PATH", None)
         os.environ.pop("NVR_COOKIE_SECURE", None)
+        os.environ.pop("NVR_SEGMENT_SECONDS", None)
 
     def test_bootstrap_closes_setup_and_authenticates_admin(self):
         self.assertEqual(self.client.get("/api/setup/status").json(), {"setup_required": True})
@@ -111,6 +113,35 @@ class BootstrapTests(unittest.TestCase):
             time.sleep(0.2)
         self.assertEqual(current["recording_status"], "reconnecting")
         self.assertNotIn("FeedSecret2026", self.client.get("/api/cameras").text)
+        stopped = self.client.patch(f"/api/cameras/{camera_id}", json={"recording_mode":"disabled"})
+        self.assertEqual(stopped.status_code, 200)
+
+    @unittest.skipUnless(os.environ.get("NVR_RTSP_TEST_URL"), "A simulated RTSP publisher is required")
+    def test_rtsp_stream_is_probed_recorded_indexed_and_playable(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        created = self.client.post("/api/cameras", json={
+            "name":"Simulated RTSP camera",
+            "stream_url":os.environ["NVR_RTSP_TEST_URL"],
+            "recording_mode":"continuous",
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        camera_id = created.json()["id"]
+        self.assertTrue(created.json()["video"]["codec"])
+        deadline = time.monotonic() + 35
+        segments = []
+        while time.monotonic() < deadline:
+            response = self.client.get(f"/api/cameras/{camera_id}/segments")
+            self.assertEqual(response.status_code, 200)
+            segments = response.json()["segments"]
+            if segments:
+                break
+            time.sleep(1)
+        self.assertTrue(segments, "FFmpeg did not index a completed segment from the RTSP stream")
+        playback = self.client.get(segments[0]["media_url"])
+        self.assertEqual(playback.status_code, 200)
+        self.assertEqual(playback.headers["content-type"], "video/mp4")
+        self.assertIn("inline", playback.headers["content-disposition"])
+        self.assertGreater(len(playback.content), 128)
         stopped = self.client.patch(f"/api/cameras/{camera_id}", json={"recording_mode":"disabled"})
         self.assertEqual(stopped.status_code, 200)
 

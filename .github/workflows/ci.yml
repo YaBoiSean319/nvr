@@ -14,6 +14,11 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      mediamtx:
+        image: bluenviron/mediamtx:1.21.0
+        ports:
+          - 8554:8554
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,7 +31,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt
+      - name: Start simulated RTSP camera
+        run: |
+          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 90 -an \
+            -c:v libx264 -preset ultrafast -tune zerolatency -g 10 \
+            -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-test \
+            >/tmp/nvr-rtsp-publisher.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if ffprobe -v error -rtsp_transport tcp -show_entries stream=codec_type \
+              -of csv=p=0 rtsp://127.0.0.1:8554/nvr-test | grep -q video; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/nvr-rtsp-publisher.log
+          exit 1
       - name: Run API and media tests
+        env:
+          NVR_RTSP_TEST_URL: rtsp://127.0.0.1:8554/nvr-test
         run: python -m unittest discover -s tests -v
       - name: Compile Python
         run: python -m compileall -q app tests
