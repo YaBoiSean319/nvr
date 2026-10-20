@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import uuid
 import json
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from .store import connect, database_path, initialize
 from .credentials import encrypt, decrypt
 from .recording import RecordingManager, masked_stream_url, probe_stream, recordings_path, safe_stream_url
 from .discovery import DiscoveryResult, discover_onvif
+from . import diagnostics
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -207,6 +209,11 @@ class CameraGroupCreateRequest(BaseModel):
 
 class DiscoveryScanRequest(BaseModel):
     timeout_seconds: float = Field(default=5, ge=0.5, le=15)
+
+
+class DiagnosticCaptureRequest(BaseModel):
+    enabled: bool
+    hours: int = Field(default=4, ge=1, le=24)
 
 
 class DiscoveredCameraAddRequest(CameraProbeRequest):
@@ -459,6 +466,28 @@ def system_status(user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[
     }
 
 
+@app.get("/api/diagnostics/status")
+def diagnostics_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    return diagnostics.capture_status()
+
+
+@app.post("/api/diagnostics/capture")
+def diagnostics_capture(
+    payload: DiagnosticCaptureRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    return diagnostics.set_capture(payload.enabled, payload.hours)
+
+
+@app.get("/api/diagnostics/bundle")
+def diagnostics_bundle(_: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+    return Response(
+        content=json.dumps(diagnostics.bundle(), indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="nvr-diagnostics.json"', "Cache-Control": "no-store"},
+    )
+
+
 def _camera_view(row: sqlite3.Row) -> dict[str, object]:
     try:
         visible_url = masked_stream_url(decrypt(row["stream_url_ciphertext"]))
@@ -535,7 +564,13 @@ async def test_camera_stream(
         safe_stream_url(payload.stream_url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return await probe_stream(payload.stream_url)
+    started = time.monotonic()
+    result = await probe_stream(payload.stream_url)
+    diagnostics.record_event(
+        "stream_probe", outcome="success" if result.get("reachable") else "unavailable",
+        elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
+    )
+    return result
 
 
 @app.get("/api/cameras")
@@ -737,12 +772,19 @@ async def scan_cameras(
     payload: DiscoveryScanRequest,
     _: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
+    started = time.monotonic()
+    interface_configured = bool(os.environ.get("NVR_DISCOVERY_INTERFACE", "").strip())
     try:
         result: DiscoveryResult = await discover_onvif(
             payload.timeout_seconds,
             os.environ.get("NVR_DISCOVERY_INTERFACE", "").strip() or None,
         )
     except (OSError, ValueError) as exc:
+        diagnostics.record_event(
+            "discovery_scan", outcome="failed", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
+            interface_configured=interface_configured,
+            error_category="configuration" if isinstance(exc, ValueError) else "network",
+        )
         raise HTTPException(status_code=503, detail="Camera discovery failed; check the NVR discovery network configuration") from exc
 
     now = datetime.now(timezone.utc).isoformat()
@@ -770,6 +812,10 @@ async def scan_cameras(
             )
         rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid").fetchall()
     partial_failures = [f"Ignored {result.ignored_responses} malformed or unrecognized response(s)"] if result.ignored_responses else []
+    diagnostics.record_event(
+        "discovery_scan", outcome="completed", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
+        interface_configured=interface_configured, discovered_count=len(result.devices), ignored_responses=result.ignored_responses,
+    )
     return {
         "discovered_count": len(result.devices),
         "ignored_responses": result.ignored_responses,
