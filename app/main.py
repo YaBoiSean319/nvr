@@ -478,6 +478,54 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
+def _insert_camera(
+    db: sqlite3.Connection,
+    *,
+    name: str,
+    stream_url: str,
+    recording_mode: str,
+    capability: dict[str, object],
+    onvif_uuid: str | None = None,
+    group_id: str | None = None,
+) -> str:
+    """Persist a camera only after its stream has passed the shared probe."""
+    video = capability["video"]
+    if not isinstance(video, dict):
+        raise ValueError("A successful stream probe must include video metadata")
+    camera_id = str(uuid.uuid4())
+    status = "unsupported" if recording_mode == "motion" else ("stopped" if recording_mode == "disabled" else "connecting")
+    error = "Motion detection is not enabled in this implementation slice" if recording_mode == "motion" else None
+    db.execute(
+        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,recording_mode,recording_status,last_error,video_codec,video_width,video_height,last_probe_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), recording_mode, status, error,
+         video.get("codec"), video.get("width"), video.get("height")),
+    )
+    return camera_id
+
+
+def _record_discovery_probe(db: sqlite3.Connection, device_uuid: str | None, capability: dict[str, object]) -> None:
+    if not device_uuid:
+        return
+    row = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device_uuid,)).fetchone()
+    if row is None:
+        return
+    states = json.loads(row["capabilities"])
+    states["video_stream"] = "supported"
+    if isinstance(capability.get("audio"), bool):
+        states["audio"] = "supported" if capability["audio"] else "unsupported"
+    db.execute("UPDATE discovery_candidates SET capabilities=? WHERE id=?", (json.dumps(states), row["id"]))
+
+
+def _record_discovery_failure(db: sqlite3.Connection, device_uuid: str) -> None:
+    row = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device_uuid,)).fetchone()
+    if row is None:
+        return
+    states = json.loads(row["capabilities"])
+    states["video_stream"] = "unavailable"
+    db.execute("UPDATE discovery_candidates SET capabilities=? WHERE id=?", (json.dumps(states), row["id"]))
+
+
 @app.post("/api/cameras/test")
 async def test_camera_stream(
     payload: CameraProbeRequest,
@@ -646,18 +694,13 @@ async def apply_camera_import(
                     else:
                         group_id = str(uuid.uuid4())
                         db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, item.group_name))
-                camera_id = str(uuid.uuid4())
-                video = capability["video"]
                 mode = item.recording_mode
                 try:
-                    db.execute(
-                        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,recording_mode,recording_status,last_error,video_codec,video_width,video_height,last_probe_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                        (camera_id,item.name,item.onvif_uuid,group_id,encrypt(item.stream_url),mode,
-                         "unsupported" if mode=="motion" else ("stopped" if mode=="disabled" else "connecting"),
-                         "Motion detection is not enabled in this implementation slice" if mode=="motion" else None,
-                         video["codec"],video["width"],video["height"]),
+                    camera_id = _insert_camera(
+                        db, name=item.name, stream_url=item.stream_url, recording_mode=mode,
+                        capability=capability, onvif_uuid=item.onvif_uuid, group_id=group_id,
                     )
+                    _record_discovery_probe(db, item.onvif_uuid, capability)
                     if item.onvif_uuid:
                         db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE device_uuid=?",(camera_id,datetime.now(timezone.utc).isoformat(),item.onvif_uuid))
                     inserted.append((index,camera_id,mode))
@@ -776,16 +819,22 @@ async def add_discovered_camera(
         raise HTTPException(status_code=404, detail="Discovery candidate not found")
     if candidate["linked_camera_id"]:
         raise HTTPException(status_code=409, detail="This discovered device is already linked to a camera")
-    camera = await create_camera(
-        CameraCreateRequest(
-            name=payload.name,
-            stream_url=payload.stream_url,
-            recording_mode=payload.recording_mode,
-            onvif_uuid=candidate["device_uuid"],
-        ),
-        request,
-        user,
-    )
+    try:
+        camera = await create_camera(
+            CameraCreateRequest(
+                name=payload.name,
+                stream_url=payload.stream_url,
+                recording_mode=payload.recording_mode,
+                onvif_uuid=candidate["device_uuid"],
+            ),
+            request,
+            user,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 422:
+            with connect() as db:
+                _record_discovery_failure(db, candidate["device_uuid"])
+        raise
     with connect() as db:
         reviewed_at = datetime.now(timezone.utc).isoformat()
         db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE id=?", (camera["id"], reviewed_at, candidate_id))
@@ -808,18 +857,13 @@ async def create_camera(
     capability = await probe_stream(payload.stream_url)
     if not capability.get("reachable"):
         raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
-    video = capability["video"]
-    camera_id = str(uuid.uuid4())
     with connect() as db:
         try:
-            db.execute(
-                "INSERT INTO cameras(id, name, onvif_uuid, stream_url_ciphertext, recording_mode, recording_status, last_error, video_codec, video_width, video_height, last_probe_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                (camera_id, name, payload.onvif_uuid, encrypt(payload.stream_url.strip()), payload.recording_mode,
-                 "unsupported" if payload.recording_mode == "motion" else "stopped",
-                 "Motion detection is not enabled in this implementation slice" if payload.recording_mode == "motion" else None,
-                 video["codec"], video["width"], video["height"]),
+            camera_id = _insert_camera(
+                db, name=name, stream_url=payload.stream_url, recording_mode=payload.recording_mode,
+                capability=capability, onvif_uuid=payload.onvif_uuid,
             )
+            _record_discovery_probe(db, payload.onvif_uuid, capability)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="A camera with that name or ONVIF identity already exists") from exc
     if payload.recording_mode == "continuous":
