@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import csv
+import io
 import os
 import re
 import secrets
@@ -15,7 +18,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -142,8 +145,64 @@ class CameraCreateRequest(CameraProbeRequest):
             raise ValueError("ONVIF identity must be a UUID") from exc
 
 
+class CameraImportRequest(BaseModel):
+    csv_text: str = Field(min_length=1, max_length=1_000_000)
+
+
+class CameraImportRow(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    stream_url: str = Field(min_length=8, max_length=2048)
+    recording_mode: Literal["motion", "continuous", "disabled"] = "motion"
+    group_name: str | None = Field(default=None, max_length=80)
+    onvif_uuid: str | None = None
+
+    @field_validator("name", "group_name")
+    @classmethod
+    def trim_names(cls, value: str | None) -> str | None:
+        value = value.strip() if isinstance(value, str) else value
+        return (value or None) if isinstance(value, str) else value
+
+    @field_validator("stream_url")
+    @classmethod
+    def trim_stream_url(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("onvif_uuid")
+    @classmethod
+    def validate_onvif_uuid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return str(uuid.UUID(value))
+        except ValueError as exc:
+            raise ValueError("ONVIF identity must be a UUID") from exc
+
+
+class CameraBulkUpdateRequest(BaseModel):
+    camera_ids: list[str] = Field(min_length=1, max_length=500)
+    group_name: str | None = Field(default=None, max_length=80)
+    recording_mode: Literal["motion", "continuous", "disabled"] | None = None
+
+    @field_validator("group_name")
+    @classmethod
+    def trim_group_name(cls, value: str | None) -> str | None:
+        value = value.strip() if isinstance(value, str) else value
+        return (value or None) if isinstance(value, str) else value
+
+
+class CameraCredentialRotateRequest(CameraProbeRequest):
+    pass
+
+
 class CameraUpdateRequest(BaseModel):
     recording_mode: Literal["motion", "continuous", "disabled"]
+
+
+class CameraGroupCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
 
 
 class DiscoveryScanRequest(BaseModel):
@@ -408,6 +467,7 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
     return {
         "id": row["id"],
         "name": row["name"],
+        "group_name": row["group_name"] if "group_name" in row.keys() else None,
         "stream_url": visible_url,
         "enabled": bool(row["enabled"]),
         "recording_mode": row["recording_mode"],
@@ -433,8 +493,186 @@ async def test_camera_stream(
 @app.get("/api/cameras")
 def list_cameras(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
     with connect() as db:
-        rows = db.execute("SELECT * FROM cameras ORDER BY name COLLATE NOCASE").fetchall()
+        rows = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE").fetchall()
     return {"cameras": [_camera_view(row) for row in rows]}
+
+
+@app.get("/api/camera-groups")
+def list_camera_groups(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    with connect() as db:
+        groups = db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE").fetchall()
+    return {"groups": [dict(group) for group in groups]}
+
+
+@app.post("/api/camera-groups", status_code=status.HTTP_201_CREATED)
+def create_camera_group(
+    payload: CameraGroupCreateRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, str]:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Group name is required")
+    group_id = str(uuid.uuid4())
+    with connect() as db:
+        try:
+            db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, name))
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="A camera group with that name already exists") from exc
+    return {"id": group_id, "name": name}
+
+
+def _camera_import_records(csv_text: str) -> list[dict[str, str | None]]:
+    try:
+        reader = csv.reader(io.StringIO(csv_text.lstrip("\ufeff"), newline=""), strict=True)
+        header = next(reader, None)
+        if not header:
+            raise HTTPException(status_code=422, detail="CSV must include a header row")
+        header = [field.strip().casefold() for field in header]
+        allowed = {"name", "stream_url", "recording_mode", "group_name", "onvif_uuid"}
+        if len(set(header)) != len(header) or not {"name", "stream_url"}.issubset(header) or not set(header).issubset(allowed):
+            raise HTTPException(status_code=422, detail="CSV headers must include name and stream_url and use only recording_mode, group_name, and onvif_uuid as optional columns")
+        records: list[dict[str, str | None]] = []
+        for row in reader:
+            if not row or all(not value.strip() for value in row):
+                continue
+            values = dict(zip(header, row))
+            if len(row) > len(header):
+                values["__row_error__"] = "Row has a different number of columns than the header"
+            records.append(values)
+            if len(records) > 500:
+                raise HTTPException(status_code=413, detail="A camera import may contain at most 500 rows")
+        if not records:
+            raise HTTPException(status_code=422, detail="CSV contains no camera rows")
+        return records
+    except csv.Error as exc:
+        raise HTTPException(status_code=422, detail="CSV data is malformed") from exc
+
+
+def _camera_import_preview(csv_text: str) -> tuple[list[dict[str, object]], list[CameraImportRow | None]]:
+    records = _camera_import_records(csv_text)
+    with connect() as db:
+        existing = db.execute("SELECT name,onvif_uuid FROM cameras").fetchall()
+    existing_names = {row["name"].casefold() for row in existing}
+    existing_uuids = {row["onvif_uuid"] for row in existing if row["onvif_uuid"]}
+    seen_names: set[str] = set()
+    seen_uuids: set[str] = set()
+    results: list[dict[str, object]] = []
+    validated: list[CameraImportRow | None] = []
+    for index, record in enumerate(records, start=2):
+        row_errors: list[str] = []
+        if record.get("__row_error__"):
+            row_errors.append(str(record["__row_error__"]))
+        try:
+            item = CameraImportRow.model_validate(record)
+            if not item.name:
+                row_errors.append("Camera name is required")
+            try:
+                safe_stream_url(item.stream_url)
+            except ValueError as exc:
+                row_errors.append(str(exc))
+            name_key = item.name.casefold()
+            if name_key in existing_names or name_key in seen_names:
+                row_errors.append("Camera name already exists or is duplicated in this import")
+            if item.onvif_uuid:
+                if item.onvif_uuid in existing_uuids or item.onvif_uuid in seen_uuids:
+                    row_errors.append("ONVIF device identity already exists or is duplicated in this import")
+            if not row_errors:
+                seen_names.add(name_key)
+                if item.onvif_uuid:
+                    seen_uuids.add(item.onvif_uuid)
+        except ValidationError as exc:
+            item = None
+            row_errors.extend(error["msg"] for error in exc.errors(include_input=False))
+        validated.append(item if not row_errors else None)
+        results.append({
+            "row": index,
+            "name": item.name if item else (str(record.get("name") or "")[:120]),
+            "group_name": item.group_name if item else None,
+            "status": "accepted" if not row_errors else ("duplicate" if any("already exists or is duplicated" in message for message in row_errors) else "invalid"),
+            "errors": row_errors,
+        })
+    return results, validated
+
+
+@app.post("/api/cameras/import/preview")
+def preview_camera_import(
+    payload: CameraImportRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    rows, _ = _camera_import_preview(payload.csv_text)
+    return {"rows": rows, "accepted_count": sum(row["status"] == "accepted" for row in rows), "rejected_count": sum(row["status"] != "accepted" for row in rows)}
+
+
+@app.post("/api/cameras/import/apply")
+async def apply_camera_import(
+    payload: CameraImportRequest,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    preview_rows, validated = _camera_import_preview(payload.csv_text)
+    probe_limit = asyncio.Semaphore(8)
+
+    async def check(item: CameraImportRow | None) -> dict[str, object] | None:
+        if item is None:
+            return None
+        async with probe_limit:
+            return await probe_stream(item.stream_url)
+
+    checks = await asyncio.gather(*(check(item) for item in validated))
+    results: list[dict[str, object]] = []
+    pending: list[tuple[int, CameraImportRow, dict[str, object]]] = []
+    for index, (preview, item, capability) in enumerate(zip(preview_rows, validated, checks)):
+        result = dict(preview)
+        if item is None:
+            results.append(result)
+        elif not capability or not capability.get("reachable"):
+            result["status"] = "failed"
+            result["errors"] = [str((capability or {}).get("reason", "Camera stream could not be opened"))]
+            results.append(result)
+        else:
+            pending.append((index, item, capability))
+            results.append(result)
+
+    inserted: list[tuple[int, str, str]] = []
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for index, item, capability in pending:
+                group_id = None
+                if item.group_name:
+                    found = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (item.group_name,)).fetchone()
+                    if found:
+                        group_id = found["id"]
+                    else:
+                        group_id = str(uuid.uuid4())
+                        db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, item.group_name))
+                camera_id = str(uuid.uuid4())
+                video = capability["video"]
+                mode = item.recording_mode
+                try:
+                    db.execute(
+                        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,recording_mode,recording_status,last_error,video_codec,video_width,video_height,last_probe_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                        (camera_id,item.name,item.onvif_uuid,group_id,encrypt(item.stream_url),mode,
+                         "unsupported" if mode=="motion" else ("stopped" if mode=="disabled" else "connecting"),
+                         "Motion detection is not enabled in this implementation slice" if mode=="motion" else None,
+                         video["codec"],video["width"],video["height"]),
+                    )
+                    if item.onvif_uuid:
+                        db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE device_uuid=?",(camera_id,datetime.now(timezone.utc).isoformat(),item.onvif_uuid))
+                    inserted.append((index,camera_id,mode))
+                except sqlite3.IntegrityError:
+                    results[index]["status"] = "duplicate"
+                    results[index]["errors"] = ["Camera name or ONVIF identity now exists"]
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    for index,camera_id,mode in inserted:
+        if mode == "continuous":
+            request.app.state.recorders.ensure(camera_id)
+        results[index]["status"] = "created"
+    return {"rows": results, "created_count": len(inserted), "failed_count": sum(row["status"] not in {"created","duplicate"} for row in results)}
 
 
 def _candidate_view(row: sqlite3.Row) -> dict[str, object]:
@@ -587,7 +825,7 @@ async def create_camera(
     if payload.recording_mode == "continuous":
         request.app.state.recorders.ensure(camera_id)
     with connect() as db:
-        row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
 
 
@@ -610,7 +848,84 @@ async def update_camera(
             raise HTTPException(status_code=404, detail="Camera not found")
     await request.app.state.recorders.sync_camera(camera_id)
     with connect() as db:
-        row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
+    return _camera_view(row)
+
+
+@app.post("/api/cameras/bulk-update")
+async def bulk_update_cameras(
+    payload: CameraBulkUpdateRequest,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    if "group_name" not in payload.model_fields_set and payload.recording_mode is None:
+        raise HTTPException(status_code=422, detail="Specify a group assignment or recording mode")
+    if len(set(payload.camera_ids)) != len(payload.camera_ids):
+        raise HTTPException(status_code=422, detail="Camera IDs must be unique")
+    with connect() as db:
+        rows = db.execute(f"SELECT id FROM cameras WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", payload.camera_ids).fetchall()
+        if len(rows) != len(payload.camera_ids):
+            raise HTTPException(status_code=404, detail="One or more cameras were not found")
+        group_id = None
+        if "group_name" in payload.model_fields_set and payload.group_name:
+            group = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (payload.group_name,)).fetchone()
+            if group:
+                group_id = group["id"]
+            else:
+                group_id = str(uuid.uuid4())
+                db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, payload.group_name))
+
+        assignments = []
+        values: list[object] = []
+        if "group_name" in payload.model_fields_set:
+            assignments.append("group_id=?")
+            values.append(group_id)
+        if payload.recording_mode is not None:
+            assignments.extend(("recording_mode=?", "recording_status=?", "last_error=?"))
+            values.extend((payload.recording_mode,
+                           "unsupported" if payload.recording_mode == "motion" else ("stopped" if payload.recording_mode == "disabled" else "connecting"),
+                           "Motion detection is not enabled in this implementation slice" if payload.recording_mode == "motion" else None))
+        assignments.append("updated_at=?")
+        values.append(datetime.now(timezone.utc).isoformat())
+        values.extend(payload.camera_ids)
+        db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", values)
+    if payload.recording_mode is not None:
+        await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id) for camera_id in payload.camera_ids))
+    with connect() as db:
+        updated = db.execute(
+            f"SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id IN ({','.join('?' for _ in payload.camera_ids)}) ORDER BY c.name COLLATE NOCASE",
+            payload.camera_ids,
+        ).fetchall()
+    return {"cameras": [_camera_view(row) for row in updated]}
+
+
+@app.post("/api/cameras/{camera_id}/credentials")
+async def rotate_camera_credentials(
+    camera_id: str,
+    payload: CameraCredentialRotateRequest,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    try:
+        safe_stream_url(payload.stream_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with connect() as db:
+        camera = db.execute("SELECT id,recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    capability = await probe_stream(payload.stream_url)
+    if not capability.get("reachable"):
+        raise HTTPException(status_code=422, detail=str(capability.get("reason", "Updated camera stream could not be opened")))
+    video = capability["video"]
+    with connect() as db:
+        db.execute(
+            "UPDATE cameras SET stream_url_ciphertext=?,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
+            (encrypt(payload.stream_url.strip()), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
+        )
+    await request.app.state.recorders.sync_camera(camera_id)
+    with connect() as db:
+        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
 
 

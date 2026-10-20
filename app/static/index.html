@@ -12,6 +12,8 @@
     main { width:min(100%, 34rem); background:var(--panel); padding:clamp(1.5rem,5vw,3rem); border-radius:1rem; box-shadow:0 1rem 3rem #0002 }
     h1 { margin-top:0; font-size:1.8rem } p { color:var(--muted) } label { display:block; margin-top:1rem; font-weight:600 }
     input { width:100%; padding:.75rem; margin-top:.35rem; border:1px solid #8793a1; border-radius:.4rem; font:inherit; color:var(--ink); background:var(--panel) }
+    input[type=checkbox] { width:auto; margin:.35rem .5rem 0 0; vertical-align:middle }
+    textarea { width:100%; min-height:9rem; padding:.75rem; margin-top:.35rem; border:1px solid #8793a1; border-radius:.4rem; font:inherit; color:var(--ink); background:var(--panel) }
     button,select { margin-top:1.25rem; padding:.75rem 1rem; border:1px solid #8793a1; border-radius:.45rem; font:inherit; cursor:pointer }
     button { border:0; background:var(--accent); color:#fff; font-weight:700 }
     select { color:var(--ink); background:var(--panel) }
@@ -59,6 +61,20 @@
           <button id="discover-cameras" type="button">Scan camera VLAN</button>
           <p id="discovery-message" role="status" aria-live="polite"></p>
           <div id="discovery-candidates"></div>
+        </section>
+        <section id="bulk-admin" class="hidden" aria-labelledby="bulk-heading">
+          <h3 id="bulk-heading">Camera groups and bulk onboarding</h3>
+          <form id="group-form"><label for="new-group-name">Create camera group</label><input id="new-group-name" maxlength="80" required><button>Create group</button></form>
+          <label for="bulk-group">Set group for selected cameras</label>
+          <select id="bulk-group"><option value="__unchanged__">Leave groups unchanged</option><option value="">Remove from group</option></select>
+          <label for="bulk-recording-mode">Set recording mode for selected cameras</label>
+          <select id="bulk-recording-mode"><option value="">Leave modes unchanged</option><option value="motion">Motion</option><option value="continuous">Continuous</option><option value="disabled">Disabled</option></select>
+          <button id="apply-bulk" type="button">Apply to selected cameras</button>
+          <p id="bulk-message" role="status" aria-live="polite"></p>
+          <label for="camera-import-csv">Import CSV (columns: name, stream_url; optional: recording_mode, group_name, onvif_uuid)</label>
+          <textarea id="camera-import-csv" spellcheck="false" autocomplete="off" placeholder="name,stream_url,recording_mode,group_name,onvif_uuid&#10;Loading Dock,rtsp://user:password@10.1.2.10/stream,motion,East,&#10;"></textarea>
+          <button id="preview-import" type="button">Preview import</button><button id="apply-import" type="button" disabled>Test streams and import accepted rows</button>
+          <div id="import-preview" aria-live="polite"></div>
         </section>
         <form id="camera-form">
           <label for="camera-name">Camera name</label><input id="camera-name" maxlength="120" required>

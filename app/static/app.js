@@ -1,6 +1,8 @@
 const sections = ["setup", "login", "status"];
 const message = document.querySelector("#message");
 let currentRole = null;
+let importCanApply = false;
+let lastPreviewCsv = "";
 function show(name) { for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 async function showLogin() {
   const state = await api("/api/setup/status");
@@ -28,6 +30,7 @@ async function refresh() {
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
     document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
+    document.querySelector("#bulk-admin").classList.toggle("hidden", !admin);
     if (admin) {
       const data = await api("/api/system/status");
       const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
@@ -35,6 +38,7 @@ async function refresh() {
       await refreshSessions();
     }
     const inventory = await api("/api/cameras");
+    if (admin) await refreshGroups();
     renderCameras(inventory.cameras);
     if (admin) await refreshDiscovery();
     show("status");
@@ -43,6 +47,13 @@ async function refresh() {
       currentRole = null; await showLogin();
     } else { message.textContent = error.message; }
   }
+}
+async function refreshGroups() {
+  const {groups}=await api("/api/camera-groups");
+  const select=document.querySelector("#bulk-group");
+  const options=[new Option("Leave groups unchanged","__unchanged__"),new Option("Remove from group","")];
+  for (const group of groups) options.push(new Option(group.name,group.name));
+  select.replaceChildren(...options);
 }
 async function refreshDiscovery() {
   const [{candidates}, inventory] = await Promise.all([api("/api/discovery/candidates"), api("/api/cameras")]);
@@ -111,9 +122,14 @@ function renderCameras(cameras) {
   list.replaceChildren(...cameras.map(camera => {
     const card = document.createElement("article");
     const title = document.createElement("h3"); title.textContent = camera.name;
+    if (currentRole === "administrator") {
+      const pickLabel=document.createElement("label"); pickLabel.textContent="Select for bulk changes ";
+      const pick=document.createElement("input"); pick.type="checkbox"; pick.dataset.cameraSelect="true"; pick.value=camera.id;
+      pickLabel.append(pick); card.append(pickLabel);
+    }
     const summary = document.createElement("p");
     const video = camera.video || {};
-    summary.textContent = `${camera.recording_mode} · ${camera.recording_status} · ${video.codec || "unknown codec"}${video.width && video.height ? ` ${video.width}×${video.height}` : ""}`;
+    summary.textContent = `${camera.group_name ? `${camera.group_name} · ` : ""}${camera.recording_mode} · ${camera.recording_status} · ${video.codec || "unknown codec"}${video.width && video.height ? ` ${video.width}×${video.height}` : ""}`;
     card.append(title, summary);
     if (camera.last_error) { const note=document.createElement("p"); note.textContent=camera.last_error; card.append(note); }
     const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
@@ -138,7 +154,17 @@ function renderCameras(cameras) {
       try { await api(`/api/cameras/${encodeURIComponent(camera.id)}`, {method:"DELETE"}); await refresh(); }
       catch (error) { document.querySelector("#camera-message").textContent=error.message; }
     });
-    card.append(mode, save, remove);
+    const rotateLabel=document.createElement("label"); rotateLabel.textContent="Update stream credentials or URL";
+    const rotateInput=document.createElement("input"); rotateInput.type="url"; rotateInput.autocomplete="off"; rotateInput.placeholder="rtsp://new-user:new-password@camera/stream";
+    const rotate=document.createElement("button"); rotate.type="button"; rotate.textContent="Test and rotate stream";
+    rotate.addEventListener("click",async()=>{
+      try {
+        await api(`/api/cameras/${encodeURIComponent(camera.id)}/credentials`,{method:"POST",body:JSON.stringify({stream_url:rotateInput.value})});
+        document.querySelector("#bulk-message").textContent=`${camera.name}: updated stream validated and the recorder is reconnecting.`;
+        rotateInput.value=""; await refresh();
+      } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
+    });
+    card.append(mode,save,remove,rotateLabel,rotateInput,rotate);
     return card;
   }));
 }
@@ -182,6 +208,56 @@ document.querySelector("#discover-cameras").addEventListener("click", async () =
     await refreshDiscovery();
   } catch(error) { message.textContent=error.message; }
   finally { button.disabled=false; }
+});
+document.querySelector("#group-form").addEventListener("submit",async event=>{
+  event.preventDefault();
+  try {
+    const result=await api("/api/camera-groups",{method:"POST",body:JSON.stringify({name:document.querySelector("#new-group-name").value})});
+    document.querySelector("#bulk-message").textContent=`Created camera group ${result.name}.`;
+    event.currentTarget.reset(); await refreshGroups();
+  } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
+});
+document.querySelector("#apply-bulk").addEventListener("click",async()=>{
+  const camera_ids=[...document.querySelectorAll("[data-camera-select]:checked")].map(input=>input.value);
+  const payload={camera_ids};
+  const group=document.querySelector("#bulk-group").value;
+  const mode=document.querySelector("#bulk-recording-mode").value;
+  if(group!=="__unchanged__") payload.group_name=group || null;
+  if(mode) payload.recording_mode=mode;
+  try {
+    const result=await api("/api/cameras/bulk-update",{method:"POST",body:JSON.stringify(payload)});
+    document.querySelector("#bulk-message").textContent=`Updated ${result.cameras.length} camera(s).`;
+    await refresh();
+  } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
+});
+document.querySelector("#preview-import").addEventListener("click",async()=>{
+  const message=document.querySelector("#bulk-message");
+  const csv_text=document.querySelector("#camera-import-csv").value;
+  importCanApply=false; lastPreviewCsv=""; document.querySelector("#apply-import").disabled=true;
+  try {
+    const result=await api("/api/cameras/import/preview",{method:"POST",body:JSON.stringify({csv_text})});
+    const target=document.querySelector("#import-preview");
+    target.replaceChildren(...result.rows.map(row=>{
+      const line=document.createElement("p");
+      line.textContent=`CSV row ${row.row} · ${row.name || "Unnamed"} · ${row.group_name || "No group"} · ${row.status}${row.errors.length ? ` · ${row.errors.join("; ")}` : ""}`;
+      return line;
+    }));
+    message.textContent=`Preview: ${result.accepted_count} accepted, ${result.rejected_count} rejected. Stream credentials are not echoed.`;
+    importCanApply=result.accepted_count>0; lastPreviewCsv=csv_text; document.querySelector("#apply-import").disabled=!importCanApply;
+  } catch(error) { message.textContent=error.message; }
+});
+document.querySelector("#apply-import").addEventListener("click",async()=>{
+  if(!importCanApply || lastPreviewCsv!==document.querySelector("#camera-import-csv").value) {
+    document.querySelector("#bulk-message").textContent="Preview the current CSV again before importing."; return;
+  }
+  const button=document.querySelector("#apply-import"); button.disabled=true;
+  try {
+    const result=await api("/api/cameras/import/apply",{method:"POST",body:JSON.stringify({csv_text:lastPreviewCsv})});
+    const target=document.querySelector("#import-preview");
+    target.replaceChildren(...result.rows.map(row=>{ const line=document.createElement("p"); line.textContent=`CSV row ${row.row} · ${row.name || "Unnamed"} · ${row.status}${row.errors.length ? ` · ${row.errors.join("; ")}` : ""}`; return line; }));
+    document.querySelector("#bulk-message").textContent=`Imported ${result.created_count} camera(s); ${result.failed_count} row(s) need attention.`;
+    importCanApply=false; await refresh();
+  } catch(error) { document.querySelector("#bulk-message").textContent=error.message; button.disabled=false; }
 });
 document.querySelector("#camera-form").addEventListener("submit", async event => {
   event.preventDefault();
