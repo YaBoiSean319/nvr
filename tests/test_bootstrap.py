@@ -526,6 +526,17 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(response.json()["motion_sensitivity"], 72)
         self.assertEqual(response.json()["server_motion_status"], "waiting")
         self.assertEqual(response.json()["motion_zones"], [{"x":0.1,"y":0.2,"width":0.5,"height":0.6}])
+        partial = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={"sensitivity":80})
+        self.assertEqual(partial.status_code, 200, partial.text)
+        self.assertEqual(partial.json()["motion_pre_roll_seconds"], 10)
+        self.assertEqual(partial.json()["motion_post_roll_seconds"], 30)
+        custom = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
+            "fallback_enabled":True, "pre_roll_seconds":7, "post_roll_seconds":19
+        })
+        self.assertEqual(custom.status_code, 200, custom.text)
+        partial = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={"sensitivity":60})
+        self.assertEqual(partial.json()["motion_pre_roll_seconds"], 7)
+        self.assertEqual(partial.json()["motion_post_roll_seconds"], 19)
         invalid_zone = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
             "fallback_enabled":True, "zones":[{"x":0.9,"y":0,"width":0.2,"height":1}]
         })

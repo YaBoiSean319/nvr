@@ -247,8 +247,8 @@ class MotionSourceUpdateRequest(BaseModel):
     service_url: str | None = Field(default=None, max_length=2048)
     username: str | None = Field(default=None, max_length=256)
     password: str | None = Field(default=None, max_length=1024)
-    pre_roll_seconds: int = Field(default=10, ge=0, le=120)
-    post_roll_seconds: int = Field(default=30, ge=1, le=600)
+    pre_roll_seconds: int | None = Field(default=None, ge=0, le=120)
+    post_roll_seconds: int | None = Field(default=None, ge=1, le=600)
     fallback_enabled: bool | None = None
     zones: list[MotionZoneRequest] | None = Field(default=None, max_length=16)
     sensitivity: int | None = Field(default=None, ge=1, le=100)
@@ -1182,7 +1182,7 @@ async def configure_motion_source(
     if credentials_supplied and bool(payload.username) != bool(payload.password):
         raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
     with connect() as db:
-        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity,motion_pre_roll_seconds,motion_post_roll_seconds FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Camera not found")
         service_url = payload.service_url if "service_url" in payload.model_fields_set else row["motion_service_url"]
@@ -1190,7 +1190,9 @@ async def configure_motion_source(
         if not service_url and not fallback_enabled:
             raise HTTPException(status_code=422, detail="Configure an ONVIF event service or enable server motion fallback")
         assignments = ["motion_service_url=?", "motion_pre_roll_seconds=?", "motion_post_roll_seconds=?", "motion_source_status=?"]
-        values: list[object] = [service_url, payload.pre_roll_seconds, payload.post_roll_seconds, "untested" if service_url else "unsupported"]
+        pre_roll_seconds = payload.pre_roll_seconds if payload.pre_roll_seconds is not None else row["motion_pre_roll_seconds"]
+        post_roll_seconds = payload.post_roll_seconds if payload.post_roll_seconds is not None else row["motion_post_roll_seconds"]
+        values: list[object] = [service_url, pre_roll_seconds, post_roll_seconds, "untested" if service_url else "unsupported"]
         if credentials_supplied:
             assignments.append("motion_credentials_ciphertext=?")
             values.append(encrypt(json.dumps({"username": payload.username or "", "password": payload.password or ""}, separators=(",", ":"))))

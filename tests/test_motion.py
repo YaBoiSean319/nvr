@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import http.server
 import os
+import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import tempfile
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from app.motion import MotionClipAssembler, parse_live_playlist
 from app.onvif_events import CameraMotionEvent, parse_motion_notifications, subscribe_and_pull
@@ -167,6 +170,98 @@ class MotionTests(unittest.TestCase):
                     browser_events = client.get(f"/api/cameras/{camera_id}/motion-events")
                     self.assertEqual(browser_events.status_code, 200, browser_events.text)
                     view = browser_events.json()["events"][0]
+                    self.assertEqual(view["status"], "complete")
+                    playback = client.get(view["media_url"])
+                    self.assertEqual(playback.status_code, 200, playback.text[:200])
+                    self.assertEqual(playback.headers["content-type"], "video/mp4")
+                    self.assertGreater(len(playback.content), 128)
+            finally:
+                for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH"):
+                    os.environ.pop(key, None)
+
+    def test_server_fallback_detects_motion_and_serves_persisted_clip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            os.environ["NVR_DB_PATH"] = str(root / "state.sqlite3")
+            os.environ["NVR_RECORDINGS_PATH"] = str(root / "recordings")
+            os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(root / "credentials.key")
+            try:
+                from app.store import connect, initialize
+                from app.recording import RecordingManager
+                initialize()
+                camera_id = str(uuid.uuid4())
+                with connect() as db:
+                    db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,motion_fallback_enabled) VALUES(?,?,?,1)", (camera_id, "Server fallback integration", b"encrypted"))
+
+                spool = root / "spool"
+                spool.mkdir()
+                source = spool / "segment-000001.ts"
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "testsrc=duration=6:size=64x64:rate=10", "-an", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-f", "mpegts", str(source),
+                ], check=True, timeout=20)
+                start = datetime.now(timezone.utc) - timedelta(seconds=2)
+                spool.joinpath("live.m3u8").write_text(
+                    "#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:" + start.isoformat() + "\n#EXTINF:6.0,\nsegment-000001.ts\n",
+                    encoding="utf-8",
+                )
+                assembler = MotionClipAssembler(camera_id, spool, pre_roll_seconds=0, post_roll_seconds=1)
+
+                real_ffmpeg = shutil.which("ffmpeg")
+                self.assertIsNotNone(real_ffmpeg)
+                fake_ffmpeg = root / "ffmpeg-frames"
+                fake_ffmpeg.write_text(
+                    f"#!{sys.executable}\n"
+                    "import os, sys\n"
+                    f"real = {real_ffmpeg!r}\n"
+                    "args = sys.argv[1:]\n"
+                    "if 'rawvideo' in args:\n"
+                    "    sys.stdin.buffer.read()\n"
+                    "    size = 160 * 90\n"
+                    "    still = bytes(size)\n"
+                    "    moving_a = bytes([100]) * size\n"
+                    "    moving_b = bytes([200]) * size\n"
+                    "    moving_c = bytes([255]) * size\n"
+                    "    sys.stdout.buffer.write(still + moving_a + moving_b + moving_c + still + still + still)\n"
+                    "    sys.stdout.buffer.flush()\n"
+                    "else:\n"
+                    "    os.execv(real, [real, *args])\n",
+                    encoding="utf-8",
+                )
+                fake_ffmpeg.chmod(0o755)
+                source_state = {"value":"unavailable"}
+
+                async def detect_and_finalize():
+                    with patch("app.recording.shutil.which", side_effect=lambda name: str(fake_ffmpeg) if name == "ffmpeg" else shutil.which(name)):
+                        with self.assertRaises((asyncio.IncompleteReadError, OSError)):
+                            await RecordingManager()._detect_server_motion(
+                                camera_id, "rtsp://127.0.0.1/stream", [], 50, source_state, assembler,
+                            )
+                        await asyncio.sleep(1.1)
+                        await assembler.poll()
+
+                asyncio.run(detect_and_finalize())
+                with connect() as db:
+                    event = db.execute("SELECT * FROM motion_events WHERE camera_id=?", (camera_id,)).fetchone()
+                    segment = db.execute("SELECT * FROM recording_segments WHERE camera_id=?", (camera_id,)).fetchone()
+                self.assertIsNotNone(event)
+                self.assertEqual(event["source"], "server")
+                self.assertEqual(event["status"], "complete")
+                self.assertIsNotNone(segment)
+
+                from fastapi.testclient import TestClient
+                from app.main import app
+                from app.security import hash_password
+                with connect() as db:
+                    db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", ("fallback-admin", hash_password("StrongPassphrase2026"), "administrator"))
+                with TestClient(app) as client:
+                    login = client.post("/api/auth/login", json={"username":"fallback-admin","password":"StrongPassphrase2026"})
+                    self.assertEqual(login.status_code, 200, login.text)
+                    events = client.get(f"/api/cameras/{camera_id}/motion-events")
+                    self.assertEqual(events.status_code, 200, events.text)
+                    view = events.json()["events"][0]
+                    self.assertEqual(view["source"], "server")
                     self.assertEqual(view["status"], "complete")
                     playback = client.get(view["media_url"])
                     self.assertEqual(playback.status_code, 200, playback.text[:200])

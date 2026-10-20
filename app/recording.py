@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .credentials import decrypt
 from .store import connect
 from .motion import MotionClipAssembler
-from .onvif_events import subscribe_and_pull
+from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 
 SEGMENT_SECONDS = max(10, min(int(os.environ.get("NVR_SEGMENT_SECONDS", "60")), 3600))
