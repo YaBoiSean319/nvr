@@ -1,5 +1,59 @@
 # Workplace NVR
 
-This repository contains the workplace NVR project. See [the approved specification](https://github.com/YaBoiSean319/nvr/issues/1) and [first implementation slice](https://github.com/YaBoiSean319/nvr/issues/2).
+A self-hosted network video recorder for workplace cameras. The current implementation includes secure first-run administration, a persistent Docker Compose application, manual single-camera RTSP onboarding, continuous recording, and authenticated playback of indexed MP4 segments. The broader approved NVR specification remains in progress.
 
-The first implementation will establish a secure first-run application and persistent Docker Compose stack.
+## Requirements
+
+- Docker Engine with the Compose plugin
+- A host with a persistent filesystem for the Compose volumes
+
+## Start the stack
+
+```sh
+docker compose up -d --build
+docker compose logs -f nvr
+```
+
+Open `http://<server>:8080` on a trusted setup network and create the first local administrator. No default account or password is shipped. The setup endpoint is permanently closed as soon as the first administrator is committed to the database. Configure TLS through the approved workplace gateway and set `NVR_COOKIE_SECURE=true` when the application is served over HTTPS.
+
+The `nvr-data` volume stores the database and account/session state. `nvr-secrets` stores the generated credential-encryption key with owner-only file permissions. `nvr-recordings` stores the MP4 segments. All three survive container replacement and host reboot as long as Docker's volume data is retained. Back up and protect the data and secrets volumes together; a database-only export does not contain the key needed to decrypt camera URLs.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `NVR_PORT` | `8080` | Host port for the web application |
+| `NVR_SESSION_HOURS` | `12` | Session lifetime, clamped to 1–168 hours |
+| `NVR_COOKIE_SECURE` | `false` | Set `true` behind HTTPS so session cookies are HTTPS-only |
+
+Do not expose the initial HTTP setup screen to untrusted networks. Place it behind the workplace VPN or approved gateway, then use HTTPS and enable secure cookies.
+
+## Health and setup
+
+- `GET /healthz` returns `200` when the app can query its database; Compose uses it as its health check.
+- `GET /api/setup/status` reports whether initial setup is still required.
+- `POST /api/setup/admin` creates the one-time local administrator. Passwords require at least 14 characters, including a letter and a number.
+- `GET /api/system/status` requires an authenticated administrator session.
+- `POST /api/cameras/test` checks an RTSP/RTSPS video stream with FFprobe.
+- `POST /api/cameras` saves the stream URL encrypted and reports tested video capability; credentials and query parameters are omitted from API responses.
+- `GET /api/cameras/{id}/segments` returns indexed coverage; authenticated media routes serve stored MP4 segments.
+
+Choose **Continuous** explicitly to start recording. The product default remains **Motion**, but motion detection is not implemented yet; that mode is shown as unsupported and does not silently record continuously. FFmpeg remuxes the source video without re-encoding into target one-minute MP4 segments; actual segment boundaries follow source keyframes and may be longer. Browser playback depends on the camera codec. H.264/AVC in MP4 is a pragmatic compatibility target, while HEVC/H.265 and vendor-specific codecs may not play in every browser or operating system. Audio is omitted in this slice. FFmpeg and FFprobe are included in the image, and the recorder retries interrupted RTSP/TCP connections.
+
+The application encrypts camera URLs before database storage, keeps the key on a separate Docker volume, suppresses FFmpeg diagnostics that could contain credentials, and passes the URL to the media process over stdin rather than exposing it in process arguments. Protect both volumes and restrict access to the Docker host.
+
+Use `docker compose restart` to restart the service. The account remains in the `nvr-data` volume and the health check returns healthy after startup. To intentionally reset the test installation, run `docker compose down -v`; this permanently deletes the local database and any volume data.
+
+## Development
+
+```sh
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+uvicorn app.main:app --reload
+```
+
+## Current boundary
+
+Motion detection, Entra ID sign-in, camera discovery, multi-camera load controls, retention, and the remaining approved NVR features are still to be implemented. This first recorder path has not been qualified for 200+ cameras or a production retention workload; compatibility and capacity tests are required before replacement use.

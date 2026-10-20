@@ -1,0 +1,116 @@
+name: NVR checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mediamtx:
+        image: bluenviron/mediamtx:1.21.0
+        ports:
+          - 8554:8554
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Start simulated RTSP camera
+        run: |
+          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 90 -an \
+            -c:v libx264 -preset ultrafast -tune zerolatency -g 10 \
+            -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-test \
+            >/tmp/nvr-rtsp-publisher.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if ffprobe -v error -rtsp_transport tcp -show_entries stream=codec_type \
+              -of csv=p=0 rtsp://127.0.0.1:8554/nvr-test | grep -q video; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/nvr-rtsp-publisher.log
+          exit 1
+      - name: Run API and media tests
+        env:
+          NVR_RTSP_TEST_URL: rtsp://127.0.0.1:8554/nvr-test
+        run: python -m unittest discover -s tests -v
+      - name: Compile Python
+        run: python -m compileall -q app tests
+      - name: Check browser JavaScript
+        run: node --check app/static/app.js
+      - name: Validate Compose configuration
+        run: docker compose config -q
+      - name: Build container image
+        run: docker build --tag workplace-nvr:ci .
+      - name: Smoke test Compose health and persistence
+        run: |
+          docker compose up -d
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          base = "http://127.0.0.1:8080"
+
+          def get_json(path):
+              with urllib.request.urlopen(base + path, timeout=3) as response:
+                  return response.status, json.load(response)
+
+          for _ in range(40):
+              try:
+                  get_json("/healthz")
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Compose service did not become healthy")
+
+          status, setup = get_json("/api/setup/status")
+          assert status == 200 and setup["setup_required"]
+          payload = json.dumps({"username": "ci-admin", "password": "ComposeTestPassphrase2026"}).encode()
+          request = urllib.request.Request(
+              base + "/api/setup/admin", data=payload,
+              headers={"Content-Type": "application/json"}, method="POST"
+          )
+          with urllib.request.urlopen(request, timeout=5) as response:
+              assert response.status == 201
+          PY
+          docker compose restart nvr
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          base = "http://127.0.0.1:8080"
+          for _ in range(40):
+              try:
+                  with urllib.request.urlopen(base + "/healthz", timeout=3):
+                      pass
+                  with urllib.request.urlopen(base + "/api/setup/status", timeout=3) as response:
+                      setup = json.load(response)
+                  assert not setup["setup_required"], "Administrator state was lost on restart"
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Compose service did not recover with persisted state")
+          PY
+      - name: Tear down Compose stack
+        if: always()
+        run: docker compose down -v
