@@ -63,6 +63,39 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/system/status").status_code, 200)
         self.assertEqual(self.client.post("/api/setup/admin", json={"username":"second-admin", "password":"AnotherStrongPass2026"}).status_code, 409)
 
+    def test_admin_can_capture_and_download_bounded_redacted_diagnostics(self):
+        self.assertEqual(self.client.get("/api/diagnostics/status").status_code, 401)
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.assertEqual(self.client.get("/api/diagnostics/status").json()["enabled"], False)
+        self.assertEqual(self.client.post("/api/diagnostics/capture", json={"enabled":True,"hours":25}).status_code, 422)
+        enabled=self.client.post("/api/diagnostics/capture",json={"enabled":True,"hours":2})
+        self.assertEqual(enabled.status_code,200)
+        from app.diagnostics import record_event
+        record_event("discovery_scan",outcome="completed",elapsed_ms=123,interface_configured=True,
+                     discovered_count=0,ignored_responses=2,ip="192.168.1.30",url="rtsp://user:secret@host/stream",
+                     camera_id="private-camera-id",password="secret")
+        bundle=self.client.get("/api/diagnostics/bundle")
+        self.assertEqual(bundle.status_code,200)
+        self.assertIn("attachment",bundle.headers["content-disposition"])
+        self.assertEqual(bundle.headers["cache-control"],"no-store")
+        text=bundle.text
+        self.assertIn('"discovered_count": 0',text)
+        self.assertIn('"ignored_responses": 2',text)
+        for secret in ("192.168.1.30","rtsp://","private-camera-id","secret","password"):
+            self.assertNotIn(secret,text)
+        self.assertEqual(self.client.post("/api/diagnostics/capture",json={"enabled":False,"hours":2}).json()["enabled"],False)
+
+    def test_operator_cannot_manage_diagnostics(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        from app.security import hash_password
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)",("operator1",hash_password("OperatorPassword2026"),"operator"))
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login",json={"username":"operator1","password":"OperatorPassword2026"})
+        self.assertEqual(self.client.get("/api/diagnostics/status").status_code,403)
+        self.assertEqual(self.client.post("/api/diagnostics/capture",json={"enabled":True,"hours":2}).status_code,403)
+        self.assertEqual(self.client.get("/api/diagnostics/bundle").status_code,403)
+
     def test_api_denies_status_and_invalid_credentials(self):
         self.assertEqual(self.client.get("/api/system/status").status_code, 401)
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
