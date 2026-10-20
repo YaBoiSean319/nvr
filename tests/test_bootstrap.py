@@ -150,6 +150,8 @@ class BootstrapTests(unittest.TestCase):
         candidates=repeated.json()["candidates"]
         self.assertEqual(len(candidates),1)
         self.assertEqual(candidates[0]["linked_camera_id"],added.json()["id"])
+        self.assertEqual(candidates[0]["capabilities"]["video_stream"],"supported")
+        self.assertEqual(candidates[0]["capabilities"]["audio"],"unsupported")
         self.assertEqual(self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Duplicate","stream_url":"rtsp://10.1.2.30/stream"}).status_code,409)
 
     def test_onvif_probe_parser_rejects_unsafe_service_urls_and_malformed_xml(self):
