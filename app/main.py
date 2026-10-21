@@ -39,6 +39,7 @@ from .storage import assign_group_volume, configured_volumes, refresh_registry, 
 from .preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
 from .exports import ExportManager, create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 from .incidents import acknowledge_incident, incident_view, list_incidents, sync_storage_incidents
+from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, WebhookManager, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -62,10 +63,13 @@ async def lifespan(_: FastAPI):
     initialize()
     app.state.exports = ExportManager()
     await app.state.exports.start()
+    app.state.webhooks = WebhookManager()
+    await app.state.webhooks.start()
     app.state.recorders = RecordingManager()
     await app.state.recorders.start()
     yield
     await app.state.exports.stop()
+    await app.state.webhooks.stop()
     await app.state.recorders.stop()
 
 
@@ -209,6 +213,35 @@ class ExportRequest(BaseModel):
         if self.end - self.start > MAX_EXPORT_WINDOW:
             raise ValueError("Exports are limited to 24 hours per job")
         return self
+
+
+class WebhookCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    url: str = Field(min_length=8, max_length=2048)
+    events: list[str] = Field(min_length=1, max_length=6)
+    allow_private_receiver: bool = False
+
+    @field_validator("events")
+    @classmethod
+    def validate_events(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value) or any(event not in WEBHOOK_EVENT_TYPES - {"webhook.test"} for event in value):
+            raise ValueError("Select one or more supported incident event types")
+        return value
+
+
+class WebhookUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    url: str | None = Field(default=None, min_length=8, max_length=2048)
+    events: list[str] | None = Field(default=None, min_length=1, max_length=6)
+    allow_private_receiver: bool | None = None
+    enabled: bool | None = None
+
+    @field_validator("events")
+    @classmethod
+    def validate_events(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and (len(set(value)) != len(value) or any(event not in WEBHOOK_EVENT_TYPES - {"webhook.test"} for event in value)):
+            raise ValueError("Select one or more supported incident event types")
+        return value
 
 
 class CameraProfileRequest(BaseModel):
@@ -1997,6 +2030,83 @@ def post_incident_acknowledgement(
             raise HTTPException(status_code=409, detail="Incident has already recovered")
         row = db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
         return incident_view(db, row)
+
+
+@app.get("/api/webhooks/event-types")
+def get_webhook_event_types(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    return {"event_types": sorted(WEBHOOK_EVENT_TYPES)}
+
+
+@app.get("/api/webhooks")
+def get_webhooks(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    return {"webhooks": list_webhook_endpoints()}
+
+
+@app.post("/api/webhooks", status_code=status.HTTP_201_CREATED)
+def post_webhook(payload: WebhookCreateRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    try:
+        endpoint, secret = create_webhook_endpoint(payload.name, payload.url, payload.events, payload.allow_private_receiver, int(user["id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "webhook_created", "webhook", endpoint["id"], json.dumps({"name": endpoint["name"], "events": endpoint["events"], "allow_private_receiver": endpoint["allow_private_receiver"]})))
+    return {"webhook": endpoint, "signing_secret": secret, "secret_notice": "This secret is shown once. Store it at the receiver to verify signed deliveries."}
+
+
+@app.patch("/api/webhooks/{webhook_id}")
+def patch_webhook(webhook_id: str, payload: WebhookUpdateRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    fields = payload.model_dump(exclude_unset=True)
+    try:
+        endpoint = update_webhook_endpoint(webhook_id, fields)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "webhook_updated", "webhook", webhook_id, json.dumps({"fields": sorted(fields), "events": endpoint["events"], "enabled": endpoint["enabled"]})))
+    return {"webhook": endpoint}
+
+
+@app.post("/api/webhooks/{webhook_id}/rotate-secret")
+def post_webhook_secret_rotation(webhook_id: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, str]:
+    secret = rotate_webhook_secret(webhook_id)
+    if secret is None:
+        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "webhook_secret_rotated", "webhook", webhook_id, "{}"))
+    return {"signing_secret": secret, "secret_notice": "This secret is shown once. Update the receiver before the next delivery."}
+
+
+@app.delete("/api/webhooks/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_webhook(webhook_id: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+    if not delete_webhook_endpoint(webhook_id):
+        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "webhook_deleted", "webhook", webhook_id, "{}"))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/webhooks/{webhook_id}/test", status_code=status.HTTP_202_ACCEPTED)
+def post_webhook_test(webhook_id: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    event_id = enqueue_webhook_test(webhook_id, int(user["id"]))
+    if event_id is None:
+        raise HTTPException(status_code=404, detail="Enabled webhook endpoint not found")
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "webhook_test_requested", "webhook", webhook_id, json.dumps({"event_id": event_id})))
+    return {"event_id": event_id, "status": "queued"}
+
+
+@app.get("/api/webhooks/deliveries")
+def get_webhook_deliveries(
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, object]:
+    return {"deliveries": list_webhook_deliveries(limit)}
 
 
 @app.post("/api/playback/timeline")
