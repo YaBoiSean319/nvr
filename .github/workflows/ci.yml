@@ -59,6 +59,8 @@ jobs:
           docker compose -f compose.yaml -f compose.discovery.yaml config -q
       - name: Build container image
         run: docker build --tag ghcr.io/yaboisean319/nvr:edge .
+      - name: Benchmark and validate bundled CPU detection model
+        run: docker run --rm ghcr.io/yaboisean319/nvr:edge python -m scripts.benchmark_ai
       - name: Smoke test Compose health and persistence
         run: |
           NVR_PORT=8080 docker compose up --pull never -d

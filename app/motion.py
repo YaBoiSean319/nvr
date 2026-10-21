@@ -166,8 +166,9 @@ class MotionClipAssembler:
 
     async def _finalize(self, capture: _Capture) -> None:
         from .recording import recordings_path
+        from .storage import camera_recordings_dir
         staging = capture.staging_dir
-        output_dir = recordings_path() / self.camera_id / "motion"
+        output_dir = camera_recordings_dir(self.camera_id) / "motion"
         output_dir.mkdir(parents=True, exist_ok=True)
         output = output_dir / f"{capture.event_id}.mp4"
         manifest = staging / "concat.txt"
@@ -179,9 +180,13 @@ class MotionClipAssembler:
         if not executable or not files:
             await self._mark_failed(capture, "Media encoder unavailable")
             return
+        with connect() as db:
+            camera = db.execute("SELECT audio_enabled FROM cameras WHERE id=?", (self.camera_id,)).fetchone()
+        from .recording import audio_recording_args
+        audio_args = audio_recording_args(bool(camera and camera["audio_enabled"]))
         proc = await asyncio.create_subprocess_exec(
             executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
-            "-map", "0:v:0", "-an", "-c:v", "copy", "-movflags", "+faststart", "-y", str(output),
+            "-map", "0:v:0", *audio_args, "-c:v", "copy", "-movflags", "+faststart", "-y", str(output),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
@@ -212,6 +217,7 @@ class MotionClipAssembler:
                 "UPDATE motion_events SET actual_start=?,actual_end=?,pre_roll_complete=?,status='complete',segment_id=?,failure_reason=NULL WHERE id=?",
                 (actual_start.isoformat(), actual_end.isoformat(), int(pre_roll_complete), segment_id, capture.event_id),
             )
+            db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (self.camera_id,))
         shutil.rmtree(staging, ignore_errors=True)
 
     async def _mark_failed(self, capture: _Capture, reason: str) -> None:

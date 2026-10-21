@@ -1,6 +1,6 @@
-# Use with compose.yaml on Linux when ONVIF multicast discovery must reach the
-# camera VLAN. Host networking is opt-in because it removes port isolation.
+# Compatibility overlay for existing deployments. The base compose.yaml now
+# uses the host network because that is the tested camera-network arrangement.
 services:
   nvr:
-    network_mode: host
-    ports: !reset []
+    environment:
+      NVR_DISCOVERY_INTERFACE: ${NVR_DISCOVERY_INTERFACE:-}

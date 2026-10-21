@@ -7,16 +7,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY requirements.txt .
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt \
+    && mkdir -p /opt/nvr/models \
+    && curl -fsSL --retry 3 https://storage.openvinotoolkit.org/repositories/open_model_zoo/2021.4/models_bin/2/person-vehicle-bike-detection-2004/FP32/person-vehicle-bike-detection-2004.xml -o /opt/nvr/models/person-vehicle-bike-detection-2004.xml \
+    && curl -fsSL --retry 3 https://storage.openvinotoolkit.org/repositories/open_model_zoo/2021.4/models_bin/2/person-vehicle-bike-detection-2004/FP32/person-vehicle-bike-detection-2004.bin -o /opt/nvr/models/person-vehicle-bike-detection-2004.bin \
+    && echo '408e2a556cc935a59b765cb72045fb7c5f8071c4b0f2c5433711c2b38ff085d8  /opt/nvr/models/person-vehicle-bike-detection-2004.xml' | sha256sum -c - \
+    && echo 'de10beb5a811bd1b38c828b4060898c32502c4919488fd7100269cbdc7595e08  /opt/nvr/models/person-vehicle-bike-detection-2004.bin' | sha256sum -c - \
     && groupadd --system --gid 10001 nvr \
     && useradd --system --uid 10001 --gid nvr --home-dir /nonexistent nvr \
     && mkdir -p /data /secrets /recordings \
-    && chown -R nvr:nvr /app /data /secrets /recordings
+    && chown -R nvr:nvr /app /data /secrets /recordings /opt/nvr/models
 COPY --chown=nvr:nvr app ./app
+COPY --chown=nvr:nvr scripts ./scripts
 USER nvr
-EXPOSE 8080
+EXPOSE 8280
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+  CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('NVR_LISTEN_PORT', '8280') + '/healthz', timeout=3)"
+CMD ["python", "-m", "app.entrypoint"]

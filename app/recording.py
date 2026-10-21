@@ -17,9 +17,19 @@ from .store import connect
 from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
+from .scheduling import effective_policy
+from .health import recording_health
+from .incidents import sync_incident, sync_storage_incidents
 
-SEGMENT_SECONDS = max(10, min(int(os.environ.get("NVR_SEGMENT_SECONDS", "60")), 3600))
 RECONNECT_MAX_SECONDS = 30
+
+
+def segment_seconds() -> int:
+    try:
+        configured = int(os.environ.get("NVR_SEGMENT_SECONDS", "60"))
+    except ValueError:
+        configured = 60
+    return max(10, min(configured, 3600))
 
 
 def recordings_path() -> Path:
@@ -49,6 +59,11 @@ def _manifest_bytes(source: str) -> bytes:
 
 
 _PROTOCOLS = "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto"
+
+
+def audio_recording_args(enabled: bool) -> list[str]:
+    """Keep audio opt-in and normalize enabled audio to browser-friendly AAC."""
+    return ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "96k"] if enabled else ["-an"]
 
 
 def masked_stream_url(raw: str) -> str:
@@ -101,40 +116,156 @@ async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, obje
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.task_modes: dict[str, str] = {}
+        self.scheduler_task: asyncio.Task[None] | None = None
+        self.retention_task: asyncio.Task[None] | None = None
+        self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
 
     async def start(self) -> None:
         self.stopping = False
         with connect() as db:
-            rows = db.execute("SELECT id FROM cameras WHERE enabled=1 AND recording_enabled=1 AND recording_mode IN ('continuous','motion')").fetchall()
+            rows = db.execute("SELECT id FROM cameras").fetchall()
         for row in rows:
-            self.ensure(row["id"])
+            await self.sync_camera(row["id"])
+        self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
+        self.retention_task = asyncio.create_task(self._retention_loop(), name="recording-retention-cleanup")
+        self.storage_task = asyncio.create_task(self._storage_loop(), name="recording-storage-health")
 
     async def stop(self) -> None:
         self.stopping = True
+        if self.scheduler_task and not self.scheduler_task.done():
+            self.scheduler_task.cancel()
+            await asyncio.gather(self.scheduler_task, return_exceptions=True)
+        self.scheduler_task = None
+        if self.retention_task and not self.retention_task.done():
+            self.retention_task.cancel()
+            await asyncio.gather(self.retention_task, return_exceptions=True)
+        self.retention_task = None
+        if self.storage_task and not self.storage_task.done():
+            self.storage_task.cancel()
+            await asyncio.gather(self.storage_task, return_exceptions=True)
+        self.storage_task = None
         for task in list(self.tasks.values()):
             task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks.values(), return_exceptions=True)
         self.tasks.clear()
+        self.task_modes.clear()
 
     def ensure(self, camera_id: str) -> None:
         task = self.tasks.get(camera_id)
         if task is None or task.done():
-            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id), name=f"record-{camera_id}")
+            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, "continuous"), name=f"record-{camera_id}")
+            self.task_modes[camera_id] = "continuous"
 
     async def remove(self, camera_id: str) -> None:
         task = self.tasks.pop(camera_id, None)
+        self.task_modes.pop(camera_id, None)
         if task and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    async def sync_camera(self, camera_id: str) -> None:
-        await self.remove(camera_id)
+    async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
         with connect() as db:
-            row = db.execute("SELECT enabled, recording_enabled, recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if row and row["enabled"] and row["recording_enabled"] and row["recording_mode"] in {"continuous", "motion"} and not self.stopping:
-            self.ensure(camera_id)
+            policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
+            row = db.execute("SELECT enabled,recording_enabled,recording_status FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] else "disabled"
+        task = self.tasks.get(camera_id)
+        if task is not None and self.task_modes.get(camera_id) == desired:
+            if not task.done() or not force_restart:
+                return
+        await self.remove(camera_id)
+        if desired in {"motion", "continuous"} and not self.stopping:
+            self.task_modes[camera_id] = desired
+            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, desired), name=f"record-{camera_id}")
+        elif row and row["enabled"] and row["recording_enabled"] and policy["scheduled"]:
+            if row["recording_status"] != "scheduled_idle":
+                self._set_status(camera_id, "scheduled_idle")
+        elif row and row["recording_status"] != "stopped":
+            self._set_status(camera_id, "stopped")
+
+    async def _schedule_loop(self) -> None:
+        while not self.stopping:
+            try:
+                with connect() as db:
+                    rows = db.execute("SELECT id FROM cameras").fetchall()
+                await asyncio.gather(*(self.sync_camera(row["id"]) for row in rows))
+                for row in rows:
+                    self._sync_coverage(row["id"])
+            except asyncio.CancelledError:
+                raise
+            except sqlite3.Error:
+                pass
+            await asyncio.sleep(5)
+
+    async def _retention_loop(self) -> None:
+        from .retention import cleanup_expired_recordings
+        while not self.stopping:
+            try:
+                await asyncio.to_thread(cleanup_expired_recordings)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, sqlite3.Error):
+                pass
+            await asyncio.sleep(300)
+
+    async def _storage_loop(self) -> None:
+        while not self.stopping:
+            try:
+                await asyncio.to_thread(self._sync_storage_health)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ValueError, sqlite3.Error):
+                pass
+            await asyncio.sleep(30)
+
+    @staticmethod
+    def _sync_storage_health() -> None:
+        from .storage import storage_status
+        status = storage_status()
+        with connect() as db:
+            sync_storage_incidents(db, status["volumes"])
+
+    def _sync_coverage(self, camera_id: str) -> None:
+        with connect() as db:
+            row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if row is None:
+                return
+            policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
+            health = recording_health(
+                enabled=bool(row["enabled"]), recording_enabled=bool(row["recording_enabled"]),
+                mode=row["recording_mode"], effective_mode=str(policy["mode"]),
+                recording_status=row["recording_status"], motion_source_status=row["motion_source_status"],
+                last_video_at=row["last_video_at"], last_footage_write_at=row["last_footage_write_at"],
+            )
+            active = db.execute("SELECT id,coverage_kind FROM coverage_intervals WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
+            kind = str(health["coverage_kind"])
+            if active and active["coverage_kind"] == kind:
+                db.execute("UPDATE coverage_intervals SET reason=? WHERE id=?", (str(health["detail"]), active["id"]))
+            else:
+                now = datetime.now(timezone.utc).isoformat()
+                if active:
+                    db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (now, active["id"]))
+                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at) VALUES(?,?,?,?)",
+                           (camera_id, kind, str(health["detail"]), now))
+            for fault_type, coverage_kinds, title in (
+                ("recording_failure", {"failure"}, "Recording coverage failure"),
+                ("recording_uncertain", {"uncertain"}, "Recording coverage is uncertain"),
+            ):
+                sync_incident(
+                    db,
+                    incident_key=f"{fault_type}:{camera_id}",
+                    camera_id=camera_id,
+                    fault_type=fault_type,
+                    summary=f"{title}: {row['name']} — {health['detail']}",
+                    active=kind in coverage_kinds,
+                    details={"coverage_kind": kind, "reason": str(health["detail"])},
+                )
+
+    def _desired_mode(self, camera_id: str) -> str:
+        with connect() as db:
+            return str(effective_policy(db, camera_id, datetime.now(timezone.utc))["mode"])
 
     def _camera(self, camera_id: str) -> sqlite3.Row | None:
         with connect() as db:
@@ -146,6 +277,10 @@ class RecordingManager:
                 "UPDATE cameras SET recording_status=?, last_error=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
                 (value, error, camera_id),
             )
+
+    def _mark_video_fresh(self, camera_id: str) -> None:
+        with connect() as db:
+            db.execute("UPDATE cameras SET last_video_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (camera_id,))
 
     def _index_csv(self, camera_id: str, index_path: Path, output_dir: Path) -> int:
         indexed = 0
@@ -180,26 +315,29 @@ class RecordingManager:
                     indexed += cur.rowcount
             except sqlite3.Error:
                 continue
+        if indexed:
+            with connect() as db:
+                db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (camera_id,))
         return indexed
 
-    async def _run(self, camera_id: str) -> None:
+    async def _run(self, camera_id: str, expected_mode: str) -> None:
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
-            if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] == "disabled":
+            if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
                 self._set_status(camera_id, "stopped")
                 return
-            if row["recording_mode"] == "motion":
+            if expected_mode == "motion":
                 should_retry = await self._run_motion(camera_id)
                 row = self._camera(camera_id)
-                if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] != "motion" or self.stopping:
+                if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode or self.stopping:
                     return
                 if not should_retry:
                     return
                 failures += 1
                 await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
             else:
-                await self._run_continuous(camera_id)
+                await self._run_continuous(camera_id, expected_mode)
                 return
 
     async def _run_motion(self, camera_id: str) -> bool:
@@ -240,10 +378,11 @@ class RecordingManager:
         source_changed = asyncio.Event()
         try:
             list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
+            audio_args = audio_recording_args(bool(row["audio_enabled"]))
             args = [
                 executable, "-hide_banner", "-nostats", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
-                "-i", "pipe:0", "-map", "0:v:0", "-an", "-c:v", "copy",
+                "-i", "pipe:0", "-map", "0:v:0", *audio_args, "-c:v", "copy",
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", str(list_size),
                 "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
                 "-hls_segment_filename", str(spool / "segment-%06d.ts"), str(spool / "live.m3u8"),
@@ -289,6 +428,13 @@ class RecordingManager:
                 )
             while not self.stopping:
                 await assembler.poll()
+                newest = max(spool.glob("segment-*.ts"), key=lambda path: path.stat().st_mtime, default=None)
+                if newest is not None:
+                    try:
+                        if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
+                            self._mark_video_fresh(camera_id)
+                    except OSError:
+                        pass
                 if proc.returncode is not None:
                     self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying")
                     break
@@ -407,15 +553,16 @@ class RecordingManager:
                 with connect() as db:
                     db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
 
-    async def _run_continuous(self, camera_id: str) -> None:
+    async def _run_continuous(self, camera_id: str, expected_mode: str = "continuous") -> None:
         executable = shutil.which("ffmpeg")
         if not executable:
             self._set_status(camera_id, "unavailable", "FFmpeg is not installed")
             return
+        segment_duration = segment_seconds()
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
-            if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] != "continuous":
+            if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
                 self._set_status(camera_id, "stopped")
                 return
             try:
@@ -424,16 +571,23 @@ class RecordingManager:
             except Exception:
                 self._set_status(camera_id, "failed", "Camera credentials are unavailable")
                 return
-            output_dir = recordings_path() / camera_id / uuid.uuid4().hex
-            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                from .storage import camera_recordings_dir
+                output_dir = camera_recordings_dir(camera_id) / uuid.uuid4().hex
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                self._set_status(camera_id, "unavailable", "Assigned recording volume is missing or not writable")
+                await asyncio.sleep(5)
+                continue
             list_path = output_dir / "segments.csv"
             self._set_status(camera_id, "connecting")
+            audio_args = audio_recording_args(bool(row["audio_enabled"]))
             args = [
                 executable, "-hide_banner", "-nostats", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
                 "-i", "pipe:0",
-                "-map", "0:v:0", "-an", "-c:v", "copy", "-f", "segment",
-                "-segment_time", str(SEGMENT_SECONDS), "-reset_timestamps", "1",
+                "-map", "0:v:0", *audio_args, "-c:v", "copy", "-f", "segment",
+                "-segment_time", str(segment_duration), "-reset_timestamps", "1",
                 "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart",
                 "-segment_list", str(list_path), "-segment_list_type", "csv", "-strftime", "1",
                 str(output_dir / "segment-%Y%m%dT%H%M%SZ.mp4"),
@@ -453,15 +607,24 @@ class RecordingManager:
                 process.stdin.close()
                 while process.returncode is None and not self.stopping:
                     self._index_csv(camera_id, list_path, output_dir)
+                    newest = max(output_dir.glob("segment-*.mp4"), key=lambda path: path.stat().st_mtime, default=None)
+                    if newest is not None:
+                        try:
+                            if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
+                                self._mark_video_fresh(camera_id)
+                        except OSError:
+                            pass
                     with connect() as db:
                         latest = db.execute(
                             "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
                             (camera_id,),
                         ).fetchone()["latest"]
                     if latest:
-                        recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=SEGMENT_SECONDS * 2)).isoformat()
+                        recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
                         if latest >= recent_cutoff:
                             self._set_status(camera_id, "recording")
+                        if latest and latest < recent_cutoff:
+                            db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
                     await asyncio.sleep(2)
                 if process.returncode is None:
                     process.terminate()
