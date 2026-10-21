@@ -27,6 +27,18 @@ class ConsoleNavigationTests(unittest.TestCase):
             self.assertIn(f'<option value="{capacity}"', response.text)
         self.assertIn('aria-live="polite"', response.text)
 
+    def test_footage_search_exposes_stale_state_and_shared_timeline_controls(self):
+        response = TestClient(app).get("/")
+
+        self.assertEqual(response.status_code, 200)
+        for control in (
+            'id="playback-camera-picker"', 'id="playback-start"', 'id="playback-end"',
+            'id="playback-stale"', 'id="playback-ruler"', 'id="playback-zoom-in"',
+            'id="playback-zoom-out"', 'id="playback-fit-range"',
+        ):
+            self.assertIn(control, response.text)
+        self.assertIn("New searches start with the past hour", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

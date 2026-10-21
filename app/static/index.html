@@ -33,10 +33,18 @@
     .playback-camera { min-width:0; padding:.75rem; border:1px solid #8793a155; border-radius:.6rem }
     .playback-camera video { display:block; width:100%; aspect-ratio:16/9; background:#000; margin-top:.5rem }
     .playback-track { position:relative; height:2rem; margin:.75rem 0; background:#8793a122; border-radius:.3rem }
+    .playback-recording { position:absolute; top:.25rem; bottom:.25rem; background:#16803c88; border:1px solid #16803c; border-radius:.2rem }
     .playback-gap { position:absolute; top:0; bottom:0; background:#b4231855; border:1px solid #b42318; }
     .playback-gap.expected_idle { background:#8793a155; border-color:#8793a1 }
     .playback-motion { position:absolute; top:0; height:100%; width:.8rem; transform:translateX(-50%); padding:0; background:#f5a623; border:1px solid #925f00; }
     .playback-status { color:var(--muted); min-height:1.5em }
+    .playback-ruler { position:relative; height:2.4rem; margin:1rem 0 .5rem; border-bottom:1px solid #8793a1; cursor:grab; touch-action:none; user-select:none }
+    .playback-ruler:active { cursor:grabbing }
+    .playback-ruler-tick { position:absolute; bottom:.2rem; transform:translateX(-50%); white-space:nowrap; font-size:.8rem; color:var(--muted) }
+    .playback-motion-list { display:grid; gap:.2rem; margin-top:.5rem }
+    .playback-motion-event { text-align:left; margin:0; padding:.35rem .5rem; font-size:.85rem }
+    #playback-camera-picker fieldset { border:1px solid #8793a155; border-radius:.4rem; margin:.5rem 0 }
+    #playback-camera-picker fieldset label { display:inline-block; margin:.2rem .75rem .2rem 0 }
     #status { width:min(100%, 100rem); }
     .console-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:1rem; border-bottom:1px solid #8793a155; padding-bottom:.75rem }
     .console-header h1 { margin:0; font-size:1.35rem }
@@ -192,7 +200,7 @@
         </section>
         <section aria-labelledby="playback-heading">
           <h3 id="playback-heading">Synchronized playback</h3>
-          <p>Choose up to eight cameras and a time range up to 24 hours. Streams stay aligned to the same wall-clock time; timeline gaps distinguish expected idle, recording failure, uncertain coverage, and unindexed footage.</p>
+          <p>Choose up to eight cameras or groups and a time range up to 24 hours. New searches start with the past hour. Results load only when you search; playback stays paused at the earliest indexed recording, and cameras without footage remain visible. Streams stay aligned to one site-time ruler; timeline gaps distinguish expected idle, recording failure, uncertain coverage, and unindexed footage.</p>
           <div id="playback-camera-picker"></div>
           <label for="playback-grid-size">Playback layout</label><select id="playback-grid-size"><option value="1">1 feed</option><option value="4" selected>4 feeds</option><option value="9">9 feeds</option><option value="16">16 feeds</option></select>
           <label for="playback-start">From</label><input id="playback-start" type="datetime-local">
@@ -201,11 +209,18 @@
           <label id="playback-end-fold-label" for="playback-end-fold" class="hidden">This local time occurs twice; choose which occurrence</label><select id="playback-end-fold" class="hidden"><option value="">Choose occurrence</option></select>
           <p id="site-time-context" role="note"></p>
           <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
-          <button id="playback-search" type="button">Load timeline</button><button id="playback-stop" type="button">Stop playback</button>
+          <button id="playback-search" type="button">Search footage</button><button id="playback-stop" type="button">Stop playback</button>
           <button id="playback-export" type="button">Export selected footage</button>
           <p>Exports run as bounded background jobs. Completed downloads contain one playable video per selected camera and metadata listing actual recorded intervals and missing time. Audio is omitted.</p>
           <p id="export-message" role="status" aria-live="polite"></p>
           <ul id="export-jobs" aria-live="polite"></ul>
+          <p id="playback-stale" class="hidden" role="alert">Search inputs changed. Existing results are stale until you search again.</p>
+          <div class="playback-timeline-controls" aria-label="Timeline controls">
+            <button id="playback-zoom-in" type="button" aria-label="Zoom in">Zoom in</button>
+            <button id="playback-zoom-out" type="button" aria-label="Zoom out">Zoom out</button>
+            <button id="playback-fit-range" type="button">Fit Search Range</button>
+          </div>
+          <div id="playback-ruler" class="playback-ruler" role="slider" aria-label="Shared timeline ruler"></div>
           <label for="playback-cursor">Shared time</label><input id="playback-cursor" type="range" min="0" max="1000" value="0" disabled>
           <p id="playback-status" class="playback-status" role="status" aria-live="polite"></p>
           <div id="playback-grid" class="playback-grid"></div>

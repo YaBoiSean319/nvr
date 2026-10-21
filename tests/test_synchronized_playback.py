@@ -87,6 +87,32 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         })
         self.assertEqual(too_long.status_code, 422)
 
+    def test_timeline_rejects_duplicate_cameras_and_reversed_ranges(self):
+        duplicate = self.client.post("/api/playback/timeline", json={
+            "camera_ids": [self.cameras[0], self.cameras[0]],
+            "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",
+        })
+        self.assertEqual(duplicate.status_code, 422)
+        reversed_range = self.client.post("/api/playback/timeline", json={
+            "camera_ids": [self.cameras[0]],
+            "start": "2026-10-20T12:02:00Z", "end": "2026-10-20T12:01:00Z",
+        })
+        self.assertEqual(reversed_range.status_code, 422)
+
+    def test_timeline_keeps_a_camera_with_no_indexed_footage_visible(self):
+        camera_id = str(uuid.uuid4())
+        with connect() as db:
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')", (camera_id, "Empty camera"))
+        response = self.client.post("/api/playback/timeline", json={
+            "camera_ids": [camera_id], "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        camera = response.json()["cameras"][0]
+        self.assertEqual(camera["name"], "Empty camera")
+        self.assertEqual(camera["segments"], [])
+        self.assertTrue(camera["gaps"])
+        self.assertEqual(camera["gaps"][0]["state"], "missing")
+
     def test_snapshot_is_authenticated_bounded_to_interval_and_returns_jpeg(self):
         with connect() as db:
             row = db.execute("SELECT id,relative_path FROM recording_segments WHERE camera_id=? ORDER BY id LIMIT 1", (self.cameras[0],)).fetchone()

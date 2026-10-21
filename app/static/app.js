@@ -15,6 +15,9 @@ let playbackTimeline = null;
 let playbackViews = [];
 let playbackMaster = null;
 let playbackSyncGuard = false;
+let playbackWindow = null;
+let playbackManualChoices = new Map();
+let playbackResultsStale = false;
 let exportPollTimer = null;
 let incidentPollTimer = null;
 let webhookPollTimer = null;
@@ -57,6 +60,15 @@ function updateFoldChoices(field) {
   select.replaceChildren(new Option("Choose occurrence",""));
   if(candidates.length>1){for(const [index,instant] of candidates.entries()){const zoneOffset=new Intl.DateTimeFormat("en-US",{timeZone:displaySettings.time_zone,timeZoneName:"shortOffset"}).formatToParts(new Date(instant)).find(part=>part.type==="timeZoneName")?.value||`Occurrence ${index+1}`;select.add(new Option(`${index===0?"First":"Second"} occurrence · ${zoneOffset}`,String(instant)));}select.classList.remove("hidden");label.classList.remove("hidden");}
   else{select.classList.add("hidden");label.classList.add("hidden");}
+}
+function localInputForInstant(instant) {
+  const parts=Object.fromEntries(new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(instant).map(part=>[part.type,part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+function initializePlaybackDefaultRange() {
+  const start=document.querySelector("#playback-start"),end=document.querySelector("#playback-end");
+  if(!start||!end||start.value||end.value)return;
+  const now=new Date();start.value=localInputForInstant(new Date(now.getTime()-3600000));end.value=localInputForInstant(now);
 }
 function resolveSearchLocalTime(field) {
   const input=document.querySelector(`#playback-${field}`),candidates=localTimeCandidates(input.value),fold=document.querySelector(`#playback-${field}-fold`);
@@ -107,6 +119,22 @@ function setupConsoleShell() {
   for(const selector of ["#display-time-zone","#display-date-format","#display-clock-format"])document.querySelector(selector).addEventListener("input",previewDisplaySettings);
   document.querySelector("#display-settings-save").addEventListener("click",saveDisplaySettings);
   for(const field of ["start","end"])document.querySelector(`#playback-${field}`).addEventListener("change",()=>updateFoldChoices(field));
+  for(const selector of ["#playback-start","#playback-end"])document.querySelector(selector).addEventListener("input",markPlaybackResultsStale);
+  document.querySelector("#playback-camera-picker").addEventListener("change",event=>{
+    if(event.target.matches("[data-playback-camera]")){
+      playbackManualChoices.set(event.target.value,event.target.checked);
+      syncPlaybackGroupChecks();markPlaybackResultsStale();
+    } else if(event.target.matches("[data-playback-group]")){
+      const group=sidebarGroups.find(item=>item.id===event.target.value),members=new Set(group?.camera_ids||[]);
+      for(const cameraId of members)playbackManualChoices.delete(cameraId);
+      syncPlaybackCameraChecks();markPlaybackResultsStale();
+    }
+  });
+  document.querySelector("#playback-grid-size").addEventListener("change",markPlaybackResultsStale);
+  document.querySelector("#playback-zoom-in").addEventListener("click",()=>zoomPlaybackTimeline(.5));
+  document.querySelector("#playback-zoom-out").addEventListener("click",()=>zoomPlaybackTimeline(2));
+  document.querySelector("#playback-fit-range").addEventListener("click",fitPlaybackTimeline);
+  setupPlaybackRulerGestures();
   consoleShellReady = true;
 }
 function readDisplaySettingsForm() {
@@ -142,6 +170,7 @@ async function refreshDisplaySettings() {
   document.querySelector("#display-date-format").value=displaySettings.date_format;
   document.querySelector("#display-clock-format").value=displaySettings.clock_format;
   updateSiteTimeContext();
+  initializePlaybackDefaultRange();
   for(const field of ["start","end"])updateFoldChoices(field);
   if(currentRole==="administrator")await previewDisplaySettings();
 }
@@ -278,7 +307,7 @@ async function refresh() {
     await refreshIncidents();
     renderCameras(inventory.cameras);
     renderLiveCameraPicker(inventory.cameras);
-    renderPlaybackCameraPicker(inventory.cameras);
+    renderPlaybackCameraPicker(inventory.cameras,sidebarGroups);
     await refreshLiveLayouts();
     if (!workspaceRestored) { await restoreLiveWorkspace(); workspaceRestored = true; }
     renderSidebar();
@@ -461,14 +490,21 @@ async function restoreLiveWorkspace() {
 }
 function applySavedView(view) {
   if(activeScreen==="footage") {
-    stopSynchronizedPlayback();
+    playbackViews.forEach(view=>view.video.pause());
     const playbackPicker=document.querySelector("#playback-camera-picker");
-    const labels=new Map([...playbackPicker.querySelectorAll("label")].map(label=>[label.querySelector("input").value,label]));
+    const cameraLabels=new Map([...playbackPicker.querySelectorAll("[data-playback-camera]")].map(input=>[input.value,input.closest("label")]));
+    const labels=cameraLabels;
     const ordered=view.tile_camera_ids.map(id=>id&&labels.get(id)).filter(Boolean);
-    playbackPicker.prepend(...ordered);
-    for(const input of playbackPicker.querySelectorAll("[data-playback-camera]"))input.checked=view.camera_ids.includes(input.value);
+    playbackPicker.querySelectorAll("fieldset")[1]?.prepend(...ordered);
+    for(const input of playbackPicker.querySelectorAll("[data-playback-group]"))input.checked=false;
+    playbackManualChoices.clear();
+    for(const input of playbackPicker.querySelectorAll("[data-playback-camera]")){
+      input.checked=view.camera_ids.includes(input.value);playbackManualChoices.set(input.value,input.checked);
+    }
+    syncPlaybackGroupChecks();
     document.querySelector("#playback-grid-size").value=String(view.grid_size);
     const unavailable=view.camera_ids.filter(id=>!labels.has(id)).length;
+    markPlaybackResultsStale();
     document.querySelector("#playback-status").textContent=`Applied ${view.scope} view “${view.name}”. Camera selection and layout changed; date inputs were kept.${unavailable?` ${unavailable} saved camera(s) are unavailable.`:""}`;
     return;
   }
@@ -632,21 +668,172 @@ function addCameraToLiveGrid(cameraId,cameras){
   if(!activeLiveCameraIds.length)size=Number(document.querySelector("#live-grid-size").value)||4;
   startLiveViews([...activeLiveCameraIds,cameraId],cameras,null,size);
 }
-function renderPlaybackCameraPicker(cameras) {
+function renderPlaybackCameraPicker(cameras,groups=[]) {
   const target=document.querySelector("#playback-camera-picker");
-  target.replaceChildren(...cameras.map(camera=>{
+  const groupFieldset=document.createElement("fieldset"),groupLegend=document.createElement("legend");
+  groupLegend.textContent="Camera groups";groupFieldset.append(groupLegend);
+  groupFieldset.append(...groups.map(group=>{
+    const label=document.createElement("label");label.textContent=`${group.name} (${(group.camera_ids||[]).length}) `;
+    const input=document.createElement("input");input.type="checkbox";input.dataset.playbackGroup="true";input.value=group.id;
+    label.append(input);return label;
+  }));
+  const cameraFieldset=document.createElement("fieldset"),cameraLegend=document.createElement("legend");
+  cameraLegend.textContent="Cameras";cameraFieldset.append(cameraLegend);
+  cameraFieldset.append(...cameras.map(camera=>{
     const label=document.createElement("label"); label.textContent=`${camera.name} `;
     const input=document.createElement("input"); input.type="checkbox"; input.dataset.playbackCamera="true"; input.value=camera.id;
     label.append(input); return label;
   }));
+  target.replaceChildren(groupFieldset,cameraFieldset);
+  syncPlaybackCameraChecks();
+}
+function syncPlaybackCameraChecks() {
+  const selectedByGroups=new Set([...document.querySelectorAll("[data-playback-group]:checked")].flatMap(input=>sidebarGroups.find(group=>group.id===input.value)?.camera_ids||[]));
+  for(const input of document.querySelectorAll("[data-playback-camera]"))
+    input.checked=playbackManualChoices.has(input.value)?playbackManualChoices.get(input.value):selectedByGroups.has(input.value);
+  syncPlaybackGroupChecks();
+}
+function syncPlaybackGroupChecks() {
+  for(const groupInput of document.querySelectorAll("[data-playback-group]")){
+    const memberIds=sidebarGroups.find(group=>group.id===groupInput.value)?.camera_ids||[];
+    const selected=new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value));
+    const count=memberIds.filter(id=>selected.has(id)).length;
+    groupInput.checked=memberIds.length>0&&count===memberIds.length;
+    groupInput.indeterminate=count>0&&count<memberIds.length;
+  }
+}
+function markPlaybackResultsStale() {
+  if(!playbackTimeline)return;
+  playbackResultsStale=true;
+  playbackViews.forEach(view=>view.video.pause());
+  document.querySelector("#playback-stale").classList.remove("hidden");
+  document.querySelector("#playback-status").textContent="Search inputs changed. Results are stale until you load the timeline again.";
 }
 function stopSynchronizedPlayback() {
   playbackViews.forEach(view=>{view.video.pause();view.video.removeAttribute("src");view.video.load();});
-  playbackViews=[]; playbackTimeline=null; playbackMaster=null;
+  playbackViews=[]; playbackTimeline=null; playbackMaster=null;playbackWindow=null;
   document.querySelector("#playback-grid")?.replaceChildren();
   const cursor=document.querySelector("#playback-cursor"); if(cursor) cursor.disabled=true;
 }
 function playbackMilliseconds(value) { return new Date(value).getTime(); }
+function currentPlaybackWindow() {
+  if(playbackWindow)return playbackWindow;
+  return playbackTimeline?{start:playbackMilliseconds(playbackTimeline.start),end:playbackMilliseconds(playbackTimeline.end)}:null;
+}
+function playbackPosition(value) {
+  const window=currentPlaybackWindow();if(!window||window.end<=window.start)return null;
+  const time=playbackMilliseconds(value);if(time<window.start||time>window.end)return null;
+  return Math.max(0,Math.min(100,(time-window.start)/(window.end-window.start)*100));
+}
+function renderPlaybackRuler() {
+  const ruler=document.querySelector("#playback-ruler"),window=currentPlaybackWindow();
+  if(!ruler||!window)return;
+  ruler.replaceChildren();
+  ruler.tabIndex=0;ruler.setAttribute("aria-valuemin",String(window.start));ruler.setAttribute("aria-valuemax",String(window.end));
+  ruler.setAttribute("aria-valuenow",String(Number(document.querySelector("#playback-cursor")?.dataset.time||window.start)));
+  ruler.setAttribute("aria-valuetext",formatDateTime(Number(document.querySelector("#playback-cursor")?.dataset.time||window.start)));
+  for(let index=0;index<=4;index++){
+    const at=window.start+(window.end-window.start)*index/4,label=document.createElement("span");
+    label.className="playback-ruler-tick";label.style.left=`${index*25}%`;label.textContent=formatDateTime(at,true);ruler.append(label);
+  }
+  ruler.setAttribute("aria-label",`Timeline from ${formatDateTime(window.start)} to ${formatDateTime(window.end)}. Drag to pan; click to seek.`);
+}
+function fitPlaybackTimeline() {
+  if(!playbackTimeline)return;
+  playbackWindow={start:playbackMilliseconds(playbackTimeline.start),end:playbackMilliseconds(playbackTimeline.end)};
+  renderPlaybackRuler();renderPlaybackTracks();
+}
+function zoomPlaybackTimeline(factor) {
+  const window=currentPlaybackWindow();if(!window||!playbackTimeline)return;
+  const rangeStart=playbackMilliseconds(playbackTimeline.start),rangeEnd=playbackMilliseconds(playbackTimeline.end),range=rangeEnd-rangeStart;
+  const center=Number(document.querySelector("#playback-cursor").dataset.time||((window.start+window.end)/2));
+  const nextSpan=Math.max(60000,Math.min(range,(window.end-window.start)*factor));
+  let start=center-nextSpan/2,end=center+nextSpan/2;
+  if(start<rangeStart){end+=rangeStart-start;start=rangeStart;}
+  if(end>rangeEnd){start-=end-rangeEnd;end=rangeEnd;}
+  playbackWindow={start:Math.max(rangeStart,start),end:Math.min(rangeEnd,end)};
+  renderPlaybackRuler();renderPlaybackTracks();
+}
+function seekPlaybackAtClientX(clientX,element) {
+  const window=currentPlaybackWindow();if(!window)return;
+  const rect=element.getBoundingClientRect(),ratio=Math.max(0,Math.min(1,(clientX-rect.left)/rect.width));
+  seekSynchronizedPlayback(window.start+(window.end-window.start)*ratio);
+}
+function setupPlaybackRulerGestures() {
+  const ruler=document.querySelector("#playback-ruler");if(!ruler)return;
+  let drag=null;
+  ruler.addEventListener("keydown",event=>{
+    if(!playbackTimeline||!playbackWindow||!["ArrowLeft","ArrowRight","PageUp","PageDown"].includes(event.key))return;
+    event.preventDefault();
+    const current=Number(document.querySelector("#playback-cursor").dataset.time||playbackWindow.start);
+    const step=(playbackWindow.end-playbackWindow.start)*(event.key.startsWith("Page")?.25:.01)*(event.key.endsWith("Left")||event.key==="PageDown"?-1:1);
+    seekSynchronizedPlayback(current+step);
+  });
+  ruler.addEventListener("pointerdown",event=>{
+    if(!playbackTimeline)return;
+    ruler.setPointerCapture(event.pointerId);
+    const window=currentPlaybackWindow();drag={id:event.pointerId,x:event.clientX,start:window.start,end:window.end,moved:false};
+  });
+  ruler.addEventListener("pointermove",event=>{
+    if(!drag||drag.id!==event.pointerId)return;
+    const dx=event.clientX-drag.x;if(Math.abs(dx)>4)drag.moved=true;
+    if(!drag.moved)return;
+    const span=drag.end-drag.start,shift=dx/ruler.getBoundingClientRect().width*span;
+    const rangeStart=playbackMilliseconds(playbackTimeline.start),rangeEnd=playbackMilliseconds(playbackTimeline.end);
+    let start=drag.start-shift,end=drag.end-shift;
+    if(start<rangeStart){end+=rangeStart-start;start=rangeStart;}
+    if(end>rangeEnd){start-=end-rangeEnd;end=rangeEnd;}
+    playbackWindow={start:Math.max(rangeStart,start),end:Math.min(rangeEnd,end)};
+    renderPlaybackRuler();renderPlaybackTracks();
+  });
+  const finish=event=>{
+    if(!drag||drag.id!==event.pointerId)return;
+    if(!drag.moved)seekPlaybackAtClientX(event.clientX,ruler);
+    drag=null;
+  };
+  ruler.addEventListener("pointerup",finish);ruler.addEventListener("pointercancel",()=>{drag=null;});
+}
+function renderPlaybackTracks() {
+  if(!playbackViews.length)return;
+  for(const view of playbackViews){
+    const track=view.tile?.querySelector(".playback-track");if(!track)continue;
+    const next=renderPlaybackTrack(view);track.replaceWith(next);
+    const list=view.tile.querySelector(".playback-motion-list");if(list)list.replaceWith(renderPlaybackMotionList(view));
+  }
+}
+function renderPlaybackTrack(view) {
+  const track=document.createElement("div");track.className="playback-track";track.setAttribute("aria-label",`Recording coverage and motion timeline for ${view.name}`);
+  const window=currentPlaybackWindow();if(!window||window.end<=window.start)return track;
+  const pct=ms=>Math.max(0,Math.min(100,(ms-window.start)/(window.end-window.start)*100));
+  for(const segment of view.segments){
+    const left=playbackMilliseconds(segment.starts_at),right=playbackMilliseconds(segment.ends_at);
+    if(right<window.start||left>window.end)continue;
+    const available=document.createElement("span");available.className="playback-recording";available.style.left=`${pct(left)}%`;available.style.width=`${Math.max(.4,pct(right)-pct(left))}%`;available.title=`Recorded footage · ${formatDateTime(segment.starts_at)} to ${formatDateTime(segment.ends_at)}`;track.append(available);
+  }
+  for(const gap of view.gaps){
+    const left=playbackMilliseconds(gap.starts_at),right=playbackMilliseconds(gap.ends_at);
+    if(right<window.start||left>window.end)continue;
+    const mark=document.createElement("button");mark.type="button";mark.className=`playback-gap ${gap.state}`;mark.style.left=`${pct(left)}%`;mark.style.width=`${Math.max(.4,pct(right)-pct(left))}%`;mark.title=`${gap.state}: ${gap.reason}`;mark.setAttribute("aria-label",mark.title);mark.addEventListener("click",event=>{event.stopPropagation();seekSynchronizedPlayback(left);});track.append(mark);
+  }
+  for(const event of view.motion_events){
+    const at=playbackMilliseconds(event.source_event_at),position=playbackPosition(event.source_event_at);if(position===null)continue;
+    const marker=document.createElement("button");marker.type="button";marker.className="playback-motion";marker.style.left=`${position}%`;marker.title=`Motion · ${view.name} · ${formatDateTime(event.source_event_at)}`;marker.setAttribute("aria-label",marker.title);marker.addEventListener("click",click=>{click.stopPropagation();seekSynchronizedPlayback(at);});track.append(marker);
+  }
+  track.addEventListener("click",event=>seekPlaybackAtClientX(event.clientX,track));
+  return track;
+}
+function renderPlaybackMotionList(view) {
+  const list=document.createElement("div");list.className="playback-motion-list";
+  if(!view.motion_events.length){const note=document.createElement("p");note.textContent="No motion events in this range.";list.append(note);return list;}
+  for(const event of view.motion_events){
+    const start=event.actual_start||event.requested_start||event.source_event_at,end=event.actual_end||event.requested_end;
+    const duration=end?Math.max(0,(playbackMilliseconds(end)-playbackMilliseconds(start))/1000):0;
+    const button=document.createElement("button");button.type="button";button.className="playback-motion-event";button.textContent=`Motion · ${view.name} · ${formatDateTime(event.source_event_at)} · ${duration.toFixed(0)} sec · ${event.status}`;
+    button.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(event.source_event_at)));
+    list.append(button);
+  }
+  return list;
+}
 function playbackSegmentAt(view,timeMs) {
   return view.segments.find(segment=>playbackMilliseconds(segment.starts_at)<=timeMs && timeMs<playbackMilliseconds(segment.ends_at));
 }
@@ -698,7 +885,11 @@ function updatePlaybackDrift() {
   const times=playbackViews.map(playbackAbsTime).filter(value=>value!==null);
   const drift=times.length>1?Math.max(...times)-Math.min(...times):0;
   const label=document.querySelector("#playback-status");
-  if(playbackTimeline) label.textContent=`Shared time ${formatDateTime(Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start),true)} · measured playback drift ${Math.round(drift)} ms`;
+  if(playbackTimeline) {
+    const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start),ruler=document.querySelector("#playback-ruler");
+    ruler?.setAttribute("aria-valuenow",String(at));ruler?.setAttribute("aria-valuetext",formatDateTime(at));
+    label.textContent=`Shared time ${formatDateTime(at,true)} · measured playback drift ${Math.round(drift)} ms`;
+  }
 }
 function renderPlaybackCamera(view) {
   const tile=document.createElement("article"); tile.className="playback-camera";
@@ -716,11 +907,9 @@ function renderPlaybackCamera(view) {
   const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Fullscreen";
   fullscreen.addEventListener("click",()=>{if(!tile.requestFullscreen){state.textContent="Fullscreen is not supported by this browser.";return;}tile.requestFullscreen().catch(()=>{state.textContent="Fullscreen was blocked by the browser.";});});
   controls.append(snapshot,fullscreen); tile.append(heading,state,video,controls);
-  const track=document.createElement("div"); track.className="playback-track"; track.setAttribute("aria-label",`Motion and coverage timeline for ${view.name}`);
-  const start=playbackMilliseconds(playbackTimeline.start), span=playbackMilliseconds(playbackTimeline.end)-start;
-  for(const gap of view.gaps){const mark=document.createElement("button");mark.type="button";mark.className=`playback-gap ${gap.state}`;const left=(playbackMilliseconds(gap.starts_at)-start)/span*100,width=(playbackMilliseconds(gap.ends_at)-playbackMilliseconds(gap.starts_at))/span*100;mark.style.left=`${left}%`;mark.style.width=`${Math.max(.4,width)}%`;mark.title=`${gap.state}: ${gap.reason}`;mark.setAttribute("aria-label",mark.title);mark.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(gap.starts_at)));track.append(mark);}
-  for(const event of view.motion_events){const marker=document.createElement("button");marker.type="button";marker.className="playback-motion";marker.style.left=`${(playbackMilliseconds(event.source_event_at)-start)/span*100}%`;marker.title=`Motion · ${formatDateTime(event.source_event_at)} · ${event.status}`;marker.setAttribute("aria-label",marker.title);marker.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(event.source_event_at)));track.append(marker);}
+  const track=renderPlaybackTrack(view),motionList=renderPlaybackMotionList(view);
   tile.append(track);
+  tile.append(motionList);
   view.video=video;view.state=state;view.tile=tile;
   video.addEventListener("play",()=>{if(playbackSyncGuard)return;playbackMaster=view;const time=playbackAbsTime(view);if(time!==null)seekSynchronizedPlayback(time,true,view);});
   video.addEventListener("pause",()=>{if(playbackSyncGuard)return;playbackViews.forEach(other=>{if(other!==view)other.video.pause();});});
@@ -729,22 +918,31 @@ function renderPlaybackCamera(view) {
   return tile;
 }
 async function loadSynchronizedPlayback() {
-  stopSynchronizedPlayback();
-  const camera_ids=[...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value);
+  const camera_ids=[...new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value))];
   const startInput=document.querySelector("#playback-start").value,endInput=document.querySelector("#playback-end").value;
   const label=document.querySelector("#playback-status");
   try {
-    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
+    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight unique cameras.");
     if(!startInput||!endInput)throw new Error("Enter both a start and end time.");
     const start=resolveSearchLocalTime("start"),end=resolveSearchLocalTime("end");
+    const startMs=playbackMilliseconds(start),endMs=playbackMilliseconds(end);
+    if(endMs<=startMs)throw new Error("The end time must be later than the start time.");
+    if(endMs-startMs>24*60*60*1000)throw new Error("Search ranges are limited to 24 hours.");
+    playbackViews.forEach(view=>view.video.pause());
+    label.textContent="Loading indexed coverage and motion events…";
     const result=await api("/api/playback/timeline",{method:"POST",body:JSON.stringify({camera_ids,start,end})});
+    stopSynchronizedPlayback();
     playbackTimeline=result;const cursor=document.querySelector("#playback-cursor");cursor.disabled=false;cursor.value="0";cursor.dataset.time=String(playbackMilliseconds(result.start));
+    playbackWindow={start:playbackMilliseconds(result.start),end:playbackMilliseconds(result.end)};
     const grid=document.querySelector("#playback-grid");
     grid.style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(Number(document.querySelector("#playback-grid-size").value)||4))));
     playbackViews=result.cameras.map(camera=>({cameraId:camera.camera_id,name:camera.name,segments:camera.segments,gaps:camera.gaps,motion_events:camera.motion_events,coverage:camera.coverage,video:null,state:null,segment:null}));
     grid.replaceChildren(...playbackViews.map(renderPlaybackCamera));
-    seekSynchronizedPlayback(playbackMilliseconds(result.start));
-    label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Recorded footage, motion markers, and known gaps are shown below.`;
+    renderPlaybackRuler();
+    const earliest=playbackViews.flatMap(view=>view.segments.map(segment=>playbackMilliseconds(segment.starts_at))).filter(Number.isFinite);
+    seekSynchronizedPlayback(earliest.length?Math.min(...earliest):playbackMilliseconds(result.start));
+    playbackResultsStale=false;document.querySelector("#playback-stale").classList.add("hidden");
+    label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Playback is paused at the earliest indexed recording; events and gaps are aligned to the same search range.`;
   }catch(error){label.textContent=error.message;}
 }
 async function refreshExports() {
@@ -772,13 +970,15 @@ async function refreshExports() {
 }
 async function requestPlaybackExport() {
   const message=document.querySelector("#export-message"),button=document.querySelector("#playback-export");
-  const camera_ids=[...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value);
+  const camera_ids=[...new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value))];
   const start=document.querySelector("#playback-start").value,end=document.querySelector("#playback-end").value;
   try {
     if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
     if(!start||!end)throw new Error("Enter both a start and end time.");
     button.disabled=true;message.textContent="Submitting export…";
     const startInstant=resolveSearchLocalTime("start"),endInstant=resolveSearchLocalTime("end");
+    if(playbackMilliseconds(endInstant)<=playbackMilliseconds(startInstant))throw new Error("The end time must be later than the start time.");
+    if(playbackMilliseconds(endInstant)-playbackMilliseconds(startInstant)>24*60*60*1000)throw new Error("Export ranges are limited to 24 hours.");
     const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids,start:startInstant,end:endInstant})});
     message.textContent=`Export ${job.id.slice(0,8)} queued. You can leave this page; the job will continue.`;
     await refreshExports();
