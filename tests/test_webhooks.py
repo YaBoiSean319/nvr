@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from app.main import administrator, app, current_user
 from app.recording import RecordingManager
 from app.store import connect, initialize
+from app.detection import record_observations, set_camera_state
 
 
 class WebhookApiTests(unittest.TestCase):
@@ -62,7 +63,7 @@ class WebhookApiTests(unittest.TestCase):
         return self.client.post("/api/webhooks", json={
             "name": "Operations receiver",
             "url": "http://10.23.4.5:8090/events/private-token",
-            "events": ["recording.failure", "recording.uncertain", "recording.recovered", "storage.failure", "storage.recovered"],
+            "events": ["recording.failure", "recording.uncertain", "recording.recovered", "storage.failure", "storage.recovered", "ai.detection", "ai.failure", "ai.recovered"],
             "allow_private_receiver": True,
         })
 
@@ -206,6 +207,42 @@ class WebhookApiTests(unittest.TestCase):
         with connect() as db:
             audit = db.execute("SELECT actor_id,action FROM audit_log WHERE resource_type='webhook' ORDER BY id").fetchall()
         self.assertIn((1, "webhook_test_requested"), [(row["actor_id"], row["action"]) for row in audit])
+
+    def test_ai_observation_and_health_recovery_are_signed_webhook_events(self):
+        created = self._create_private_endpoint()
+        self.assertEqual(created.status_code, 201, created.text)
+        camera_id = str(uuid.uuid4())
+        with connect() as db:
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES(?,?,X'01')", (camera_id, "AI webhook camera"))
+        requests = []
+
+        def receiver(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(202, request=request)
+
+        real_client = httpx.AsyncClient
+        def client_factory(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(receiver)
+            return real_client(*args, **kwargs)
+
+        with patch("app.webhooks.httpx.AsyncClient", side_effect=client_factory):
+            at = datetime.now(timezone.utc)
+            record_observations(camera_id, [{"label": "person", "confidence": 0.9, "box": {"x": 0.2, "y": 0.2, "width": 0.1, "height": 0.2}}], at)
+            set_camera_state(camera_id, "failed", "Test analysis failure", at + timedelta(seconds=1))
+            set_camera_state(camera_id, "analyzed", at=at + timedelta(seconds=2))
+            deadline = time.monotonic() + 10
+            deliveries = []
+            while time.monotonic() < deadline:
+                deliveries = self.client.get("/api/webhooks/deliveries?limit=50").json()["deliveries"]
+                if len(deliveries) >= 3 and all(item["status"] == "delivered" for item in deliveries[:3]):
+                    break
+                time.sleep(0.1)
+        self.assertEqual({request.headers["X-NVR-Event-Type"] for request in requests}, {"ai.detection", "ai.failure", "ai.recovered"})
+        self.assertEqual(len({request.headers["X-NVR-Event-ID"] for request in requests}), 3)
+        observation = next(json.loads(request.content) for request in requests if request.headers["X-NVR-Event-Type"] == "ai.detection")
+        self.assertEqual(observation["label"], "person")
+        self.assertEqual(observation["camera_id"], camera_id)
+        self.assertTrue(all(item["status"] == "delivered" for item in deliveries[:3]))
 
 
 if __name__ == "__main__":

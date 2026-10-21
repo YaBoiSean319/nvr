@@ -41,7 +41,7 @@ from .exports import ExportManager, create_export_record, export_output_path, ge
 from .incidents import acknowledge_incident, incident_view, list_incidents, sync_storage_incidents
 from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, WebhookManager, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
 from .heartbeat import HeartbeatManager, configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
-from .detection import DetectionManager, detector_availability, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
+from .detection import DetectionManager, detector_availability, effective_camera_config, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -226,7 +226,7 @@ class ExportRequest(BaseModel):
 class WebhookCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=8, max_length=2048)
-    events: list[str] = Field(min_length=1, max_length=6)
+    events: list[str] = Field(min_length=1, max_length=8)
     allow_private_receiver: bool = False
 
     @field_validator("events")
@@ -240,7 +240,7 @@ class WebhookCreateRequest(BaseModel):
 class WebhookUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     url: str | None = Field(default=None, min_length=8, max_length=2048)
-    events: list[str] | None = Field(default=None, min_length=1, max_length=6)
+    events: list[str] | None = Field(default=None, min_length=1, max_length=8)
     allow_private_receiver: bool | None = None
     enabled: bool | None = None
 
@@ -414,11 +414,16 @@ class CameraUpdateRequest(BaseModel):
 
 
 class AIDetectionConfigRequest(BaseModel):
-    enabled: bool
+    enabled: bool = False
     analysis_fps: float = Field(default=0.5, ge=0.1, le=5)
     confidence_threshold: float = Field(default=0.55, ge=0.1, le=0.99)
     use_substream: bool = True
     zones: list[MotionZoneRequest] = Field(default_factory=list, max_length=16)
+    inherit_group: bool = False
+
+
+class AIRuntimeSettingsRequest(BaseModel):
+    max_active_cameras: int = Field(ge=1, le=16)
 
 
 class CameraGroupCreateRequest(BaseModel):
@@ -1753,7 +1758,7 @@ async def update_camera(
     if not any(name in payload.model_fields_set for name in ("recording_mode", "recording_enabled", "motion_pre_roll_seconds", "motion_post_roll_seconds")):
         raise HTTPException(status_code=422, detail="Specify a recording mode, enablement, or buffer duration")
     with connect() as db:
-        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Camera not found")
         mode = payload.recording_mode or row["recording_mode"]
@@ -1939,13 +1944,16 @@ def _ensure_ai_settings(camera_id: str) -> sqlite3.Row:
 @app.get("/api/cameras/{camera_id}/ai")
 def get_ai_detection_config(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
     row = _ensure_ai_settings(camera_id)
+    effective = effective_camera_config(camera_id) or {}
     return {
         "camera_id": camera_id,
-        "enabled": bool(row["enabled"]),
-        "analysis_fps": row["analysis_fps"],
-        "confidence_threshold": row["confidence_threshold"],
-        "use_substream": bool(row["use_substream"]),
-        "zones": json.loads(row["zones_json"]),
+        "enabled": bool(effective.get("enabled", False)),
+        "analysis_fps": effective.get("analysis_fps", 0.5),
+        "confidence_threshold": effective.get("confidence_threshold", 0.55),
+        "use_substream": bool(effective.get("use_substream", True)),
+        "zones": json.loads(effective.get("zones_json", "[]")),
+        "config_source": effective.get("config_source", "default"),
+        "config_override": bool(row["config_override"]),
         "status": row["status"],
         "last_attempt_at": row["last_attempt_at"],
         "last_success_at": row["last_success_at"],
@@ -1965,22 +1973,90 @@ async def update_ai_detection_config(
     existing = _ensure_ai_settings(camera_id)
     zones = [zone.model_dump() for zone in payload.zones]
     with connect() as db:
-        camera = db.execute("SELECT live_substream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if payload.enabled and payload.use_substream and not camera["live_substream_url_ciphertext"]:
+        camera = db.execute("SELECT group_id,live_substream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if payload.inherit_group and not camera["group_id"]:
+            raise HTTPException(status_code=422, detail="Assign this camera to a group before inheriting its AI settings")
+        if not payload.inherit_group and payload.enabled and payload.use_substream and not camera["live_substream_url_ciphertext"]:
             raise HTTPException(status_code=422, detail="Configure and validate a lower-resolution camera profile, or select the main stream")
-        if payload.enabled:
-            competing = db.execute("SELECT camera_id FROM ai_camera_settings WHERE enabled=1 AND camera_id<>? LIMIT 1", (camera_id,)).fetchone()
-            if competing:
-                raise HTTPException(status_code=409, detail="Initial CPU analysis supports one camera at a time; disable its AI analysis before selecting another")
         db.execute(
-            "UPDATE ai_camera_settings SET enabled=?,analysis_fps=?,confidence_threshold=?,use_substream=?,zones_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE camera_id=?",
-            (int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":")), camera_id),
+            "UPDATE ai_camera_settings SET config_override=?,enabled=?,analysis_fps=?,confidence_threshold=?,use_substream=?,zones_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE camera_id=?",
+            (int(not payload.inherit_group), int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":")), camera_id),
         )
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "ai_detection_configured", "camera", camera_id,
-                    json.dumps({"enabled": payload.enabled, "analysis_fps": payload.analysis_fps, "model_id": MODEL_ID, "model_version": MODEL_VERSION}, separators=(",", ":"))))
+                    json.dumps({"enabled": payload.enabled, "inherit_group": payload.inherit_group, "analysis_fps": payload.analysis_fps, "model_id": MODEL_ID, "model_version": MODEL_VERSION}, separators=(",", ":"))))
     await request.app.state.detectors.sync_camera(camera_id, force_restart=True)
     return get_ai_detection_config(camera_id, _=user)
+
+
+def _group_ai_view(group_id: str) -> dict[str, object]:
+    with connect() as db:
+        group = db.execute("SELECT id,name FROM camera_groups WHERE id=?", (group_id,)).fetchone()
+        if group is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        config = db.execute("SELECT * FROM ai_group_settings WHERE group_id=?", (group_id,)).fetchone()
+        camera_count = db.execute("SELECT COUNT(*) FROM cameras WHERE group_id=?", (group_id,)).fetchone()[0]
+        inherited_count = db.execute("SELECT COUNT(*) FROM cameras c LEFT JOIN ai_camera_settings s ON s.camera_id=c.id WHERE c.group_id=? AND COALESCE(s.config_override,0)=0", (group_id,)).fetchone()[0]
+    return {
+        "group_id": group_id, "group_name": group["name"], "configured": config is not None,
+        "enabled": bool(config["enabled"]) if config else False,
+        "analysis_fps": config["analysis_fps"] if config else 0.5,
+        "confidence_threshold": config["confidence_threshold"] if config else 0.55,
+        "use_substream": bool(config["use_substream"]) if config else True,
+        "zones": json.loads(config["zones_json"]) if config else [],
+        "camera_count": camera_count, "inherited_camera_count": inherited_count,
+        "model": {"id": MODEL_ID, "version": MODEL_VERSION, "runtime": MODEL_RUNTIME, **detector_availability()},
+    }
+
+
+@app.get("/api/camera-groups/{group_id}/ai")
+def get_group_ai_config(group_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    return _group_ai_view(group_id)
+
+
+@app.put("/api/camera-groups/{group_id}/ai")
+async def update_group_ai_config(
+    group_id: str,
+    payload: AIDetectionConfigRequest,
+    request: Request,
+    user: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    zones = [zone.model_dump() for zone in payload.zones]
+    with connect() as db:
+        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        if payload.enabled and payload.use_substream:
+            missing = db.execute("SELECT COUNT(*) FROM cameras c LEFT JOIN ai_camera_settings s ON s.camera_id=c.id WHERE c.group_id=? AND c.enabled=1 AND COALESCE(s.config_override,0)=0 AND c.live_substream_url_ciphertext IS NULL", (group_id,)).fetchone()[0]
+            if missing:
+                raise HTTPException(status_code=422, detail=f"{missing} inherited camera(s) do not have a validated lower-resolution profile; choose the main stream or configure the profiles")
+        db.execute(
+            "INSERT INTO ai_group_settings(group_id,enabled,analysis_fps,confidence_threshold,use_substream,zones_json,updated_at) VALUES(?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now')) "
+            "ON CONFLICT(group_id) DO UPDATE SET enabled=excluded.enabled,analysis_fps=excluded.analysis_fps,confidence_threshold=excluded.confidence_threshold,use_substream=excluded.use_substream,zones_json=excluded.zones_json,updated_at=excluded.updated_at",
+            (group_id, int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":"))),
+        )
+        camera_ids = [row[0] for row in db.execute("SELECT c.id FROM cameras c LEFT JOIN ai_camera_settings s ON s.camera_id=c.id WHERE c.group_id=? AND c.enabled=1 AND COALESCE(s.config_override,0)=0", (group_id,)).fetchall()]
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "ai_group_configured", "camera_group", group_id,
+                    json.dumps({"enabled": payload.enabled, "inherited_camera_count": len(camera_ids), "analysis_fps": payload.analysis_fps, "model_id": MODEL_ID, "model_version": MODEL_VERSION}, separators=(",", ":"))))
+    for camera_id in camera_ids:
+        await request.app.state.detectors.sync_camera(camera_id, force_restart=True)
+    return _group_ai_view(group_id)
+
+
+@app.get("/api/ai/settings")
+def get_ai_runtime_settings(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    with connect() as db:
+        row = db.execute("SELECT max_active_cameras,updated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+    return {"max_active_cameras": int(row["max_active_cameras"]), "inflight_inferences": 1, "updated_at": row["updated_at"], "resource_note": "Inference calls run through one bounded CPU slot to preserve headroom for recording. Cameras beyond the active limit are marked skipped; no unbounded analysis queue is maintained."}
+
+
+@app.put("/api/ai/settings")
+async def update_ai_runtime_settings(payload: AIRuntimeSettingsRequest, request: Request, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    with connect() as db:
+        db.execute("UPDATE ai_runtime_settings SET max_active_cameras=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (payload.max_active_cameras,))
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (int(user["id"]), "ai_runtime_configured", "ai_runtime", "local", json.dumps({"max_active_cameras": payload.max_active_cameras}, separators=(",", ":"))))
+    await request.app.state.detectors.reconcile()
+    return get_ai_runtime_settings(_=user)
 
 
 @app.get("/api/ai/events")

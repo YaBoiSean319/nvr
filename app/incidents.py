@@ -23,13 +23,16 @@ def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: d
     incident = db.execute("SELECT fault_type,camera_id,summary,recurrence_count FROM incidents WHERE id=?", (incident_id,)).fetchone()
     if incident is None:
         return
-    category = "storage" if incident["fault_type"] == "storage" else "recording"
-    if event_type == "recovered":
-        webhook_type = f"{category}.recovered"
-    elif incident["fault_type"] == "recording_uncertain":
-        webhook_type = "recording.uncertain"
+    if str(incident["fault_type"]).startswith("ai_"):
+        webhook_type = "ai.recovered" if event_type == "recovered" else "ai.failure"
     else:
-        webhook_type = f"{category}.failure"
+        category = "storage" if incident["fault_type"] == "storage" else "recording"
+        if event_type == "recovered":
+            webhook_type = f"{category}.recovered"
+        elif incident["fault_type"] == "recording_uncertain":
+            webhook_type = "recording.uncertain"
+        else:
+            webhook_type = f"{category}.failure"
     from .webhooks import enqueue_event
     enqueue_event(db, webhook_type, {
         "event_id": event_id,

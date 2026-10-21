@@ -101,13 +101,53 @@ class DetectionApiTests(unittest.TestCase):
         with connect() as db:
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES(?,?,?)", (second, "Other camera", encrypt("rtsp://camera.invalid/other")))
         conflict = self.client.put(f"/api/cameras/{second}/ai", json={"enabled": True, "use_substream": False})
-        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.status_code, 200, conflict.text)
 
     def test_zone_filter_uses_detection_center_and_empty_zone_covers_frame(self):
         box = {"x": 0.45, "y": 0.2, "width": 0.1, "height": 0.2}
         self.assertTrue(point_in_zones(box, [{"x": 0.4, "y": 0.1, "width": 0.2, "height": 0.4}]))
         self.assertFalse(point_in_zones(box, [{"x": 0, "y": 0, "width": 0.3, "height": 1}]))
         self.assertTrue(point_in_zones(box, []))
+
+    def test_group_inheritance_camera_override_and_bounded_camera_capacity(self):
+        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        manager: DetectionManager = app.state.detectors
+
+        class QuietDetector:
+            def infer(self, frame, threshold):
+                return []
+
+        manager.detector = QuietDetector()
+        group = self.client.post("/api/camera-groups", json={"name": "AI group"})
+        self.assertEqual(group.status_code, 201, group.text)
+        group_id = group.json()["id"]
+        second = str(uuid.uuid4())
+        with connect() as db:
+            db.execute("UPDATE cameras SET group_id=? WHERE id=?", (group_id, self.camera_id))
+            db.execute("INSERT INTO cameras(id,name,group_id,stream_url_ciphertext,live_substream_url_ciphertext) VALUES(?,?,?,?,?)",
+                       (second, "AI group second", group_id, encrypt("rtsp://camera.invalid/second"), encrypt("rtsp://camera.invalid/second-low")))
+        capacity = self.client.put("/api/ai/settings", json={"max_active_cameras": 1})
+        self.assertEqual(capacity.status_code, 200, capacity.text)
+        group_config = self.client.put(f"/api/camera-groups/{group_id}/ai", json={"enabled": True, "analysis_fps": 0.5, "use_substream": True})
+        self.assertEqual(group_config.status_code, 200, group_config.text)
+        self.assertEqual(group_config.json()["inherited_camera_count"], 2)
+        active = [task for task in manager.tasks.values() if not task.done()]
+        self.assertEqual(len(active), 1)
+        with connect() as db:
+            statuses = [row[0] for row in db.execute("SELECT status FROM ai_camera_settings WHERE camera_id IN (?,?)", (self.camera_id, second))]
+        self.assertIn("skipped", statuses)
+
+        effective = self.client.get(f"/api/cameras/{self.camera_id}/ai").json()
+        self.assertEqual(effective["config_source"], "group")
+        self.assertTrue(effective["enabled"])
+        override = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": False, "use_substream": False})
+        self.assertEqual(override.status_code, 200, override.text)
+        self.assertEqual(override.json()["config_source"], "camera")
+        self.assertFalse(override.json()["enabled"])
+        inherited = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"inherit_group": True})
+        self.assertEqual(inherited.status_code, 200, inherited.text)
+        self.assertEqual(inherited.json()["config_source"], "group")
+        self.assertTrue(inherited.json()["enabled"])
 
     def test_recording_policy_and_worker_are_separate_from_ai_stop(self):
         manager: DetectionManager = app.state.detectors

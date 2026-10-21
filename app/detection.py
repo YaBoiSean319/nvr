@@ -97,24 +97,67 @@ def point_in_zones(box: dict[str, float], zones: list[dict[str, float]]) -> bool
     return any(z["x"] <= x <= z["x"] + z["width"] and z["y"] <= y <= z["y"] + z["height"] for z in zones)
 
 
+def box_iou(left: dict[str, float], right: dict[str, float]) -> float:
+    x1 = max(left["x"], right["x"])
+    y1 = max(left["y"], right["y"])
+    x2 = min(left["x"] + left["width"], right["x"] + right["width"])
+    y2 = min(left["y"] + left["height"], right["y"] + right["height"])
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    union = left["width"] * left["height"] + right["width"] * right["height"] - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def effective_camera_config(camera_id: str) -> dict[str, Any] | None:
+    with connect() as db:
+        camera = db.execute("SELECT group_id FROM cameras WHERE id=? AND enabled=1", (camera_id,)).fetchone()
+        if camera is None:
+            return None
+        personal = db.execute("SELECT * FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+        group = db.execute("SELECT * FROM ai_group_settings WHERE group_id=?", (camera["group_id"],)).fetchone() if camera["group_id"] else None
+    if personal and personal["config_override"]:
+        result = dict(personal)
+        result["config_source"] = "camera"
+    elif group:
+        result = dict(group)
+        result["config_source"] = "group"
+    else:
+        result = {"enabled": 0, "analysis_fps": 0.5, "confidence_threshold": 0.55, "use_substream": 1, "zones_json": "[]", "config_source": "default"}
+    result["enabled"] = bool(result["enabled"])
+    result["use_substream"] = bool(result["use_substream"])
+    return result
+
+
 def record_observations(camera_id: str, observations: Iterable[dict[str, Any]], at: datetime | None = None) -> int:
     when = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     stamp = when.isoformat()
     count = 0
     with connect() as db:
         for item in observations:
-            previous = db.execute(
-                "SELECT id,box_json FROM ai_observations WHERE camera_id=? AND label=? AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 1",
+            candidates = db.execute(
+                "SELECT id,box_json FROM ai_observations WHERE camera_id=? AND label=? AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 100",
                 (camera_id, item["label"], (when - timedelta(seconds=5)).isoformat()),
-            ).fetchone()
+            ).fetchall()
+            previous = max(
+                (candidate for candidate in candidates if box_iou(json.loads(candidate["box_json"]), item["box"]) >= 0.2),
+                key=lambda candidate: box_iou(json.loads(candidate["box_json"]), item["box"]),
+                default=None,
+            )
             if previous:
                 db.execute("UPDATE ai_observations SET confidence=max(confidence,?),box_json=?,last_seen_at=? WHERE id=?",
                            (item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, previous["id"]))
             else:
+                observation_id = str(uuid.uuid4())
                 db.execute(
                     "INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (str(uuid.uuid4()), camera_id, item["label"], item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, stamp, MODEL_WIDTH, MODEL_HEIGHT, MODEL_ID, MODEL_VERSION),
+                    (observation_id, camera_id, item["label"], item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, stamp, MODEL_WIDTH, MODEL_HEIGHT, MODEL_ID, MODEL_VERSION),
                 )
+                event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "nvr-ai-observation:" + observation_id))
+                from .webhooks import enqueue_event
+                enqueue_event(db, "ai.detection", {
+                    "event_id": event_id, "event_type": "ai.detection", "occurred_at": stamp,
+                    "observation_id": observation_id, "camera_id": camera_id, "label": item["label"],
+                    "confidence": item["confidence"], "box": item["box"], "model_id": MODEL_ID, "model_version": MODEL_VERSION,
+                })
                 count += 1
     return count
 
@@ -122,6 +165,7 @@ def record_observations(camera_id: str, observations: Iterable[dict[str, Any]], 
 def set_camera_state(camera_id: str, state: str, error: str | None = None, at: datetime | None = None) -> None:
     stamp = (at or datetime.now(timezone.utc)).isoformat()
     with connect() as db:
+        db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
         row = db.execute("SELECT status FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
         if row is None:
             return
@@ -139,6 +183,19 @@ def set_camera_state(camera_id: str, state: str, error: str | None = None, at: d
             if active:
                 db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
             db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,detail) VALUES(?,?,?,?)", (camera_id, coverage_state, stamp, error or ""))
+        if state in {"failed", "delayed", "analyzed"}:
+            from .incidents import sync_incident
+            camera = db.execute("SELECT name FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if camera:
+                sync_incident(
+                    db,
+                    incident_key=f"ai_analysis:{camera_id}",
+                    camera_id=camera_id,
+                    fault_type="ai_analysis",
+                    summary=f"AI analysis {state}: {camera['name']}" + (f" — {error}" if error else ""),
+                    active=state in {"failed", "delayed"},
+                    details={"analysis_state": state, "reason": error},
+                )
 
 
 def _camera_source(camera_id: str, use_substream: bool) -> str:
@@ -185,66 +242,112 @@ class DetectionManager:
         self.detector_factory = detector_factory
         self.detector: Any | None = None
         self._model_lock = asyncio.Lock()
+        self._inference_slots = asyncio.Semaphore(1)
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.task_configs: dict[str, tuple[Any, ...]] = {}
+        self.configuration_task: asyncio.Task[None] | None = None
         self.stopping = False
 
     async def start(self) -> None:
         self.stopping = False
+        await self.reconcile()
+        self.configuration_task = asyncio.create_task(self._configuration_loop(), name="ai-configuration-supervisor")
+
+    async def reconcile(self) -> None:
         with connect() as db:
-            enabled = db.execute("SELECT camera_id FROM ai_camera_settings WHERE enabled=1 ORDER BY updated_at").fetchall()
-        if enabled:
-            for row in enabled:
-                await self.sync_camera(row["camera_id"])
+            cameras = db.execute("SELECT id FROM cameras WHERE enabled=1 ORDER BY name COLLATE NOCASE").fetchall()
+            runtime = db.execute("SELECT max_active_cameras FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+        max_active = int(runtime["max_active_cameras"]) if runtime else 4
+        eligible: list[str] = []
+        for row in cameras:
+            config = effective_camera_config(row["id"])
+            if config and config["enabled"] and len(eligible) < max_active:
+                eligible.append(row["id"])
+        for row in cameras:
+            await self.sync_camera(row["id"], capacity_allowed=row["id"] in eligible)
+
+    async def _configuration_loop(self) -> None:
+        while not self.stopping:
+            try:
+                await self.reconcile()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(5)
 
     async def stop(self) -> None:
         self.stopping = True
+        if self.configuration_task and not self.configuration_task.done():
+            self.configuration_task.cancel()
+            await asyncio.gather(self.configuration_task, return_exceptions=True)
+        self.configuration_task = None
         tasks = list(self.tasks.values())
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.clear()
+        self.task_configs.clear()
 
-    async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
+    async def sync_camera(self, camera_id: str, force_restart: bool = False, capacity_allowed: bool | None = None) -> None:
         if self.stopping:
             return
-        with connect() as db:
-            config = db.execute("SELECT enabled FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+        config = effective_camera_config(camera_id)
         task = self.tasks.get(camera_id)
+        signature = None if config is None else (
+            bool(config["enabled"]), float(config["analysis_fps"]), float(config["confidence_threshold"]),
+            bool(config["use_substream"]), config["zones_json"], config["config_source"],
+        )
+        if task and not task.done() and self.task_configs.get(camera_id) != signature:
+            force_restart = True
         if force_restart and task and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self.tasks.pop(camera_id, None)
+            self.task_configs.pop(camera_id, None)
             task = None
         if not config or not config["enabled"]:
             if task and not task.done():
                 task.cancel()
             self.tasks.pop(camera_id, None)
+            self.task_configs.pop(camera_id, None)
             set_camera_state(camera_id, "disabled")
-        elif self.detector is None:
-            async with self._model_lock:
-                if self.detector is None:
-                    try:
-                        self.detector = await asyncio.to_thread(self.detector_factory)
-                    except Exception:
-                        set_camera_state(camera_id, "failed", "CPU inference model could not be loaded")
-                        return
+            return
+        if capacity_allowed is False:
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            self.tasks.pop(camera_id, None)
+            self.task_configs.pop(camera_id, None)
+            set_camera_state(camera_id, "skipped", "Waiting because the configured number of AI analysis slots is in use")
+            return
+        active_count = sum(1 for active in self.tasks.values() if not active.done())
+        with connect() as db:
+            runtime = db.execute("SELECT max_active_cameras FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+        max_active = int(runtime["max_active_cameras"]) if runtime else 4
+        if task is None and active_count >= max_active:
+            set_camera_state(camera_id, "skipped", "Waiting because the configured number of AI analysis slots is in use")
+            self.task_configs.pop(camera_id, None)
+            return
+        if task is None or task.done() or force_restart:
+            if self.detector is None:
+                async with self._model_lock:
+                    if self.detector is None:
+                        try:
+                            self.detector = await asyncio.to_thread(self.detector_factory)
+                        except Exception:
+                            set_camera_state(camera_id, "failed", "CPU inference model could not be loaded")
+                            return
             if self.detector is None:
                 return
             set_camera_state(camera_id, "connecting")
-            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id), name=f"ai-detection-{camera_id}")
-        elif task is None or task.done():
-            set_camera_state(camera_id, "connecting")
-            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id), name=f"ai-detection-{camera_id}")
+            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, config), name=f"ai-detection-{camera_id}")
+            self.task_configs[camera_id] = signature
 
-    async def _run(self, camera_id: str) -> None:
+    async def _run(self, camera_id: str, config: dict[str, Any]) -> None:
         while not self.stopping:
             try:
-                with connect() as db:
-                    config = db.execute("SELECT * FROM ai_camera_settings WHERE camera_id=? AND enabled=1", (camera_id,)).fetchone()
-                if not config:
-                    set_camera_state(camera_id, "disabled")
-                    return
                 source = _camera_source(camera_id, bool(config["use_substream"]))
                 zones = json.loads(config["zones_json"])
                 seen_frame = False
@@ -252,12 +355,17 @@ class DetectionManager:
                     if self.stopping:
                         return
                     seen_frame = True
-                    observations = await asyncio.to_thread(self.detector.infer, frame, float(config["confidence_threshold"]))
+                    wait_started = asyncio.get_running_loop().time()
+                    async with self._inference_slots:
+                        queue_wait = asyncio.get_running_loop().time() - wait_started
+                        if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
+                            set_camera_state(camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
+                        observations = await asyncio.to_thread(self.detector.infer, frame, float(config["confidence_threshold"]))
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
                     record_observations(camera_id, observations)
                     set_camera_state(camera_id, "analyzed")
-                if not seen_frame:
-                    raise RuntimeError("Camera stream ended before an analysis frame was received")
+                if not self.stopping:
+                    raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

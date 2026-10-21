@@ -25,6 +25,9 @@ EVENT_TYPES = {
     "recording.recovered",
     "storage.failure",
     "storage.recovered",
+    "ai.detection",
+    "ai.failure",
+    "ai.recovered",
     "webhook.test",
 }
 MAX_ATTEMPTS = 8

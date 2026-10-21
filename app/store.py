@@ -190,6 +190,7 @@ def initialize() -> None:
             CREATE INDEX IF NOT EXISTS motion_events_camera_time_idx ON motion_events(camera_id, received_at);
             CREATE TABLE IF NOT EXISTS ai_camera_settings (
                 camera_id TEXT PRIMARY KEY REFERENCES cameras(id) ON DELETE CASCADE,
+                config_override INTEGER NOT NULL DEFAULT 0 CHECK (config_override IN (0,1)),
                 enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
                 analysis_fps REAL NOT NULL DEFAULT 0.5 CHECK (analysis_fps BETWEEN 0.1 AND 5),
                 confidence_threshold REAL NOT NULL DEFAULT 0.55 CHECK (confidence_threshold BETWEEN 0.1 AND 0.99),
@@ -201,6 +202,21 @@ def initialize() -> None:
                 last_error TEXT,
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS ai_group_settings (
+                group_id TEXT PRIMARY KEY REFERENCES camera_groups(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+                analysis_fps REAL NOT NULL DEFAULT 0.5 CHECK (analysis_fps BETWEEN 0.1 AND 5),
+                confidence_threshold REAL NOT NULL DEFAULT 0.55 CHECK (confidence_threshold BETWEEN 0.1 AND 0.99),
+                use_substream INTEGER NOT NULL DEFAULT 1 CHECK (use_substream IN (0,1)),
+                zones_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS ai_runtime_settings (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id=1),
+                max_active_cameras INTEGER NOT NULL DEFAULT 4 CHECK (max_active_cameras BETWEEN 1 AND 16),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            INSERT OR IGNORE INTO ai_runtime_settings(singleton_id,max_active_cameras) VALUES(1,4);
             CREATE TABLE IF NOT EXISTS ai_observations (
                 id TEXT PRIMARY KEY,
                 camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
@@ -218,7 +234,7 @@ def initialize() -> None:
             CREATE TABLE IF NOT EXISTS ai_coverage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
-                state TEXT NOT NULL CHECK (state IN ('analyzed','delayed','failed','unanalyzed')),
+                state TEXT NOT NULL CHECK (state IN ('analyzed','delayed','skipped','failed','unanalyzed')),
                 starts_at TEXT NOT NULL,
                 ends_at TEXT,
                 detail TEXT NOT NULL DEFAULT ''
@@ -331,6 +347,16 @@ def initialize() -> None:
         for row in db.execute("SELECT id FROM incident_events WHERE event_id IS NULL").fetchall():
             db.execute("UPDATE incident_events SET event_id=? WHERE id=?", (str(uuid.uuid4()), row["id"]))
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS incident_events_event_id_idx ON incident_events(event_id)")
+        ai_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_camera_settings)")}
+        if ai_columns and "config_override" not in ai_columns:
+            db.execute("ALTER TABLE ai_camera_settings ADD COLUMN config_override INTEGER NOT NULL DEFAULT 0 CHECK (config_override IN (0,1))")
+        ai_coverage_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_coverage'").fetchone()[0]
+        if "'skipped'" not in ai_coverage_sql:
+            db.execute("ALTER TABLE ai_coverage RENAME TO ai_coverage_legacy")
+            db.execute("CREATE TABLE ai_coverage (id INTEGER PRIMARY KEY AUTOINCREMENT,camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK (state IN ('analyzed','delayed','skipped','failed','unanalyzed')),starts_at TEXT NOT NULL,ends_at TEXT,detail TEXT NOT NULL DEFAULT '')")
+            db.execute("INSERT INTO ai_coverage(id,camera_id,state,starts_at,ends_at,detail) SELECT id,camera_id,state,starts_at,ends_at,detail FROM ai_coverage_legacy")
+            db.execute("DROP TABLE ai_coverage_legacy")
+            db.execute("CREATE INDEX IF NOT EXISTS ai_coverage_camera_time_idx ON ai_coverage(camera_id,starts_at DESC)")
         # Migrate installations created by the first implementation, which only
         # allowed administrator accounts and did not assign stable session IDs.
         camera_columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}

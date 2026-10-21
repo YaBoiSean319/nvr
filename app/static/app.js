@@ -441,6 +441,7 @@ async function refreshGroups() {
   select.replaceChildren(...options);
   const scheduleSelect=document.querySelector("#schedule-group");
   scheduleSelect.replaceChildren(...(groups.length ? groups.map(group=>new Option(group.name,group.id)) : [new Option("Create a group first","")]));
+  try { const runtime=await api("/api/ai/settings"); document.querySelector("#ai-max-active").value=runtime.max_active_cameras; } catch {}
 }
 async function refreshDiscovery() {
   const [{candidates}, inventory] = await Promise.all([api("/api/discovery/candidates"), api("/api/cameras")]);
@@ -663,6 +664,8 @@ function renderCameras(cameras) {
         if(!aiPanel){aiPanel=document.createElement("section");card.append(aiPanel);}
         aiPanel.replaceChildren();const heading=document.createElement("h4");heading.textContent="Local CPU AI analysis";
         const availability=document.createElement("p");availability.textContent=`${config.model.id} ${config.model.version} · ${config.model.runtime} · ${config.model.available?"model ready":config.model.reason}`;
+        const source=document.createElement("p");source.textContent=`Effective settings source: ${config.config_source}${config.config_source==="group"?" (inherited)":""}`;
+        const inheritLabel=document.createElement("label");inheritLabel.textContent="Inherit assigned camera group AI settings ";const inherit=document.createElement("input");inherit.type="checkbox";inherit.checked=!config.config_override&&config.config_source==="group";inheritLabel.append(inherit);
         const enabledLabel=document.createElement("label");enabledLabel.textContent="Enable analysis ";const aiEnabled=document.createElement("input");aiEnabled.type="checkbox";aiEnabled.checked=config.enabled;enabledLabel.append(aiEnabled);
         const fpsLabel=document.createElement("label");fpsLabel.textContent="Analysis frames per second";const fps=document.createElement("input");fps.type="number";fps.min="0.1";fps.max="5";fps.step="0.1";fps.value=config.analysis_fps;fpsLabel.append(fps);
         const confidenceLabel=document.createElement("label");confidenceLabel.textContent="Minimum confidence (0.1–0.99)";const confidence=document.createElement("input");confidence.type="number";confidence.min="0.1";confidence.max="0.99";confidence.step="0.01";confidence.value=config.confidence_threshold;confidenceLabel.append(confidence);
@@ -670,9 +673,9 @@ function renderCameras(cameras) {
         const zonesLabel=document.createElement("label");zonesLabel.textContent="AI zones (normalized rectangles; empty uses full frame)";const aiZones=document.createElement("textarea");aiZones.spellcheck=false;aiZones.value=JSON.stringify(config.zones);aiZones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';zonesLabel.append(aiZones);
         const saveAI=document.createElement("button");saveAI.type="button";saveAI.textContent="Save AI settings";
         const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${new Date(config.last_success_at).toLocaleString()}`:""}${config.last_error?` · ${config.last_error}`:""}`;
-        saveAI.addEventListener("click",async()=>{try{const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:JSON.parse(aiZones.value||"[]")})});aiStatus.textContent=`Status: ${saved.status}${saved.last_error?` · ${saved.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
+        saveAI.addEventListener("click",async()=>{try{const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:JSON.parse(aiZones.value||"[]"),inherit_group:inherit.checked})});aiStatus.textContent=`Status: ${saved.status} · settings ${saved.config_source}${saved.last_error?` · ${saved.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
         const coverageButton=document.createElement("button");coverageButton.type="button";coverageButton.textContent="Refresh analysis coverage";coverageButton.addEventListener("click",async()=>{try{const status=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai/coverage`);aiStatus.textContent=`Status: ${status.status} · ${status.intervals.length} analysis coverage intervals${status.last_error?` · ${status.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
-        aiPanel.append(heading,availability,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,zonesLabel,saveAI,coverageButton,aiStatus);
+        aiPanel.append(heading,availability,source,inheritLabel,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,zonesLabel,saveAI,coverageButton,aiStatus);
       }catch(error){document.querySelector("#camera-message").textContent=error.message;}
     });
     const coverage=document.createElement("button"); coverage.type="button"; coverage.textContent="View coverage history";
@@ -931,6 +934,33 @@ document.querySelector("#apply-import").addEventListener("click",async()=>{
     document.querySelector("#bulk-message").textContent=`Imported ${result.created_count} camera(s); ${result.failed_count} row(s) need attention.`;
     importCanApply=false; await refresh();
   } catch(error) { document.querySelector("#bulk-message").textContent=error.message; button.disabled=false; }
+});
+document.querySelector("#load-group-ai").addEventListener("click",async()=>{
+  const group=document.querySelector("#schedule-group").value;
+  try{
+    if(!group)throw new Error("Create or select a camera group first.");
+    const config=await api(`/api/camera-groups/${encodeURIComponent(group)}/ai`);
+    document.querySelector("#group-ai-enabled").checked=config.enabled;
+    document.querySelector("#group-ai-fps").value=config.analysis_fps;
+    document.querySelector("#group-ai-confidence").value=config.confidence_threshold;
+    document.querySelector("#group-ai-substream").checked=config.use_substream;
+    document.querySelector("#group-ai-zones").value=JSON.stringify(config.zones);
+    document.querySelector("#ai-group-message").textContent=`${config.group_name}: ${config.inherited_camera_count}/${config.camera_count} camera(s) inherit these settings · ${config.model.available?"model ready":config.model.reason}.`;
+  }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
+});
+document.querySelector("#save-group-ai").addEventListener("click",async()=>{
+  const group=document.querySelector("#schedule-group").value;
+  try{
+    if(!group)throw new Error("Create or select a camera group first.");
+    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/ai`,{method:"PUT",body:JSON.stringify({enabled:document.querySelector("#group-ai-enabled").checked,analysis_fps:Number(document.querySelector("#group-ai-fps").value),confidence_threshold:Number(document.querySelector("#group-ai-confidence").value),use_substream:document.querySelector("#group-ai-substream").checked,zones:JSON.parse(document.querySelector("#group-ai-zones").value||"[]")})});
+    document.querySelector("#ai-group-message").textContent=`Saved group settings for ${result.inherited_camera_count} inherited camera(s). Cameras beyond the configured CPU limit will show skipped analysis coverage.`;
+  }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
+});
+document.querySelector("#save-ai-runtime").addEventListener("click",async()=>{
+  try{
+    const result=await api("/api/ai/settings",{method:"PUT",body:JSON.stringify({max_active_cameras:Number(document.querySelector("#ai-max-active").value)})});
+    document.querySelector("#ai-group-message").textContent=`CPU analysis now allows ${result.max_active_cameras} active camera(s); inference remains serialized in one bounded slot to prioritize recording.`;
+  }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
 });
 document.querySelector("#camera-form").addEventListener("submit", async event => {
   event.preventDefault();
