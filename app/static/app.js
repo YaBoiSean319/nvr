@@ -10,6 +10,7 @@ let playbackTimeline = null;
 let playbackViews = [];
 let playbackMaster = null;
 let playbackSyncGuard = false;
+let exportPollTimer = null;
 function show(name) { if(name!=="status") stopSynchronizedPlayback(); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 async function showLogin() {
   const state = await api("/api/setup/status");
@@ -78,6 +79,7 @@ async function refresh() {
     renderLiveCameraPicker(inventory.cameras);
     renderPlaybackCameraPicker(inventory.cameras);
     await refreshLiveLayouts();
+    await refreshExports();
     if (admin) await refreshDiscovery();
     show("status");
   } catch (error) {
@@ -283,6 +285,43 @@ async function loadSynchronizedPlayback() {
     seekSynchronizedPlayback(playbackMilliseconds(result.start));
     label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Recorded footage, motion markers, and known gaps are shown below.`;
   }catch(error){label.textContent=error.message;}
+}
+async function refreshExports() {
+  const target=document.querySelector("#export-jobs");
+  if(!target)return;
+  try {
+    const {exports}=await api("/api/exports");
+    target.replaceChildren(...exports.map(job=>{
+      const row=document.createElement("li");
+      const state=document.createElement("span");
+      state.textContent=`${job.id.slice(0,8)} · ${job.status}${job.cancel_requested?" · cancelling":""}${job.error?` · ${job.error}`:""}`;
+      row.append(state);
+      if(job.download_url){const download=document.createElement("a");download.href=job.download_url;download.textContent=" Download ZIP";row.append(download);}
+      if(job.status==="queued"||job.status==="running"){
+        const cancel=document.createElement("button");cancel.type="button";cancel.textContent="Cancel";
+        cancel.addEventListener("click",async()=>{try{await api(`/api/exports/${encodeURIComponent(job.id)}/cancel`,{method:"POST"});await refreshExports();}catch(error){document.querySelector("#export-message").textContent=error.message;}});
+        row.append(cancel);
+      }
+      return row;
+    }));
+    if(exports.some(job=>job.status==="queued"||job.status==="running")){
+      if(!exportPollTimer)exportPollTimer=setInterval(()=>refreshExports(),2500);
+    }else if(exportPollTimer){clearInterval(exportPollTimer);exportPollTimer=null;}
+  }catch(error){document.querySelector("#export-message").textContent=error.message;}
+}
+async function requestPlaybackExport() {
+  const message=document.querySelector("#export-message"),button=document.querySelector("#playback-export");
+  const camera_ids=[...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value);
+  const start=document.querySelector("#playback-start").value,end=document.querySelector("#playback-end").value;
+  try {
+    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
+    if(!start||!end)throw new Error("Enter both a start and end time.");
+    button.disabled=true;message.textContent="Submitting export…";
+    const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids,start:new Date(start).toISOString(),end:new Date(end).toISOString()})});
+    message.textContent=`Export ${job.id.slice(0,8)} queued. You can leave this page; the job will continue.`;
+    await refreshExports();
+  }catch(error){message.textContent=error.message;}
+  finally{button.disabled=false;}
 }
 async function refreshDiagnostics() {
   const state = await api("/api/diagnostics/status");
@@ -795,6 +834,7 @@ document.querySelector("#live-delete-layout").addEventListener("click",async()=>
 window.addEventListener("pagehide",stopLiveViews);
 document.querySelector("#playback-search").addEventListener("click",loadSynchronizedPlayback);
 document.querySelector("#playback-stop").addEventListener("click",()=>{stopSynchronizedPlayback();document.querySelector("#playback-status").textContent="Playback stopped.";});
+document.querySelector("#playback-export").addEventListener("click",requestPlaybackExport);
 document.querySelector("#playback-cursor").addEventListener("input",event=>{
   if(!playbackTimeline)return;
   const start=playbackMilliseconds(playbackTimeline.start),end=playbackMilliseconds(playbackTimeline.end);
@@ -804,6 +844,7 @@ document.querySelector("#playback-cursor").addEventListener("input",event=>{
 });
 document.querySelector("#playback-rate").addEventListener("change",event=>{playbackViews.forEach(view=>{view.video.playbackRate=Number(event.target.value);});});
 window.addEventListener("pagehide",stopSynchronizedPlayback);
+window.addEventListener("pagehide",()=>{if(exportPollTimer)clearInterval(exportPollTimer);exportPollTimer=null;});
 document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
