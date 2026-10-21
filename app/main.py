@@ -34,6 +34,7 @@ from . import diagnostics
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.@-]{3,128}$")
+CameraBrand = Literal["auto", "acti", "axis", "bosch", "dahua", "hanwha", "hikvision", "reolink", "samsung", "uniview", "other"]
 
 
 def _secure_cookie() -> bool:
@@ -133,7 +134,7 @@ class CameraProbeRequest(BaseModel):
     camera_ip: str | None = Field(default=None, min_length=7, max_length=45)
     camera_username: str | None = Field(default=None, max_length=256)
     camera_password: str | None = Field(default=None, max_length=1024)
-    camera_brand: Literal["auto", "acti", "axis", "bosch", "dahua", "hanwha", "hikvision", "reolink", "samsung", "uniview", "other"] = "auto"
+    camera_brand: CameraBrand = "auto"
     onvif_profile_token: str | None = Field(default=None, max_length=256)
     device_service_url: str | None = Field(default=None, max_length=2048)
 
@@ -150,7 +151,7 @@ class CameraProfileRequest(BaseModel):
     camera_ip: str = Field(min_length=7, max_length=45)
     camera_username: str | None = Field(default=None, max_length=256)
     camera_password: str | None = Field(default=None, max_length=1024)
-    camera_brand: Literal["auto", "acti", "axis", "bosch", "dahua", "hanwha", "hikvision", "reolink", "samsung", "uniview", "other"] = "auto"
+    camera_brand: CameraBrand = "auto"
     device_service_url: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
