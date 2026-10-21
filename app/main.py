@@ -160,14 +160,60 @@ class LoginRequest(BaseModel):
 
 
 class ViewerLayoutRequest(BaseModel):
-    camera_ids: list[str] = Field(min_length=1, max_length=MAX_LIVE_VIEWERS)
+    camera_ids: list[str] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
+    grid_size: int = Field(default=4)
+    tile_camera_ids: list[str | None] | None = Field(default=None, max_length=MAX_LIVE_VIEWERS)
 
-    @field_validator("camera_ids")
-    @classmethod
-    def unique_cameras(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
+    @model_validator(mode="after")
+    def validate_layout(self) -> "ViewerLayoutRequest":
+        if self.tile_camera_ids is None and self.grid_size == 4 and len(self.camera_ids) > 4:
+            self.grid_size = 9 if len(self.camera_ids) <= 9 else 16
+        if self.grid_size not in {1, 4, 9, 16}:
+            raise ValueError("Grid size must be 1, 4, 9, or 16")
+        if self.tile_camera_ids is None:
+            self.tile_camera_ids = [*self.camera_ids, *([None] * max(0, self.grid_size - len(self.camera_ids)))]
+        if len(self.tile_camera_ids) != self.grid_size:
+            raise ValueError("Tile positions must match the selected grid size")
+        tile_ids = [camera_id for camera_id in self.tile_camera_ids if camera_id is not None]
+        if not tile_ids and not self.camera_ids:
+            raise ValueError("A saved view must contain at least one camera")
+        if len(set(self.camera_ids)) != len(self.camera_ids):
             raise ValueError("A camera can appear only once in a layout")
-        return value
+        if len(set(tile_ids)) != len(tile_ids):
+            raise ValueError("A camera can appear only once in a layout")
+        if self.camera_ids and set(self.camera_ids) != set(tile_ids):
+            raise ValueError("Camera selection must match the populated tile positions")
+        self.camera_ids = tile_ids
+        return self
+
+
+class LiveWorkspaceRequest(BaseModel):
+    camera_ids: list[str] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
+    grid_size: int = Field(default=4)
+    tile_camera_ids: list[str | None] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
+    sidebar_collapsed: bool = False
+
+    @model_validator(mode="after")
+    def validate_workspace(self) -> "LiveWorkspaceRequest":
+        if not self.tile_camera_ids and self.grid_size == 4 and len(self.camera_ids) > 4:
+            self.grid_size = 9 if len(self.camera_ids) <= 9 else 16
+        if self.grid_size not in {1, 4, 9, 16}:
+            raise ValueError("Grid size must be 1, 4, 9, or 16")
+        if self.tile_camera_ids and len(self.tile_camera_ids) != self.grid_size:
+            raise ValueError("Tile positions must match the selected grid size")
+        tile_ids = [camera_id for camera_id in self.tile_camera_ids if camera_id is not None]
+        if len(set(self.camera_ids)) != len(self.camera_ids):
+            raise ValueError("A camera can appear only once in a workspace")
+        if len(set(tile_ids)) != len(tile_ids):
+            raise ValueError("A camera can appear only once in a workspace")
+        if self.camera_ids and set(self.camera_ids) != set(tile_ids):
+            raise ValueError("Camera selection must match the populated tile positions")
+        if not self.tile_camera_ids:
+            self.tile_camera_ids = [*self.camera_ids, *([None] * max(0, self.grid_size - len(self.camera_ids)))]
+        if len(self.tile_camera_ids) != self.grid_size:
+            raise ValueError("Workspace cameras must fit the selected grid size")
+        self.camera_ids = tile_ids
+        return self
 
 
 class CameraProbeRequest(BaseModel):
@@ -667,23 +713,49 @@ def me(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, str]:
     return {"username": user["username"], "role": user["role"]}
 
 
-@app.get("/api/live/layouts")
-def get_viewer_layouts(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
     with connect() as db:
         rows = db.execute(
-            "SELECT name,camera_ids_json FROM viewer_layouts WHERE user_id=? ORDER BY name COLLATE NOCASE",
+            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json FROM viewer_layouts WHERE user_id=? ORDER BY name COLLATE NOCASE",
             (int(user["id"]),),
         ).fetchall()
-        cameras = {row["id"] for row in db.execute("SELECT id FROM cameras")}
+        shared_rows = db.execute(
+            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json FROM shared_viewer_layouts ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+    def decode_layout(row: sqlite3.Row, scope: str) -> dict[str, object] | None:
+        try:
+            camera_ids = json.loads(row["camera_ids_json"])
+            tile_camera_ids = json.loads(row["tile_camera_ids_json"] or "null")
+            if not isinstance(camera_ids, list):
+                return None
+            if not isinstance(tile_camera_ids, list):
+                tile_camera_ids = [*camera_ids, *([None] * max(0, int(row["grid_size"]) - len(camera_ids)))]
+            return {"name": row["name"], "camera_ids": camera_ids, "grid_size": int(row["grid_size"]),
+                    "tile_camera_ids": tile_camera_ids, "scope": scope}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
     layouts = []
     for row in rows:
-        try:
-            camera_ids = [camera_id for camera_id in json.loads(row["camera_ids_json"]) if camera_id in cameras]
-        except (TypeError, json.JSONDecodeError):
-            camera_ids = []
-        if camera_ids:
-            layouts.append({"name": row["name"], "camera_ids": camera_ids})
+        layout = decode_layout(row, "personal")
+        if layout is not None:
+            layouts.append(layout)
+    shared_views = [layout for row in shared_rows if (layout := decode_layout(row, "shared")) is not None]
+    return {"layouts": layouts, "shared_views": shared_views}
+
+
+@app.get("/api/live/layouts")
+def get_viewer_layouts(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    views = _load_live_views(user)
+    with connect() as db:
+        available = {row["id"] for row in db.execute("SELECT id FROM cameras")}
+    layouts = [{"name": layout["name"], "camera_ids": [camera_id for camera_id in layout["camera_ids"] if camera_id in available]}
+               for layout in views["layouts"] if any(camera_id in available for camera_id in layout["camera_ids"])]
     return {"layouts": layouts}
+
+
+@app.get("/api/live/views")
+def get_live_views(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    return _load_live_views(user)
 
 
 @app.put("/api/live/layouts/{name}")
@@ -696,18 +768,80 @@ def save_viewer_layout(
     if not name or len(name) > 60:
         raise HTTPException(status_code=422, detail="Layout name must be between 1 and 60 characters")
     with connect() as db:
-        present = {row["id"] for row in db.execute(
-            f"SELECT id FROM cameras WHERE id IN ({','.join('?' for _ in payload.camera_ids)})",
-            tuple(payload.camera_ids),
-        ).fetchall()}
-        if present != set(payload.camera_ids):
+        present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall()}
+        if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
         db.execute(
-            "INSERT INTO viewer_layouts(user_id,name,camera_ids_json,updated_at) VALUES(?,?,?,?) "
-            "ON CONFLICT(user_id,name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,updated_at=excluded.updated_at",
-            (int(user["id"]), name, json.dumps(payload.camera_ids), datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO viewer_layouts(user_id,name,camera_ids_json,updated_at,grid_size,tile_camera_ids_json) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(user_id,name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,updated_at=excluded.updated_at,"
+            "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json",
+            (int(user["id"]), name, json.dumps(payload.camera_ids), datetime.now(timezone.utc).isoformat(),
+             payload.grid_size, json.dumps(payload.tile_camera_ids)),
         )
     return {"name": name, "camera_ids": payload.camera_ids}
+
+
+@app.put("/api/live/shared-layouts/{name}")
+def save_shared_viewer_layout(
+    name: str, payload: ViewerLayoutRequest, user: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    name = name.strip()
+    if not name or len(name) > 60:
+        raise HTTPException(status_code=422, detail="Layout name must be between 1 and 60 characters")
+    with connect() as db:
+        present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall()}
+        if not set(payload.camera_ids) <= present:
+            raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
+        db.execute(
+            "INSERT INTO shared_viewer_layouts(name,camera_ids_json,grid_size,tile_camera_ids_json,created_by,updated_at) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
+            "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json,created_by=excluded.created_by,"
+            "updated_at=excluded.updated_at",
+            (name, json.dumps(payload.camera_ids), payload.grid_size, json.dumps(payload.tile_camera_ids),
+             int(user["id"]), datetime.now(timezone.utc).isoformat()),
+        )
+    return {"name": name, "camera_ids": payload.camera_ids, "grid_size": payload.grid_size,
+            "tile_camera_ids": payload.tile_camera_ids, "scope": "shared"}
+
+
+@app.delete("/api/live/shared-layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_shared_viewer_layout(name: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+    with connect() as db:
+        db.execute("DELETE FROM shared_viewer_layouts WHERE name=? COLLATE NOCASE", (name.strip(),))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/live/workspace")
+def get_live_workspace(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    with connect() as db:
+        row = db.execute("SELECT * FROM live_workspace_states WHERE user_id=?", (int(user["id"]),)).fetchone()
+    if row is None:
+        return {"camera_ids": None, "tile_camera_ids": [], "grid_size": 4, "sidebar_collapsed": False}
+    try:
+        camera_ids = json.loads(row["camera_ids_json"])
+        tile_camera_ids = json.loads(row["tile_camera_ids_json"])
+    except (TypeError, json.JSONDecodeError):
+        camera_ids, tile_camera_ids = [], []
+    return {"camera_ids": camera_ids, "tile_camera_ids": tile_camera_ids, "grid_size": row["grid_size"],
+            "sidebar_collapsed": bool(row["sidebar_collapsed"])}
+
+
+@app.put("/api/live/workspace")
+def save_live_workspace(payload: LiveWorkspaceRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    with connect() as db:
+        present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall()}
+        if not set(payload.camera_ids) <= present:
+            raise HTTPException(status_code=422, detail="Workspace contains an unknown camera")
+        db.execute(
+            "INSERT INTO live_workspace_states(user_id,camera_ids_json,tile_camera_ids_json,grid_size,sidebar_collapsed,updated_at) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
+            "tile_camera_ids_json=excluded.tile_camera_ids_json,grid_size=excluded.grid_size,"
+            "sidebar_collapsed=excluded.sidebar_collapsed,updated_at=excluded.updated_at",
+            (int(user["id"]), json.dumps(payload.camera_ids), json.dumps(payload.tile_camera_ids), payload.grid_size,
+             int(payload.sidebar_collapsed), datetime.now(timezone.utc).isoformat()),
+        )
+    return {"camera_ids": payload.camera_ids, "tile_camera_ids": payload.tile_camera_ids,
+            "grid_size": payload.grid_size, "sidebar_collapsed": payload.sidebar_collapsed}
 
 
 @app.delete("/api/live/layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)

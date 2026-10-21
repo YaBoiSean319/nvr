@@ -7,6 +7,7 @@ let liveViews = [];
 let liveStatusTimer = null;
 const LIVE_GRID_SIZES = [1, 4, 9, 16];
 let activeLiveCameraIds = [];
+let activeLiveTileCameraIds = [];
 let activeLiveGridSize = 4;
 let focusedLiveCameraId = null;
 let latestCameras = [];
@@ -22,6 +23,10 @@ let activeScreen = "live";
 let sidebarCameras = [];
 let sidebarGroups = [];
 let sidebarViews = [];
+let workspaceRestored = false;
+let workspaceSaveTimer = null;
+let liveViewDirty = false;
+let cachedLiveArrangement = null;
 function show(name) { if(name!=="status") stopSynchronizedPlayback(); document.querySelector("main > h1").classList.toggle("hidden", name === "status"); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 function moveInto(selector, targetSelector) {
   const element = document.querySelector(selector), target = document.querySelector(targetSelector);
@@ -55,6 +60,7 @@ function setupConsoleShell() {
     const collapsed = layout.classList.toggle("sidebar-collapsed");
     button.setAttribute("aria-expanded", String(!collapsed));
     button.setAttribute("aria-label", collapsed ? "Expand camera sidebar" : "Collapse camera sidebar");
+    saveLiveWorkspace();
   });
   document.querySelector("#sidebar-search").addEventListener("input", filterSidebar);
   const theme = document.querySelector("#theme-choice"), savedTheme = localStorage.getItem("nvr-theme") || "system";
@@ -64,7 +70,10 @@ function setupConsoleShell() {
 }
 function setScreen(screen) {
   if (!document.querySelector(`[data-page="${screen}"]`)) return;
-  if (activeScreen === "live" && screen !== "live") stopLiveViews();
+  if (activeScreen === "live" && screen !== "live") {
+    if(activeLiveCameraIds.length)cachedLiveArrangement={camera_ids:[...activeLiveCameraIds],tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize};
+    stopLiveViews();
+  }
   if (screen !== "footage") stopSynchronizedPlayback();
   activeScreen = screen;
   document.querySelectorAll("[data-page]").forEach(page => page.classList.toggle("hidden", page.dataset.page !== screen));
@@ -73,6 +82,12 @@ function setScreen(screen) {
     if (button.dataset.screen === screen) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
+  if(screen==="live"&&cachedLiveArrangement&&!activeLiveCameraIds.length){
+    const prior=cachedLiveArrangement;cachedLiveArrangement=null;
+    for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=prior.camera_ids.includes(input.value);
+    startLiveViews(prior.camera_ids,latestCameras,null,prior.grid_size,prior.tile_camera_ids);
+    clearLiveViewDirty();
+  }
 }
 function filterSidebar() {
   const query = document.querySelector("#sidebar-search").value.trim().toLocaleLowerCase();
@@ -103,10 +118,7 @@ function renderSidebar() {
     document.querySelectorAll("[data-live-camera]").forEach(input => { input.checked = members.has(input.value); });
     if (!members.size) document.querySelector("#live-message").textContent = "This group has no available cameras.";
   });
-  for (const view of sidebarViews) sidebarItem(viewList, view.name, view.name, () => {
-    setScreen("live"); document.querySelectorAll("[data-live-camera]").forEach(input => { input.checked = view.camera_ids.includes(input.value); });
-    document.querySelector("#live-layouts").value = view.name;
-  });
+  for (const view of sidebarViews) sidebarItem(viewList, `${view.name} · ${view.scope}`, `${view.name} ${view.scope}`, () => applySavedView(view));
   filterSidebar();
 }
 async function showLogin() {
@@ -155,6 +167,7 @@ async function refresh() {
     const who = await api("/api/auth/me");
     currentRole = who.role;
     const admin = currentRole === "administrator";
+    document.querySelector("#live-layout-scope option[value=shared]").classList.toggle("hidden", !admin);
     setupConsoleShell();
     document.querySelectorAll('#console-nav [data-screen="camera-settings"], #console-nav [data-screen="app-settings"]').forEach(button => button.classList.toggle("hidden", !admin));
     if (!admin && ["camera-settings", "app-settings"].includes(activeScreen)) setScreen("live");
@@ -188,6 +201,7 @@ async function refresh() {
     renderLiveCameraPicker(inventory.cameras);
     renderPlaybackCameraPicker(inventory.cameras);
     await refreshLiveLayouts();
+    if (!workspaceRestored) { await restoreLiveWorkspace(); workspaceRestored = true; }
     renderSidebar();
     await refreshExports();
     if (admin) await refreshDiscovery();
@@ -209,11 +223,11 @@ function renderLiveCameraPicker(cameras) {
 }
 async function refreshLiveLayouts() {
   try {
-    const {layouts}=await api("/api/live/layouts");
-    sidebarViews = layouts;
+    const {layouts,shared_views=[]}=await api("/api/live/views");
+    sidebarViews = [...layouts,...shared_views];
     const select=document.querySelector("#live-layouts"), previous=select.value;
-    select.replaceChildren(new Option("Choose a saved layout",""),...layouts.map(layout=>new Option(layout.name,layout.name)));
-    if(layouts.some(layout=>layout.name===previous)) select.value=previous;
+    select.replaceChildren(new Option("Choose a saved view",""),...sidebarViews.map(layout=>new Option(`${layout.name} · ${layout.scope}`,`${layout.scope}:${layout.name}`)));
+    if(sidebarViews.some(layout=>`${layout.scope}:${layout.name}`===previous)) select.value=previous;
     renderSidebar();
   } catch(error) { document.querySelector("#live-message").textContent=error.message; }
 }
@@ -323,29 +337,92 @@ function stopLiveViews() {
   }
   liveViews=[];
   activeLiveCameraIds=[];
+  activeLiveTileCameraIds=[];
   focusedLiveCameraId=null;
   document.querySelector("#live-grid").replaceChildren();
 }
 function selectedLiveCameras() { return [...document.querySelectorAll("[data-live-camera]:checked")].map(input=>input.value); }
 function liveGridSizeFor(cameraCount) { return LIVE_GRID_SIZES.find(size=>size>=cameraCount)||16; }
-function startLiveViews(cameraIds,cameras,focusedCameraId=null,gridSize=null) {
-  cameraIds=[...new Set(cameraIds)];
+function currentLiveTiles(size=activeLiveGridSize) {
+  const tiles=[...document.querySelectorAll("#live-grid .live-tile")].map(tile=>tile.dataset.cameraId||null);
+  if(tiles.length===size)return tiles;
+  const ids=activeLiveCameraIds;
+  return [...ids,...Array(Math.max(0,size-ids.length)).fill(null)].slice(0,size);
+}
+function markLiveViewDirty() {
+  liveViewDirty=true;
+  document.querySelector("#live-unsaved").classList.remove("hidden");
+  document.querySelector("#live-message").textContent="Unsaved changes to this view.";
+}
+function clearLiveViewDirty() { liveViewDirty=false;document.querySelector("#live-unsaved").classList.add("hidden"); }
+async function saveLiveWorkspace() {
+  if(!currentRole)return;
+  const arrangement=activeLiveTileCameraIds.length?{tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize}:
+    cachedLiveArrangement||{tile_camera_ids:[...Array(activeLiveGridSize).fill(null)],grid_size:activeLiveGridSize};
+  const state={camera_ids:arrangement.tile_camera_ids.filter(Boolean),tile_camera_ids:arrangement.tile_camera_ids,
+    grid_size:arrangement.grid_size,sidebar_collapsed:document.querySelector("#console-layout").classList.contains("sidebar-collapsed")};
+  clearTimeout(workspaceSaveTimer);
+  workspaceSaveTimer=setTimeout(async()=>{
+    try { await api("/api/live/workspace",{method:"PUT",body:JSON.stringify(state)}); }
+    catch(error) { document.querySelector("#live-message").textContent=`Workspace could not be saved: ${error.message}`; }
+  },250);
+}
+async function restoreLiveWorkspace() {
+  try {
+    const state=await api("/api/live/workspace");
+    const layout=document.querySelector("#console-layout"), button=document.querySelector("#sidebar-toggle");
+    layout.classList.toggle("sidebar-collapsed",!!state.sidebar_collapsed);
+    button.setAttribute("aria-expanded",String(!state.sidebar_collapsed));
+    button.setAttribute("aria-label",state.sidebar_collapsed?"Expand camera sidebar":"Collapse camera sidebar");
+    if(!state.camera_ids?.length)return;
+    for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=state.camera_ids.includes(input.value);
+    startLiveViews(state.camera_ids,latestCameras,null,state.grid_size,state.tile_camera_ids);
+    clearLiveViewDirty();
+  } catch(error) { document.querySelector("#live-message").textContent=`Previous workspace could not be restored: ${error.message}`; }
+}
+function applySavedView(view) {
+  if(activeScreen==="footage") {
+    stopSynchronizedPlayback();
+    const playbackPicker=document.querySelector("#playback-camera-picker");
+    const labels=new Map([...playbackPicker.querySelectorAll("label")].map(label=>[label.querySelector("input").value,label]));
+    const ordered=view.tile_camera_ids.map(id=>id&&labels.get(id)).filter(Boolean);
+    playbackPicker.prepend(...ordered);
+    for(const input of playbackPicker.querySelectorAll("[data-playback-camera]"))input.checked=view.camera_ids.includes(input.value);
+    document.querySelector("#playback-grid-size").value=String(view.grid_size);
+    const unavailable=view.camera_ids.filter(id=>!labels.has(id)).length;
+    document.querySelector("#playback-status").textContent=`Applied ${view.scope} view “${view.name}”. Camera selection and layout changed; date inputs were kept.${unavailable?` ${unavailable} saved camera(s) are unavailable.`:""}`;
+    return;
+  }
+  setScreen("live");
+  document.querySelector("#live-layouts").value=`${view.scope}:${view.name}`;
+  document.querySelector("#live-layout-name").value=view.name;
+  for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=view.camera_ids.includes(input.value);
+  document.querySelector("#live-grid-size").value=String(view.grid_size);
+  startLiveViews(view.camera_ids,latestCameras,null,view.grid_size,view.tile_camera_ids);
+  clearLiveViewDirty();
+  document.querySelector("#live-message").textContent=`Applied ${view.scope} view “${view.name}”.`;
+}
+function startLiveViews(cameraIds,cameras,focusedCameraId=null,gridSize=null,tileCameraIds=null) {
   const selectedSize=gridSize||Number(document.querySelector("#live-grid-size").value)||4;
+  let tiles=tileCameraIds?[...tileCameraIds]:[...cameraIds,...Array(Math.max(0,selectedSize-cameraIds.length)).fill(null)];
+  tiles=tiles.slice(0,selectedSize);
+  while(tiles.length<selectedSize)tiles.push(null);
+  cameraIds=[...new Set(tiles.filter(Boolean))];
   if(!cameraIds.length) { document.querySelector("#live-message").textContent="Choose at least one camera."; return; }
   if(cameraIds.length>16 || cameraIds.length>selectedSize) {
     document.querySelector("#live-message").textContent=`The ${selectedSize}-feed grid cannot show ${cameraIds.length} selected cameras. Choose a larger grid or remove cameras; selections are never dropped.`;
     return;
   }
-  const unavailable=cameraIds.filter(id=>!cameras.some(camera=>camera.id===id));
-  if(unavailable.length) { document.querySelector("#live-message").textContent="One or more selected cameras are unavailable."; return; }
   stopLiveViews();
   const grid=document.querySelector("#live-grid"), liveMessage=document.querySelector("#live-message");
   activeLiveCameraIds=cameraIds;
+  activeLiveTileCameraIds=tiles;
+  cachedLiveArrangement={camera_ids:[...cameraIds],tile_camera_ids:[...tiles],grid_size:selectedSize};
   activeLiveGridSize=selectedSize;
   focusedLiveCameraId=focusedCameraId;
   document.querySelector("#live-grid-size").value=String(selectedSize);
   grid.style.setProperty("--live-grid-columns",String(focusedCameraId?1:Math.ceil(Math.sqrt(selectedSize))));
-  const displayed=focusedCameraId?[focusedCameraId]:cameraIds;
+  const displayed=focusedCameraId?[focusedCameraId]:tiles;
   const slots=focusedCameraId?1:selectedSize;
   for(let index=0;index<slots;index++) {
     const cameraId=displayed[index]||null;
@@ -358,15 +435,16 @@ function startLiveViews(cameraIds,cameras,focusedCameraId=null,gridSize=null) {
     }
     tile.dataset.cameraId=cameraId;
     const camera=cameras.find(item=>item.id===cameraId);
-    const title=document.createElement("strong"); title.textContent=camera.name;
-    const state=document.createElement("span"); state.className="live-state"; state.textContent="Loading";state.setAttribute("role","status");state.setAttribute("aria-live","polite");
+    const title=document.createElement("strong"); title.textContent=camera?.name||`Unavailable camera · ${cameraId}`;
+    const state=document.createElement("span"); state.className="live-state"; state.textContent=camera?"Loading":"Unavailable";state.setAttribute("role","status");state.setAttribute("aria-live","polite");
+    if(!camera){tile.append(title,state);grid.append(tile);continue;}
     const image=document.createElement("img"); image.alt=`Live video from ${camera.name}`;
     const focus=document.createElement("button"); focus.type="button"; focus.textContent=focusedCameraId?"Restore grid":"Expand feed";focus.setAttribute("aria-label",focusedCameraId?"Restore camera grid":`Expand ${camera.name}`);
-    focus.addEventListener("click",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize));
+    focus.addEventListener("click",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]));
     tile.draggable=true;
     tile.addEventListener("dragstart",event=>event.dataTransfer.setData("text/plain",cameraId));
-    tile.addEventListener("dblclick",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize));
-    tile.addEventListener("keydown",event=>{if(event.key==="Enter"&&event.altKey){event.preventDefault();startLiveViews(activeLiveCameraIds,cameras,focusedLiveCameraId?null:cameraId,activeLiveGridSize);}});
+    tile.addEventListener("dblclick",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]));
+    tile.addEventListener("keydown",event=>{if(event.key==="Enter"&&event.altKey){event.preventDefault();startLiveViews(activeLiveCameraIds,cameras,focusedLiveCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]);}});
     tile.append(title,state,focus);
     if(focusedCameraId) {
       const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Enter fullscreen";
@@ -418,6 +496,8 @@ function startLiveViews(cameraIds,cameras,focusedCameraId=null,gridSize=null) {
       } catch { if(!view.controller.signal.aborted) view.state.textContent="Lost"; }
     }
   },5000);
+  markLiveViewDirty();
+  saveLiveWorkspace();
 }
 function waitForLiveRetry(delay,signal){return new Promise(resolve=>{const finish=()=>{clearTimeout(timer);signal.removeEventListener("abort",finish);resolve();};const timer=setTimeout(finish,delay);signal.addEventListener("abort",finish,{once:true});});}
 async function consumeLiveStream(view) {
@@ -580,6 +660,7 @@ async function loadSynchronizedPlayback() {
     const result=await api("/api/playback/timeline",{method:"POST",body:JSON.stringify({camera_ids,start:new Date(startInput).toISOString(),end:new Date(endInput).toISOString()})});
     playbackTimeline=result;const cursor=document.querySelector("#playback-cursor");cursor.disabled=false;cursor.value="0";cursor.dataset.time=String(playbackMilliseconds(result.start));
     const grid=document.querySelector("#playback-grid");
+    grid.style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(Number(document.querySelector("#playback-grid-size").value)||4))));
     playbackViews=result.cameras.map(camera=>({cameraId:camera.camera_id,name:camera.name,segments:camera.segments,gaps:camera.gaps,motion_events:camera.motion_events,coverage:camera.coverage,video:null,state:null,segment:null}));
     grid.replaceChildren(...playbackViews.map(renderPlaybackCamera));
     seekSynchronizedPlayback(playbackMilliseconds(result.start));
@@ -1270,32 +1351,48 @@ document.querySelector("#login-form").addEventListener("submit", async event => 
   catch (error) { message.textContent = error.message; }
 });
 document.querySelector("#live-start").addEventListener("click",()=>startLiveViews(selectedLiveCameras(),latestCameras));
+document.querySelector("#live-camera-picker").addEventListener("change",event=>{if(event.target.matches("[data-live-camera]"))markLiveViewDirty();});
 document.querySelector("#live-grid-size").addEventListener("change",event=>{
   const size=Number(event.target.value);
   if(activeLiveCameraIds.length>size){document.querySelector("#live-message").textContent=`The active grid has ${activeLiveCameraIds.length} cameras. Remove cameras before switching to ${size} feeds.`;event.target.value=String(activeLiveGridSize);return;}
   if(activeLiveCameraIds.length)startLiveViews(activeLiveCameraIds,latestCameras,null,size);
+  else markLiveViewDirty();
 });
-document.querySelector("#live-stop").addEventListener("click",()=>{stopLiveViews();document.querySelector("#live-message").textContent="Live viewing stopped.";});
+document.querySelector("#live-stop").addEventListener("click",()=>{stopLiveViews();cachedLiveArrangement=null;document.querySelector("#live-message").textContent="Live viewing stopped.";});
 document.querySelector("#live-save-layout").addEventListener("click",async()=>{
-  const name=document.querySelector("#live-layout-name").value.trim(), camera_ids=selectedLiveCameras();
-  try {if(!name)throw new Error("Enter a layout name.");const result=await api(`/api/live/layouts/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({camera_ids})});document.querySelector("#live-message").textContent=`Saved “${result.name}” for your account.`;await refreshLiveLayouts();document.querySelector("#live-layouts").value=result.name;}
+  const name=document.querySelector("#live-layout-name").value.trim(), scope=document.querySelector("#live-layout-scope").value;
+  const size=Number(document.querySelector("#live-grid-size").value)||4;
+  let tiles;
+  const selected=new Set(selectedLiveCameras());
+  if(selected.size>size){document.querySelector("#live-message").textContent=`The ${size}-feed grid cannot save ${selected.size} selected cameras. Choose a larger grid or remove cameras.`;return;}
+  if(activeLiveTileCameraIds.length===size){tiles=currentLiveTiles(size).map(id=>id&&selected.has(id)?id:null);for(const id of selected)if(!tiles.includes(id)){const slot=tiles.indexOf(null);if(slot>=0)tiles[slot]=id;}}
+  else tiles=[...selected,...Array(size-selected.size).fill(null)];
+  const camera_ids=tiles.filter(Boolean);
+  try {if(!name)throw new Error("Enter a view name.");if(!camera_ids.length)throw new Error("Select at least one camera.");
+    const path=scope==="shared"?"shared-layouts":"layouts";
+    const result=await api(`/api/live/${path}/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({camera_ids,tile_camera_ids:tiles,grid_size:size})});
+    clearLiveViewDirty();document.querySelector("#live-message").textContent=`Saved ${scope} view “${result.name}”.`;await refreshLiveLayouts();document.querySelector("#live-layouts").value=`${scope}:${result.name}`;}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
 document.querySelector("#live-load-layout").addEventListener("click",async()=>{
-  const name=document.querySelector("#live-layouts").value;
-  try {if(!name)throw new Error("Choose a saved layout.");const {layouts}=await api("/api/live/layouts");const layout=layouts.find(item=>item.name===name);if(!layout)throw new Error("Saved layout is unavailable.");for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=layout.camera_ids.includes(input.value);startLiveViews(layout.camera_ids,latestCameras,null,liveGridSizeFor(layout.camera_ids.length));}
+  const key=document.querySelector("#live-layouts").value;
+  try {if(!key)throw new Error("Choose a saved view.");const layout=sidebarViews.find(item=>`${item.scope}:${item.name}`===key);if(!layout)throw new Error("Saved view is unavailable.");applySavedView(layout);}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
 document.querySelector("#live-delete-layout").addEventListener("click",async()=>{
-  const name=document.querySelector("#live-layouts").value;
-  try {if(!name)throw new Error("Choose a saved layout.");await api(`/api/live/layouts/${encodeURIComponent(name)}`,{method:"DELETE"});document.querySelector("#live-message").textContent=`Deleted “${name}”.`;await refreshLiveLayouts();}
+  const key=document.querySelector("#live-layouts").value;
+  try {if(!key)throw new Error("Choose a saved view.");const [scope,name]=key.split(":",2);if(scope==="shared"&&currentRole!=="administrator")throw new Error("Only administrators can delete shared views.");await api(`/api/live/${scope==="shared"?"shared-layouts":"layouts"}/${encodeURIComponent(name)}`,{method:"DELETE"});document.querySelector("#live-message").textContent=`Deleted “${name}”.`;await refreshLiveLayouts();}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
 window.addEventListener("pagehide",stopLiveViews);
 window.addEventListener("keydown",event=>{
-  if(event.key==="Escape"&&focusedLiveCameraId){event.preventDefault();startLiveViews(activeLiveCameraIds,latestCameras,null,activeLiveGridSize);}
+  if(event.key==="Escape"&&focusedLiveCameraId){event.preventDefault();startLiveViews(activeLiveCameraIds,latestCameras,null,activeLiveGridSize,[...activeLiveTileCameraIds]);}
 });
 document.querySelector("#playback-search").addEventListener("click",loadSynchronizedPlayback);
+document.querySelector("#playback-grid-size").addEventListener("change",event=>{
+  const size=Number(event.target.value);
+  document.querySelector("#playback-grid").style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(size))));
+});
 document.querySelector("#playback-stop").addEventListener("click",()=>{stopSynchronizedPlayback();document.querySelector("#playback-status").textContent="Playback stopped.";});
 document.querySelector("#playback-export").addEventListener("click",requestPlaybackExport);
 document.querySelector("#playback-cursor").addEventListener("input",event=>{
@@ -1312,7 +1409,7 @@ if(incidentPollTimer) clearInterval(incidentPollTimer);
 incidentPollTimer=setInterval(()=>{if(currentRole)refreshIncidents();},15000);
 if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
-document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); document.querySelector("#webhook-list").replaceChildren(); document.querySelector("#webhook-deliveries").replaceChildren(); show("login"); });
+document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); cachedLiveArrangement=null;workspaceRestored=false;await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); document.querySelector("#webhook-list").replaceChildren(); document.querySelector("#webhook-deliveries").replaceChildren(); show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 from pathlib import Path
 
@@ -71,8 +72,27 @@ def initialize() -> None:
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT NOT NULL COLLATE NOCASE,
                 camera_ids_json TEXT NOT NULL,
+                grid_size INTEGER NOT NULL DEFAULT 4,
+                tile_camera_ids_json TEXT,
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 PRIMARY KEY(user_id,name)
+            );
+            CREATE TABLE IF NOT EXISTS shared_viewer_layouts (
+                name TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
+                camera_ids_json TEXT NOT NULL,
+                grid_size INTEGER NOT NULL,
+                tile_camera_ids_json TEXT NOT NULL,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS live_workspace_states (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                camera_ids_json TEXT NOT NULL,
+                grid_size INTEGER NOT NULL,
+                tile_camera_ids_json TEXT NOT NULL,
+                sidebar_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (sidebar_collapsed IN (0,1)),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
             CREATE TABLE IF NOT EXISTS cameras (
@@ -463,4 +483,22 @@ def initialize() -> None:
             "INSERT OR IGNORE INTO camera_group_memberships(group_id,camera_id) "
             "SELECT group_id,id FROM cameras WHERE group_id IS NOT NULL"
         )
+        layout_columns = {row[1] for row in db.execute("PRAGMA table_info(viewer_layouts)")}
+        if "grid_size" not in layout_columns:
+            db.execute("ALTER TABLE viewer_layouts ADD COLUMN grid_size INTEGER NOT NULL DEFAULT 4")
+        if "tile_camera_ids_json" not in layout_columns:
+            db.execute("ALTER TABLE viewer_layouts ADD COLUMN tile_camera_ids_json TEXT")
+        for layout in db.execute("SELECT user_id,name,camera_ids_json,grid_size FROM viewer_layouts WHERE tile_camera_ids_json IS NULL").fetchall():
+            try:
+                camera_ids = json.loads(layout["camera_ids_json"])
+                if not isinstance(camera_ids, list):
+                    camera_ids = []
+            except (TypeError, json.JSONDecodeError):
+                camera_ids = []
+            grid_size = 1 if len(camera_ids) <= 1 else 4 if len(camera_ids) <= 4 else 9 if len(camera_ids) <= 9 else 16
+            tile_ids = [*camera_ids[:grid_size], *([None] * max(0, grid_size - len(camera_ids)))]
+            db.execute(
+                "UPDATE viewer_layouts SET grid_size=?,tile_camera_ids_json=? WHERE user_id=? AND name=?",
+                (grid_size, json.dumps(tile_ids), layout["user_id"], layout["name"]),
+            )
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_provider_identity_idx ON users(provider_issuer, provider_subject) WHERE provider_issuer IS NOT NULL AND provider_subject IS NOT NULL")

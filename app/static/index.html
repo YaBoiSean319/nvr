@@ -29,7 +29,7 @@
     .live-placeholder { display:grid; place-items:center; min-height:7rem; border:1px dashed #8793a1; border-radius:.45rem; color:#a7b2c0 }
     .live-tile:focus-within { outline:2px solid var(--accent); outline-offset:2px }
     .live-state { display:inline-block; margin-left:.5rem; color:var(--muted) }
-    .playback-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr)); gap:1rem; margin-top:1rem }
+    .playback-grid { display:grid; grid-template-columns:repeat(var(--playback-grid-columns, auto-fit),minmax(min(100%,22rem),1fr)); gap:1rem; margin-top:1rem }
     .playback-camera { min-width:0; padding:.75rem; border:1px solid #8793a155; border-radius:.6rem }
     .playback-camera video { display:block; width:100%; aspect-ratio:16/9; background:#000; margin-top:.5rem }
     .playback-track { position:relative; height:2rem; margin:.75rem 0; background:#8793a122; border-radius:.3rem }
@@ -169,12 +169,14 @@
           <p>Choose a 1, 4, 9, or 16-feed layout. Double-click a camera to add it; drag a camera into a tile to add or reorder it. Grid tiles use a configured low-resolution profile where available. Expand a feed for the main stream, then press Escape or Restore grid. Streams use your signed-in session and close when you stop viewing or leave this page. Audio starts muted, appears only when enabled by an administrator, and only one camera can be audible at a time.</p>
           <div id="live-camera-picker"></div>
           <label for="live-grid-size">Grid size</label><select id="live-grid-size"><option value="1">1 feed</option><option value="4" selected>4 feeds</option><option value="9">9 feeds</option><option value="16">16 feeds</option></select>
-          <label for="live-layout-name">Personal layout name</label><input id="live-layout-name" maxlength="60" placeholder="Opening shift">
+          <label for="live-layout-name">Saved view name</label><input id="live-layout-name" maxlength="60" placeholder="Opening shift">
+          <label for="live-layout-scope">Save as</label><select id="live-layout-scope"><option value="personal">Personal view</option><option value="shared" class="admin-only hidden">Shared view · administrators</option></select>
           <label for="live-layouts">Saved layouts</label><select id="live-layouts"><option value="">Choose a saved layout</option></select>
           <label for="live-quality">Focused view quality</label><select id="live-quality"><option value="high">Main stream</option><option value="low">Low-resolution profile</option></select>
-          <button id="live-start" type="button">Start selected grid</button><button id="live-save-layout" type="button">Save selected layout</button>
+          <button id="live-start" type="button">Start selected grid</button><button id="live-save-layout" type="button">Save selected view</button>
           <button id="live-load-layout" type="button">Load saved layout</button><button id="live-delete-layout" type="button">Delete saved layout</button>
           <button id="live-stop" type="button">Stop viewing</button>
+          <p id="live-unsaved" class="hidden" role="alert">Unsaved changes. Save this view to keep the new camera order and grid size.</p>
           <p id="live-message" role="status" aria-live="polite"></p>
           <div id="live-grid" class="live-grid"></div>
         </section>
@@ -182,6 +184,7 @@
           <h3 id="playback-heading">Synchronized playback</h3>
           <p>Choose up to eight cameras and a time range up to 24 hours. Streams stay aligned to the same wall-clock time; timeline gaps distinguish expected idle, recording failure, uncertain coverage, and unindexed footage.</p>
           <div id="playback-camera-picker"></div>
+          <label for="playback-grid-size">Playback layout</label><select id="playback-grid-size"><option value="1">1 feed</option><option value="4" selected>4 feeds</option><option value="9">9 feeds</option><option value="16">16 feeds</option></select>
           <label for="playback-start">From</label><input id="playback-start" type="datetime-local">
           <label for="playback-end">To</label><input id="playback-end" type="datetime-local">
           <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
