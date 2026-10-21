@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import socket
 import time
@@ -14,6 +15,11 @@ MULTICAST_ADDRESS = "239.255.255.250"
 MULTICAST_PORT = 3702
 MAX_DATAGRAM_BYTES = 64 * 1024
 DISCOVERY_TIMEOUT_SECONDS = 5
+IP_RANGE_MAX_HOSTS = 256
+IP_RANGE_PORTS = (80, 8000, 8080, 8899)
+IP_RANGE_CONCURRENCY = 64
+IP_RANGE_PROBE_TIMEOUT_SECONDS = 1.25
+PRIVATE_IPV4_NETWORKS = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,22 @@ class DiscoveredDevice:
 class DiscoveryResult:
     devices: tuple[DiscoveredDevice, ...]
     ignored_responses: int
+    targets_scanned: int = 0
+
+
+def parse_camera_ip_range(value: str) -> tuple[ipaddress.IPv4Address, ...]:
+    """Return bounded RFC1918 hosts only; range scans must never target public networks."""
+    try:
+        network = ipaddress.ip_network(value.strip(), strict=False)
+    except ValueError as exc:
+        raise ValueError("Enter a valid IPv4 CIDR range, such as 10.45.50.0/24") from exc
+    if network.version != 4 or not any(network.subnet_of(allowed) for allowed in PRIVATE_IPV4_NETWORKS):
+        raise ValueError("IP-range discovery is limited to private IPv4 camera networks")
+    host_count = network.num_addresses - (2 if network.prefixlen < 31 else 0)
+    if host_count < 1 or host_count > IP_RANGE_MAX_HOSTS:
+        raise ValueError(f"IP-range discovery is limited to {IP_RANGE_MAX_HOSTS} addresses per scan")
+    hosts = tuple(network.hosts())
+    return hosts
 
 
 def _local_name(tag: str) -> str:
@@ -164,3 +186,83 @@ def _discover_sync(timeout_seconds: float, interface_address: str | None) -> Dis
 async def discover_onvif(timeout_seconds: float = DISCOVERY_TIMEOUT_SECONDS, interface_address: str | None = None) -> DiscoveryResult:
     bounded_timeout = min(max(float(timeout_seconds), 0.5), 15.0)
     return await asyncio.to_thread(_discover_sync, bounded_timeout, interface_address)
+
+
+_DEVICE_INFORMATION_SOAP = b'''<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+ xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+ <s:Body><tds:GetDeviceInformation/></s:Body>
+</s:Envelope>'''
+
+
+async def _probe_onvif_endpoint(address: ipaddress.IPv4Address, port: int, semaphore: asyncio.Semaphore) -> DiscoveredDevice | None:
+    endpoint = f"http://{address}:{port}/onvif/device_service"
+    request = (
+        f"POST /onvif/device_service HTTP/1.1\r\n"
+        f"Host: {address}:{port}\r\n"
+        "Content-Type: application/soap+xml; charset=utf-8\r\n"
+        'SOAPAction: "http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation"\r\n'
+        "Connection: close\r\n"
+        f"Content-Length: {len(_DEVICE_INFORMATION_SOAP)}\r\n\r\n"
+    ).encode("ascii") + _DEVICE_INFORMATION_SOAP
+    try:
+        async with semaphore:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(str(address), port), timeout=IP_RANGE_PROBE_TIMEOUT_SECONDS
+            )
+            try:
+                writer.write(request)
+                await writer.drain()
+                response = await asyncio.wait_for(reader.read(MAX_DATAGRAM_BYTES + 1), timeout=IP_RANGE_PROBE_TIMEOUT_SECONDS)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+    except (OSError, asyncio.TimeoutError):
+        return None
+    if not response or len(response) > MAX_DATAGRAM_BYTES:
+        return None
+    header, _, body = response.partition(b"\r\n\r\n")
+    try:
+        status = int(header.split(b"\r\n", 1)[0].split()[1])
+    except (IndexError, ValueError):
+        return None
+    # A 401 from the standard ONVIF device-service path is useful: it confirms
+    # the endpoint while allowing cameras that require ONVIF credentials.
+    is_onvif = status == 401
+    if status == 200 and body and b"<!DOCTYPE" not in body.upper() and b"<!ENTITY" not in body.upper():
+        try:
+            root = ET.fromstring(body)
+            is_onvif = any(
+                "onvif.org/ver10/device/wsdl" in node.tag
+                or _local_name(node.tag) in {"GetDeviceInformationResponse", "Fault"}
+                for node in root.iter()
+            )
+        except ET.ParseError:
+            is_onvif = False
+    if not is_onvif:
+        return None
+    # IP-scan identities are deterministic candidate keys, not camera UUIDs.
+    candidate_key = "ipscan:" + hashlib.sha256(endpoint.encode("ascii")).hexdigest()[:32]
+    return DiscoveredDevice(candidate_key, (endpoint,), ())
+
+
+async def discover_onvif_ip_range(ip_range: str) -> DiscoveryResult:
+    """Probe common ONVIF device-service ports over a small, private IPv4 range.
+
+    This is unicast TCP/HTTP and works across routed networks when the NVR has
+    an ACL-permitted route to the cameras. It does not rely on WS-Discovery
+    multicast.
+    """
+    hosts = parse_camera_ip_range(ip_range)
+    semaphore = asyncio.Semaphore(IP_RANGE_CONCURRENCY)
+
+    async def probe_host(address: ipaddress.IPv4Address) -> DiscoveredDevice | None:
+        probes = (_probe_onvif_endpoint(address, port, semaphore) for port in IP_RANGE_PORTS)
+        for result in await asyncio.gather(*probes):
+            if result is not None:
+                return result
+        return None
+
+    results = await asyncio.gather(*(probe_host(address) for address in hosts))
+    devices = tuple(device for device in results if device is not None)
+    return DiscoveryResult(devices, 0, len(hosts))
