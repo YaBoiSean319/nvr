@@ -12,17 +12,23 @@ from .store import connect
 
 DEFAULT_RETENTION_DAYS = 30
 _lease_lock = threading.Lock()
-_leased_paths: set[Path] = set()
+_leased_paths: dict[Path, int] = {}
 
 
 def acquire_playback(path: Path) -> None:
     with _lease_lock:
-        _leased_paths.add(path.resolve())
+        resolved = path.resolve()
+        _leased_paths[resolved] = _leased_paths.get(resolved, 0) + 1
 
 
 def release_playback(path: Path) -> None:
     with _lease_lock:
-        _leased_paths.discard(path.resolve())
+        resolved = path.resolve()
+        count = _leased_paths.get(resolved, 0)
+        if count <= 1:
+            _leased_paths.pop(resolved, None)
+        else:
+            _leased_paths[resolved] = count - 1
 
 
 def playback_is_leased(path: Path) -> bool:
@@ -131,6 +137,14 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                     continue
                 active=db.execute("SELECT 1 FROM recording_holds WHERE segment_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(row["id"],now.astimezone(timezone.utc).isoformat())).fetchone()
                 if active:
+                    continue
+                reserved=db.execute(
+                    "SELECT 1 FROM export_sources s JOIN exports e ON e.id=s.export_id "
+                    "WHERE s.segment_id=? AND e.status IN ('queued','running') LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if reserved:
+                    skipped_leased+=1
                     continue
                 days,_=effective_retention(db,row["camera_id"])
                 current_end=datetime.fromisoformat(current["ends_at"].replace("Z","+00:00"))
