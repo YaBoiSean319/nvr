@@ -37,7 +37,8 @@ from . import diagnostics
 from .retention import acquire_playback, coverage_summary, effective_retention, release_playback
 from .storage import assign_group_volume, configured_volumes, refresh_registry, storage_status
 from .preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
-from .exports import ExportManager, create_export_record, export_output_path, get_export, list_exports, request_cancel, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW
+from .exports import ExportManager, create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
+from .incidents import acknowledge_incident, incident_view, list_incidents, sync_storage_incidents
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -1148,7 +1149,10 @@ def delete_camera_retention(camera_id: str, _: Annotated[sqlite3.Row, Depends(ad
 @app.get("/api/storage")
 def get_storage_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
     refresh_registry()
-    return storage_status()
+    result = storage_status()
+    with connect() as db:
+        sync_storage_incidents(db, result["volumes"])
+    return result
 
 
 @app.get("/api/camera-groups/{group_id}/storage-volume")
@@ -1971,6 +1975,30 @@ def list_camera_coverage(
     return {"camera_id": camera_id, "current": health, "intervals": [dict(row) for row in reversed(rows)]}
 
 
+@app.get("/api/incidents")
+def get_incidents(
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+    state: str | None = Query(default=None, pattern="^(active|acknowledged|recovered)$"),
+) -> dict[str, object]:
+    with connect() as db:
+        return {"incidents": list_incidents(db, state=state)}
+
+
+@app.post("/api/incidents/{incident_id}/acknowledge")
+def post_incident_acknowledgement(
+    incident_id: str,
+    user: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, object]:
+    with connect() as db:
+        incident = acknowledge_incident(db, incident_id, int(user["id"]))
+        if incident is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        if incident.pop("acknowledgement_conflict", False):
+            raise HTTPException(status_code=409, detail="Incident has already recovered")
+        row = db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
+        return incident_view(db, row)
+
+
 @app.post("/api/playback/timeline")
 def synchronized_playback_timeline(
     payload: SynchronizedPlaybackRequest,
@@ -2235,3 +2263,29 @@ def download_export(job_id: str, user: Annotated[sqlite3.Row, Depends(current_us
         raise HTTPException(status_code=410, detail="Export file is unavailable")
     acquire_playback(path)
     return FileResponse(path, media_type="application/zip", filename=f"nvr-export-{job_id}.zip", background=BackgroundTask(release_playback, path))
+
+
+@app.post("/api/exports/{job_id}/verify")
+async def verify_export_evidence(job_id: str, request: Request, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    """Check manifest checksums against uploaded package bytes; media probing is separate."""
+    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if row["status"] != "completed":
+        raise HTTPException(status_code=409, detail="Evidence package is not ready")
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_VERIFY_PACKAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Evidence package exceeds the verification size limit")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_VERIFY_PACKAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Evidence package exceeds the verification size limit")
+    result = verify_evidence_bytes(bytes(body), job_id)
+    action = "evidence_verified" if result["checksums_valid"] else "evidence_verification_failed"
+    with connect() as db:
+        db.execute(
+            "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+            (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if result["checksums_valid"] else "invalid", "file_count": len(result["files"])})),
+        )
+    return {**result, "media_validation": "not_performed", "authenticity": "Checksums are unsigned. A matching manifest detects accidental or subsequent byte changes but does not prove package origin, creation time, or camera timestamp accuracy."}
