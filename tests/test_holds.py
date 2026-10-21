@@ -43,8 +43,6 @@ class PreservationHoldTests(unittest.TestCase):
             return self.active_user
         app.dependency_overrides[administrator]=admin_override
         self.context=TestClient(app);self.client=self.context.__enter__()
-        with connect() as db:
-            db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days) VALUES('camera',?,1)",(self.camera,))
 
     def tearDown(self):
         self.context.__exit__(None,None,None)
@@ -66,6 +64,8 @@ class PreservationHoldTests(unittest.TestCase):
         held=self.client.post(url+"/hold",json={})
         self.assertEqual(held.status_code,201,held.text)
         self.assertIsNone(held.json()["expires_at"])
+        with connect() as db:
+            db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days) VALUES('camera',?,1)",(self.camera,))
         self.assertEqual(self.client.delete(url).status_code,403)
         self.assertEqual(cleanup_expired_recordings()["removed_segments"],0)
         self.assertTrue(self.media.exists())
