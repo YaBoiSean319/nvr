@@ -7,6 +7,8 @@
   <title>Workplace NVR</title>
   <style>
     :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; --bg:#f4f6f8; --panel:#fff; --ink:#18212b; --muted:#586575; --accent:#155eef; }
+    :root[data-theme="light"] { color-scheme:light; --bg:#f4f6f8; --panel:#fff; --ink:#18212b; --muted:#586575; --accent:#155eef; }
+    :root[data-theme="dark"] { color-scheme:dark; --bg:#10151c; --panel:#1b232d; --ink:#edf2f7; --muted:#a7b2c0; --accent:#8ab4ff; }
     @media (prefers-color-scheme:dark) { :root { --bg:#10151c; --panel:#1b232d; --ink:#edf2f7; --muted:#a7b2c0; --accent:#8ab4ff; } }
     * { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--ink); min-height:100vh; display:grid; place-items:center; padding:1.5rem }
     main { width:min(100%, 78rem); background:var(--panel); padding:clamp(1rem,3vw,2.5rem); border-radius:1rem; box-shadow:0 1rem 3rem #0002 }
@@ -32,6 +34,33 @@
     .playback-gap.expected_idle { background:#8793a155; border-color:#8793a1 }
     .playback-motion { position:absolute; top:0; height:100%; width:.8rem; transform:translateX(-50%); padding:0; background:#f5a623; border:1px solid #925f00; }
     .playback-status { color:var(--muted); min-height:1.5em }
+    #status { width:min(100%, 100rem); }
+    .console-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:1rem; border-bottom:1px solid #8793a155; padding-bottom:.75rem }
+    .console-header h1 { margin:0; font-size:1.35rem }
+    #console-nav { display:flex; flex-wrap:wrap; gap:.25rem }
+    #console-nav button { margin:0; background:transparent; color:var(--ink); }
+    #console-nav button[aria-current="page"] { background:var(--accent); color:#fff }
+    .console-layout { display:grid; grid-template-columns:minmax(13rem,20rem) minmax(0,1fr); gap:1rem; align-items:start }
+    .console-layout.sidebar-collapsed { grid-template-columns:3rem minmax(0,1fr) }
+    #console-sidebar { position:sticky; top:1rem; height:min(75vh,60rem); min-width:3rem; max-width:24rem; resize:horizontal; overflow:auto; padding:.75rem; border:1px solid #8793a155; border-radius:.65rem; background:var(--bg) }
+    .sidebar-collapsed #console-sidebar { width:3rem; resize:none; padding:.35rem }
+    #console-sidebar h2 { margin:.25rem 0; font-size:1rem }
+    #console-sidebar section { margin-top:.8rem }
+    #console-sidebar ul { list-style:none; padding:0; margin:.25rem 0 }
+    #console-sidebar li button { display:flex; justify-content:space-between; gap:.5rem; width:100%; margin:.1rem 0; padding:.4rem .5rem; text-align:left; background:transparent; color:var(--ink); font-weight:400 }
+    #console-sidebar li button:hover, #console-sidebar li button:focus-visible { background:#8793a122 }
+    .health-dot { flex:none; width:.65rem; height:.65rem; margin-top:.4rem; border-radius:50%; background:#8793a1 }
+    .health-dot[data-health="healthy"], .health-dot[data-health="covered"] { background:#12b76a }
+    .health-dot[data-health="failure"], .health-dot[data-health="unavailable"] { background:#f04438 }
+    .health-dot[data-health="uncertain"], .health-dot[data-health="expected_idle"] { background:#f79009 }
+    #console-workspace { min-width:0 }
+    .console-page { min-width:0 }
+    .console-page > h2 { margin-top:0 }
+    .console-tools { display:flex; align-items:center; gap:.5rem }
+    .console-tools select { margin:0 }
+    .sidebar-collapsed #sidebar-search, .sidebar-collapsed #console-sidebar h2, .sidebar-collapsed #console-sidebar section { display:none }
+    #sidebar-toggle { padding:.45rem .65rem; margin:0 }
+    @media(max-width:760px) { body { padding:.5rem } .console-layout, .console-layout.sidebar-collapsed { grid-template-columns:1fr } #console-sidebar { position:static; width:auto!important; max-width:none; height:auto; resize:none } .sidebar-collapsed #console-sidebar { display:none } }
     .hidden { display:none } .badge { color:#087443 }
   </style>
 </head>
@@ -58,7 +87,34 @@
       <button id="entra-login" type="button" class="hidden">Sign in with Microsoft Entra</button>
     </section>
     <section id="status" class="hidden">
-      <h2>System status</h2><p class="badge">● Application healthy</p>
+      <header class="console-header">
+        <h1>Workplace NVR</h1>
+        <nav id="console-nav" aria-label="Main navigation">
+          <button type="button" data-screen="live" aria-current="page">Live</button>
+          <button type="button" data-screen="footage">Footage Search</button>
+          <button type="button" data-screen="camera-settings" class="hidden">Camera Settings</button>
+          <button type="button" data-screen="app-settings" class="hidden">App Settings</button>
+        </nav>
+        <div class="console-tools">
+          <label for="theme-choice">Theme</label><select id="theme-choice" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+          <button id="sidebar-toggle" type="button" aria-controls="console-sidebar" aria-expanded="true" aria-label="Collapse camera sidebar">☰</button>
+        </div>
+      </header>
+      <div id="console-layout" class="console-layout">
+       <aside id="console-sidebar" aria-label="Camera navigation">
+        <label for="sidebar-search">Search cameras, groups, and views</label><input id="sidebar-search" type="search" autocomplete="off" placeholder="Search by name or IP">
+        <section aria-labelledby="sidebar-cameras-heading"><h2 id="sidebar-cameras-heading">Cameras</h2><ul id="sidebar-cameras"></ul></section>
+        <section aria-labelledby="sidebar-groups-heading"><h2 id="sidebar-groups-heading">Groups</h2><ul id="sidebar-groups"></ul></section>
+        <section aria-labelledby="sidebar-views-heading"><h2 id="sidebar-views-heading">Saved Views</h2><ul id="sidebar-views"></ul></section>
+       </aside>
+       <div id="console-workspace">
+        <section class="console-page" data-page="live" aria-labelledby="live-page-heading"><h2 id="live-page-heading">Live</h2><div id="live-page-content"></div></section>
+        <section class="console-page hidden" data-page="footage" aria-labelledby="footage-page-heading"><h2 id="footage-page-heading">Footage Search</h2><div id="footage-page-content"></div></section>
+        <section class="console-page hidden" data-page="camera-settings" aria-labelledby="camera-settings-heading"><h2 id="camera-settings-heading">Camera Settings</h2><div id="camera-settings-content"></div></section>
+        <section class="console-page hidden" data-page="app-settings" aria-labelledby="app-settings-heading"><h2 id="app-settings-heading">App Settings</h2><div id="app-settings-content"></div></section>
+       </div>
+      </div>
+      <h2 id="status-heading">System status</h2><p class="badge">● Application healthy</p>
       <dl id="status-list"></dl>
       <section id="session-admin" class="hidden" aria-labelledby="sessions-heading">
         <h2 id="sessions-heading">Active sessions</h2>

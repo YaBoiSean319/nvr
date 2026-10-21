@@ -13,7 +13,95 @@ let playbackSyncGuard = false;
 let exportPollTimer = null;
 let incidentPollTimer = null;
 let webhookPollTimer = null;
-function show(name) { if(name!=="status") stopSynchronizedPlayback(); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
+let consoleShellReady = false;
+let activeScreen = "live";
+let sidebarCameras = [];
+let sidebarGroups = [];
+let sidebarViews = [];
+function show(name) { if(name!=="status") stopSynchronizedPlayback(); document.querySelector("main > h1").classList.toggle("hidden", name === "status"); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
+function moveInto(selector, targetSelector) {
+  const element = document.querySelector(selector), target = document.querySelector(targetSelector);
+  if (element && target) target.append(element);
+}
+function setupConsoleShell() {
+  if (consoleShellReady) return;
+  const live = document.querySelector("#live-page-content"), footage = document.querySelector("#footage-page-content");
+  const cameraSettings = document.querySelector("#camera-settings-content"), appSettings = document.querySelector("#app-settings-content");
+  for (const selector of ["#live-heading", "#incidents-heading"]) {
+    const heading = document.querySelector(selector);
+    if (heading) live.append(heading.closest("section"));
+  }
+  for (const selector of ["#playback-heading"]) {
+    const heading = document.querySelector(selector);
+    if (heading) footage.append(heading.closest("section"));
+  }
+  for (const selector of ["#camera-heading", "#discovery-admin", "#bulk-admin", "#camera-form", "#camera-message", "#camera-list", "#segment-list", "#playback"]) {
+    if (selector === "#camera-heading") {
+      const heading = document.querySelector(selector);
+      if (heading) cameraSettings.append(heading);
+    } else moveInto(selector, "#camera-settings-content");
+  }
+  const recordedHeading = [...document.querySelectorAll("h3")].find(item => item.textContent.trim() === "Recorded footage");
+  if (recordedHeading) cameraSettings.append(recordedHeading);
+  moveInto("#status > .badge", "#app-settings-content");
+  for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#logout"]) moveInto(selector, "#app-settings-content");
+  document.querySelectorAll("[data-screen]").forEach(button => button.addEventListener("click", () => setScreen(button.dataset.screen)));
+  document.querySelector("#sidebar-toggle").addEventListener("click", () => {
+    const layout = document.querySelector("#console-layout"), button = document.querySelector("#sidebar-toggle");
+    const collapsed = layout.classList.toggle("sidebar-collapsed");
+    button.setAttribute("aria-expanded", String(!collapsed));
+    button.setAttribute("aria-label", collapsed ? "Expand camera sidebar" : "Collapse camera sidebar");
+  });
+  document.querySelector("#sidebar-search").addEventListener("input", filterSidebar);
+  const theme = document.querySelector("#theme-choice"), savedTheme = localStorage.getItem("nvr-theme") || "system";
+  theme.value = savedTheme; document.documentElement.dataset.theme = savedTheme === "system" ? "" : savedTheme;
+  theme.addEventListener("change", () => { localStorage.setItem("nvr-theme", theme.value); document.documentElement.dataset.theme = theme.value === "system" ? "" : theme.value; });
+  consoleShellReady = true;
+}
+function setScreen(screen) {
+  if (!document.querySelector(`[data-page="${screen}"]`)) return;
+  if (activeScreen === "live" && screen !== "live") stopLiveViews();
+  if (screen !== "footage") stopSynchronizedPlayback();
+  activeScreen = screen;
+  document.querySelectorAll("[data-page]").forEach(page => page.classList.toggle("hidden", page.dataset.page !== screen));
+  document.querySelectorAll("#console-nav [data-screen]").forEach(button => {
+    if (button.classList.contains("hidden")) return;
+    if (button.dataset.screen === screen) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+}
+function filterSidebar() {
+  const query = document.querySelector("#sidebar-search").value.trim().toLocaleLowerCase();
+  document.querySelectorAll("#console-sidebar li").forEach(item => { item.hidden = !item.dataset.searchText.includes(query); });
+}
+function sidebarItem(target, label, searchText, activate, health = null) {
+  const row = document.createElement("li"); row.dataset.searchText = searchText.toLocaleLowerCase();
+  const button = document.createElement("button"); button.type = "button"; button.append(document.createTextNode(label));
+  if (health) { const dot = document.createElement("span"); dot.className = "health-dot"; dot.dataset.health = health; dot.setAttribute("aria-label", `Health: ${health.replaceAll("_", " ")}`); button.append(dot); }
+  button.addEventListener("click", activate); row.append(button); target.append(row); return row;
+}
+function renderSidebar() {
+  const cameraList = document.querySelector("#sidebar-cameras"), groupList = document.querySelector("#sidebar-groups"), viewList = document.querySelector("#sidebar-views");
+  cameraList.replaceChildren(); groupList.replaceChildren(); viewList.replaceChildren();
+  for (const camera of [...sidebarCameras].sort((a, b) => a.name.localeCompare(b.name))) {
+    let address = "";
+    try { address = new URL(camera.stream_url).hostname; } catch {}
+    sidebarItem(cameraList, camera.name, `${camera.name} ${address}`, () => {
+    setScreen("live"); const choice = [...document.querySelectorAll("[data-live-camera]")].find(input => input.value === camera.id);
+    if (choice) choice.checked = true;
+    }, camera.recording_health?.state || camera.recording_status || "unknown");
+  }
+  for (const group of sidebarGroups) sidebarItem(groupList, group.name, group.name, () => {
+    setScreen("live"); const members = new Set(sidebarCameras.filter(camera => camera.group_name === group.name).map(camera => camera.id));
+    document.querySelectorAll("[data-live-camera]").forEach(input => { input.checked = members.has(input.value); });
+    if (!members.size) document.querySelector("#live-message").textContent = "This group has no available cameras.";
+  });
+  for (const view of sidebarViews) sidebarItem(viewList, view.name, view.name, () => {
+    setScreen("live"); document.querySelectorAll("[data-live-camera]").forEach(input => { input.checked = view.camera_ids.includes(input.value); });
+    document.querySelector("#live-layouts").value = view.name;
+  });
+  filterSidebar();
+}
 async function showLogin() {
   const state = await api("/api/setup/status");
   show(state.setup_required ? "setup" : "login");
@@ -60,7 +148,10 @@ async function refresh() {
     const who = await api("/api/auth/me");
     currentRole = who.role;
     const admin = currentRole === "administrator";
-    document.querySelector("#status h2").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
+    setupConsoleShell();
+    document.querySelectorAll('#console-nav [data-screen="camera-settings"], #console-nav [data-screen="app-settings"]').forEach(button => button.classList.toggle("hidden", !admin));
+    if (!admin && ["camera-settings", "app-settings"].includes(activeScreen)) setScreen("live");
+    document.querySelector("#status-heading").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
     document.querySelector("#status-list").classList.toggle("hidden", !admin);
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#diagnostics-admin").classList.toggle("hidden", !admin);
@@ -80,15 +171,20 @@ async function refresh() {
       await loadAiRuntimeSettings();
     }
     const inventory = await api("/api/cameras");
-    if (admin) await refreshGroups();
     latestCameras = inventory.cameras;
+    sidebarCameras = inventory.cameras;
+    const {groups} = await api("/api/camera-groups");
+    sidebarGroups = groups;
+    if (admin) await refreshGroups();
     await refreshIncidents();
     renderCameras(inventory.cameras);
     renderLiveCameraPicker(inventory.cameras);
     renderPlaybackCameraPicker(inventory.cameras);
     await refreshLiveLayouts();
+    renderSidebar();
     await refreshExports();
     if (admin) await refreshDiscovery();
+    setScreen(activeScreen === "footage" ? "footage" : "live");
     show("status");
   } catch (error) {
     if (error.message === "Authentication required" || error.message === "Session expired") {
@@ -107,9 +203,11 @@ function renderLiveCameraPicker(cameras) {
 async function refreshLiveLayouts() {
   try {
     const {layouts}=await api("/api/live/layouts");
+    sidebarViews = layouts;
     const select=document.querySelector("#live-layouts"), previous=select.value;
     select.replaceChildren(new Option("Choose a saved layout",""),...layouts.map(layout=>new Option(layout.name,layout.name)));
     if(layouts.some(layout=>layout.name===previous)) select.value=previous;
+    renderSidebar();
   } catch(error) { document.querySelector("#live-message").textContent=error.message; }
 }
 async function refreshIncidents() {
