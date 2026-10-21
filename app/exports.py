@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import json
 import os
 import shutil
@@ -23,6 +25,57 @@ MAX_EXPORT_WINDOW = timedelta(hours=24)
 MAX_EXPORT_SOURCE_BYTES = 100 * 1024**3
 MAX_EXPORT_SEGMENTS = 5000
 EXPORT_DIRECTORY = "exports"
+MAX_VERIFY_PACKAGE_BYTES = 2 * 1024**3
+
+
+def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None) -> dict[str, Any]:
+    """Verify the evidence manifest against the exact uploaded ZIP member bytes.
+
+    This deliberately does not extract files or validate that media is playable.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+            infos = archive.infolist()
+            names = [item.filename for item in infos]
+            if len(names) != len(set(names)) or any(name.startswith("/") or ".." in Path(name).parts for name in names):
+                raise ValueError("invalid archive paths")
+            if sum(item.file_size for item in infos) > MAX_VERIFY_PACKAGE_BYTES:
+                raise ValueError("uncompressed package exceeds the verification size limit")
+            if names.count("integrity.json") != 1:
+                raise ValueError("integrity manifest is missing or duplicated")
+            manifest = json.loads(archive.read("integrity.json"))
+            if manifest.get("algorithm") != "sha256" or not isinstance(manifest.get("files"), list):
+                raise ValueError("unsupported integrity manifest")
+            expected = {entry["path"]: entry for entry in manifest["files"]}
+            if len(expected) != len(manifest["files"]):
+                raise ValueError("integrity manifest contains duplicate paths")
+            delivered = set(names) - {"integrity.json"}
+            if delivered != set(expected):
+                return {"checksums_valid": False, "files": [], "error": "package contents do not match the integrity manifest"}
+            if expected_export_id is not None:
+                metadata = json.loads(archive.read("metadata.json"))
+                if metadata.get("export_id") != expected_export_id or metadata.get("audit_reference") != {"resource_type": "export", "resource_id": expected_export_id}:
+                    return {"checksums_valid": False, "files": [], "error": "package identity does not match the requested export"}
+            files = []
+            valid = True
+            for name in sorted(delivered):
+                content = archive.read(name)
+                digest = hashlib.sha256(content).hexdigest()
+                entry = expected[name]
+                matches = len(content) == entry.get("size_bytes") and digest == entry.get("sha256")
+                valid = valid and matches
+                files.append({"path": name, "size_bytes": len(content), "sha256": digest, "matches": matches})
+            return {"checksums_valid": valid, "files": files, "error": None if valid else "one or more file checksums do not match"}
+    except (zipfile.BadZipFile, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"checksums_valid": False, "files": [], "error": f"invalid evidence package: {str(exc)[:200]}"}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class ExportCancelled(Exception):
@@ -225,12 +278,15 @@ class ExportManager:
 
             metadata: dict[str, Any] = {
                 "schema_version": 1,
+                "package_type": "nvr_evidence",
                 "export_id": job_id,
+                "audit_reference": {"resource_type": "export", "resource_id": job_id},
                 "requested_by_user_id": requester,
                 "requested_interval": {"start": start.isoformat(), "end": end.isoformat()},
                 "generated_at": datetime.now(timezone.utc).isoformat(),
+                "timestamp_provenance": "All timestamps are ISO 8601 with explicit UTC offsets and normalized to UTC. Recording intervals come from the NVR segment index; camera clock accuracy and timestamp authenticity are not independently attested.",
                 "cameras": [],
-                "notes": ["Video is exported without audio.", "Missing intervals are listed explicitly; the video concatenates available clips and therefore does not encode wall-clock gaps."],
+                "notes": ["Video is exported without audio.", "Missing intervals are listed explicitly; the video concatenates available clips and therefore does not encode wall-clock gaps.", "SHA-256 detects changes relative to this manifest but is not a digital signature and does not establish who created the package or when."],
             }
             for camera in per_camera:
                 if job_id in self._cancelled:
@@ -269,11 +325,23 @@ class ExportManager:
             work_dir.mkdir(parents=True, exist_ok=True)
             metadata_path = work_dir / "metadata.json"
             metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+            package_files = [metadata_path] + [work_dir / item["video_file"] for item in metadata["cameras"] if item["video_file"]]
+            integrity = {
+                "schema_version": 1,
+                "algorithm": "sha256",
+                "files": [
+                    {"path": path.name, "size_bytes": path.stat().st_size, "sha256": _file_sha256(path)}
+                    for path in package_files
+                ],
+            }
+            integrity_path = work_dir / "integrity.json"
+            integrity_path.write_text(json.dumps(integrity, indent=2, sort_keys=True), encoding="utf-8")
             if job_id in self._cancelled:
                 raise ExportCancelled()
             final_path.parent.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(partial_path, "w", compression=zipfile.ZIP_STORED) as archive:
                 archive.write(metadata_path, "metadata.json")
+                archive.write(integrity_path, "integrity.json")
                 for item in metadata["cameras"]:
                     if item["video_file"]:
                         archive.write(work_dir / item["video_file"], item["video_file"])
