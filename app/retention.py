@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import shutil
 import threading
 from datetime import datetime, timedelta, timezone
@@ -107,12 +108,13 @@ def coverage_summary(db, camera_id: str, root: Path | None = None, now: datetime
 
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
-    root = recordings_path()
     removed_segments = removed_bytes = skipped_leased = failed = 0
     with connect() as db:
-        rows = db.execute(
-            "SELECT s.id,s.camera_id,s.relative_path,s.ends_at,s.size_bytes FROM recording_segments s ORDER BY s.ends_at"
-        ).fetchall()
+        expired=db.execute("SELECT id,segment_id FROM recording_holds WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?",(now.astimezone(timezone.utc).isoformat(),)).fetchall()
+        for hold in expired:
+            db.execute("UPDATE recording_holds SET released_at=expires_at WHERE id=?",(hold["id"],))
+            db.execute("INSERT INTO audit_log(action,resource_type,resource_id,details_json) VALUES('expire_hold','recording_segment',?,'{}')",(str(hold["segment_id"] or "unknown"),))
+        rows = db.execute("SELECT s.id,s.camera_id,s.relative_path,s.ends_at,s.size_bytes FROM recording_segments s ORDER BY s.ends_at").fetchall()
     for row in rows:
         try:
             end = datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00"))
@@ -121,22 +123,28 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
         except ValueError:
             failed += 1
             continue
-        with connect() as db:
-            days, _ = effective_retention(db, row["camera_id"])
-        if end > now - timedelta(days=days):
-            continue
-        path = (root / row["relative_path"]).resolve()
-        if root not in path.parents:
-            failed += 1
-            continue
         try:
-            if not unlink_if_unleased(path):
-                skipped_leased += 1
-                continue
             with connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current=db.execute("SELECT id,camera_id,relative_path,ends_at,size_bytes FROM recording_segments WHERE id=?",(row["id"],)).fetchone()
+                if current is None:
+                    continue
+                active=db.execute("SELECT 1 FROM recording_holds WHERE segment_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(row["id"],now.astimezone(timezone.utc).isoformat())).fetchone()
+                if active:
+                    continue
+                days,_=effective_retention(db,row["camera_id"])
+                current_end=datetime.fromisoformat(current["ends_at"].replace("Z","+00:00"))
+                if current_end.tzinfo is None: current_end=current_end.replace(tzinfo=timezone.utc)
+                if current_end>now-timedelta(days=days):
+                    continue
+                from .storage import recording_file_path
+                path=recording_file_path(current["relative_path"])
+                if not unlink_if_unleased(path):
+                    skipped_leased+=1
+                    continue
                 db.execute("DELETE FROM recording_segments WHERE id=?", (row["id"],))
             removed_segments += 1
-            removed_bytes += int(row["size_bytes"])
-        except OSError:
+            removed_bytes += int(current["size_bytes"])
+        except (OSError,sqlite3.Error):
             failed += 1
     return {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "skipped_playback": skipped_leased, "failed": failed}
