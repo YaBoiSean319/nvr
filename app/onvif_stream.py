@@ -79,6 +79,8 @@ def _stream_lookup_inputs(
             raise ValueError("Invalid ONVIF device service port") from exc
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("Invalid ONVIF device service URL")
+        if parsed.hostname != str(address):
+            raise ValueError("ONVIF device service URL host must match the camera IP address")
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("Invalid ONVIF device service port")
         service_urls = (device_service_url,)
