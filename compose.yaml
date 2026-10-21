@@ -1,9 +1,11 @@
 services:
   nvr:
-    build: .
+    image: ghcr.io/yaboisean319/nvr:edge
+    pull_policy: always
     restart: unless-stopped
+    stop_grace_period: 30s
     ports:
-      - "${NVR_PORT:-8080}:8080"
+      - "${NVR_PORT:-8280}:8080"
     environment:
       NVR_DB_PATH: /data/nvr.sqlite3
       NVR_RECORDINGS_PATH: /recordings
