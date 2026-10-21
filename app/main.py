@@ -37,6 +37,7 @@ from . import diagnostics
 from .retention import acquire_playback, coverage_summary, effective_retention, release_playback
 from .storage import assign_group_volume, configured_volumes, refresh_registry, storage_status
 from .preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
+from .exports import ExportManager, create_export_record, export_output_path, get_export, list_exports, request_cancel, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -58,9 +59,12 @@ def _secure_cookie() -> bool:
 async def lifespan(_: FastAPI):
     os.umask(0o077)
     initialize()
+    app.state.exports = ExportManager()
+    await app.state.exports.start()
     app.state.recorders = RecordingManager()
     await app.state.recorders.start()
     yield
+    await app.state.exports.stop()
     await app.state.recorders.stop()
 
 
@@ -187,6 +191,22 @@ class SynchronizedPlaybackRequest(BaseModel):
             raise ValueError("Playback interval must include timezone-aware start and end times")
         if self.end - self.start > timedelta(hours=24):
             raise ValueError("Synchronized playback is limited to 24 hours per search")
+        return self
+
+
+class ExportRequest(BaseModel):
+    camera_ids: list[str] = Field(min_length=1, max_length=MAX_EXPORT_CAMERAS)
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "ExportRequest":
+        if len(set(self.camera_ids)) != len(self.camera_ids):
+            raise ValueError("Choose each camera only once")
+        if self.start.tzinfo is None or self.end.tzinfo is None or self.end <= self.start:
+            raise ValueError("Export interval must include timezone-aware start and end times")
+        if self.end - self.start > MAX_EXPORT_WINDOW:
+            raise ValueError("Exports are limited to 24 hours per job")
         return self
 
 
@@ -2149,3 +2169,69 @@ async def snapshot_segment(
         raise HTTPException(status_code=503, detail="Snapshot extraction timed out") from exc
     finally:
         release_playback(path)
+
+
+@app.get("/api/exports")
+def get_exports(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    return {"exports": list_exports(int(user["id"]), user["role"] == "administrator")}
+
+
+@app.post("/api/exports", status_code=status.HTTP_202_ACCEPTED)
+async def create_export(
+    payload: ExportRequest,
+    request: Request,
+    user: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, object]:
+    start, end = payload.start.astimezone(timezone.utc), payload.end.astimezone(timezone.utc)
+    try:
+        job_id = create_export_record(int(user["id"]), payload.camera_ids, start, end)
+    except LookupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OverflowError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    try:
+        request.app.state.exports.enqueue(job_id)
+    except (AttributeError, RuntimeError) as exc:
+        with connect() as db:
+            db.execute("UPDATE exports SET status='failed',error=?,completed_at=?,updated_at=? WHERE id=?", ("Export worker is unavailable", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
+            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (int(user["id"]), "export_failed", "export", job_id, '{"reason":"worker_unavailable"}'))
+        raise HTTPException(status_code=503, detail="Export worker is unavailable") from exc
+    row = get_export(job_id, int(user["id"]))
+    return _job_view(row)
+
+
+@app.get("/api/exports/{job_id}")
+def get_export_status(job_id: str, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    return _job_view(row)
+
+
+@app.post("/api/exports/{job_id}/cancel")
+async def cancel_export(job_id: str, request: Request, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    try:
+        state = request_cancel(job_id, int(user["id"]), user["role"] == "administrator")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if state == "cancel_requested":
+        await request.app.state.exports.cancel(job_id)
+    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
+    return _job_view(row)
+
+
+@app.get("/api/exports/{job_id}/download")
+def download_export(job_id: str, user: Annotated[sqlite3.Row, Depends(current_user)]) -> FileResponse:
+    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    try:
+        path = export_output_path(row)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=410, detail="Export file is unavailable") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="Export file is unavailable")
+    acquire_playback(path)
+    return FileResponse(path, media_type="application/zip", filename=f"nvr-export-{job_id}.zip", background=BackgroundTask(release_playback, path))
