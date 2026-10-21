@@ -64,9 +64,10 @@
         <h2 id="camera-heading">Cameras</h2>
         <section id="discovery-admin" class="hidden" aria-labelledby="discovery-heading">
           <h3 id="discovery-heading">Discover cameras</h3>
-          <p>Run an explicit ONVIF discovery scan on the configured camera VLAN. Discovered devices are candidates only; nothing records until an administrator reviews and adds it.</p>
+          <p>Use multicast on the camera VLAN, or enter a private IPv4 CIDR range reachable through routing. Range scans use unicast ONVIF probes and do not require the NVR host on that VLAN. Discovered devices are candidates only; nothing records until an administrator reviews and adds it.</p>
+          <label for="discovery-ip-range">Camera IP range (CIDR, optional)</label><input id="discovery-ip-range" inputmode="numeric" autocomplete="off" placeholder="10.45.50.0/24">
           <label for="discovery-timeout">Scan duration (seconds)</label><input id="discovery-timeout" type="number" min="0.5" max="15" step="0.5" value="5">
-          <button id="discover-cameras" type="button">Scan camera VLAN</button>
+          <button id="discover-cameras" type="button">Scan camera VLAN</button><button id="discover-ip-range" type="button">Scan IP range</button>
           <p id="discovery-message" role="status" aria-live="polite"></p>
           <div id="discovery-candidates"></div>
         </section>
@@ -88,7 +89,15 @@
         </section>
         <form id="camera-form">
           <label for="camera-name">Camera name</label><input id="camera-name" maxlength="120" required>
-          <label for="stream-url">RTSP or RTSPS stream URL</label><input id="stream-url" type="url" autocomplete="off" required placeholder="rtsp://user:password@camera/stream">
+          <label for="camera-ip">Camera IP address</label><input id="camera-ip" inputmode="numeric" autocomplete="off" required placeholder="10.45.50.25">
+          <label for="camera-port">Camera ONVIF port</label><input id="camera-port" type="number" min="1" max="65535" value="80" required>
+          <label for="camera-username">Camera username (optional)</label><input id="camera-username" autocomplete="off">
+          <label for="camera-password">Camera password (optional)</label><input id="camera-password" type="password" autocomplete="new-password">
+          <label for="camera-password-confirm">Confirm camera password</label><input id="camera-password-confirm" type="password" autocomplete="new-password">
+          <label for="camera-brand">Device type / brand</label><select id="camera-brand"><option value="auto">Auto-detect / ONVIF</option><option value="acti">ACTi</option><option value="axis">Axis</option><option value="bosch">Bosch</option><option value="dahua">Dahua</option><option value="hanwha">Hanwha</option><option value="hikvision">Hikvision</option><option value="reolink">Reolink</option><option value="samsung">Samsung</option><option value="uniview">Uniview</option><option value="other">Other / generic ONVIF</option></select>
+          <button id="load-camera-profiles" type="button">Load camera endpoints</button>
+          <label for="camera-profile">Camera stream endpoint</label><select id="camera-profile"><option value="">Load endpoints to choose a stream</option></select>
+          <p id="camera-profile-message" role="status" aria-live="polite"></p>
           <label for="recording-mode">Recording mode</label>
           <select id="recording-mode">
             <option value="motion" selected>Motion (ONVIF events)</option>
