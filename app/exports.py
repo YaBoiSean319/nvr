@@ -154,6 +154,7 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
         "start": row["requested_start"],
         "end": row["requested_end"],
         "camera_ids": json.loads(row["camera_ids_json"]),
+        "output_modes": json.loads(row["output_modes_json"]),
         "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
         "error": row["error"],
         "download_url": f"/api/exports/{row['id']}/download" if row["status"] == "completed" and row["output_relative_path"] else None,
@@ -415,7 +416,13 @@ class ExportManager:
             raise RuntimeError(reason or "FFmpeg could not create a playable export")
 
 
-def create_export_record(requested_by: int, camera_ids: list[str], start: datetime, end: datetime) -> str:
+def create_export_record(
+    requested_by: int, camera_ids: list[str], start: datetime, end: datetime,
+    output_modes: list[str] | None = None,
+) -> str:
+    output_modes = output_modes or ["individual", "grid"]
+    if not output_modes or len(set(output_modes)) != len(output_modes) or any(mode not in {"individual", "grid"} for mode in output_modes):
+        raise ValueError("Choose individual, grid, or both export outputs")
     job_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:
@@ -437,11 +444,11 @@ def create_export_record(requested_by: int, camera_ids: list[str], start: dateti
             raise LookupError("No indexed footage is available in the requested interval")
         if count > MAX_EXPORT_SEGMENTS or size > MAX_EXPORT_SOURCE_BYTES:
             raise OverflowError("Export source exceeds the supported size or segment limit")
-        db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,requested_start,requested_end,status,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)",
-                   (job_id, requested_by, json.dumps(camera_ids), start.isoformat(), end.isoformat(), now, now))
+        db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,output_modes_json,requested_start,requested_end,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?)",
+                   (job_id, requested_by, json.dumps(camera_ids), json.dumps(output_modes), start.isoformat(), end.isoformat(), now, now))
         db.executemany("INSERT INTO export_sources(export_id,segment_id) VALUES(?,?)", ((job_id, segment["id"]) for segment in segments))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (requested_by, "export_requested", "export", job_id, json.dumps({"cameras": len(camera_ids), "start": start.isoformat(), "end": end.isoformat()})))
+                   (requested_by, "export_requested", "export", job_id, json.dumps({"cameras": len(camera_ids), "start": start.isoformat(), "end": end.isoformat(), "output_modes": output_modes})))
     return job_id
 
 

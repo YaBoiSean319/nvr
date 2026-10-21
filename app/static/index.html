@@ -40,6 +40,7 @@
     .playback-gap { position:absolute; top:0; bottom:0; background:#b4231855; border:1px solid #b42318; }
     .playback-gap.expected_idle { background:#8793a155; border-color:#8793a1 }
     .playback-motion { position:absolute; top:0; height:100%; width:.8rem; transform:translateX(-50%); padding:0; background:#f5a623; border:1px solid #925f00; }
+    .playback-export-selection { position:absolute; top:0; bottom:0; background:#f5c54255; border:1px solid #e1aa00; pointer-events:none }
     .playback-status { color:var(--muted); min-height:1.5em }
     .playback-ruler { position:relative; height:2.4rem; margin:1rem 0 .5rem; border-bottom:1px solid #8793a1; cursor:grab; touch-action:none; user-select:none }
     .playback-ruler:active { cursor:grabbing }
@@ -220,7 +221,16 @@
             <label><input id="playback-skip-empty" type="checkbox"> Skip periods with no footage on any searched camera</label>
           </div>
           <button id="playback-search" type="button">Search footage</button><button id="playback-stop" type="button">Stop playback</button>
-          <button id="playback-export" type="button">Export selected footage</button>
+          <fieldset id="playback-export-selection">
+            <legend>Export selection</legend>
+            <button id="playback-mark-in" type="button" disabled>Mark In at playhead</button><button id="playback-mark-out" type="button" disabled>Mark Out at playhead</button><button id="playback-clear-marks" type="button" disabled>Clear Marks</button>
+            <label for="export-start">Export from</label><input id="export-start" type="datetime-local" disabled><select id="export-start-fold" class="hidden" disabled><option value="">Choose occurrence</option></select>
+            <label for="export-end">Export to</label><input id="export-end" type="datetime-local" disabled><select id="export-end-fold" class="hidden" disabled><option value="">Choose occurrence</option></select>
+            <fieldset id="export-camera-selection"><legend>Cameras to export</legend><p>Search footage to choose cameras.</p></fieldset>
+            <fieldset><legend>Include output</legend><label><input type="checkbox" data-export-mode="individual" checked>Individual camera videos</label><label><input type="checkbox" data-export-mode="grid" checked>Synchronized grid video</label></fieldset>
+            <p id="export-preflight" role="status">Search footage to preview recording coverage and gaps.</p>
+          </fieldset>
+          <button id="playback-export" type="button" disabled>Export selected footage</button>
           <p>Exports run as bounded background jobs. Completed downloads contain one playable video per selected camera and metadata listing actual recorded intervals and missing time. Audio is omitted.</p>
           <p id="export-message" role="status" aria-live="polite"></p>
           <ul id="export-jobs" aria-live="polite"></ul>
@@ -325,6 +335,7 @@
           <button type="submit">Test and add camera</button>
         </form>
         <p id="camera-message" role="status" aria-live="polite"></p>
+        <label for="camera-inventory-search">Search camera inventory</label><input id="camera-inventory-search" type="search" autocomplete="off" placeholder="Name or group">
         <div id="camera-list"></div>
         <h3>Recorded footage</h3>
         <div id="segment-list"></div>

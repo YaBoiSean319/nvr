@@ -261,6 +261,31 @@ class ExportJobTests(unittest.TestCase):
         })
         self.assertEqual(too_long.status_code, 422)
 
+    def test_export_output_selection_is_validated_and_persisted(self):
+        with patch.object(self.client.app.state.exports, "enqueue"):
+            selected = self.client.post("/api/exports", json={
+                "camera_ids": [self.camera],
+                "start": "2026-10-20T09:59:59.500000Z",
+                "end": "2026-10-20T10:00:00.800000Z",
+                "output_modes": ["individual"],
+            })
+            defaulted = self.client.post("/api/exports", json={
+                "camera_ids": [self.camera],
+                "start": "2026-10-20T09:59:59.500000Z",
+                "end": "2026-10-20T10:00:00.800000Z",
+            })
+        self.assertEqual(selected.status_code, 202, selected.text)
+        self.assertEqual(selected.json()["output_modes"], ["individual"])
+        self.assertEqual(defaulted.status_code, 202, defaulted.text)
+        self.assertEqual(defaulted.json()["output_modes"], ["individual", "grid"])
+        invalid = self.client.post("/api/exports", json={
+            "camera_ids": [self.camera],
+            "start": "2026-10-20T09:59:59.500000Z",
+            "end": "2026-10-20T10:00:00.800000Z",
+            "output_modes": ["thumbnail"],
+        })
+        self.assertEqual(invalid.status_code, 422)
+
 
     def test_evidence_package_hashes_bytes_and_verification_is_independent_of_media_probe(self):
         if not self.ffmpeg:

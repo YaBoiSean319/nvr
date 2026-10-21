@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 import uuid
@@ -130,6 +131,13 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["content-type"], "image/jpeg")
         self.assertEqual(response.content, b"\xff\xd8jpeg\xff\xd9")
+        self.assertEqual(response.headers["x-source-time"], "2026-10-20T12:00:30+00:00")
+        self.assertRegex(response.headers["x-audit-reference"], r"^audit-[0-9]+$")
+        with connect() as db:
+            audit = db.execute("SELECT action,resource_id,details_json FROM audit_log WHERE id=?", (int(response.headers["x-audit-reference"].split("-")[1]),)).fetchone()
+        self.assertEqual(audit["action"], "snapshot_downloaded")
+        self.assertEqual(audit["resource_id"], str(segment))
+        self.assertEqual(json.loads(audit["details_json"])["source_time"], response.headers["x-source-time"])
         self.assertTrue(path.is_file())
         self.assertIn("-ss", ffmpeg.await_args.args)
         outside = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{segment}/snapshot?at=2026-10-20T12:01:00Z")

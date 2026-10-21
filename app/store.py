@@ -109,6 +109,11 @@ def initialize() -> None:
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 onvif_uuid TEXT,
                 group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL,
+                camera_ip TEXT,
+                camera_brand TEXT NOT NULL DEFAULT 'auto',
+                device_service_url TEXT,
+                onvif_profile_token TEXT,
+                live_substream_profile_token TEXT,
                 stream_url_ciphertext BLOB NOT NULL,
                 live_substream_url_ciphertext BLOB,
                 audio_supported INTEGER CHECK (audio_supported IN (0,1)),
@@ -180,6 +185,7 @@ def initialize() -> None:
                 id TEXT PRIMARY KEY,
                 requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 camera_ids_json TEXT NOT NULL,
+                output_modes_json TEXT NOT NULL DEFAULT '["individual","grid"]',
                 requested_start TEXT NOT NULL,
                 requested_end TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','cancelled')),
@@ -391,6 +397,9 @@ def initialize() -> None:
         for row in db.execute("SELECT id FROM incident_events WHERE event_id IS NULL").fetchall():
             db.execute("UPDATE incident_events SET event_id=? WHERE id=?", (str(uuid.uuid4()), row["id"]))
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS incident_events_event_id_idx ON incident_events(event_id)")
+        export_columns = {row[1] for row in db.execute("PRAGMA table_info(exports)")}
+        if "output_modes_json" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN output_modes_json TEXT NOT NULL DEFAULT '[\"individual\",\"grid\"]'")
         ai_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_camera_settings)")}
         if ai_columns and "config_override" not in ai_columns:
             db.execute("ALTER TABLE ai_camera_settings ADD COLUMN config_override INTEGER NOT NULL DEFAULT 0 CHECK (config_override IN (0,1))")
@@ -423,6 +432,15 @@ def initialize() -> None:
             db.execute("ALTER TABLE cameras ADD COLUMN onvif_uuid TEXT")
         if "group_id" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL")
+        for name, definition in (
+            ("camera_ip", "TEXT"),
+            ("camera_brand", "TEXT NOT NULL DEFAULT 'auto'"),
+            ("device_service_url", "TEXT"),
+            ("onvif_profile_token", "TEXT"),
+            ("live_substream_profile_token", "TEXT"),
+        ):
+            if name not in camera_columns:
+                db.execute(f"ALTER TABLE cameras ADD COLUMN {name} {definition}")
         if "live_substream_url_ciphertext" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN live_substream_url_ciphertext BLOB")
         if "audio_supported" not in camera_columns:

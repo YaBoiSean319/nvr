@@ -81,6 +81,67 @@ function resolveSearchLocalTime(field) {
   if(candidates.length>1){const chosen=Number(fold.value);if(!candidates.includes(chosen))throw new Error(`Choose which occurrence of the repeated ${field} time to use.`);return new Date(chosen).toISOString();}
   return new Date(candidates[0]).toISOString();
 }
+function updateExportFoldChoices(field) {
+  const input=document.querySelector(`#export-${field}`),select=document.querySelector(`#export-${field}-fold`),candidates=localTimeCandidates(input.value);
+  select.replaceChildren(new Option("Choose occurrence",""));
+  if(candidates.length>1){for(const [index,instant] of candidates.entries()){const zoneOffset=new Intl.DateTimeFormat("en-US",{timeZone:displaySettings.time_zone,timeZoneName:"shortOffset"}).formatToParts(new Date(instant)).find(part=>part.type==="timeZoneName")?.value||`Occurrence ${index+1}`;select.add(new Option(`${index===0?"First":"Second"} occurrence · ${zoneOffset}`,String(instant)));}select.classList.remove("hidden");select.disabled=false;}
+  else{select.classList.add("hidden");select.disabled=true;}
+}
+function resolveExportLocalTime(field) {
+  const input=document.querySelector(`#export-${field}`),fold=document.querySelector(`#export-${field}-fold`),candidates=localTimeCandidates(input.value);
+  if(!input.value)throw new Error("Choose an export start and end time.");
+  if(!candidates.length)throw new Error(`The export ${field} time does not exist in ${displaySettings.time_zone}.`);
+  if(candidates.length>1){const chosen=Number(fold.value);if(!candidates.includes(chosen))throw new Error(`Choose which repeated export ${field} time to use.`);return chosen;}
+  return candidates[0];
+}
+function selectedExportRange() {
+  if(!playbackTimeline)throw new Error("Search footage before preparing an export.");
+  if(playbackResultsStale)throw new Error("Search inputs changed. Load the timeline again before exporting.");
+  const start=resolveExportLocalTime("start"),end=resolveExportLocalTime("end"),boundStart=playbackMilliseconds(playbackTimeline.start),boundEnd=playbackMilliseconds(playbackTimeline.end);
+  if(end<=start)throw new Error("Export end must be later than export start.");
+  if(start<boundStart||end>boundEnd)throw new Error("Export marks must stay within the executed search range.");
+  if(end-start>24*60*60*1000)throw new Error("Export ranges are limited to 24 hours.");
+  return {start,end};
+}
+function updatePlaybackExportPreview() {
+  const message=document.querySelector("#export-preflight"),button=document.querySelector("#playback-export"),enabled=Boolean(playbackTimeline&&!playbackResultsStale);
+  ["#playback-mark-in","#playback-mark-out","#playback-clear-marks","#export-start","#export-end"].forEach(selector=>{document.querySelector(selector).disabled=!enabled;});
+  button.disabled=!enabled;
+  document.querySelectorAll("[data-export-camera]").forEach(input=>{input.disabled=!enabled;});
+  if(!playbackTimeline){message.textContent="Search footage to preview recording coverage and gaps.";renderPlaybackTracks();return;}
+  if(playbackResultsStale){message.textContent="Search inputs changed; export is unavailable until the timeline is reloaded.";renderPlaybackTracks();return;}
+  try {
+    const range=selectedExportRange(),cameraIds=[...document.querySelectorAll("[data-export-camera]:checked")].map(input=>input.value),eligible=[],omitted=[],gaps=[];
+    for(const view of playbackViews.filter(item=>cameraIds.includes(item.cameraId))){
+      const seconds=view.segments.reduce((sum,segment)=>sum+Math.max(0,Math.min(range.end,playbackMilliseconds(segment.ends_at))-Math.max(range.start,playbackMilliseconds(segment.starts_at)))/1000,0);
+      const gapSeconds=view.gaps.reduce((sum,gap)=>sum+Math.max(0,Math.min(range.end,playbackMilliseconds(gap.ends_at))-Math.max(range.start,playbackMilliseconds(gap.starts_at)))/1000,0);
+      if(seconds>0)eligible.push(view);else omitted.push(view.name);
+      gaps.push(`${view.name}: ${gapSeconds.toFixed(0)}s gap`);
+    }
+    if(!cameraIds.length)throw new Error("Select at least one searched camera for export.");
+    if(!eligible.length){button.disabled=true;message.textContent=`No footage overlaps this export range. ${omitted.length?`No-footage cameras: ${omitted.join(", ")}.`:""}`;renderPlaybackTracks();return;}
+    message.textContent=`${formatDateTime(range.start)} – ${formatDateTime(range.end)} · footage from ${eligible.map(view=>view.name).join(", ")}${omitted.length?` · omitted without footage: ${omitted.join(", ")}`:""}${gaps.length?` · ${gaps.join("; ")}`:""}`;
+    renderPlaybackTracks();
+  }catch(error){button.disabled=true;message.textContent=error.message;renderPlaybackTracks();}
+}
+function initializeExportSelection() {
+  const target=document.querySelector("#export-camera-selection"),legend=target.querySelector("legend");
+  target.replaceChildren(legend);
+  if(!playbackViews.length){const note=document.createElement("p");note.textContent="Search footage to choose cameras.";target.append(note);return;}
+  for(const view of playbackViews){const label=document.createElement("label"),input=document.createElement("input");input.type="checkbox";input.checked=true;input.value=view.cameraId;input.dataset.exportCamera="";input.addEventListener("change",updatePlaybackExportPreview);label.append(input,document.createTextNode(` ${view.name}`));target.append(label);}
+}
+function setExportBoundary(field,instant) {
+  document.querySelector(`#export-${field}`).value=localInputForInstant(new Date(instant));
+  updateExportFoldChoices(field);
+  updatePlaybackExportPreview();
+}
+function updateExportSelectionOverlay(track) {
+  track.querySelector(".playback-export-selection")?.remove();
+  try {
+    const {start,end}=selectedExportRange(),window=currentPlaybackWindow();if(!window||end<=window.start||start>=window.end)return;
+    const overlay=document.createElement("span");overlay.className="playback-export-selection";overlay.style.left=`${Math.max(0,(start-window.start)/(window.end-window.start)*100)}%`;overlay.style.width=`${Math.max(0,Math.min(100,(end-window.start)/(window.end-window.start)*100)-Math.max(0,(start-window.start)/(window.end-window.start)*100))}%`;overlay.setAttribute("aria-label",`Selected export range ${formatDateTime(start)} to ${formatDateTime(end)}`);track.append(overlay);
+  }catch{}
+}
 function show(name) { if(name!=="status") stopSynchronizedPlayback(); document.querySelector("main > h1").classList.toggle("hidden", name === "status"); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 function moveInto(selector, targetSelector) {
   const element = document.querySelector(selector), target = document.querySelector(targetSelector);
@@ -98,7 +159,7 @@ function setupConsoleShell() {
     const heading = document.querySelector(selector);
     if (heading) footage.append(heading.closest("section"));
   }
-  for (const selector of ["#camera-heading", "#discovery-admin", "#bulk-admin", "#camera-form", "#camera-message", "#camera-list", "#segment-list", "#playback"]) {
+  for (const selector of ["#camera-heading", "#discovery-admin", "#bulk-admin", "#camera-form", "#camera-message", "#camera-inventory-search", "#camera-list", "#segment-list", "#playback"]) {
     if (selector === "#camera-heading") {
       const heading = document.querySelector(selector);
       if (heading) cameraSettings.append(heading);
@@ -117,6 +178,7 @@ function setupConsoleShell() {
     saveLiveWorkspace();
   });
   document.querySelector("#sidebar-search").addEventListener("input", filterSidebar);
+  document.querySelector("#camera-inventory-search").addEventListener("input",()=>renderCameras(latestCameras));
   const theme = document.querySelector("#theme-choice"), savedTheme = localStorage.getItem("nvr-theme") || "system";
   theme.value = savedTheme; document.documentElement.dataset.theme = savedTheme === "system" ? "" : savedTheme;
   theme.addEventListener("change", () => { localStorage.setItem("nvr-theme", theme.value); document.documentElement.dataset.theme = theme.value === "system" ? "" : theme.value; });
@@ -714,6 +776,7 @@ function markPlaybackResultsStale() {
   playbackViews.forEach(view=>view.video.pause());
   document.querySelector("#playback-stale").classList.remove("hidden");
   document.querySelector("#playback-status").textContent="Search inputs changed. Results are stale until you load the timeline again.";
+  updatePlaybackExportPreview();
 }
 function stopSynchronizedPlayback() {
   stopPlaybackClock();
@@ -830,6 +893,7 @@ function renderPlaybackTrack(view) {
     const at=playbackMilliseconds(event.source_event_at),position=playbackPosition(event.source_event_at);if(position===null)continue;
     const marker=document.createElement("button");marker.type="button";marker.className="playback-motion";marker.style.left=`${position}%`;marker.title=`Motion · ${view.name} · ${formatDateTime(event.source_event_at)}`;marker.setAttribute("aria-label",marker.title);marker.addEventListener("click",click=>{click.stopPropagation();seekSynchronizedPlayback(at);});track.append(marker);
   }
+  updateExportSelectionOverlay(track);
   track.addEventListener("click",event=>seekPlaybackAtClientX(event.clientX,track));
   return track;
 }
@@ -990,10 +1054,11 @@ function renderPlaybackCamera(view) {
   const select=document.createElement("button");select.type="button";select.textContent="Select camera";select.addEventListener("click",()=>{playbackMaster=view;playbackViews.forEach(item=>{item.video.muted=item!==view;item.tile.classList.toggle("selected",item===view);});});
   const snapshot=document.createElement("button"); snapshot.type="button"; snapshot.textContent="Download snapshot";
   snapshot.addEventListener("click",async()=>{
+    if(playbackResultsStale){state.textContent="Search inputs changed. Reload the timeline before capturing a snapshot.";return;}
     const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start);
     const segment=playbackSegmentAt(view,at);
     if(!segment){state.textContent="No snapshot is available at the shared time.";return;}
-    try {const response=await fetch(`${segment.media_url.replace(/\/media$/,"")}/snapshot?at=${encodeURIComponent(new Date(at).toISOString())}`,{credentials:"same-origin"});if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.detail||"Snapshot is unavailable");}const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");link.href=url;link.download=`${view.name.replace(/[^a-z0-9_-]+/gi,"_")}-${new Date(at).toISOString().replace(/[:.]/g,"-")}.jpg`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);state.textContent="Snapshot downloaded.";}catch(error){state.textContent=error.message;}
+    try {const response=await fetch(`${segment.media_url.replace(/\/media$/,"")}/snapshot?at=${encodeURIComponent(new Date(at).toISOString())}`,{credentials:"same-origin"});if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.detail||"Snapshot is unavailable");}const sourceTime=response.headers.get("X-Source-Time"),audit=response.headers.get("X-Audit-Reference"),blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");link.href=url;link.download=`${view.name.replace(/[^a-z0-9_-]+/gi,"_")}-${new Date(at).toISOString().replace(/[:.]/g,"-")}.jpg`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);state.textContent=`Snapshot downloaded from ${sourceTime||new Date(at).toISOString()} · audit ${audit||"reference unavailable"}.`;}catch(error){state.textContent=error.message;}
   });
   const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Fullscreen";
   fullscreen.addEventListener("click",()=>{if(!tile.requestFullscreen){state.textContent="Fullscreen is not supported by this browser.";return;}tile.requestFullscreen().catch(()=>{state.textContent="Fullscreen was blocked by the browser.";});});
@@ -1041,6 +1106,7 @@ async function loadSynchronizedPlayback() {
     if(playbackViews.length){playbackMaster=playbackViews[0];playbackViews[0].tile.classList.add("selected");playbackViews.forEach((view,index)=>{view.video.muted=index>0;});}
     ["#playback-play","#playback-pause","#playback-prev-frame","#playback-next-frame","#playback-prev-event","#playback-next-event"].forEach(selector=>{document.querySelector(selector).disabled=false;});
     playbackResultsStale=false;document.querySelector("#playback-stale").classList.add("hidden");
+    initializeExportSelection();setExportBoundary("start",playbackMilliseconds(result.start));setExportBoundary("end",playbackMilliseconds(result.end));updatePlaybackExportPreview();
     label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Playback is paused at the earliest indexed recording; events and gaps are aligned to the same search range.`;
   }catch(error){label.textContent=error.message;}
 }
@@ -1069,20 +1135,22 @@ async function refreshExports() {
 }
 async function requestPlaybackExport() {
   const message=document.querySelector("#export-message"),button=document.querySelector("#playback-export");
-  const camera_ids=[...new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value))];
-  const start=document.querySelector("#playback-start").value,end=document.querySelector("#playback-end").value;
   try {
-    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
-    if(!start||!end)throw new Error("Enter both a start and end time.");
+    const range=selectedExportRange();
+    const camera_ids=[...new Set([...document.querySelectorAll("[data-export-camera]:checked")].map(input=>input.value))];
+    const output_modes=[...document.querySelectorAll("[data-export-mode]:checked")].map(input=>input.dataset.exportMode);
+    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight searched cameras.");
+    if(!output_modes.length)throw new Error("Choose individual camera videos, a synchronized grid, or both.");
+    const eligible=playbackViews.filter(view=>camera_ids.includes(view.cameraId)&&view.segments.some(segment=>Math.min(range.end,playbackMilliseconds(segment.ends_at))>Math.max(range.start,playbackMilliseconds(segment.starts_at))));
+    if(!eligible.length)throw new Error("No indexed footage overlaps this export selection.");
+    const omitted=playbackViews.filter(view=>camera_ids.includes(view.cameraId)&&!eligible.includes(view)).map(view=>view.name);
     button.disabled=true;message.textContent="Submitting export…";
-    const startInstant=resolveSearchLocalTime("start"),endInstant=resolveSearchLocalTime("end");
-    if(playbackMilliseconds(endInstant)<=playbackMilliseconds(startInstant))throw new Error("The end time must be later than the start time.");
-    if(playbackMilliseconds(endInstant)-playbackMilliseconds(startInstant)>24*60*60*1000)throw new Error("Export ranges are limited to 24 hours.");
-    const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids,start:startInstant,end:endInstant})});
-    message.textContent=`Export ${job.id.slice(0,8)} queued. You can leave this page; the job will continue.`;
+    const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids:eligible.map(view=>view.cameraId),start:new Date(range.start).toISOString(),end:new Date(range.end).toISOString(),output_modes})});
+    const omissionNote=omitted.length?`; no footage for ${omitted.join(", ")}`:"";
+    message.textContent=`Export ${job.id.slice(0,8)} queued (${output_modes.join(" + ")})${omissionNote}. You can leave this page; the job will continue.`;
     await refreshExports();
   }catch(error){message.textContent=error.message;}
-  finally{button.disabled=false;}
+  finally{updatePlaybackExportPreview();}
 }
 async function refreshDiagnostics() {
   const state = await api("/api/diagnostics/status");
@@ -1236,7 +1304,10 @@ async function refreshSessions() {
 function renderCameras(cameras) {
   const list = document.querySelector("#camera-list");
   if (!cameras.length) { list.textContent = "No cameras have been added."; return; }
-  list.replaceChildren(...cameras.map(camera => {
+  const query=(document.querySelector("#camera-inventory-search")?.value||"").trim().toLocaleLowerCase();
+  const filtered=cameras.filter(camera=>!query||`${camera.name} ${camera.group_name||""}`.toLocaleLowerCase().includes(query));
+  if (!filtered.length) { list.textContent = "No cameras match this search."; return; }
+  list.replaceChildren(...filtered.map(camera => {
     const card = document.createElement("article");
     const title = document.createElement("h3"); title.textContent = camera.name;
     if (currentRole === "administrator") {
@@ -1254,6 +1325,63 @@ function renderCameras(cameras) {
     summary.textContent += ` · retention ${camera.retention_days} days (${camera.retention_policy_source||"default"}; ${retentionSummary.achieved_days||0} days achieved` + (retentionSummary.projected_days_at_current_activity == null ? ")" : `; ${retentionSummary.projected_days_at_current_activity} days projected at current activity)`);
     card.append(title, summary);
     if(currentRole === "administrator") {
+      const editor=document.createElement("details"),editorHeading=document.createElement("summary");
+      editorHeading.textContent="Edit camera details";
+      const nameLabel=document.createElement("label"),nameInput=document.createElement("input");
+      nameLabel.textContent="Camera name ";nameInput.type="text";nameInput.maxLength=120;nameInput.required=true;nameInput.value=camera.name;nameLabel.append(nameInput);
+      const saveDetails=document.createElement("button");saveDetails.type="button";saveDetails.textContent="Save camera details";
+      saveDetails.addEventListener("click",async()=>{
+        try{await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PATCH",body:JSON.stringify({name:nameInput.value})});document.querySelector("#camera-message").textContent="Camera details saved.";await refresh();}
+        catch(error){document.querySelector("#camera-message").textContent=error.message;}
+      });
+      editor.append(editorHeading,nameLabel,saveDetails);card.append(editor);
+      const sourcePanel=document.createElement("fieldset"),sourceLegend=document.createElement("legend");sourceLegend.textContent="Video source and advertised ONVIF profiles";sourcePanel.append(sourceLegend);
+      const addressLabel=document.createElement("label"),address=document.createElement("input");addressLabel.textContent="Camera IP address ";address.inputMode="numeric";address.autocomplete="off";address.value=camera.camera_ip||"";addressLabel.append(address);
+      const directLabel=document.createElement("label"),directUrl=document.createElement("input");directLabel.textContent="Direct RTSP URL (use when not selecting by IP) ";directUrl.type="url";directUrl.autocomplete="off";directUrl.placeholder="rtsp://camera.example/stream";directLabel.append(directUrl);
+      const usernameLabel=document.createElement("label"),username=document.createElement("input");usernameLabel.textContent="Camera username (leave blank to keep current credentials) ";username.autocomplete="off";usernameLabel.append(username);
+      const passwordLabel=document.createElement("label"),password=document.createElement("input");passwordLabel.textContent="Camera password (leave blank to keep current credentials) ";password.type="password";password.autocomplete="new-password";passwordLabel.append(password);
+      const confirmLabel=document.createElement("label"),confirm=document.createElement("input");confirmLabel.textContent="Confirm new camera password ";confirm.type="password";confirm.autocomplete="new-password";confirmLabel.append(confirm);
+      const clearLabel=document.createElement("label"),clearCredentials=document.createElement("input");clearCredentials.type="checkbox";clearLabel.append(clearCredentials,document.createTextNode(" Clear saved camera credentials"));
+      const brandLabel=document.createElement("label"),brand=document.createElement("select");brandLabel.textContent="Device type / brand ";
+      for(const [value,label] of [["auto","Auto-detect / ONVIF"],["acti","ACTi"],["axis","Axis"],["bosch","Bosch"],["dahua","Dahua"],["hanwha","Hanwha"],["hikvision","Hikvision"],["reolink","Reolink"],["samsung","Samsung"],["uniview","Uniview"],["other","Other / generic ONVIF"]])brand.add(new Option(label,value));
+      brand.value=camera.camera_brand||"auto";brandLabel.append(brand);
+      const serviceLabel=document.createElement("label"),service=document.createElement("input");serviceLabel.textContent="ONVIF device-service URL (optional custom path) ";service.type="url";service.autocomplete="off";service.value=camera.device_service_url||"";service.placeholder="http://camera/onvif/device_service";serviceLabel.append(service);
+      const mainLabel=document.createElement("label"),mainProfile=document.createElement("select");mainLabel.textContent="Main stream profile ";mainProfile.append(new Option(camera.onvif_profile_token?`Saved profile · ${camera.onvif_profile_token}`:"Load advertised profiles",camera.onvif_profile_token||""));mainLabel.append(mainProfile);
+      const subLabel=document.createElement("label"),subProfile=document.createElement("select");subLabel.textContent="Optional lower-resolution live grid profile ";subProfile.append(new Option("Use main stream for grid scaled by server",""));if(camera.live_substream_profile_token)subProfile.add(new Option(`Saved profile · ${camera.live_substream_profile_token}`,camera.live_substream_profile_token));subLabel.append(subProfile);
+      const sourceMessage=document.createElement("p");sourceMessage.setAttribute("role","status");
+      const loadProfiles=document.createElement("button");loadProfiles.type="button";loadProfiles.textContent="Load advertised endpoints";
+      loadProfiles.addEventListener("click",async()=>{
+        try{
+          if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
+          const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source/profiles`,{method:"POST",body:JSON.stringify({camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,camera_brand:brand.value,device_service_url:service.value||null,clear_credentials:clearCredentials.checked})});
+          mainProfile.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+          if(result.profiles.length>1)mainProfile.prepend(new Option("Select main stream profile",""));
+          subProfile.replaceChildren(new Option("Use main stream for grid scaled by server",""),...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+          mainProfile.value=camera.onvif_profile_token||result.profiles[0]?.token||"";subProfile.value=camera.live_substream_profile_token||"";service.value=result.device_service_url;
+          sourceMessage.textContent=`Found ${result.profiles.length} advertised ONVIF profile(s).`;
+        }catch(error){sourceMessage.textContent=error.message;}
+      });
+      const buildSourcePayload=()=>{
+        if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
+        const common={camera_brand:brand.value,device_service_url:service.value||null,clear_credentials:clearCredentials.checked};
+        if(address.value.trim()){
+          if(!mainProfile.value)throw new Error("Load advertised endpoints and select a main stream profile first");
+          return {...common,camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,onvif_profile_token:mainProfile.value,live_substream_profile_token:subProfile.value||null};
+        }
+        if(!directUrl.value)throw new Error("Enter a camera IP address or a direct RTSP URL");
+        return {...common,stream_url:directUrl.value.trim()};
+      };
+      const testSource=document.createElement("button");testSource.type="button";testSource.textContent="Test source connection";
+      testSource.addEventListener("click",async()=>{
+        try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source/test`,{method:"POST",body:JSON.stringify(buildSourcePayload())});sourceMessage.textContent=result.reachable?`Connection passed · ${result.video.codec} ${result.video.width||"?"}×${result.video.height||"?"}`:result.reason;}
+        catch(error){sourceMessage.textContent=error.message;}
+      });
+      const saveSource=document.createElement("button");saveSource.type="button";saveSource.textContent="Save tested source";
+      saveSource.addEventListener("click",async()=>{
+        try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source`,{method:"PUT",body:JSON.stringify(buildSourcePayload())});sourceMessage.textContent=`Source saved · ${result.video.codec} ${result.video.width||"?"}×${result.video.height||"?"}`;await refresh();}
+        catch(error){sourceMessage.textContent=error.message;}
+      });
+      sourcePanel.append(addressLabel,directLabel,usernameLabel,passwordLabel,confirmLabel,clearLabel,brandLabel,serviceLabel,loadProfiles,mainLabel,subLabel,testSource,saveSource,sourceMessage);editor.append(sourcePanel);
       const audioLabel=document.createElement("label");audioLabel.textContent="Enable audio recording and operator listening ";
       const audioEnabled=document.createElement("input");audioEnabled.type="checkbox";audioEnabled.checked=Boolean(camera.audio_enabled);audioEnabled.disabled=camera.audio_supported!==true;
       audioLabel.append(audioEnabled);
@@ -1780,6 +1908,10 @@ document.querySelector("#playback-prev-frame").addEventListener("click",()=>step
 document.querySelector("#playback-next-frame").addEventListener("click",()=>stepPlaybackFrame("next").catch(error=>{document.querySelector("#playback-status").textContent=error.message;}));
 document.querySelector("#playback-prev-event").addEventListener("click",()=>navigatePlaybackEvent("previous"));
 document.querySelector("#playback-next-event").addEventListener("click",()=>navigatePlaybackEvent("next"));
+document.querySelector("#playback-mark-in").addEventListener("click",()=>setExportBoundary("start",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline?.start)));
+document.querySelector("#playback-mark-out").addEventListener("click",()=>setExportBoundary("end",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline?.end)));
+document.querySelector("#playback-clear-marks").addEventListener("click",()=>{if(!playbackTimeline)return;setExportBoundary("start",playbackMilliseconds(playbackTimeline.start));setExportBoundary("end",playbackMilliseconds(playbackTimeline.end));});
+for(const field of ["start","end"]){document.querySelector(`#export-${field}`).addEventListener("change",()=>{updateExportFoldChoices(field);updatePlaybackExportPreview();});document.querySelector(`#export-${field}-fold`).addEventListener("change",updatePlaybackExportPreview);}
 document.querySelector("#playback-export").addEventListener("click",requestPlaybackExport);
 document.querySelector("#playback-cursor").addEventListener("input",event=>{
   if(!playbackTimeline)return;

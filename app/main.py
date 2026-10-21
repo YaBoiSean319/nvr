@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
@@ -233,7 +233,7 @@ class LiveWorkspaceRequest(BaseModel):
         return self
 
 
-class CameraProbeRequest(BaseModel):
+class CameraSourceRequest(BaseModel):
     stream_url: str | None = Field(default=None, min_length=8, max_length=2048)
     camera_ip: str | None = Field(default=None, min_length=7, max_length=45)
     camera_username: str | None = Field(default=None, max_length=256)
@@ -244,15 +244,40 @@ class CameraProbeRequest(BaseModel):
     device_service_url: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
-    def validate_source(self) -> "CameraProbeRequest":
+    def validate_source(self) -> "CameraSourceRequest":
         if bool(self.stream_url) == bool(self.camera_ip):
             raise ValueError("Provide either a camera IP address or an RTSP stream URL")
-        if bool(self.camera_username) != bool(self.camera_password):
-            raise ValueError("Provide both camera username and password, or leave both blank")
         if self.live_substream_profile_token and (not self.camera_ip or not self.onvif_profile_token):
             raise ValueError("A live substream requires an ONVIF camera address and a selected main profile")
         if self.live_substream_profile_token and self.live_substream_profile_token == self.onvif_profile_token:
             raise ValueError("Choose a different profile for the optional live substream")
+        return self
+
+    @field_validator("device_service_url")
+    @classmethod
+    def validate_device_service_url(cls, value: str | None) -> str | None:
+        return _validate_onvif_service_url(value)
+
+
+class CameraProbeRequest(CameraSourceRequest):
+    @model_validator(mode="after")
+    def validate_credentials(self) -> "CameraProbeRequest":
+        if bool(self.camera_username) != bool(self.camera_password):
+            raise ValueError("Provide both camera username and password, or leave both blank")
+        return self
+
+
+class CameraSourceUpdateRequest(CameraSourceRequest):
+    clear_credentials: bool = False
+
+    @model_validator(mode="after")
+    def validate_credential_choice(self) -> "CameraSourceUpdateRequest":
+        if self.clear_credentials and (self.camera_username or self.camera_password):
+            raise ValueError("Clear saved credentials or provide new credentials, not both")
+        if self.clear_credentials and self.stream_url:
+            parsed = urlsplit(self.stream_url)
+            if parsed.username or parsed.password:
+                raise ValueError("Remove credentials from the direct stream URL before clearing saved credentials")
         return self
 
 
@@ -276,11 +301,14 @@ class ExportRequest(BaseModel):
     camera_ids: list[str] = Field(min_length=1, max_length=MAX_EXPORT_CAMERAS)
     start: datetime
     end: datetime
+    output_modes: list[Literal["individual", "grid"]] = Field(default_factory=lambda: ["individual", "grid"], min_length=1, max_length=2)
 
     @model_validator(mode="after")
     def validate_interval(self) -> "ExportRequest":
         if len(set(self.camera_ids)) != len(self.camera_ids):
             raise ValueError("Choose each camera only once")
+        if len(set(self.output_modes)) != len(self.output_modes):
+            raise ValueError("Choose each export output only once")
         if self.start.tzinfo is None or self.end.tzinfo is None or self.end <= self.start:
             raise ValueError("Export interval must include timezone-aware start and end times")
         if self.end - self.start > MAX_EXPORT_WINDOW:
@@ -467,11 +495,20 @@ class MotionSourceUpdateRequest(BaseModel):
 
 
 class CameraUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
     recording_mode: Literal["motion", "continuous", "disabled"] | None = None
     recording_enabled: bool | None = None
     motion_pre_roll_seconds: int | None = Field(default=None, ge=0, le=120)
     motion_post_roll_seconds: int | None = Field(default=None, ge=1, le=600)
     audio_enabled: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str | None) -> str | None:
+        value = value.strip() if value is not None else None
+        if value == "":
+            raise ValueError("Camera name is required")
+        return value
 
     @field_validator("recording_mode")
     @classmethod
@@ -1264,6 +1301,11 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
         "name": row["name"],
         "group_name": row["group_name"] if "group_name" in row.keys() else None,
         "storage_volume_id": row["storage_volume_id"] if "storage_volume_id" in row.keys() else None,
+        "camera_ip": row["camera_ip"] if "camera_ip" in row.keys() else None,
+        "camera_brand": row["camera_brand"] if "camera_brand" in row.keys() else "auto",
+        "device_service_url": row["device_service_url"] if "device_service_url" in row.keys() else None,
+        "onvif_profile_token": row["onvif_profile_token"] if "onvif_profile_token" in row.keys() else None,
+        "live_substream_profile_token": row["live_substream_profile_token"] if "live_substream_profile_token" in row.keys() else None,
         "stream_url": visible_url,
         "enabled": bool(row["enabled"]),
         "recording_mode": row["recording_mode"],
@@ -1305,6 +1347,11 @@ def _insert_camera(
     capability: dict[str, object],
     onvif_uuid: str | None = None,
     group_id: str | None = None,
+    camera_ip: str | None = None,
+    camera_brand: str = "auto",
+    device_service_url: str | None = None,
+    onvif_profile_token: str | None = None,
+    live_substream_profile_token: str | None = None,
     recording_enabled: bool = False,
     motion_service_url: str | None = None,
     motion_username: str | None = None,
@@ -1330,12 +1377,13 @@ def _insert_camera(
             raise ValueError("Provide both ONVIF motion username and password")
         credentials = encrypt(json.dumps({"username": motion_username, "password": motion_password}, separators=(",", ":")))
     db.execute(
-        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,live_substream_url_ciphertext,audio_supported,audio_enabled,recording_mode,recording_enabled,recording_status," 
+        "INSERT INTO cameras(id,name,onvif_uuid,group_id,camera_ip,camera_brand,device_service_url,onvif_profile_token,live_substream_profile_token,stream_url_ciphertext,live_substream_url_ciphertext,audio_supported,audio_enabled,recording_mode,recording_enabled,recording_status,"
         "motion_service_url,motion_credentials_ciphertext,motion_pre_roll_seconds,motion_post_roll_seconds,motion_source_status," 
         "motion_fallback_enabled,motion_zones_json,motion_sensitivity,server_motion_status,last_error," 
         "video_codec,video_width,video_height,last_probe_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), encrypt(live_substream_url.strip()) if live_substream_url else None, int(bool(capability.get("audio"))), 0, recording_mode, int(recording_enabled), status,
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        (camera_id, name, onvif_uuid, group_id, camera_ip, camera_brand, device_service_url, onvif_profile_token, live_substream_profile_token,
+         encrypt(stream_url.strip()), encrypt(live_substream_url.strip()) if live_substream_url else None, int(bool(capability.get("audio"))), 0, recording_mode, int(recording_enabled), status,
          motion_service_url, credentials, motion_pre_roll_seconds, motion_post_roll_seconds,
          "untested" if motion_service_url else "unsupported", int(motion_fallback_enabled),
          json.dumps([zone.model_dump() for zone in (motion_zones or [])], separators=(",", ":")), motion_sensitivity,
@@ -1389,7 +1437,16 @@ async def test_camera_stream(
 async def _resolve_camera_source(payload: CameraProbeRequest, service_url: str | None = None) -> tuple[str, str | None]:
     """Return an RTSP URI and its ONVIF device-service URL, resolving IP inputs safely."""
     if payload.stream_url:
-        return payload.stream_url.strip(), service_url
+        stream_url = payload.stream_url.strip()
+        if payload.camera_username and payload.camera_password:
+            parsed = urlsplit(stream_url)
+            host = parsed.hostname or ""
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            if parsed.port:
+                host = f"{host}:{parsed.port}"
+            stream_url = urlunsplit((parsed.scheme, f"{quote(payload.camera_username, safe='')}:{quote(payload.camera_password, safe='')}@{host}", parsed.path, parsed.query, ""))
+        return stream_url, service_url
     try:
         source = await resolve_camera_stream(
             payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
@@ -2103,6 +2160,10 @@ async def create_camera(
             camera_id = _insert_camera(
                 db, name=name, stream_url=stream_url, recording_mode=payload.recording_mode,
                 capability=capability, onvif_uuid=payload.onvif_uuid,
+                camera_ip=payload.camera_ip, camera_brand=payload.camera_brand,
+                device_service_url=resolved_service_url or payload.device_service_url,
+                onvif_profile_token=payload.onvif_profile_token,
+                live_substream_profile_token=payload.live_substream_profile_token,
                 recording_enabled=payload.recording_enabled,
                 motion_service_url=payload.motion_service_url or resolved_service_url,
                 motion_username=motion_username,
@@ -2123,6 +2184,140 @@ async def create_camera(
     return _camera_view(row)
 
 
+def _reuse_source_credentials(current: sqlite3.Row, payload: CameraSourceUpdateRequest) -> CameraSourceUpdateRequest:
+    if payload.camera_ip and payload.camera_ip == current["camera_ip"] and not payload.clear_credentials:
+        try:
+            existing = urlsplit(decrypt(current["stream_url_ciphertext"]))
+            existing_user = unquote(existing.username or "")
+            existing_password = unquote(existing.password or "")
+        except (RuntimeError, ValueError):
+            existing_user = existing_password = ""
+        updates = {}
+        if not payload.camera_username and existing_user:
+            updates["camera_username"] = existing_user
+        if not payload.camera_password and existing_password:
+            updates["camera_password"] = existing_password
+        if updates:
+            payload = payload.model_copy(update=updates)
+    if bool(payload.camera_username) != bool(payload.camera_password):
+        raise HTTPException(status_code=422, detail="Provide both camera username and password, or leave both blank")
+    return payload
+
+
+@app.post("/api/cameras/{camera_id}/source/test")
+async def test_camera_source_update(
+    camera_id: str,
+    payload: CameraSourceUpdateRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    with connect() as db:
+        current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    payload = _reuse_source_credentials(current, payload)
+    started = time.monotonic()
+    try:
+        stream_url, _ = await _resolve_camera_source(payload)
+        safe_stream_url(stream_url)
+    except (ValueError, HTTPException) as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    result = await probe_stream(stream_url)
+    diagnostics.record_event("stream_probe", outcome="success" if result.get("reachable") else "unavailable", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)))
+    return result
+
+
+@app.post("/api/cameras/{camera_id}/source/profiles")
+async def list_camera_source_update_profiles(
+    camera_id: str,
+    payload: CameraSourceUpdateRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    if not payload.camera_ip:
+        raise HTTPException(status_code=422, detail="Enter the camera IP address before loading ONVIF profiles")
+    with connect() as db:
+        current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    payload = _reuse_source_credentials(current, payload)
+    try:
+        service_url, profiles = await list_camera_stream_profiles(
+            payload.camera_ip, payload.camera_username or "", payload.camera_password or "",
+            payload.device_service_url, payload.camera_brand,
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"device_service_url": service_url, "profiles": [profile.__dict__ for profile in profiles]}
+
+
+@app.put("/api/cameras/{camera_id}/source")
+async def update_camera_source(
+    camera_id: str,
+    payload: CameraSourceUpdateRequest,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    with connect() as db:
+        current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    payload = _reuse_source_credentials(current, payload)
+
+    try:
+        stream_url, resolved_service_url = await _resolve_camera_source(payload)
+        safe_stream_url(stream_url)
+    except (ValueError, HTTPException) as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    capability = await probe_stream(stream_url)
+    if not capability.get("reachable"):
+        raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
+
+    live_substream_url = None
+    if payload.live_substream_profile_token:
+        try:
+            substream = await resolve_camera_stream(
+                payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
+                resolved_service_url or payload.device_service_url, payload.live_substream_profile_token, payload.camera_brand,
+            )
+            safe_stream_url(substream.stream_url)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="The selected live substream could not be resolved") from exc
+        substream_capability = await probe_stream(substream.stream_url)
+        if not substream_capability.get("reachable"):
+            raise HTTPException(status_code=422, detail="The selected live substream failed its video test")
+        main_video = capability.get("video") or {}
+        sub_video = substream_capability.get("video") or {}
+        main_pixels = int(main_video.get("width") or 0) * int(main_video.get("height") or 0)
+        sub_pixels = int(sub_video.get("width") or 0) * int(sub_video.get("height") or 0)
+        if not main_pixels or not sub_pixels or sub_pixels >= main_pixels:
+            raise HTTPException(status_code=422, detail="Choose an ONVIF profile with a lower video resolution for grid viewing")
+        live_substream_url = substream.stream_url
+
+    selected_service_url = resolved_service_url or payload.device_service_url
+    with connect() as db:
+        db.execute(
+            "UPDATE cameras SET camera_ip=?,camera_brand=?,device_service_url=?,onvif_profile_token=?,live_substream_profile_token=?,"
+            "motion_service_url=COALESCE(?,motion_service_url),"
+            "stream_url_ciphertext=?,live_substream_url_ciphertext=?,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,"
+            "video_codec=?,video_width=?,video_height=?,last_probe_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+            "WHERE id=?",
+            (payload.camera_ip, payload.camera_brand, selected_service_url, payload.onvif_profile_token,
+             payload.live_substream_profile_token, selected_service_url, encrypt(stream_url.strip()),
+             encrypt(live_substream_url.strip()) if live_substream_url else None,
+             int(bool(capability.get("audio"))), int(bool(capability.get("audio"))),
+             (capability.get("video") or {}).get("codec"), (capability.get("video") or {}).get("width"),
+             (capability.get("video") or {}).get("height"), camera_id),
+        )
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+    with connect() as db:
+        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
+    return _camera_view(row)
+
+
 @app.patch("/api/cameras/{camera_id}")
 async def update_camera(
     camera_id: str,
@@ -2130,8 +2325,10 @@ async def update_camera(
     request: Request,
     user: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
-    if not any(name in payload.model_fields_set for name in ("recording_mode", "recording_enabled", "motion_pre_roll_seconds", "motion_post_roll_seconds", "audio_enabled")):
-        raise HTTPException(status_code=422, detail="Specify a recording mode, enablement, buffer duration, or audio setting")
+    if "name" in payload.model_fields_set and payload.name is None:
+        raise HTTPException(status_code=422, detail="Camera name is required")
+    if not any(name in payload.model_fields_set for name in ("name", "recording_mode", "recording_enabled", "motion_pre_roll_seconds", "motion_post_roll_seconds", "audio_enabled")):
+        raise HTTPException(status_code=422, detail="Specify a camera name, recording setting, buffer duration, or audio setting")
     with connect() as db:
         row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if row is None:
@@ -2139,32 +2336,45 @@ async def update_camera(
         if payload.audio_enabled and row["audio_supported"] is not True and row["audio_supported"] != 1:
             message = "Probe the camera audio capability before enabling audio" if row["audio_supported"] is None else "This camera stream has no supported audio track"
             raise HTTPException(status_code=422, detail=message)
+        name_only = payload.model_fields_set == {"name"}
         mode = payload.recording_mode or row["recording_mode"]
         enabled = payload.recording_enabled if payload.recording_enabled is not None else bool(row["recording_enabled"])
         if mode == "disabled":
             enabled = False
-        assignments = ["recording_mode=?", "recording_enabled=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
-        values: list[object] = [mode, int(enabled)]
-        audio_enabled = payload.audio_enabled if payload.audio_enabled is not None else bool(row["audio_enabled"])
-        if payload.audio_enabled is not None:
-            assignments.append("audio_enabled=?"); values.append(int(audio_enabled))
-            if bool(row["audio_enabled"]) != audio_enabled:
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                           (int(user["id"]), "camera_audio_enabled" if audio_enabled else "camera_audio_disabled", "camera", camera_id,
-                            json.dumps({"audio_supported": bool(row["audio_supported"])}, separators=(",", ":"))))
-        if payload.motion_pre_roll_seconds is not None:
-            assignments.append("motion_pre_roll_seconds=?"); values.append(payload.motion_pre_roll_seconds)
-        if payload.motion_post_roll_seconds is not None:
-            assignments.append("motion_post_roll_seconds=?"); values.append(payload.motion_post_roll_seconds)
-        if not enabled:
-            assignments.extend(("recording_status='stopped'", "last_error=NULL"))
-        elif mode == "motion" and not row["motion_service_url"] and not row["motion_fallback_enabled"]:
-            assignments.extend(("recording_status='unsupported'", "last_error='Configure an ONVIF event service or enable server motion fallback'"))
+        if name_only:
+            assignments = ["name=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
+            values: list[object] = [payload.name]
         else:
-            assignments.extend(("recording_status='connecting'", "last_error=NULL"))
+            assignments = ["recording_mode=?", "recording_enabled=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
+            values = [mode, int(enabled)]
+            if payload.name is not None:
+                assignments.append("name=?")
+                values.append(payload.name)
+        audio_enabled = payload.audio_enabled if payload.audio_enabled is not None else bool(row["audio_enabled"])
+        if not name_only:
+            if payload.audio_enabled is not None:
+                assignments.append("audio_enabled=?"); values.append(int(audio_enabled))
+                if bool(row["audio_enabled"]) != audio_enabled:
+                    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                               (int(user["id"]), "camera_audio_enabled" if audio_enabled else "camera_audio_disabled", "camera", camera_id,
+                                json.dumps({"audio_supported": bool(row["audio_supported"])}, separators=(",", ":"))))
+            if payload.motion_pre_roll_seconds is not None:
+                assignments.append("motion_pre_roll_seconds=?"); values.append(payload.motion_pre_roll_seconds)
+            if payload.motion_post_roll_seconds is not None:
+                assignments.append("motion_post_roll_seconds=?"); values.append(payload.motion_post_roll_seconds)
+            if not enabled:
+                assignments.extend(("recording_status='stopped'", "last_error=NULL"))
+            elif mode == "motion" and not row["motion_service_url"] and not row["motion_fallback_enabled"]:
+                assignments.extend(("recording_status='unsupported'", "last_error='Configure an ONVIF event service or enable server motion fallback'"))
+            else:
+                assignments.extend(("recording_status='connecting'", "last_error=NULL"))
         values.append(camera_id)
-        db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values)
-    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+        try:
+            db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="A camera with that name already exists") from exc
+    if not name_only:
+        await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
@@ -2992,7 +3202,7 @@ async def snapshot_segment(
     camera_id: str,
     segment_id: int,
     at: datetime,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    user: Annotated[sqlite3.Row, Depends(current_user)],
 ) -> Response:
     if at.tzinfo is None:
         raise HTTPException(status_code=422, detail="Snapshot time must include a timezone")
@@ -3027,7 +3237,17 @@ async def snapshot_segment(
         image, _ = await asyncio.wait_for(process.communicate(), timeout=15)
         if process.returncode != 0 or not image.startswith(b"\xff\xd8"):
             raise HTTPException(status_code=422, detail="A snapshot could not be extracted from this interval")
-        return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        source_time = at.isoformat()
+        with connect() as db:
+            cursor = db.execute(
+                "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                (int(user["id"]), "snapshot_downloaded", "recording_segment", str(segment_id),
+                 json.dumps({"camera_id": camera_id, "source_time": source_time})),
+            )
+            audit_reference = f"audit-{cursor.lastrowid}"
+        return Response(image, media_type="image/jpeg", headers={
+            "Cache-Control": "no-store", "X-Source-Time": source_time, "X-Audit-Reference": audit_reference,
+        })
     except asyncio.TimeoutError as exc:
         if process and process.returncode is None:
             process.kill()
@@ -3111,7 +3331,7 @@ async def create_export(
 ) -> dict[str, object]:
     start, end = payload.start.astimezone(timezone.utc), payload.end.astimezone(timezone.utc)
     try:
-        job_id = create_export_record(int(user["id"]), payload.camera_ids, start, end)
+        job_id = create_export_record(int(user["id"]), payload.camera_ids, start, end, payload.output_modes)
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OverflowError as exc:
