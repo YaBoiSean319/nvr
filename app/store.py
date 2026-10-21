@@ -47,6 +47,13 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 PRIMARY KEY(scope_type, scope_id)
             );
+            CREATE TABLE IF NOT EXISTS retention_policy_overrides (
+                scope_type TEXT NOT NULL CHECK (scope_type IN ('group','camera')),
+                scope_id TEXT NOT NULL,
+                retention_days INTEGER NOT NULL CHECK (retention_days BETWEEN 1 AND 3650),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY(scope_type, scope_id)
+            );
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT NOT NULL UNIQUE,
                 token_hash TEXT PRIMARY KEY,

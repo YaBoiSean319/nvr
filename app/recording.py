@@ -105,6 +105,7 @@ class RecordingManager:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.task_modes: dict[str, str] = {}
         self.scheduler_task: asyncio.Task[None] | None = None
+        self.retention_task: asyncio.Task[None] | None = None
         self.stopping = False
 
     async def start(self) -> None:
@@ -114,6 +115,7 @@ class RecordingManager:
         for row in rows:
             await self.sync_camera(row["id"])
         self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
+        self.retention_task = asyncio.create_task(self._retention_loop(), name="recording-retention-cleanup")
 
     async def stop(self) -> None:
         self.stopping = True
@@ -121,6 +123,10 @@ class RecordingManager:
             self.scheduler_task.cancel()
             await asyncio.gather(self.scheduler_task, return_exceptions=True)
         self.scheduler_task = None
+        if self.retention_task and not self.retention_task.done():
+            self.retention_task.cancel()
+            await asyncio.gather(self.retention_task, return_exceptions=True)
+        self.retention_task = None
         for task in list(self.tasks.values()):
             task.cancel()
         if self.tasks:
@@ -173,6 +179,17 @@ class RecordingManager:
             except sqlite3.Error:
                 pass
             await asyncio.sleep(5)
+
+    async def _retention_loop(self) -> None:
+        from .retention import cleanup_expired_recordings
+        while not self.stopping:
+            try:
+                await asyncio.to_thread(cleanup_expired_recordings)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, sqlite3.Error):
+                pass
+            await asyncio.sleep(300)
 
     def _sync_coverage(self, camera_id: str) -> None:
         with connect() as db:
