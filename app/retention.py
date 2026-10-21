@@ -58,9 +58,22 @@ def coverage_summary(db, camera_id: str, root: Path | None = None, now: datetime
     days, source = effective_retention(db, camera_id)
     rows = db.execute("SELECT starts_at,ends_at,size_bytes FROM recording_segments WHERE camera_id=? ORDER BY starts_at", (camera_id,)).fetchall()
     total_bytes = sum(max(0, int(row["size_bytes"])) for row in rows)
-    starts = [datetime.fromisoformat(row["starts_at"].replace("Z", "+00:00")) for row in rows]
-    ends = [datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00")) for row in rows]
-    actual_seconds = max(0.0, (max(ends) - min(starts)).total_seconds()) if rows else 0.0
+    def parse_time(value: str) -> datetime:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result.astimezone(timezone.utc)
+
+    spans = sorted((parse_time(row["starts_at"]), parse_time(row["ends_at"])) for row in rows)
+    starts = [start for start, _ in spans]
+    ends = [end for _, end in spans]
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in spans:
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    actual_seconds = sum((end - start).total_seconds() for start, end in merged)
     oldest = min(starts).astimezone(timezone.utc).isoformat() if starts else None
     newest = max(ends).astimezone(timezone.utc).isoformat() if ends else None
     age_seconds = max(1.0, actual_seconds)

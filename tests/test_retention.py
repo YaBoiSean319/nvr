@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.retention import acquire_playback, cleanup_expired_recordings, effective_retention, release_playback
+from app.retention import acquire_playback, cleanup_expired_recordings, coverage_summary, effective_retention, release_playback
 from app.store import connect, initialize
 
 
@@ -39,6 +39,16 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(effective_retention(db,self.camera),(14,"group"))
             db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days) VALUES('camera',?,7)",(self.camera,))
             self.assertEqual(effective_retention(db,self.camera),(7,"camera"))
+
+    def test_achieved_coverage_sums_recorded_intervals_without_counting_gaps(self):
+        with connect() as db:
+            for start,end in (("2026-01-01T00:00:00+00:00","2026-01-01T00:10:00+00:00"),
+                              ("2026-01-05T00:00:00+00:00","2026-01-05T00:10:00+00:00")):
+                db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
+                           (self.camera,str(uuid.uuid4())+".mp4",start,end,100))
+            summary=coverage_summary(db,self.camera,now=datetime(2026,1,6,tzinfo=timezone.utc))
+        self.assertEqual(summary["achieved_seconds"],1200)
+        self.assertEqual(summary["achieved_days"],0.01)
 
     def test_cleanup_removes_only_expired_cataloged_files_and_respects_playback(self):
         now=datetime.now(timezone.utc)
