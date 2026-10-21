@@ -238,7 +238,14 @@ function startLiveViews(cameraIds,cameras,focusedCameraId=null) {
       });
       tile.append(fullscreen);
     }
-    tile.append(image); grid.append(tile);
+    tile.append(image);
+    if(camera.audio_enabled) {
+      const listening=document.createElement("audio");listening.controls=true;listening.preload="none";
+      listening.setAttribute("aria-label",`Live audio from ${camera.name}`);
+      listening.src=`/api/cameras/${encodeURIComponent(camera.id)}/audio/live`;
+      tile.append(listening);
+    }
+    grid.append(tile);
     const view={cameraId,controller:new AbortController(),image,state,url:null,lastFrame:0}; liveViews.push(view);
     consumeLiveStream(view,"low",focusQuality).catch(error=>{if(!view.controller.signal.aborted){state.textContent="Lost";liveMessage.textContent=`${camera.name}: ${error.message}`;}});
   }
@@ -553,10 +560,23 @@ function renderCameras(cameras) {
     const effectiveMode=camera.effective_recording_mode || camera.recording_mode;
     const policyLabel=camera.recording_policy_source === "group" ? "group schedule" : camera.schedule_timezone ? "camera schedule" : "camera policy";
     const healthSummary=camera.recording_health||{};
-    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + "storage " + (camera.storage_volume_id||"default") + " · " + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · effective " + effectiveMode + " (" + policyLabel + ") · " + camera.recording_status + " · coverage " + (healthSummary.state||"unknown") + (healthSummary.detail ? " — " + healthSummary.detail : "") + (healthSummary.last_video_at ? " · video seen " + healthSummary.last_video_at : "") + (healthSummary.last_footage_write_at ? " · footage written " + healthSummary.last_footage_write_at : "") + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status + " · server fallback " + (camera.motion_fallback_enabled ? camera.server_motion_status : "disabled") : "") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
+    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + "storage " + (camera.storage_volume_id||"default") + " · " + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · effective " + effectiveMode + " (" + policyLabel + ") · " + camera.recording_status + " · coverage " + (healthSummary.state||"unknown") + (healthSummary.detail ? " — " + healthSummary.detail : "") + (healthSummary.last_video_at ? " · video seen " + healthSummary.last_video_at : "") + (healthSummary.last_footage_write_at ? " · footage written " + healthSummary.last_footage_write_at : "") + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status + " · server fallback " + (camera.motion_fallback_enabled ? camera.server_motion_status : "disabled") : "") + " · audio " + (camera.audio_status||"unknown") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
     const retentionSummary=camera.retention_coverage||{};
     summary.textContent += ` · retention ${camera.retention_days} days (${camera.retention_policy_source||"default"}; ${retentionSummary.achieved_days||0} days achieved` + (retentionSummary.projected_days_at_current_activity == null ? ")" : `; ${retentionSummary.projected_days_at_current_activity} days projected at current activity)`);
     card.append(title, summary);
+    if(currentRole === "administrator") {
+      const audioLabel=document.createElement("label");audioLabel.textContent="Enable audio recording and operator listening ";
+      const audioEnabled=document.createElement("input");audioEnabled.type="checkbox";audioEnabled.checked=Boolean(camera.audio_enabled);audioEnabled.disabled=camera.audio_supported!==true;
+      audioLabel.append(audioEnabled);
+      const saveAudio=document.createElement("button");saveAudio.type="button";saveAudio.textContent="Apply audio setting";
+      saveAudio.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PATCH",body:JSON.stringify({audio_enabled:audioEnabled.checked})});await refresh();}catch(error){document.querySelector("#camera-message").textContent=error.message;}});
+      card.append(audioLabel,saveAudio);
+      if(camera.audio_supported==null) {
+        const probeAudio=document.createElement("button");probeAudio.type="button";probeAudio.textContent="Probe camera audio";
+        probeAudio.addEventListener("click",async()=>{try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/audio/probe`,{method:"POST"});document.querySelector("#camera-message").textContent=result.detail;await refresh();}catch(error){document.querySelector("#camera-message").textContent=error.message;}});
+        card.append(probeAudio);
+      }
+    }
     if(currentRole === "administrator") {
       const retentionLabel=document.createElement("label"); retentionLabel.textContent="Camera retention override (days)";
       const retentionDays=document.createElement("input"); retentionDays.type="number"; retentionDays.min="1"; retentionDays.max="3650"; retentionDays.value=String(camera.retention_days||30);

@@ -82,6 +82,8 @@ def initialize() -> None:
                 group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL,
                 stream_url_ciphertext BLOB NOT NULL,
                 live_substream_url_ciphertext BLOB,
+                audio_supported INTEGER CHECK (audio_supported IN (0,1)),
+                audio_enabled INTEGER NOT NULL DEFAULT 0 CHECK (audio_enabled IN (0,1)),
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
                 recording_mode TEXT NOT NULL DEFAULT 'motion' CHECK (recording_mode IN ('motion','continuous','disabled')),
                 recording_enabled INTEGER NOT NULL DEFAULT 0 CHECK (recording_enabled IN (0,1)),
@@ -369,6 +371,10 @@ def initialize() -> None:
             db.execute("ALTER TABLE cameras ADD COLUMN group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL")
         if "live_substream_url_ciphertext" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN live_substream_url_ciphertext BLOB")
+        if "audio_supported" not in camera_columns:
+            db.execute("ALTER TABLE cameras ADD COLUMN audio_supported INTEGER CHECK (audio_supported IN (0,1))")
+        if "audio_enabled" not in camera_columns:
+            db.execute("ALTER TABLE cameras ADD COLUMN audio_enabled INTEGER NOT NULL DEFAULT 0 CHECK (audio_enabled IN (0,1))")
         for name, definition in (
             ("last_video_at", "TEXT"),
             ("last_footage_write_at", "TEXT"),

@@ -61,6 +61,11 @@ def _manifest_bytes(source: str) -> bytes:
 _PROTOCOLS = "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto"
 
 
+def audio_recording_args(enabled: bool) -> list[str]:
+    """Keep audio opt-in and normalize enabled audio to browser-friendly AAC."""
+    return ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "96k"] if enabled else ["-an"]
+
+
 def masked_stream_url(raw: str) -> str:
     parsed = urlsplit(raw)
     host = parsed.hostname or ""
@@ -373,10 +378,11 @@ class RecordingManager:
         source_changed = asyncio.Event()
         try:
             list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
+            audio_args = audio_recording_args(bool(row["audio_enabled"]))
             args = [
                 executable, "-hide_banner", "-nostats", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
-                "-i", "pipe:0", "-map", "0:v:0", "-an", "-c:v", "copy",
+                "-i", "pipe:0", "-map", "0:v:0", *audio_args, "-c:v", "copy",
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", str(list_size),
                 "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
                 "-hls_segment_filename", str(spool / "segment-%06d.ts"), str(spool / "live.m3u8"),
@@ -575,11 +581,12 @@ class RecordingManager:
                 continue
             list_path = output_dir / "segments.csv"
             self._set_status(camera_id, "connecting")
+            audio_args = audio_recording_args(bool(row["audio_enabled"]))
             args = [
                 executable, "-hide_banner", "-nostats", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
                 "-i", "pipe:0",
-                "-map", "0:v:0", "-an", "-c:v", "copy", "-f", "segment",
+                "-map", "0:v:0", *audio_args, "-c:v", "copy", "-f", "segment",
                 "-segment_time", str(segment_duration), "-reset_timestamps", "1",
                 "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart",
                 "-segment_list", str(list_path), "-segment_list_type", "csv", "-strftime", "1",

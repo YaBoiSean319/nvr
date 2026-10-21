@@ -180,9 +180,13 @@ class MotionClipAssembler:
         if not executable or not files:
             await self._mark_failed(capture, "Media encoder unavailable")
             return
+        with connect() as db:
+            camera = db.execute("SELECT audio_enabled FROM cameras WHERE id=?", (self.camera_id,)).fetchone()
+        from .recording import audio_recording_args
+        audio_args = audio_recording_args(bool(camera and camera["audio_enabled"]))
         proc = await asyncio.create_subprocess_exec(
             executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
-            "-map", "0:v:0", "-an", "-c:v", "copy", "-movflags", "+faststart", "-y", str(output),
+            "-map", "0:v:0", *audio_args, "-c:v", "copy", "-movflags", "+faststart", "-y", str(output),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:

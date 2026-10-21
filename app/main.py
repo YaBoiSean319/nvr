@@ -28,7 +28,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .security import hash_password, new_session_token, token_digest, verify_password
 from .store import connect, database_path, initialize
 from .credentials import encrypt, decrypt
-from .recording import RecordingManager, masked_stream_url, probe_stream, recordings_path, safe_stream_url
+from .recording import RecordingManager, masked_stream_url, probe_stream, recordings_path, safe_stream_url, _manifest_bytes
 from .health import recording_health
 from .discovery import DiscoveryResult, discover_onvif, discover_onvif_ip_range
 from .onvif_stream import list_camera_stream_profiles, resolve_camera_stream
@@ -406,6 +406,7 @@ class CameraUpdateRequest(BaseModel):
     recording_enabled: bool | None = None
     motion_pre_roll_seconds: int | None = Field(default=None, ge=0, le=120)
     motion_post_roll_seconds: int | None = Field(default=None, ge=1, le=600)
+    audio_enabled: bool | None = None
 
     @field_validator("recording_mode")
     @classmethod
@@ -724,6 +725,68 @@ def live_view_status(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_u
     return {"camera_id": camera_id, "active_viewers": count, "last_frame_at": last_frame_at, "state": state}
 
 
+@app.get("/api/cameras/{camera_id}/audio/live")
+def live_camera_audio(
+    camera_id: str,
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+) -> StreamingResponse:
+    with connect() as db:
+        camera = db.execute("SELECT stream_url_ciphertext,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not camera["audio_enabled"]:
+        raise HTTPException(status_code=403, detail="Camera audio listening is disabled by an administrator")
+    if not camera["audio_supported"]:
+        raise HTTPException(status_code=409, detail="The camera stream does not currently provide a supported audio track")
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        raise HTTPException(status_code=503, detail="Live audio transcoding is unavailable")
+    if not _acquire_live_view(camera_id):
+        raise HTTPException(status_code=503, detail="All live-view slots are in use; close another view and retry")
+    try:
+        source = decrypt(camera["stream_url_ciphertext"])
+        safe_stream_url(source)
+    except (RuntimeError, ValueError) as exc:
+        _release_live_view(camera_id)
+        raise HTTPException(status_code=503, detail="Camera stream configuration is unavailable") from exc
+
+    async def stream():
+        process: asyncio.subprocess.Process | None = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                "-protocol_whitelist", "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto", "-i", "pipe:0",
+                "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "44100", "-b:a", "96k",
+                "-c:a", "libmp3lame", "-f", "mp3", "pipe:1",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            if process.stdin is None or process.stdout is None:
+                return
+            process.stdin.write(_manifest_bytes(source))
+            await process.stdin.drain()
+            process.stdin.close()
+            while chunk := await process.stdout.read(32 * 1024):
+                yield chunk
+        except asyncio.CancelledError:
+            raise
+        except (OSError, RuntimeError):
+            return
+        finally:
+            if process is not None and process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+            _release_live_view(camera_id)
+
+    return StreamingResponse(stream(), media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
 async def _mjpeg_frames(camera_id: str, source: str, quality: str):
     executable = shutil.which("ffmpeg")
     if not executable:
@@ -994,6 +1057,9 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
         "server_motion_status": row["server_motion_status"],
         "video": {"codec": row["video_codec"], "width": row["video_width"], "height": row["video_height"]},
         "live_substream_available": bool(row["live_substream_url_ciphertext"]),
+        "audio_supported": None if row["audio_supported"] is None else bool(row["audio_supported"]),
+        "audio_enabled": bool(row["audio_enabled"]),
+        "audio_status": "enabled" if row["audio_enabled"] else ("unknown" if row["audio_supported"] is None else ("available_disabled" if bool(row["audio_supported"]) else "unsupported")),
         "last_probe_at": row["last_probe_at"],
         "last_error": row["last_error"],
     }
@@ -1033,12 +1099,12 @@ def _insert_camera(
             raise ValueError("Provide both ONVIF motion username and password")
         credentials = encrypt(json.dumps({"username": motion_username, "password": motion_password}, separators=(",", ":")))
     db.execute(
-        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,live_substream_url_ciphertext,recording_mode,recording_enabled,recording_status," 
+        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,live_substream_url_ciphertext,audio_supported,audio_enabled,recording_mode,recording_enabled,recording_status," 
         "motion_service_url,motion_credentials_ciphertext,motion_pre_roll_seconds,motion_post_roll_seconds,motion_source_status," 
         "motion_fallback_enabled,motion_zones_json,motion_sensitivity,server_motion_status,last_error," 
         "video_codec,video_width,video_height,last_probe_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), encrypt(live_substream_url.strip()) if live_substream_url else None, recording_mode, int(recording_enabled), status,
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), encrypt(live_substream_url.strip()) if live_substream_url else None, int(bool(capability.get("audio"))), 0, recording_mode, int(recording_enabled), status,
          motion_service_url, credentials, motion_pre_roll_seconds, motion_post_roll_seconds,
          "untested" if motion_service_url else "unsupported", int(motion_fallback_enabled),
          json.dumps([zone.model_dump() for zone in (motion_zones or [])], separators=(",", ":")), motion_sensitivity,
@@ -1753,20 +1819,30 @@ async def update_camera(
     camera_id: str,
     payload: CameraUpdateRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
-    if not any(name in payload.model_fields_set for name in ("recording_mode", "recording_enabled", "motion_pre_roll_seconds", "motion_post_roll_seconds")):
-        raise HTTPException(status_code=422, detail="Specify a recording mode, enablement, or buffer duration")
+    if not any(name in payload.model_fields_set for name in ("recording_mode", "recording_enabled", "motion_pre_roll_seconds", "motion_post_roll_seconds", "audio_enabled")):
+        raise HTTPException(status_code=422, detail="Specify a recording mode, enablement, buffer duration, or audio setting")
     with connect() as db:
-        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Camera not found")
+        if payload.audio_enabled and row["audio_supported"] is not True and row["audio_supported"] != 1:
+            message = "Probe the camera audio capability before enabling audio" if row["audio_supported"] is None else "This camera stream has no supported audio track"
+            raise HTTPException(status_code=422, detail=message)
         mode = payload.recording_mode or row["recording_mode"]
         enabled = payload.recording_enabled if payload.recording_enabled is not None else bool(row["recording_enabled"])
         if mode == "disabled":
             enabled = False
         assignments = ["recording_mode=?", "recording_enabled=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
         values: list[object] = [mode, int(enabled)]
+        audio_enabled = payload.audio_enabled if payload.audio_enabled is not None else bool(row["audio_enabled"])
+        if payload.audio_enabled is not None:
+            assignments.append("audio_enabled=?"); values.append(int(audio_enabled))
+            if bool(row["audio_enabled"]) != audio_enabled:
+                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                           (int(user["id"]), "camera_audio_enabled" if audio_enabled else "camera_audio_disabled", "camera", camera_id,
+                            json.dumps({"audio_supported": bool(row["audio_supported"])}, separators=(",", ":"))))
         if payload.motion_pre_roll_seconds is not None:
             assignments.append("motion_pre_roll_seconds=?"); values.append(payload.motion_pre_roll_seconds)
         if payload.motion_post_roll_seconds is not None:
@@ -1862,13 +1938,42 @@ async def rotate_camera_credentials(
     video = capability["video"]
     with connect() as db:
         db.execute(
-            "UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
-            (encrypt(stream_url), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
+            "UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
+            (encrypt(stream_url), int(bool(capability.get("audio"))), int(bool(capability.get("audio"))), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
         )
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
+
+
+@app.post("/api/cameras/{camera_id}/audio/probe")
+async def probe_camera_audio(
+    camera_id: str,
+    request: Request,
+    user: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    with connect() as db:
+        camera = db.execute("SELECT stream_url_ciphertext,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    try:
+        capability = await probe_stream(decrypt(camera["stream_url_ciphertext"]))
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Camera stream configuration is unavailable") from exc
+    if not capability.get("reachable"):
+        raise HTTPException(status_code=503, detail=str(capability.get("reason", "Camera stream could not be opened")))
+    supported = bool(capability.get("audio"))
+    with connect() as db:
+        db.execute("UPDATE cameras SET audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,last_probe_at=?,updated_at=? WHERE id=?",
+                   (int(supported), int(supported), datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id))
+        if not supported and camera["audio_enabled"]:
+            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                       (int(user["id"]), "camera_audio_disabled", "camera", camera_id, '{"reason":"audio_capability_lost"}'))
+    if not supported and camera["audio_enabled"]:
+        # If the recorder was retaining an audio track, restart it with the safe muted setting.
+        await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+    return {"audio_supported": supported, "audio_enabled": bool(camera["audio_enabled"] and supported), "audio_status": "available_disabled" if supported and not camera["audio_enabled"] else "enabled" if supported else "unsupported", "detail": "AAC is used in recordings; live listening is served as MP3 for broad browser playback."}
 
 
 @app.post("/api/cameras/{camera_id}/motion-source")
