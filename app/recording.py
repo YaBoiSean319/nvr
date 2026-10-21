@@ -18,6 +18,7 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
+from .health import recording_health
 
 SEGMENT_SECONDS = max(10, min(int(os.environ.get("NVR_SEGMENT_SECONDS", "60")), 3600))
 RECONNECT_MAX_SECONDS = 30
@@ -165,11 +166,36 @@ class RecordingManager:
                 with connect() as db:
                     rows = db.execute("SELECT id FROM cameras").fetchall()
                 await asyncio.gather(*(self.sync_camera(row["id"]) for row in rows))
+                for row in rows:
+                    self._sync_coverage(row["id"])
             except asyncio.CancelledError:
                 raise
             except sqlite3.Error:
                 pass
             await asyncio.sleep(5)
+
+    def _sync_coverage(self, camera_id: str) -> None:
+        with connect() as db:
+            row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if row is None:
+                return
+            policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
+            health = recording_health(
+                enabled=bool(row["enabled"]), recording_enabled=bool(row["recording_enabled"]),
+                mode=row["recording_mode"], effective_mode=str(policy["mode"]),
+                recording_status=row["recording_status"], motion_source_status=row["motion_source_status"],
+                last_video_at=row["last_video_at"], last_footage_write_at=row["last_footage_write_at"],
+            )
+            active = db.execute("SELECT id,coverage_kind FROM coverage_intervals WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
+            kind = str(health["coverage_kind"])
+            if active and active["coverage_kind"] == kind:
+                db.execute("UPDATE coverage_intervals SET reason=? WHERE id=?", (str(health["detail"]), active["id"]))
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            if active:
+                db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (now, active["id"]))
+            db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at) VALUES(?,?,?,?)",
+                       (camera_id, kind, str(health["detail"]), now))
 
     def _desired_mode(self, camera_id: str) -> str:
         with connect() as db:
@@ -185,6 +211,10 @@ class RecordingManager:
                 "UPDATE cameras SET recording_status=?, last_error=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
                 (value, error, camera_id),
             )
+
+    def _mark_video_fresh(self, camera_id: str) -> None:
+        with connect() as db:
+            db.execute("UPDATE cameras SET last_video_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (camera_id,))
 
     def _index_csv(self, camera_id: str, index_path: Path, output_dir: Path) -> int:
         indexed = 0
@@ -219,6 +249,9 @@ class RecordingManager:
                     indexed += cur.rowcount
             except sqlite3.Error:
                 continue
+        if indexed:
+            with connect() as db:
+                db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (camera_id,))
         return indexed
 
     async def _run(self, camera_id: str, expected_mode: str) -> None:
@@ -328,6 +361,13 @@ class RecordingManager:
                 )
             while not self.stopping:
                 await assembler.poll()
+                newest = max(spool.glob("segment-*.ts"), key=lambda path: path.stat().st_mtime, default=None)
+                if newest is not None:
+                    try:
+                        if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
+                            self._mark_video_fresh(camera_id)
+                    except OSError:
+                        pass
                 if proc.returncode is not None:
                     self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying")
                     break
@@ -492,6 +532,13 @@ class RecordingManager:
                 process.stdin.close()
                 while process.returncode is None and not self.stopping:
                     self._index_csv(camera_id, list_path, output_dir)
+                    newest = max(output_dir.glob("segment-*.mp4"), key=lambda path: path.stat().st_mtime, default=None)
+                    if newest is not None:
+                        try:
+                            if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
+                                self._mark_video_fresh(camera_id)
+                        except OSError:
+                            pass
                     with connect() as db:
                         latest = db.execute(
                             "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
@@ -501,6 +548,8 @@ class RecordingManager:
                         recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=SEGMENT_SECONDS * 2)).isoformat()
                         if latest >= recent_cutoff:
                             self._set_status(camera_id, "recording")
+                        if latest and latest < recent_cutoff:
+                            db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
                     await asyncio.sleep(2)
                 if process.returncode is None:
                     process.terminate()

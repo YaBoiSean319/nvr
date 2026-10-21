@@ -212,6 +212,7 @@ class MotionClipAssembler:
                 "UPDATE motion_events SET actual_start=?,actual_end=?,pre_roll_complete=?,status='complete',segment_id=?,failure_reason=NULL WHERE id=?",
                 (actual_start.isoformat(), actual_end.isoformat(), int(pre_roll_complete), segment_id, capture.event_id),
             )
+            db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (self.camera_id,))
         shutil.rmtree(staging, ignore_errors=True)
 
     async def _mark_failed(self, capture: _Capture, reason: str) -> None:

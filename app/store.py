@@ -65,6 +65,9 @@ def initialize() -> None:
                 recording_mode TEXT NOT NULL DEFAULT 'motion' CHECK (recording_mode IN ('motion','continuous','disabled')),
                 recording_enabled INTEGER NOT NULL DEFAULT 0 CHECK (recording_enabled IN (0,1)),
                 recording_status TEXT NOT NULL DEFAULT 'stopped',
+                last_video_at TEXT,
+                last_footage_write_at TEXT,
+                recording_fault_since TEXT,
                 motion_service_url TEXT,
                 motion_credentials_ciphertext BLOB,
                 motion_pre_roll_seconds INTEGER NOT NULL DEFAULT 10,
@@ -92,6 +95,15 @@ def initialize() -> None:
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE INDEX IF NOT EXISTS recording_camera_time_idx ON recording_segments(camera_id, starts_at, ends_at);
+            CREATE TABLE IF NOT EXISTS coverage_intervals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                coverage_kind TEXT NOT NULL CHECK (coverage_kind IN ('covered','expected_idle','failure','uncertain')),
+                reason TEXT NOT NULL,
+                starts_at TEXT NOT NULL,
+                ends_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS coverage_camera_time_idx ON coverage_intervals(camera_id, starts_at DESC);
             CREATE TABLE IF NOT EXISTS motion_events (
                 id TEXT PRIMARY KEY,
                 camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
@@ -142,6 +154,9 @@ def initialize() -> None:
         if "group_id" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL")
         for name, definition in (
+            ("last_video_at", "TEXT"),
+            ("last_footage_write_at", "TEXT"),
+            ("recording_fault_since", "TEXT"),
             ("recording_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK (recording_enabled IN (0,1))"),
             ("motion_service_url", "TEXT"),
             ("motion_credentials_ciphertext", "BLOB"),
