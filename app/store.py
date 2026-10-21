@@ -229,6 +229,7 @@ def initialize() -> None:
             CREATE INDEX IF NOT EXISTS incidents_state_seen_idx ON incidents(state,last_seen_at DESC);
             CREATE TABLE IF NOT EXISTS incident_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
                 incident_id TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
                 event_type TEXT NOT NULL CHECK (event_type IN ('raised','acknowledged','recovered','recurred')),
                 actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -236,8 +237,46 @@ def initialize() -> None:
                 details_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS incident_events_history_idx ON incident_events(incident_id,id);
+            CREATE TABLE IF NOT EXISTS webhook_endpoints (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                target_url_ciphertext BLOB NOT NULL,
+                signing_secret_ciphertext BLOB NOT NULL,
+                events_json TEXT NOT NULL,
+                allow_private INTEGER NOT NULL DEFAULT 0 CHECK (allow_private IN (0,1)),
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+                created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id TEXT PRIMARY KEY,
+                endpoint_id TEXT REFERENCES webhook_endpoints(id) ON DELETE SET NULL,
+                endpoint_name TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued','delivering','delivered','failed')),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                response_status INTEGER,
+                error_code TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT,
+                UNIQUE(endpoint_id,event_id)
+            );
+            CREATE INDEX IF NOT EXISTS webhook_deliveries_due_idx ON webhook_deliveries(status,next_attempt_at,created_at);
+            CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint_idx ON webhook_deliveries(endpoint_id,created_at DESC);
             """
         )
+        incident_event_columns = {row[1] for row in db.execute("PRAGMA table_info(incident_events)")}
+        if "event_id" not in incident_event_columns:
+            db.execute("ALTER TABLE incident_events ADD COLUMN event_id TEXT")
+        import uuid
+        for row in db.execute("SELECT id FROM incident_events WHERE event_id IS NULL").fetchall():
+            db.execute("UPDATE incident_events SET event_id=? WHERE id=?", (str(uuid.uuid4()), row["id"]))
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS incident_events_event_id_idx ON incident_events(event_id)")
         # Migrate installations created by the first implementation, which only
         # allowed administrator accounts and did not assign stable session IDs.
         camera_columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}
