@@ -60,6 +60,33 @@ def _camera_ip(value: str) -> ipaddress.IPv4Address:
     return address
 
 
+def _stream_lookup_inputs(
+    camera_ip_value: str,
+    username: str,
+    password: str,
+    device_service_url: str | None,
+    brand: str,
+) -> tuple[ipaddress.IPv4Address, str, tuple[str, ...]]:
+    address = _camera_ip(camera_ip_value)
+    username = username.strip()
+    if bool(username) != bool(password):
+        raise ValueError("Enter both the camera username and password, or leave both blank")
+    if device_service_url:
+        parsed = urlsplit(device_service_url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("Invalid ONVIF device service port") from exc
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Invalid ONVIF device service URL")
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("Invalid ONVIF device service port")
+        service_urls = (device_service_url,)
+    else:
+        service_urls = tuple(f"http://{address}:{port}/onvif/device_service" for port in _ports_for_brand(brand))
+    return address, username, service_urls
+
+
 def _with_credentials(uri: str, camera_ip: ipaddress.IPv4Address, username: str, password: str) -> str:
     parsed = urlsplit(uri.strip())
     if parsed.scheme not in {"rtsp", "rtsps"} or not parsed.hostname:
@@ -153,26 +180,15 @@ async def resolve_camera_stream(
     brand: str = "auto",
 ) -> CameraStreamSource:
     """Use ONVIF to resolve a stream URI without asking for a raw RTSP URL."""
-    address = _camera_ip(camera_ip_value)
-    username = username.strip()
-    if bool(username) != bool(password):
-        raise ValueError("Enter both the camera username and password, or leave both blank")
-    if device_service_url:
-        parsed = urlsplit(device_service_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("Invalid ONVIF device service URL")
-        service_urls = (device_service_url,)
-    else:
-        service_urls = tuple(f"http://{address}:{port}/onvif/device_service" for port in _ports_for_brand(brand))
+    address, username, service_urls = _stream_lookup_inputs(camera_ip_value, username, password, device_service_url, brand)
 
     auth = httpx.DigestAuth(username, password) if username else None
-    errors: list[Exception] = []
     async with httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(3.0, connect=1.5), trust_env=False, follow_redirects=False) as client:
         for service_url in service_urls:
             try:
                 return await _resolve_at_service(client, address, service_url, username, password, profile_token)
-            except (httpx.HTTPError, OSError, ValueError, ET.ParseError) as exc:
-                errors.append(exc)
+            except (httpx.HTTPError, OSError, ValueError, ET.ParseError):
+                continue
     raise ValueError("Could not retrieve a stream URI over ONVIF; check the camera IP, credentials, and ONVIF service")
 
 
@@ -195,17 +211,7 @@ async def list_camera_stream_profiles(
     brand: str = "auto",
 ) -> tuple[str, tuple[OnvifStreamProfile, ...]]:
     """Return all ONVIF media profiles without exposing any credentialed URI."""
-    address = _camera_ip(camera_ip_value)
-    username = username.strip()
-    if bool(username) != bool(password):
-        raise ValueError("Enter both the camera username and password, or leave both blank")
-    if device_service_url:
-        parsed = urlsplit(device_service_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("Invalid ONVIF device service URL")
-        service_urls = (device_service_url,)
-    else:
-        service_urls = tuple(f"http://{address}:{port}/onvif/device_service" for port in _ports_for_brand(brand))
+    address, username, service_urls = _stream_lookup_inputs(camera_ip_value, username, password, device_service_url, brand)
     auth = httpx.DigestAuth(username, password) if username else None
     async with httpx.AsyncClient(auth=auth, timeout=httpx.Timeout(3.0, connect=1.5), trust_env=False, follow_redirects=False) as client:
         for service_url in service_urls:
