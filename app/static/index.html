@@ -31,6 +31,9 @@
     .live-state { display:inline-block; margin-left:.5rem; color:var(--muted) }
     .playback-grid { display:grid; grid-template-columns:repeat(var(--playback-grid-columns, auto-fit),minmax(min(100%,22rem),1fr)); gap:1rem; margin-top:1rem }
     .playback-camera { min-width:0; padding:.75rem; border:1px solid #8793a155; border-radius:.6rem }
+    .playback-camera.expanded { grid-column:1 / -1 }
+    .playback-camera.selected { outline:2px solid var(--accent) }
+    .playback-grid.expanded { grid-template-columns:minmax(0,1fr) !important }
     .playback-camera video { display:block; width:100%; aspect-ratio:16/9; background:#000; margin-top:.5rem }
     .playback-track { position:relative; height:2rem; margin:.75rem 0; background:#8793a122; border-radius:.3rem }
     .playback-recording { position:absolute; top:.25rem; bottom:.25rem; background:#16803c88; border:1px solid #16803c; border-radius:.2rem }
@@ -208,7 +211,14 @@
           <label for="playback-end">To</label><input id="playback-end" type="datetime-local">
           <label id="playback-end-fold-label" for="playback-end-fold" class="hidden">This local time occurs twice; choose which occurrence</label><select id="playback-end-fold" class="hidden"><option value="">Choose occurrence</option></select>
           <p id="site-time-context" role="note"></p>
-          <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+          <div class="playback-transport" aria-label="Playback transport">
+            <button id="playback-play" type="button" disabled>Play</button><button id="playback-pause" type="button" disabled>Pause</button>
+            <button id="playback-prev-frame" type="button" disabled>Previous Frame</button><button id="playback-next-frame" type="button" disabled>Next Frame</button>
+            <button id="playback-prev-event" type="button" disabled>Previous Event</button><button id="playback-next-event" type="button" disabled>Next Event</button>
+            <label for="playback-event-scope">Event cameras</label><select id="playback-event-scope"><option value="all">All searched cameras</option><option value="selected">Selected camera</option></select>
+            <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option></select>
+            <label><input id="playback-skip-empty" type="checkbox"> Skip periods with no footage on any searched camera</label>
+          </div>
           <button id="playback-search" type="button">Search footage</button><button id="playback-stop" type="button">Stop playback</button>
           <button id="playback-export" type="button">Export selected footage</button>
           <p>Exports run as bounded background jobs. Completed downloads contain one playable video per selected camera and metadata listing actual recorded intervals and missing time. Audio is omitted.</p>

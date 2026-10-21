@@ -18,6 +18,10 @@ let playbackSyncGuard = false;
 let playbackWindow = null;
 let playbackManualChoices = new Map();
 let playbackResultsStale = false;
+let playbackClockTimer = null;
+let playbackClockAnchor = null;
+let playbackIsPlaying = false;
+let playbackExpandedView = null;
 let exportPollTimer = null;
 let incidentPollTimer = null;
 let webhookPollTimer = null;
@@ -712,11 +716,16 @@ function markPlaybackResultsStale() {
   document.querySelector("#playback-status").textContent="Search inputs changed. Results are stale until you load the timeline again.";
 }
 function stopSynchronizedPlayback() {
+  stopPlaybackClock();
   playbackViews.forEach(view=>{view.video.pause();view.video.removeAttribute("src");view.video.load();});
   playbackViews=[]; playbackTimeline=null; playbackMaster=null;playbackWindow=null;
+  playbackExpandedView=null;
+  document.querySelector("#playback-grid")?.classList.remove("expanded");
   document.querySelector("#playback-grid")?.replaceChildren();
   const cursor=document.querySelector("#playback-cursor"); if(cursor) cursor.disabled=true;
+  ["#playback-play","#playback-pause","#playback-prev-frame","#playback-next-frame","#playback-prev-event","#playback-next-event"].forEach(selector=>{const button=document.querySelector(selector);if(button)button.disabled=true;});
 }
+function stopPlaybackClock() { if(playbackClockTimer){clearInterval(playbackClockTimer);playbackClockTimer=null;} playbackIsPlaying=false;playbackClockAnchor=null; }
 function playbackMilliseconds(value) { return new Date(value).getTime(); }
 function currentPlaybackWindow() {
   if(playbackWindow)return playbackWindow;
@@ -852,10 +861,19 @@ function playbackAbsTime(view) {
   if(!view.segment) return null;
   return playbackMilliseconds(view.segment.starts_at)+view.video.currentTime*1000;
 }
+function playbackStartVideo(view) {
+  view.programmaticPlay=true;
+  view.video.play().catch(()=>{view.programmaticPlay=false;view.state.textContent="Press Play to start";});
+}
+function playbackPauseVideo(view) {
+  if(view.video.paused)return;
+  view.programmaticPause=true;
+  view.video.pause();
+}
 function playbackSetSegment(view,timeMs,playing=false) {
   const segment=playbackSegmentAt(view,timeMs);
   if(!segment) {
-    if(view.segment){view.video.pause();view.video.removeAttribute("src");view.video.load();view.segment=null;}
+    if(view.segment){playbackPauseVideo(view);view.video.removeAttribute("src");view.video.load();view.segment=null;}
     view.state.textContent="No footage at this time";
     return false;
   }
@@ -863,14 +881,15 @@ function playbackSetSegment(view,timeMs,playing=false) {
   view.segment=segment; view.targetMs=timeMs;
   const offset=Math.max(0,(timeMs-playbackMilliseconds(segment.starts_at))/1000);
   if(changed) {
+    playbackPauseVideo(view);
     view.video.src=segment.media_url; view.video.load(); view.state.textContent="Loading interval…";
-    view.video.onloadedmetadata=()=>{if(!view.video.isConnected)return;view.video.currentTime=Math.min(offset,Math.max(0,view.video.duration-0.05));view.video.playbackRate=Number(document.querySelector("#playback-rate").value);view.state.textContent="Ready";if(playing)view.video.play().catch(()=>{view.state.textContent="Press Play to start";});};
+    view.video.onloadedmetadata=()=>{if(!view.video.isConnected)return;view.video.currentTime=Math.min(offset,Math.max(0,view.video.duration-0.05));view.video.playbackRate=Number(document.querySelector("#playback-rate").value);view.state.textContent="Ready";if(playing)playbackStartVideo(view);};
   } else {
     const drift=Math.abs(view.video.currentTime-offset);
     if(drift>0.3)view.video.currentTime=offset;
     view.video.playbackRate=Number(document.querySelector("#playback-rate").value);
-    if(playing&&view.video.paused)view.video.play().catch(()=>{view.state.textContent="Press Play to start";});
-    if(!playing&&!view.video.paused)view.video.pause();
+    if(playing&&view.video.paused)playbackStartVideo(view);
+    if(!playing)playbackPauseVideo(view);
   }
   view.state.textContent=changed?"Loading interval…":"In sync";
   return true;
@@ -882,6 +901,75 @@ function seekSynchronizedPlayback(timeMs,playing=false,master=null) {
   playbackViews.forEach(view=>playbackSetSegment(view,bounded,playing));
   playbackSyncGuard=false;
   updatePlaybackDrift();
+}
+function playbackHasFootageAt(timeMs) { return playbackViews.some(view=>Boolean(playbackSegmentAt(view,timeMs))); }
+function nextPlaybackFootage(timeMs) {
+  const starts=playbackViews.flatMap(view=>view.segments.map(segment=>playbackMilliseconds(segment.starts_at))).filter(value=>value>timeMs).sort((a,b)=>a-b);
+  return starts.find(value=>playbackHasFootageAt(value))??null;
+}
+function startPlaybackClock() {
+  if(!playbackTimeline)return;
+  if(playbackClockTimer)clearInterval(playbackClockTimer);
+  playbackMaster=selectedPlaybackView();playbackViews.forEach(view=>{view.video.muted=view!==playbackMaster;});
+  playbackIsPlaying=true;
+  const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start);
+  playbackClockAnchor={at,wall:performance.now()};
+  playbackViews.forEach(view=>{view.video.playbackRate=Number(document.querySelector("#playback-rate").value);playbackPauseVideo(view);});
+  seekSynchronizedPlayback(at,true,playbackMaster);
+  playbackClockTimer=setInterval(()=>{
+    if(!playbackClockAnchor||!playbackTimeline)return;
+    const rate=Number(document.querySelector("#playback-rate").value),candidate=playbackClockAnchor.at+(performance.now()-playbackClockAnchor.wall)*rate;
+    const end=playbackMilliseconds(playbackTimeline.end);
+    if(candidate>=end){seekSynchronizedPlayback(end,false);stopPlaybackClock();return;}
+    let target=candidate;
+    if(document.querySelector("#playback-skip-empty").checked&&!playbackHasFootageAt(target)){
+      const next=nextPlaybackFootage(target);
+      if(next===null){seekSynchronizedPlayback(end,false);stopPlaybackClock();return;}
+      target=next;playbackClockAnchor={at:target,wall:performance.now()};
+    }
+    seekSynchronizedPlayback(target,true,playbackMaster);
+  },100);
+}
+function pausePlaybackClock() {
+  if(playbackClockAnchor&&playbackIsPlaying){const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackClockAnchor.at);playbackClockAnchor={at,wall:performance.now()};}
+  stopPlaybackClock();playbackViews.forEach(playbackPauseVideo);
+}
+function selectedPlaybackView() { return playbackMaster&&playbackViews.includes(playbackMaster)?playbackMaster:playbackViews[0]||null; }
+async function stepPlaybackFrame(direction) {
+  if(!playbackTimeline)return;
+  pausePlaybackClock();
+  const view=selectedPlaybackView();if(!view)return;
+  const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start);
+  const segments=[...view.segments].sort((a,b)=>playbackMilliseconds(a.starts_at)-playbackMilliseconds(b.starts_at));
+  const ordered=direction==="previous"?segments.filter(segment=>playbackMilliseconds(segment.starts_at)<at).reverse().concat(segments.filter(segment=>playbackMilliseconds(segment.starts_at)<=at&&playbackMilliseconds(segment.ends_at)>at).reverse()):segments.filter(segment=>playbackMilliseconds(segment.ends_at)>at);
+  let best=null;
+  for(const segment of ordered){
+    const start=playbackMilliseconds(segment.starts_at),end=playbackMilliseconds(segment.ends_at);
+    const requested=Math.max(start,Math.min(end-1,at));
+    try {
+      const result=await api(`/api/cameras/${encodeURIComponent(view.cameraId)}/segments/${segment.id}/frame-neighbor?at=${encodeURIComponent(new Date(requested).toISOString())}&direction=${direction}`);
+      const found=playbackMilliseconds(result.at);if((direction==="previous"&&found<at||direction==="next"&&found>at)&&(!best||(direction==="previous"?found>best:found<best)))best=found;
+    }catch(error){if(!["No adjacent frame exists in this interval","Frame time is outside this recorded interval"].includes(error.message))throw error;}
+    if(best!==null)break;
+  }
+  if(best===null){document.querySelector("#playback-status").textContent=`No ${direction} frame is available for ${view.name} within the searched range.`;return;}
+  const rangeStart=playbackMilliseconds(playbackTimeline.start),rangeEnd=playbackMilliseconds(playbackTimeline.end);
+  if(best<rangeStart||best>=rangeEnd){document.querySelector("#playback-status").textContent=`No ${direction} frame is available within the searched range.`;return;}
+  seekSynchronizedPlayback(best,false,view);
+}
+function navigatePlaybackEvent(direction) {
+  if(!playbackTimeline)return;
+  const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start),scope=document.querySelector("#playback-event-scope").value;
+  const views=scope==="selected"?[selectedPlaybackView()].filter(Boolean):playbackViews;
+  const times=[...new Set(views.flatMap(view=>view.motion_events.map(event=>playbackMilliseconds(event.source_event_at))).filter(value=>value>=playbackMilliseconds(playbackTimeline.start)&&value<playbackMilliseconds(playbackTimeline.end)))].sort((a,b)=>a-b);
+  const destination=direction==="next"?times.find(value=>value>at):times.filter(value=>value<at).pop();
+  if(destination===undefined){document.querySelector("#playback-status").textContent=`No ${direction} event within the searched range.`;return;}
+  const playing=playbackIsPlaying;seekSynchronizedPlayback(destination,playing);if(playing)startPlaybackClock();
+}
+function expandPlaybackView(view) {
+  const grid=document.querySelector("#playback-grid");
+  if(playbackExpandedView===view){playbackExpandedView=null;grid.classList.remove("expanded");playbackViews.forEach(item=>{item.tile.classList.remove("hidden","expanded");item.expandButton.textContent="Expand";});return;}
+  playbackExpandedView=view;grid.classList.add("expanded");playbackViews.forEach(item=>item.tile.classList.toggle("hidden",item!==view));view.tile.classList.add("expanded");view.expandButton.textContent="Restore grid";
 }
 function updatePlaybackDrift() {
   const times=playbackViews.map(playbackAbsTime).filter(value=>value!==null);
@@ -899,6 +987,7 @@ function renderPlaybackCamera(view) {
   const state=document.createElement("p"); state.className="playback-status"; state.textContent=view.segments.length?"Ready":"No indexed footage in this interval";
   const video=document.createElement("video"); video.controls=true; video.playsInline=true; video.preload="metadata"; video.setAttribute("aria-label",`Synchronized playback for ${view.name}`);
   const controls=document.createElement("div");
+  const select=document.createElement("button");select.type="button";select.textContent="Select camera";select.addEventListener("click",()=>{playbackMaster=view;playbackViews.forEach(item=>{item.video.muted=item!==view;item.tile.classList.toggle("selected",item===view);});});
   const snapshot=document.createElement("button"); snapshot.type="button"; snapshot.textContent="Download snapshot";
   snapshot.addEventListener("click",async()=>{
     const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start);
@@ -908,15 +997,21 @@ function renderPlaybackCamera(view) {
   });
   const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Fullscreen";
   fullscreen.addEventListener("click",()=>{if(!tile.requestFullscreen){state.textContent="Fullscreen is not supported by this browser.";return;}tile.requestFullscreen().catch(()=>{state.textContent="Fullscreen was blocked by the browser.";});});
-  controls.append(snapshot,fullscreen); tile.append(heading,state,video,controls);
+  const expand=document.createElement("button");expand.type="button";expand.textContent="Expand";expand.addEventListener("click",()=>expandPlaybackView(view));
+  controls.append(select,snapshot,fullscreen,expand); tile.append(heading,state,video,controls);
   const track=renderPlaybackTrack(view),motionList=renderPlaybackMotionList(view);
   tile.append(track);
   tile.append(motionList);
-  view.video=video;view.state=state;view.tile=tile;
-  video.addEventListener("play",()=>{if(playbackSyncGuard)return;playbackMaster=view;const time=playbackAbsTime(view);if(time!==null)seekSynchronizedPlayback(time,true,view);});
-  video.addEventListener("pause",()=>{if(playbackSyncGuard)return;playbackViews.forEach(other=>{if(other!==view)other.video.pause();});});
-  video.addEventListener("seeking",()=>{if(playbackSyncGuard)return;const time=playbackAbsTime(view);if(time!==null)seekSynchronizedPlayback(time,!view.video.paused,view);});
-  video.addEventListener("timeupdate",()=>{if(playbackSyncGuard||playbackMaster!==view)return;const time=playbackAbsTime(view);if(time===null)return;playbackSetCursor(time);playbackSyncGuard=true;playbackViews.filter(other=>other!==view).forEach(other=>playbackSetSegment(other,time,!view.video.paused));playbackSyncGuard=false;updatePlaybackDrift();});
+  view.video=video;view.state=state;view.tile=tile;view.expandButton=expand;
+  video.addEventListener("play",()=>{if(view.programmaticPlay){view.programmaticPlay=false;return;}if(playbackSyncGuard)return;playbackMaster=view;playbackViews.forEach(other=>{other.video.muted=other!==view;});startPlaybackClock();});
+  video.addEventListener("pause",()=>{
+    if(view.programmaticPause){view.programmaticPause=false;return;}
+    const reachedSegmentEnd=video.ended||(Number.isFinite(video.duration)&&video.currentTime>=video.duration-0.05);
+    if(playbackSyncGuard||reachedSegmentEnd)return;
+    pausePlaybackClock();
+  });
+  video.addEventListener("seeking",()=>{if(playbackSyncGuard)return;const time=playbackAbsTime(view);if(time!==null){playbackMaster=view;seekSynchronizedPlayback(time,!view.video.paused,view);if(playbackIsPlaying)startPlaybackClock();}});
+  video.addEventListener("timeupdate",()=>{if(playbackSyncGuard||playbackMaster!==view||!playbackIsPlaying)return;updatePlaybackDrift();});
   return tile;
 }
 async function loadSynchronizedPlayback() {
@@ -943,6 +1038,8 @@ async function loadSynchronizedPlayback() {
     renderPlaybackRuler();
     const earliest=playbackViews.flatMap(view=>view.segments.map(segment=>playbackMilliseconds(segment.starts_at))).filter(Number.isFinite);
     seekSynchronizedPlayback(earliest.length?Math.min(...earliest):playbackMilliseconds(result.start));
+    if(playbackViews.length){playbackMaster=playbackViews[0];playbackViews[0].tile.classList.add("selected");playbackViews.forEach((view,index)=>{view.video.muted=index>0;});}
+    ["#playback-play","#playback-pause","#playback-prev-frame","#playback-next-frame","#playback-prev-event","#playback-next-event"].forEach(selector=>{document.querySelector(selector).disabled=false;});
     playbackResultsStale=false;document.querySelector("#playback-stale").classList.add("hidden");
     label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Playback is paused at the earliest indexed recording; events and gaps are aligned to the same search range.`;
   }catch(error){label.textContent=error.message;}
@@ -1677,15 +1774,22 @@ document.querySelector("#playback-grid-size").addEventListener("change",event=>{
   document.querySelector("#playback-grid").style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(size))));
 });
 document.querySelector("#playback-stop").addEventListener("click",()=>{stopSynchronizedPlayback();document.querySelector("#playback-status").textContent="Playback stopped.";});
+document.querySelector("#playback-play").addEventListener("click",startPlaybackClock);
+document.querySelector("#playback-pause").addEventListener("click",pausePlaybackClock);
+document.querySelector("#playback-prev-frame").addEventListener("click",()=>stepPlaybackFrame("previous").catch(error=>{document.querySelector("#playback-status").textContent=error.message;}));
+document.querySelector("#playback-next-frame").addEventListener("click",()=>stepPlaybackFrame("next").catch(error=>{document.querySelector("#playback-status").textContent=error.message;}));
+document.querySelector("#playback-prev-event").addEventListener("click",()=>navigatePlaybackEvent("previous"));
+document.querySelector("#playback-next-event").addEventListener("click",()=>navigatePlaybackEvent("next"));
 document.querySelector("#playback-export").addEventListener("click",requestPlaybackExport);
 document.querySelector("#playback-cursor").addEventListener("input",event=>{
   if(!playbackTimeline)return;
   const start=playbackMilliseconds(playbackTimeline.start),end=playbackMilliseconds(playbackTimeline.end);
   const target=start+(end-start)*Number(event.target.value)/1000;
-  const playing=playbackViews.some(view=>!view.video.paused);
+  const playing=playbackIsPlaying;
   seekSynchronizedPlayback(target,playing);
+  if(playing)startPlaybackClock();
 });
-document.querySelector("#playback-rate").addEventListener("change",event=>{playbackViews.forEach(view=>{view.video.playbackRate=Number(event.target.value);});});
+document.querySelector("#playback-rate").addEventListener("change",event=>{playbackViews.forEach(view=>{view.video.playbackRate=Number(event.target.value);});if(playbackIsPlaying)startPlaybackClock();});
 window.addEventListener("pagehide",stopSynchronizedPlayback);
 window.addEventListener("pagehide",()=>{if(exportPollTimer)clearInterval(exportPollTimer);exportPollTimer=null;});
 if(incidentPollTimer) clearInterval(incidentPollTimer);

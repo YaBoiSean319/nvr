@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sqlite3
 import uuid
 import json
@@ -3032,6 +3033,67 @@ async def snapshot_segment(
             process.kill()
             await process.wait()
         raise HTTPException(status_code=503, detail="Snapshot extraction timed out") from exc
+    finally:
+        release_playback(path)
+
+
+@app.get("/api/cameras/{camera_id}/segments/{segment_id}/frame-neighbor")
+def playback_frame_neighbor(
+    camera_id: str,
+    segment_id: int,
+    at: datetime,
+    direction: Literal["previous", "next"],
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, str]:
+    """Return an adjacent decoded video frame timestamp from a protected recording."""
+    if at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="Frame time must include a timezone")
+    with connect() as db:
+        row = db.execute("SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE id=? AND camera_id=?", (segment_id, camera_id)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Recorded interval is unavailable")
+    start = datetime.fromisoformat(row["starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+    end = datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+    at = at.astimezone(timezone.utc)
+    if at < start or at >= end:
+        raise HTTPException(status_code=422, detail="Frame time is outside this recorded interval")
+    if not shutil.which("ffprobe"):
+        raise HTTPException(status_code=503, detail="Frame stepping is unavailable")
+    from .storage import recording_file_path
+    try:
+        path = recording_file_path(row["relative_path"])
+    except (OSError, ValueError):
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+    acquire_playback(path)
+    try:
+        offset = max(0.0, (at - start).total_seconds())
+        window_start = max(0.0, offset - 2.0) if direction == "previous" else offset
+        read_duration = offset - window_start + 2.0 if direction == "previous" else 2.0
+        try:
+            result = subprocess.run(
+                [shutil.which("ffprobe"), "-v", "error", "-read_intervals", f"{window_start:.3f}%+{read_duration:.3f}",
+                 "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(path)],
+                capture_output=True, text=True, timeout=12, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=503, detail="Frame timestamp extraction timed out") from exc
+        if result.returncode:
+            raise HTTPException(status_code=422, detail="Frame timestamps could not be read")
+        try:
+            frames = json.loads(result.stdout).get("frames", [])
+            frame_times = sorted({start.timestamp() + float(frame["best_effort_timestamp_time"]) for frame in frames
+                                  if frame.get("best_effort_timestamp_time") is not None})
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=422, detail="Frame timestamps could not be read") from exc
+        frame_times = [value for value in frame_times if start.timestamp() <= value < end.timestamp()]
+        target = at.timestamp()
+        candidates = [value for value in frame_times if value < target] if direction == "previous" else [value for value in frame_times if value > target]
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No adjacent frame exists in this interval")
+        selected = max(candidates) if direction == "previous" else min(candidates)
+        return {"at": datetime.fromtimestamp(selected, timezone.utc).isoformat()}
     finally:
         release_playback(path)
 
