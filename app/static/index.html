@@ -72,6 +72,18 @@
         <button id="diagnostics-download" type="button">Download diagnostics bundle</button>
         <p id="diagnostics-message" role="status" aria-live="polite"></p>
       </section>
+      <section id="webhooks-admin" class="hidden" aria-labelledby="webhooks-heading">
+        <h2 id="webhooks-heading">Failure webhooks</h2>
+        <p>Webhook destinations are encrypted at rest. Public receivers must use HTTPS. Private IP receivers require explicit authorization. The signing secret appears only when created or rotated; save it at the receiver.</p>
+        <label for="webhook-name">Receiver name</label><input id="webhook-name" maxlength="100" placeholder="Operations alerts">
+        <label for="webhook-url">Receiver URL</label><input id="webhook-url" type="url" maxlength="2048" placeholder="https://alerts.example.net/nvr">
+        <label><input id="webhook-allow-private" type="checkbox"> Authorize an explicit workplace-private receiver IP</label>
+        <fieldset><legend>Events to deliver</legend><div id="webhook-event-options"></div></fieldset>
+        <button id="webhook-create" type="button">Add receiver</button>
+        <p id="webhook-message" role="status" aria-live="polite"></p>
+        <ul id="webhook-list"></ul>
+        <h3>Delivery history</h3><ul id="webhook-deliveries" aria-live="polite"></ul>
+      </section>
       <section aria-labelledby="incidents-heading">
         <h2 id="incidents-heading">Incidents</h2>
         <p>Active faults remain visible after acknowledgement. Recovered incidents stay in the history and recur under the same incident identity if the fault returns.</p>
