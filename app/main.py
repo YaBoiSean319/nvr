@@ -47,9 +47,11 @@ APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.@-]{3,128}$")
 CameraBrand = Literal["auto", "acti", "axis", "bosch", "dahua", "hanwha", "hikvision", "reolink", "samsung", "uniview", "other"]
-MAX_LIVE_VIEWERS = 8
+MAX_LIVE_VIEWERS = 16
+MAX_LIVE_AUDIO_LISTENERS = 16
 _live_view_lock = threading.Lock()
 _live_view_count = 0
+_live_audio_count = 0
 _live_camera_status: dict[str, dict[str, object]] = {}
 
 
@@ -737,6 +739,21 @@ def _release_live_view(camera_id: str) -> None:
                 _live_camera_status.pop(camera_id, None)
 
 
+def _acquire_live_audio() -> bool:
+    global _live_audio_count
+    with _live_view_lock:
+        if _live_audio_count >= MAX_LIVE_AUDIO_LISTENERS:
+            return False
+        _live_audio_count += 1
+        return True
+
+
+def _release_live_audio() -> None:
+    global _live_audio_count
+    with _live_view_lock:
+        _live_audio_count = max(0, _live_audio_count - 1)
+
+
 @app.get("/api/cameras/{camera_id}/live/status")
 def live_view_status(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
     with connect() as db:
@@ -772,13 +789,13 @@ def live_camera_audio(
     executable = shutil.which("ffmpeg")
     if not executable:
         raise HTTPException(status_code=503, detail="Live audio transcoding is unavailable")
-    if not _acquire_live_view(camera_id):
-        raise HTTPException(status_code=503, detail="All live-view slots are in use; close another view and retry")
+    if not _acquire_live_audio():
+        raise HTTPException(status_code=503, detail="The live-audio listener is already in use; close it before listening to another camera")
     try:
         source = decrypt(camera["stream_url_ciphertext"])
         safe_stream_url(source)
     except (RuntimeError, ValueError) as exc:
-        _release_live_view(camera_id)
+        _release_live_audio()
         raise HTTPException(status_code=503, detail="Camera stream configuration is unavailable") from exc
 
     async def stream():
@@ -813,7 +830,7 @@ def live_camera_audio(
                 except asyncio.TimeoutError:
                     process.kill()
                     await process.wait()
-            _release_live_view(camera_id)
+            _release_live_audio()
 
     return StreamingResponse(stream(), media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 

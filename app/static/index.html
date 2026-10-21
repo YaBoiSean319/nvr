@@ -22,9 +22,12 @@
     button:focus-visible,input:focus-visible,select:focus-visible { outline:3px solid #f5a623; outline-offset:2px } [role=alert] { color:#b42318; min-height:1.5em }
     dl { display:grid; grid-template-columns:1fr auto; gap:.5rem; border-top:1px solid #8793a155; padding-top:1rem } dt { color:var(--muted) } dd { margin:0; font-weight:600 }
     video { display:block; width:100%; margin-top:1rem; background:#000; aspect-ratio:16/9 }
-    .live-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,20rem),1fr)); gap:1rem; margin-top:1rem }
-    .live-tile { min-width:0; padding:.75rem; border:1px solid #8793a155; border-radius:.6rem }
+    .live-grid { display:grid; grid-template-columns:repeat(var(--live-grid-columns,2),minmax(0,1fr)); gap:.5rem; margin-top:1rem }
+    .live-tile { min-width:0; padding:.45rem; border:1px solid #8793a155; border-radius:.6rem; background:#111820; color:#f4f6f8 }
     .live-tile img { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#000; margin-top:.5rem }
+    .live-tile button { margin:.3rem .25rem 0 0; padding:.4rem .6rem }
+    .live-placeholder { display:grid; place-items:center; min-height:7rem; border:1px dashed #8793a1; border-radius:.45rem; color:#a7b2c0 }
+    .live-tile:focus-within { outline:2px solid var(--accent); outline-offset:2px }
     .live-state { display:inline-block; margin-left:.5rem; color:var(--muted) }
     .playback-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr)); gap:1rem; margin-top:1rem }
     .playback-camera { min-width:0; padding:.75rem; border:1px solid #8793a155; border-radius:.6rem }
@@ -163,8 +166,9 @@
         <h2 id="camera-heading">Cameras</h2>
         <section aria-labelledby="live-heading">
           <h3 id="live-heading">Live viewing</h3>
-          <p>Grid tiles use the validated low-resolution profile when one was configured. Focus a tile for the main stream. Streams use your signed-in session and close when you stop viewing or leave this page. Camera audio is off by default; an administrator must enable it. Live listening uses MP3 and recorded audio uses AAC in MP4. Browser support can vary by codec and device.</p>
+          <p>Choose a 1, 4, 9, or 16-feed layout. Double-click a camera to add it; drag a camera into a tile to add or reorder it. Grid tiles use a configured low-resolution profile where available. Expand a feed for the main stream, then press Escape or Restore grid. Streams use your signed-in session and close when you stop viewing or leave this page. Audio starts muted, appears only when enabled by an administrator, and only one camera can be audible at a time.</p>
           <div id="live-camera-picker"></div>
+          <label for="live-grid-size">Grid size</label><select id="live-grid-size"><option value="1">1 feed</option><option value="4" selected>4 feeds</option><option value="9">9 feeds</option><option value="16">16 feeds</option></select>
           <label for="live-layout-name">Personal layout name</label><input id="live-layout-name" maxlength="60" placeholder="Opening shift">
           <label for="live-layouts">Saved layouts</label><select id="live-layouts"><option value="">Choose a saved layout</option></select>
           <label for="live-quality">Focused view quality</label><select id="live-quality"><option value="high">Main stream</option><option value="low">Low-resolution profile</option></select>
