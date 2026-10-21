@@ -3,6 +3,9 @@ const message = document.querySelector("#message");
 let currentRole = null;
 let importCanApply = false;
 let lastPreviewCsv = "";
+let liveViews = [];
+let liveStatusTimer = null;
+let latestCameras = [];
 function show(name) { for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 async function showLogin() {
   const state = await api("/api/setup/status");
@@ -24,7 +27,7 @@ function cameraSourcePayload() {
   if(password!==document.querySelector("#camera-password-confirm").value) throw new Error("Camera passwords do not match");
   const profile=document.querySelector("#camera-profile").value;
   if(!profile) throw new Error("Load camera endpoints and select a stream profile first");
-  return {camera_ip:document.querySelector("#camera-ip").value.trim(),camera_username:document.querySelector("#camera-username").value||null,camera_password:password||null,camera_brand:document.querySelector("#camera-brand").value,onvif_profile_token:profile,device_service_url:document.querySelector("#motion-service-url").value||null};
+  return {camera_ip:document.querySelector("#camera-ip").value.trim(),camera_username:document.querySelector("#camera-username").value||null,camera_password:password||null,camera_brand:document.querySelector("#camera-brand").value,onvif_profile_token:profile,live_substream_profile_token:document.querySelector("#camera-live-profile").value||null,device_service_url:document.querySelector("#motion-service-url").value||null};
 }
 async function loadCameraProfiles() {
   const address=document.querySelector("#camera-ip").value.trim();
@@ -37,6 +40,8 @@ async function loadCameraProfiles() {
   const select=document.querySelector("#camera-profile");
   select.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
   if(result.profiles.length>1) select.prepend(new Option("Select stream profile",""));
+  const liveProfile=document.querySelector("#camera-live-profile");
+  liveProfile.replaceChildren(new Option("Use main stream (scaled for grid)",""),...result.profiles.map(profile=>new Option(profile.name,profile.token)));
   document.querySelector("#motion-service-url").value=result.device_service_url;
   document.querySelector("#motion-username").value=document.querySelector("#camera-username").value;
   document.querySelector("#motion-password").value=password;
@@ -64,7 +69,10 @@ async function refresh() {
     }
     const inventory = await api("/api/cameras");
     if (admin) await refreshGroups();
+    latestCameras = inventory.cameras;
     renderCameras(inventory.cameras);
+    renderLiveCameraPicker(inventory.cameras);
+    await refreshLiveLayouts();
     if (admin) await refreshDiscovery();
     show("status");
   } catch (error) {
@@ -72,6 +80,91 @@ async function refresh() {
       currentRole = null; await showLogin();
     } else { message.textContent = error.message; }
   }
+}
+function renderLiveCameraPicker(cameras) {
+  const target=document.querySelector("#live-camera-picker");
+  target.replaceChildren(...cameras.map(camera=>{
+    const label=document.createElement("label"); label.textContent=`${camera.name}${camera.live_substream_available?" · low-resolution profile":""} `;
+    const input=document.createElement("input"); input.type="checkbox"; input.dataset.liveCamera="true"; input.value=camera.id;
+    label.append(input); return label;
+  }));
+}
+async function refreshLiveLayouts() {
+  try {
+    const {layouts}=await api("/api/live/layouts");
+    const select=document.querySelector("#live-layouts"), previous=select.value;
+    select.replaceChildren(new Option("Choose a saved layout",""),...layouts.map(layout=>new Option(layout.name,layout.name)));
+    if(layouts.some(layout=>layout.name===previous)) select.value=previous;
+  } catch(error) { document.querySelector("#live-message").textContent=error.message; }
+}
+function stopLiveViews() {
+  if(liveStatusTimer) clearInterval(liveStatusTimer);
+  liveStatusTimer=null;
+  for(const view of liveViews) { view.controller.abort(); if(view.url) URL.revokeObjectURL(view.url); }
+  liveViews=[];
+  document.querySelector("#live-grid").replaceChildren();
+}
+function selectedLiveCameras() { return [...document.querySelectorAll("[data-live-camera]:checked")].map(input=>input.value); }
+function startLiveViews(cameraIds,cameras,focusedCameraId=null) {
+  if(!cameraIds.length || cameraIds.length>8) { document.querySelector("#live-message").textContent="Choose between one and eight cameras."; return; }
+  stopLiveViews();
+  const focusQuality=document.querySelector("#live-quality").value;
+  const grid=document.querySelector("#live-grid"), liveMessage=document.querySelector("#live-message");
+  const displayed=focusedCameraId?[focusedCameraId]:cameraIds;
+  for(const cameraId of displayed) {
+    const camera=cameras.find(item=>item.id===cameraId); if(!camera) continue;
+    const tile=document.createElement("article"); tile.className="live-tile";
+    const title=document.createElement("strong"); title.textContent=camera.name;
+    const state=document.createElement("span"); state.className="live-state"; state.textContent="Loading";
+    const image=document.createElement("img"); image.alt=`Live video from ${camera.name}`;
+    const focus=document.createElement("button"); focus.type="button"; focus.textContent=focusedCameraId?"Back to grid":"Focus";
+    focus.addEventListener("click",()=>startLiveViews(cameraIds,cameras,focusedCameraId?null:cameraId));
+    tile.append(title,state,focus);
+    if(focusedCameraId) {
+      const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Enter fullscreen";
+      fullscreen.addEventListener("click",async()=>{
+        if(typeof tile.requestFullscreen!=="function") { liveMessage.textContent="Fullscreen is not supported by this browser."; return; }
+        try { await tile.requestFullscreen(); liveMessage.textContent="Focused camera is in fullscreen. Press Escape to return."; }
+        catch { liveMessage.textContent="The browser could not enter fullscreen. Check browser permissions and try again."; }
+      });
+      tile.append(fullscreen);
+    }
+    tile.append(image); grid.append(tile);
+    const view={cameraId,controller:new AbortController(),image,state,url:null,lastFrame:0}; liveViews.push(view);
+    consumeLiveStream(view,"low",focusQuality).catch(error=>{if(!view.controller.signal.aborted){state.textContent="Lost";liveMessage.textContent=`${camera.name}: ${error.message}`;}});
+  }
+  liveStatusTimer=setInterval(async()=>{
+    for(const view of liveViews) {
+      try {
+        const status=await api(`/api/cameras/${encodeURIComponent(view.cameraId)}/live/status`);
+        if(!view.controller.signal.aborted) view.state.textContent=status.state==="live"?"Live":status.active_viewers?"Stale":"Lost";
+      } catch { if(!view.controller.signal.aborted) view.state.textContent="Lost"; }
+    }
+  },5000);
+}
+async function consumeLiveStream(view,gridQuality,focusQuality) {
+  const quality=view.image.closest(".live-tile")?.querySelector("button")?.textContent==="Back to grid"?focusQuality:gridQuality;
+  const response=await fetch(`/api/cameras/${encodeURIComponent(view.cameraId)}/live?quality=${quality}`,{credentials:"same-origin",signal:view.controller.signal});
+  if(!response.ok) { const body=await response.json().catch(()=>({})); throw new Error(body.detail||"Live view could not start"); }
+  if(!response.body) throw new Error("This browser cannot read the live stream");
+  const reader=response.body.getReader(); let buffer=new Uint8Array(0);
+  while(!view.controller.signal.aborted) {
+    const {value,done}=await reader.read();
+    if(done) break;
+    const merged=new Uint8Array(buffer.length+value.length); merged.set(buffer); merged.set(value,buffer.length); buffer=merged;
+    while(true) {
+      let start=-1,end=-1;
+      for(let i=0;i<buffer.length-1;i++) if(buffer[i]===255&&buffer[i+1]===216){start=i;break;}
+      if(start<0){buffer=buffer.slice(Math.max(0,buffer.length-1));break;}
+      for(let i=start+2;i<buffer.length-1;i++) if(buffer[i]===255&&buffer[i+1]===217){end=i+2;break;}
+      if(end<0){buffer=buffer.slice(start);if(buffer.length>4*1024*1024)throw new Error("Video frame exceeded size limit");break;}
+      const frame=buffer.slice(start,end);buffer=buffer.slice(end);
+      const url=URL.createObjectURL(new Blob([frame],{type:"image/jpeg"}));
+      if(view.url) URL.revokeObjectURL(view.url); view.url=url; view.image.src=url; view.lastFrame=Date.now(); view.state.textContent="Live";
+    }
+    if(buffer.length>4*1024*1024) throw new Error("Live stream exceeded the frame buffer limit");
+  }
+  if(!view.controller.signal.aborted) view.state.textContent="Lost";
 }
 async function refreshDiagnostics() {
   const state = await api("/api/diagnostics/status");
@@ -549,6 +642,7 @@ document.querySelector("#camera-form").addEventListener("submit", async event =>
     }) });
     document.querySelector("#camera-form").reset();
     document.querySelector("#camera-profile").replaceChildren(new Option("Load endpoints to choose a stream",""));
+    document.querySelector("#camera-live-profile").replaceChildren(new Option("Use main stream for grid",""));
     message.textContent=`${result.name} added · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}`;
     await refresh();
   } catch (error) { message.textContent=error.message; }
@@ -563,7 +657,25 @@ document.querySelector("#login-form").addEventListener("submit", async event => 
   try { await api("/api/auth/login", { method:"POST", body:JSON.stringify({ username:document.querySelector("#login-user").value, password:document.querySelector("#login-pass").value }) }); await refresh(); }
   catch (error) { message.textContent = error.message; }
 });
-document.querySelector("#logout").addEventListener("click", async () => { await api("/api/auth/logout", { method:"POST" }); show("login"); });
+document.querySelector("#live-start").addEventListener("click",()=>startLiveViews(selectedLiveCameras(),latestCameras));
+document.querySelector("#live-stop").addEventListener("click",()=>{stopLiveViews();document.querySelector("#live-message").textContent="Live viewing stopped.";});
+document.querySelector("#live-save-layout").addEventListener("click",async()=>{
+  const name=document.querySelector("#live-layout-name").value.trim(), camera_ids=selectedLiveCameras();
+  try {if(!name)throw new Error("Enter a layout name.");const result=await api(`/api/live/layouts/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({camera_ids})});document.querySelector("#live-message").textContent=`Saved “${result.name}” for your account.`;await refreshLiveLayouts();document.querySelector("#live-layouts").value=result.name;}
+  catch(error){document.querySelector("#live-message").textContent=error.message;}
+});
+document.querySelector("#live-load-layout").addEventListener("click",async()=>{
+  const name=document.querySelector("#live-layouts").value;
+  try {if(!name)throw new Error("Choose a saved layout.");const {layouts}=await api("/api/live/layouts");const layout=layouts.find(item=>item.name===name);if(!layout)throw new Error("Saved layout is unavailable.");for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=layout.camera_ids.includes(input.value);startLiveViews(layout.camera_ids,latestCameras);}
+  catch(error){document.querySelector("#live-message").textContent=error.message;}
+});
+document.querySelector("#live-delete-layout").addEventListener("click",async()=>{
+  const name=document.querySelector("#live-layouts").value;
+  try {if(!name)throw new Error("Choose a saved layout.");await api(`/api/live/layouts/${encodeURIComponent(name)}`,{method:"DELETE"});document.querySelector("#live-message").textContent=`Deleted “${name}”.`;await refreshLiveLayouts();}
+  catch(error){document.querySelector("#live-message").textContent=error.message;}
+});
+window.addEventListener("pagehide",stopLiveViews);
+document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {
