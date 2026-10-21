@@ -42,6 +42,7 @@ from .incidents import acknowledge_incident, incident_view, list_incidents, sync
 from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, WebhookManager, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
 from .heartbeat import HeartbeatManager, configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
 from .detection import DetectionManager, detector_availability, effective_camera_config, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
+from .display_settings import format_display_datetime, validate_display_settings
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -157,6 +158,21 @@ class BootstrapRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=1024)
+
+
+class DisplaySettingsRequest(BaseModel):
+    time_zone: str = Field(min_length=1, max_length=128)
+    date_format: str = Field(min_length=1, max_length=32)
+    clock_format: str = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_display_options(self) -> "DisplaySettingsRequest":
+        try:
+            validate_display_settings(self.time_zone.strip(), self.date_format, self.clock_format)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        self.time_zone = self.time_zone.strip()
+        return self
 
 
 class ViewerLayoutRequest(BaseModel):
@@ -711,6 +727,38 @@ def logout(request: Request, response: Response) -> Response:
 @app.get("/api/auth/me")
 def me(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, str]:
     return {"username": user["username"], "role": user["role"]}
+
+
+def _display_settings_view(row: sqlite3.Row) -> dict[str, object]:
+    return {"time_zone": row["time_zone"], "date_format": row["date_format"],
+            "clock_format": row["clock_format"], "updated_at": row["updated_at"]}
+
+
+@app.get("/api/settings/display")
+def get_display_settings(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    with connect() as db:
+        row = db.execute("SELECT time_zone,date_format,clock_format,updated_at FROM site_display_settings WHERE singleton_id=1").fetchone()
+    return _display_settings_view(row)
+
+
+@app.post("/api/settings/display/preview")
+def preview_display_settings(payload: DisplaySettingsRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    sample = datetime(2026, 10, 21, 16, 5, 6, tzinfo=timezone.utc)
+    return {**payload.model_dump(), "preview": format_display_datetime(
+        sample, payload.time_zone, payload.date_format, payload.clock_format
+    )}
+
+
+@app.put("/api/settings/display")
+def save_display_settings(payload: DisplaySettingsRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    updated_at = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        db.execute(
+            "UPDATE site_display_settings SET time_zone=?,date_format=?,clock_format=?,updated_at=? WHERE singleton_id=1",
+            (payload.time_zone, payload.date_format, payload.clock_format, updated_at),
+        )
+        row = db.execute("SELECT time_zone,date_format,clock_format,updated_at FROM site_display_settings WHERE singleton_id=1").fetchone()
+    return _display_settings_view(row)
 
 
 def _load_live_views(user: sqlite3.Row) -> dict[str, object]:

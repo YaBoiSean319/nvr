@@ -94,6 +94,15 @@ def initialize() -> None:
                 sidebar_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (sidebar_collapsed IN (0,1)),
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS site_display_settings (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                time_zone TEXT NOT NULL DEFAULT 'UTC',
+                date_format TEXT NOT NULL DEFAULT 'friendly',
+                clock_format TEXT NOT NULL DEFAULT '12',
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            INSERT OR IGNORE INTO site_display_settings(singleton_id,time_zone,date_format,clock_format)
+                VALUES(1,'UTC','friendly','12');
             CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
             CREATE TABLE IF NOT EXISTS cameras (
                 id TEXT PRIMARY KEY,

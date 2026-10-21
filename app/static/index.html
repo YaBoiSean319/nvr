@@ -156,6 +156,16 @@
         <p id="heartbeat-message" role="status" aria-live="polite"></p>
         <p id="heartbeat-state" aria-live="polite"></p>
       </section>
+      <section id="display-settings-admin" class="hidden" aria-labelledby="display-settings-heading">
+        <h3 id="display-settings-heading">Site date and time display</h3>
+        <p>These preferences change how dates appear in the console. Stored events and search requests continue to use UTC instants. Recording schedules keep their own time zones.</p>
+        <label for="display-time-zone">Site time zone (IANA)</label><input id="display-time-zone" maxlength="128" value="UTC" autocomplete="off" placeholder="America/New_York">
+        <label for="display-date-format">Date format</label><select id="display-date-format"><option value="friendly">Oct 21, 2026</option><option value="long">October 21, 2026</option><option value="iso">2026-10-21</option><option value="day-month">21/10/2026</option><option value="month-day">10/21/2026</option></select>
+        <label for="display-clock-format">Clock</label><select id="display-clock-format"><option value="12">12-hour with seconds</option><option value="24">24-hour with seconds</option></select>
+        <button id="display-settings-save" type="button">Save display settings</button>
+        <p id="display-settings-preview" role="status" aria-live="polite">Preview appears here.</p>
+        <p id="display-settings-message" role="status" aria-live="polite"></p>
+      </section>
       <section aria-labelledby="incidents-heading">
         <h2 id="incidents-heading">Incidents</h2>
         <p>Active faults remain visible after acknowledgement. Recovered incidents stay in the history and recur under the same incident identity if the fault returns.</p>
@@ -186,7 +196,10 @@
           <div id="playback-camera-picker"></div>
           <label for="playback-grid-size">Playback layout</label><select id="playback-grid-size"><option value="1">1 feed</option><option value="4" selected>4 feeds</option><option value="9">9 feeds</option><option value="16">16 feeds</option></select>
           <label for="playback-start">From</label><input id="playback-start" type="datetime-local">
+          <label id="playback-start-fold-label" for="playback-start-fold" class="hidden">This local time occurs twice; choose which occurrence</label><select id="playback-start-fold" class="hidden"><option value="">Choose occurrence</option></select>
           <label for="playback-end">To</label><input id="playback-end" type="datetime-local">
+          <label id="playback-end-fold-label" for="playback-end-fold" class="hidden">This local time occurs twice; choose which occurrence</label><select id="playback-end-fold" class="hidden"><option value="">Choose occurrence</option></select>
+          <p id="site-time-context" role="note"></p>
           <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
           <button id="playback-search" type="button">Load timeline</button><button id="playback-stop" type="button">Stop playback</button>
           <button id="playback-export" type="button">Export selected footage</button>

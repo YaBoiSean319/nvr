@@ -27,6 +27,44 @@ let workspaceRestored = false;
 let workspaceSaveTimer = null;
 let liveViewDirty = false;
 let cachedLiveArrangement = null;
+let displaySettings = {time_zone:"UTC",date_format:"friendly",clock_format:"12"};
+function formatDateTime(value, compact=false, settings=displaySettings) {
+  const date=new Date(value);
+  const common={timeZone:settings.time_zone};
+  const parts=Object.fromEntries(new Intl.DateTimeFormat("en-US",{...common,year:"numeric",month:settings.date_format==="long"?"long":settings.date_format==="iso"||settings.date_format==="day-month"||settings.date_format==="month-day"?"2-digit":"short",day:"2-digit"}).formatToParts(date).map(part=>[part.type,part.value]));
+  let dateText;
+  if(compact) dateText=`${parts.month}/${parts.day}`;
+  else if(settings.date_format==="iso") dateText=`${parts.year}-${parts.month}-${parts.day}`;
+  else if(settings.date_format==="day-month") dateText=`${parts.day}/${parts.month}/${parts.year}`;
+  else if(settings.date_format==="month-day") dateText=`${parts.month}/${parts.day}/${parts.year}`;
+  else dateText=`${parts.month} ${Number(parts.day)}, ${parts.year}`;
+  const timeOptions={...common,hour:"2-digit",minute:"2-digit",hourCycle:settings.clock_format==="24"?"h23":"h12"};
+  if(!compact)timeOptions.second="2-digit";
+  const time=new Intl.DateTimeFormat("en-US",timeOptions).format(date);
+  return `${dateText} ${time}`;
+}
+function localTimeCandidates(value) {
+  const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value||"");
+  if(!match)return [];
+  const expected=match.slice(1).map(Number),target=Date.UTC(expected[0],expected[1]-1,expected[2],expected[3],expected[4]);
+  const formatter=new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"});
+  const offsets=new Set();
+  for(let hour=-36;hour<=36;hour+=6){const probe=target+hour*3600000;const p=Object.fromEntries(formatter.formatToParts(new Date(probe)).map(item=>[item.type,item.value]));offsets.add(Date.UTC(Number(p.year),Number(p.month)-1,Number(p.day),Number(p.hour),Number(p.minute))-probe);}
+  return [...new Set([...offsets].map(offset=>target-offset).filter(ms=>{const p=Object.fromEntries(formatter.formatToParts(new Date(ms)).map(item=>[item.type,item.value]));return Number(p.year)===expected[0]&&Number(p.month)===expected[1]&&Number(p.day)===expected[2]&&Number(p.hour)===expected[3]&&Number(p.minute)===expected[4];}))].sort((a,b)=>a-b);
+}
+function updateFoldChoices(field) {
+  const input=document.querySelector(`#playback-${field}`),select=document.querySelector(`#playback-${field}-fold`),label=document.querySelector(`#playback-${field}-fold-label`),candidates=localTimeCandidates(input.value);
+  select.replaceChildren(new Option("Choose occurrence",""));
+  if(candidates.length>1){for(const [index,instant] of candidates.entries()){const zoneOffset=new Intl.DateTimeFormat("en-US",{timeZone:displaySettings.time_zone,timeZoneName:"shortOffset"}).formatToParts(new Date(instant)).find(part=>part.type==="timeZoneName")?.value||`Occurrence ${index+1}`;select.add(new Option(`${index===0?"First":"Second"} occurrence · ${zoneOffset}`,String(instant)));}select.classList.remove("hidden");label.classList.remove("hidden");}
+  else{select.classList.add("hidden");label.classList.add("hidden");}
+}
+function resolveSearchLocalTime(field) {
+  const input=document.querySelector(`#playback-${field}`),candidates=localTimeCandidates(input.value),fold=document.querySelector(`#playback-${field}-fold`);
+  if(!input.value)throw new Error("Enter both a start and end time.");
+  if(candidates.length===0)throw new Error(`The ${field} time does not exist in ${displaySettings.time_zone} because the clock jumps forward.`);
+  if(candidates.length>1){const chosen=Number(fold.value);if(!candidates.includes(chosen))throw new Error(`Choose which occurrence of the repeated ${field} time to use.`);return new Date(chosen).toISOString();}
+  return new Date(candidates[0]).toISOString();
+}
 function show(name) { if(name!=="status") stopSynchronizedPlayback(); document.querySelector("main > h1").classList.toggle("hidden", name === "status"); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 function moveInto(selector, targetSelector) {
   const element = document.querySelector(selector), target = document.querySelector(targetSelector);
@@ -53,7 +91,7 @@ function setupConsoleShell() {
   const recordedHeading = [...document.querySelectorAll("h3")].find(item => item.textContent.trim() === "Recorded footage");
   if (recordedHeading) cameraSettings.append(recordedHeading);
   moveInto("#status > .badge", "#app-settings-content");
-  for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#logout"]) moveInto(selector, "#app-settings-content");
+  for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#display-settings-admin", "#logout"]) moveInto(selector, "#app-settings-content");
   document.querySelectorAll("[data-screen]").forEach(button => button.addEventListener("click", () => setScreen(button.dataset.screen)));
   document.querySelector("#sidebar-toggle").addEventListener("click", () => {
     const layout = document.querySelector("#console-layout"), button = document.querySelector("#sidebar-toggle");
@@ -66,7 +104,46 @@ function setupConsoleShell() {
   const theme = document.querySelector("#theme-choice"), savedTheme = localStorage.getItem("nvr-theme") || "system";
   theme.value = savedTheme; document.documentElement.dataset.theme = savedTheme === "system" ? "" : savedTheme;
   theme.addEventListener("change", () => { localStorage.setItem("nvr-theme", theme.value); document.documentElement.dataset.theme = theme.value === "system" ? "" : theme.value; });
+  for(const selector of ["#display-time-zone","#display-date-format","#display-clock-format"])document.querySelector(selector).addEventListener("input",previewDisplaySettings);
+  document.querySelector("#display-settings-save").addEventListener("click",saveDisplaySettings);
+  for(const field of ["start","end"])document.querySelector(`#playback-${field}`).addEventListener("change",()=>updateFoldChoices(field));
   consoleShellReady = true;
+}
+function readDisplaySettingsForm() {
+  return {time_zone:document.querySelector("#display-time-zone").value.trim(),date_format:document.querySelector("#display-date-format").value,clock_format:document.querySelector("#display-clock-format").value};
+}
+function updateSiteTimeContext() {
+  const target=document.querySelector("#site-time-context");
+  if(target)target.textContent=`Search times use ${displaySettings.time_zone}. Repeated fall-back times require choosing an occurrence; nonexistent spring-forward times are rejected.`;
+}
+async function previewDisplaySettings() {
+  const target=document.querySelector("#display-settings-preview"),draft=readDisplaySettingsForm();
+  try {
+    const result=await api("/api/settings/display/preview",{method:"POST",body:JSON.stringify(draft)});
+    target.textContent=`Preview: ${result.preview} · ${draft.time_zone}`;
+    document.querySelector("#display-settings-message").textContent="Preview only; save to apply these settings.";
+  } catch(error) { target.textContent="Preview unavailable until the time zone and display options are valid.";document.querySelector("#display-settings-message").textContent=error.message; }
+}
+async function saveDisplaySettings() {
+  const message=document.querySelector("#display-settings-message"),button=document.querySelector("#display-settings-save");
+  button.disabled=true;
+  try {
+    displaySettings=await api("/api/settings/display",{method:"PUT",body:JSON.stringify(readDisplaySettingsForm())});
+    updateSiteTimeContext();
+    for(const field of ["start","end"])updateFoldChoices(field);
+    message.textContent="Site date and time display settings saved.";
+    await previewDisplaySettings();
+  } catch(error) { message.textContent=error.message; }
+  finally { button.disabled=false; }
+}
+async function refreshDisplaySettings() {
+  displaySettings=await api("/api/settings/display");
+  document.querySelector("#display-time-zone").value=displaySettings.time_zone;
+  document.querySelector("#display-date-format").value=displaySettings.date_format;
+  document.querySelector("#display-clock-format").value=displaySettings.clock_format;
+  updateSiteTimeContext();
+  for(const field of ["start","end"])updateFoldChoices(field);
+  if(currentRole==="administrator")await previewDisplaySettings();
 }
 function setScreen(screen) {
   if (!document.querySelector(`[data-page="${screen}"]`)) return;
@@ -173,6 +250,7 @@ async function refresh() {
     if (!admin && ["camera-settings", "app-settings"].includes(activeScreen)) setScreen("live");
     document.querySelector("#status-heading").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
     document.querySelector("#status-list").classList.toggle("hidden", !admin);
+    document.querySelector("#display-settings-admin").classList.toggle("hidden", !admin);
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#diagnostics-admin").classList.toggle("hidden", !admin);
     document.querySelector("#webhooks-admin").classList.toggle("hidden", !admin);
@@ -180,6 +258,7 @@ async function refresh() {
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
     document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
     document.querySelector("#bulk-admin").classList.toggle("hidden", !admin);
+    await refreshDisplaySettings();
     if (admin) {
       const data = await api("/api/system/status");
       const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
@@ -242,7 +321,7 @@ async function refreshIncidents() {
       const summary=document.createElement("strong");
       summary.textContent=`${incident.state.toUpperCase()} · ${incident.summary}`;
       const details=document.createElement("p");
-      details.textContent=`First seen ${new Date(incident.first_seen_at).toLocaleString()} · Last seen ${new Date(incident.last_seen_at).toLocaleString()} · Recurrences ${Math.max(0,incident.recurrence_count-1)} · ${incident.events.length} history events`;
+      details.textContent=`First seen ${formatDateTime(incident.first_seen_at)} · Last seen ${formatDateTime(incident.last_seen_at)} · Recurrences ${Math.max(0,incident.recurrence_count-1)} · ${incident.events.length} history events`;
       item.append(summary,details);
       if(incident.state==="active") {
         const acknowledge=document.createElement("button"); acknowledge.type="button"; acknowledge.textContent="Acknowledge";
@@ -290,7 +369,7 @@ async function refreshHeartbeatStatus() {
     const target=document.querySelector("#heartbeat-state");
     if(!state.configured) target.textContent="No external heartbeat receiver is configured.";
     else {
-      const lastSuccess=state.last_success_at?new Date(state.last_success_at).toLocaleString():"none yet";
+      const lastSuccess=state.last_success_at?formatDateTime(state.last_success_at):"none yet";
       target.textContent=`${state.enabled?"Enabled":"Disabled"} · ${state.url_origin} · every ${state.interval_seconds}s · last successful send ${lastSuccess}${state.last_error?` · latest attempt failed: ${state.last_error}`:""}. ${state.checker_note}`;
     }
   }catch(error){document.querySelector("#heartbeat-message").textContent=error.message;}
@@ -619,7 +698,7 @@ function updatePlaybackDrift() {
   const times=playbackViews.map(playbackAbsTime).filter(value=>value!==null);
   const drift=times.length>1?Math.max(...times)-Math.min(...times):0;
   const label=document.querySelector("#playback-status");
-  if(playbackTimeline) label.textContent=`Shared time ${new Date(Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start)).toLocaleString()} · measured playback drift ${Math.round(drift)} ms`;
+  if(playbackTimeline) label.textContent=`Shared time ${formatDateTime(Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start),true)} · measured playback drift ${Math.round(drift)} ms`;
 }
 function renderPlaybackCamera(view) {
   const tile=document.createElement("article"); tile.className="playback-camera";
@@ -640,7 +719,7 @@ function renderPlaybackCamera(view) {
   const track=document.createElement("div"); track.className="playback-track"; track.setAttribute("aria-label",`Motion and coverage timeline for ${view.name}`);
   const start=playbackMilliseconds(playbackTimeline.start), span=playbackMilliseconds(playbackTimeline.end)-start;
   for(const gap of view.gaps){const mark=document.createElement("button");mark.type="button";mark.className=`playback-gap ${gap.state}`;const left=(playbackMilliseconds(gap.starts_at)-start)/span*100,width=(playbackMilliseconds(gap.ends_at)-playbackMilliseconds(gap.starts_at))/span*100;mark.style.left=`${left}%`;mark.style.width=`${Math.max(.4,width)}%`;mark.title=`${gap.state}: ${gap.reason}`;mark.setAttribute("aria-label",mark.title);mark.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(gap.starts_at)));track.append(mark);}
-  for(const event of view.motion_events){const marker=document.createElement("button");marker.type="button";marker.className="playback-motion";marker.style.left=`${(playbackMilliseconds(event.source_event_at)-start)/span*100}%`;marker.title=`Motion · ${new Date(event.source_event_at).toLocaleString()} · ${event.status}`;marker.setAttribute("aria-label",marker.title);marker.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(event.source_event_at)));track.append(marker);}
+  for(const event of view.motion_events){const marker=document.createElement("button");marker.type="button";marker.className="playback-motion";marker.style.left=`${(playbackMilliseconds(event.source_event_at)-start)/span*100}%`;marker.title=`Motion · ${formatDateTime(event.source_event_at)} · ${event.status}`;marker.setAttribute("aria-label",marker.title);marker.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(event.source_event_at)));track.append(marker);}
   tile.append(track);
   view.video=video;view.state=state;view.tile=tile;
   video.addEventListener("play",()=>{if(playbackSyncGuard)return;playbackMaster=view;const time=playbackAbsTime(view);if(time!==null)seekSynchronizedPlayback(time,true,view);});
@@ -657,7 +736,8 @@ async function loadSynchronizedPlayback() {
   try {
     if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
     if(!startInput||!endInput)throw new Error("Enter both a start and end time.");
-    const result=await api("/api/playback/timeline",{method:"POST",body:JSON.stringify({camera_ids,start:new Date(startInput).toISOString(),end:new Date(endInput).toISOString()})});
+    const start=resolveSearchLocalTime("start"),end=resolveSearchLocalTime("end");
+    const result=await api("/api/playback/timeline",{method:"POST",body:JSON.stringify({camera_ids,start,end})});
     playbackTimeline=result;const cursor=document.querySelector("#playback-cursor");cursor.disabled=false;cursor.value="0";cursor.dataset.time=String(playbackMilliseconds(result.start));
     const grid=document.querySelector("#playback-grid");
     grid.style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(Number(document.querySelector("#playback-grid-size").value)||4))));
@@ -675,7 +755,7 @@ async function refreshExports() {
     target.replaceChildren(...exports.map(job=>{
       const row=document.createElement("li");
       const state=document.createElement("span");
-      state.textContent=`${job.id.slice(0,8)} · ${job.status}${job.cancel_requested?" · cancelling":""}${job.error?` · ${job.error}`:""}`;
+      state.textContent=`${job.id.slice(0,8)} · ${job.status} · ${formatDateTime(job.start)} – ${formatDateTime(job.end)}${job.cancel_requested?" · cancelling":""}${job.error?` · ${job.error}`:""}`;
       row.append(state);
       if(job.download_url){const download=document.createElement("a");download.href=job.download_url;download.textContent=" Download ZIP";row.append(download);}
       if(job.status==="queued"||job.status==="running"){
@@ -698,7 +778,8 @@ async function requestPlaybackExport() {
     if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
     if(!start||!end)throw new Error("Enter both a start and end time.");
     button.disabled=true;message.textContent="Submitting export…";
-    const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids,start:new Date(start).toISOString(),end:new Date(end).toISOString()})});
+    const startInstant=resolveSearchLocalTime("start"),endInstant=resolveSearchLocalTime("end");
+    const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids,start:startInstant,end:endInstant})});
     message.textContent=`Export ${job.id.slice(0,8)} queued. You can leave this page; the job will continue.`;
     await refreshExports();
   }catch(error){message.textContent=error.message;}
@@ -709,7 +790,7 @@ async function refreshDiagnostics() {
   const button = document.querySelector("#diagnostics-toggle");
   button.textContent = state.enabled ? "Stop diagnostics capture" : "Enable diagnostics capture";
   document.querySelector("#diagnostics-message").textContent = state.enabled
-    ? `Capture is on until ${new Date(state.capture_until).toLocaleString()} · ${state.event_count} event(s) collected.`
+    ? `Capture is on until ${formatDateTime(state.capture_until)} · ${state.event_count} event(s) collected.`
     : `${state.event_count} event(s) available for download. Capture is off.`;
 }
 async function refreshGroups() {
@@ -769,7 +850,7 @@ async function refreshDiscovery() {
     const candidateAddress = (() => { try { return new URL(candidate.service_urls[0]).hostname; } catch { return ""; } })();
     title.textContent=candidate.device_uuid.startsWith("ipscan:") ? `Camera at ${candidateAddress}` : `ONVIF device ${candidate.device_uuid}`;
     const state=document.createElement("p");
-    state.textContent=candidate.linked_camera_id ? `Already linked to camera ${candidate.linked_camera_id}` : `First seen ${new Date(candidate.first_seen_at).toLocaleString()} · Last seen ${new Date(candidate.last_seen_at).toLocaleString()}`;
+    state.textContent=candidate.linked_camera_id ? `Already linked to camera ${candidate.linked_camera_id}` : `First seen ${formatDateTime(candidate.first_seen_at)} · Last seen ${formatDateTime(candidate.last_seen_at)}`;
     const services=document.createElement("p"); services.textContent=`Device service: ${candidate.service_urls.join(", ") || "unavailable"}`;
     const capabilities=document.createElement("p");
     capabilities.textContent=`Capabilities · ${Object.entries(candidate.capabilities).map(([name,result])=>`${name}: ${result}`).join(" · ")}`;
@@ -846,7 +927,7 @@ async function refreshSessions() {
   target.replaceChildren(...sessions.map(session => {
     const row=document.createElement("p");
     const text=document.createElement("span");
-    text.textContent=`${session.username} (${session.role}) · expires ${new Date(session.expires_at).toLocaleString()} `;
+    text.textContent=`${session.username} (${session.role}) · expires ${formatDateTime(session.expires_at)} `;
     const end=document.createElement("button"); end.type="button"; end.textContent="End session";
     end.addEventListener("click", async () => { await api(`/api/admin/sessions/${encodeURIComponent(session.session_id)}`, {method:"DELETE"}); await refreshSessions(); });
     row.append(text,end); return row;
@@ -947,7 +1028,7 @@ function renderCameras(cameras) {
         const target=document.querySelector("#segment-list");
         target.replaceChildren(...result.events.map(event=>{
           const row=document.createElement("p");
-          row.textContent=new Date(event.source_event_at).toLocaleString()+" · "+event.source+" · "+event.status+" · pre-roll "+(event.pre_roll_complete ? "complete" : "incomplete/unknown")+(event.media_url ? " · playable clip available" : "");
+          row.textContent=formatDateTime(event.source_event_at)+" · "+event.source+" · "+event.status+" · pre-roll "+(event.pre_roll_complete ? "complete" : "incomplete/unknown")+(event.media_url ? " · playable clip available" : "");
           if(event.media_url) { const play=document.createElement("button"); play.type="button"; play.textContent="Play"; play.addEventListener("click",()=>{const player=document.querySelector("#playback");player.src=event.media_url;player.classList.remove("hidden");player.play().catch(()=>{});}); row.append(play); }
           return row;
         }));
@@ -968,7 +1049,7 @@ function renderCameras(cameras) {
           const found=await api(`/api/ai/events?${params}`);
           results.replaceChildren();
           const note=document.createElement("p");note.textContent=found.coverage_note;results.append(note);
-          for(const item of found.events){const row=document.createElement("p");row.textContent=`${new Date(item.first_seen_at).toLocaleString()} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version} · OpenVINO ${item.provider}`;
+          for(const item of found.events){const row=document.createElement("p");row.textContent=`${formatDateTime(item.first_seen_at)} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version} · OpenVINO ${item.provider}`;
             const play=document.createElement("button");play.type="button";play.textContent="Find playback";play.addEventListener("click",async()=>{
               const at=new Date(item.first_seen_at),begin=new Date(at.getTime()-30000),finish=new Date(at.getTime()+30000);
               const footage=await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments?from=${encodeURIComponent(begin.toISOString())}&to=${encodeURIComponent(finish.toISOString())}`);
@@ -1001,7 +1082,7 @@ function renderCameras(cameras) {
         const substreamLabel=document.createElement("label");substreamLabel.textContent="Use validated lower-resolution stream ";const substream=document.createElement("input");substream.type="checkbox";substream.checked=config.use_substream;substreamLabel.append(substream);
         const zonesLabel=document.createElement("label");zonesLabel.textContent="AI zones (normalized rectangles; empty uses full frame)";const aiZones=document.createElement("textarea");aiZones.spellcheck=false;aiZones.value=JSON.stringify(config.zones);aiZones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';zonesLabel.append(aiZones);
         const saveAI=document.createElement("button");saveAI.type="button";saveAI.textContent="Save AI settings";
-        const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${new Date(config.last_success_at).toLocaleString()}`:""}${config.last_error?` · ${config.last_error}`:""}`;
+        const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${formatDateTime(config.last_success_at)}`:""}${config.last_error?` · ${config.last_error}`:""}`;
         saveAI.addEventListener("click",async()=>{try{const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:JSON.parse(aiZones.value||"[]"),inherit_group:inherit.checked})});aiStatus.textContent=`Status: ${saved.status} · settings ${saved.config_source}${saved.last_error?` · ${saved.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
         const coverageButton=document.createElement("button");coverageButton.type="button";coverageButton.textContent="Refresh analysis coverage";coverageButton.addEventListener("click",async()=>{try{const status=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai/coverage`);aiStatus.textContent=`Status: ${status.status} · ${status.intervals.length} analysis coverage intervals${status.last_error?` · ${status.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
         aiPanel.append(heading,availability,source,inheritLabel,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,zonesLabel,saveAI,coverageButton,aiStatus);
@@ -1014,8 +1095,8 @@ function renderCameras(cameras) {
         const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/coverage`);
         coverageList.replaceChildren(...result.intervals.map(interval=>{
           const item=document.createElement("li");
-          const end=interval.ends_at ? new Date(interval.ends_at).toLocaleString() : "ongoing";
-          item.textContent=`${interval.coverage_kind}: ${interval.reason} · ${new Date(interval.starts_at).toLocaleString()} to ${end}`;
+          const end=interval.ends_at ? formatDateTime(interval.ends_at) : "ongoing";
+          item.textContent=`${interval.coverage_kind}: ${interval.reason} · ${formatDateTime(interval.starts_at)} to ${end}`;
           return item;
         }));
         if(!result.intervals.length){const item=document.createElement("li");item.textContent="No coverage transitions recorded yet.";coverageList.replaceChildren(item);}
@@ -1082,11 +1163,11 @@ async function loadSegments(camera) {
     list.replaceChildren(...result.segments.map(segment => {
       const item=document.createElement("li");
       const play=document.createElement("button"); play.type="button";
-      play.textContent=`Play ${new Date(segment.starts_at).toLocaleString()} – ${new Date(segment.ends_at).toLocaleTimeString()} · ${(segment.size_bytes/1048576).toFixed(1)} MiB`;
+      play.textContent=`Play ${formatDateTime(segment.starts_at)} – ${formatDateTime(segment.ends_at).split(" ").slice(-1)[0]} · ${(segment.size_bytes/1048576).toFixed(1)} MiB`;
       play.addEventListener("click", () => { player.src=segment.media_url; player.classList.remove("hidden"); player.play().catch(() => { message.textContent="Interval loaded. Press Play to start playback."; }); });
       item.append(play);
       if(segment.preserved) {
-        const held=document.createElement("span"); held.textContent=segment.hold_expires_at ? ` Preserved until ${new Date(segment.hold_expires_at).toLocaleString()}.` : " Preserved until an administrator releases the hold."; item.append(held);
+        const held=document.createElement("span"); held.textContent=segment.hold_expires_at ? ` Preserved until ${formatDateTime(segment.hold_expires_at)}.` : " Preserved until an administrator releases the hold."; item.append(held);
         if(currentRole==="administrator") { const release=document.createElement("button"); release.type="button"; release.textContent="Release hold"; release.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments/${segment.id}/hold`,{method:"DELETE"});await loadSegments(camera);}catch(error){message.textContent=error.message;}}); item.append(release); }
       } else {
         const preserve=document.createElement("button"); preserve.type="button"; preserve.textContent="Preserve footage";
