@@ -67,6 +67,13 @@ def initialize() -> None:
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS viewer_layouts (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL COLLATE NOCASE,
+                camera_ids_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY(user_id,name)
+            );
             CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
             CREATE TABLE IF NOT EXISTS cameras (
                 id TEXT PRIMARY KEY,
@@ -74,6 +81,7 @@ def initialize() -> None:
                 onvif_uuid TEXT,
                 group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL,
                 stream_url_ciphertext BLOB NOT NULL,
+                live_substream_url_ciphertext BLOB,
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
                 recording_mode TEXT NOT NULL DEFAULT 'motion' CHECK (recording_mode IN ('motion','continuous','disabled')),
                 recording_enabled INTEGER NOT NULL DEFAULT 0 CHECK (recording_enabled IN (0,1)),
@@ -191,6 +199,8 @@ def initialize() -> None:
             db.execute("ALTER TABLE cameras ADD COLUMN onvif_uuid TEXT")
         if "group_id" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL")
+        if "live_substream_url_ciphertext" not in camera_columns:
+            db.execute("ALTER TABLE cameras ADD COLUMN live_substream_url_ciphertext BLOB")
         for name, definition in (
             ("last_video_at", "TEXT"),
             ("last_footage_write_at", "TEXT"),
