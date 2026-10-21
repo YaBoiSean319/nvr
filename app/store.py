@@ -210,6 +210,32 @@ def initialize() -> None:
                 fields_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS diagnostic_events_created_idx ON diagnostic_events(created_at);
+            CREATE TABLE IF NOT EXISTS incidents (
+                id TEXT PRIMARY KEY,
+                incident_key TEXT NOT NULL UNIQUE,
+                camera_id TEXT REFERENCES cameras(id) ON DELETE SET NULL,
+                fault_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('active','acknowledged','recovered')),
+                fault_active INTEGER NOT NULL CHECK (fault_active IN (0,1)),
+                recurrence_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                acknowledged_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                acknowledged_at TEXT,
+                recovered_at TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS incidents_state_seen_idx ON incidents(state,last_seen_at DESC);
+            CREATE TABLE IF NOT EXISTS incident_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                incident_id TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL CHECK (event_type IN ('raised','acknowledged','recovered','recurred')),
+                actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                occurred_at TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS incident_events_history_idx ON incident_events(incident_id,id);
             """
         )
         # Migrate installations created by the first implementation, which only
