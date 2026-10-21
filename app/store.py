@@ -108,6 +108,14 @@ def initialize() -> None:
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS camera_group_memberships (
+                group_id TEXT NOT NULL REFERENCES camera_groups(id) ON DELETE CASCADE,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY(group_id,camera_id)
+            );
+            CREATE INDEX IF NOT EXISTS camera_group_memberships_camera_idx
+                ON camera_group_memberships(camera_id,group_id);
             CREATE TABLE IF NOT EXISTS recording_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
@@ -451,4 +459,8 @@ def initialize() -> None:
                 db.execute("ALTER TABLE sessions ADD COLUMN session_id TEXT")
                 db.execute("UPDATE sessions SET session_id=lower(hex(randomblob(16))) WHERE session_id IS NULL")
                 db.execute("CREATE UNIQUE INDEX sessions_id_idx ON sessions(session_id)")
+        db.execute(
+            "INSERT OR IGNORE INTO camera_group_memberships(group_id,camera_id) "
+            "SELECT group_id,id FROM cameras WHERE group_id IS NOT NULL"
+        )
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_provider_identity_idx ON users(provider_issuer, provider_subject) WHERE provider_issuer IS NOT NULL AND provider_subject IS NOT NULL")

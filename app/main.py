@@ -437,6 +437,30 @@ class AIRuntimeValidationRequest(BaseModel):
 class CameraGroupCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
+    @field_validator("name")
+    @classmethod
+    def trim_group_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Group name is required")
+        return value
+
+
+class CameraGroupUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def trim_group_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Group name is required")
+        return value
+
+
+class CameraGroupMembershipRequest(BaseModel):
+    camera_ids: list[str] = Field(max_length=5000)
+
 
 class RetentionRequest(BaseModel):
     retention_days: int = Field(ge=1, le=3650)
@@ -1203,7 +1227,29 @@ def list_cameras(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, 
 def list_camera_groups(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
     with connect() as db:
         groups = db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE").fetchall()
-    return {"groups": [dict(group) for group in groups]}
+        return {"groups": [_camera_group_view(db, group) for group in groups]}
+
+
+def _camera_group_view(db: sqlite3.Connection, group: sqlite3.Row) -> dict[str, object]:
+    members = db.execute(
+        "SELECT id FROM cameras WHERE group_id=? "
+        "UNION SELECT camera_id FROM camera_group_memberships WHERE group_id=?",
+        (group["id"], group["id"]),
+    ).fetchall()
+    camera_ids = [row["id"] for row in members]
+    return {"id": group["id"], "name": group["name"], "camera_ids": camera_ids, "camera_count": len(camera_ids)}
+
+
+@app.get("/api/camera-groups/{group_id}/members")
+def list_camera_group_members(
+    group_id: str,
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, object]:
+    with connect() as db:
+        group = db.execute("SELECT id,name FROM camera_groups WHERE id=?", (group_id,)).fetchone()
+        if group is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        return _camera_group_view(db, group)
 
 
 @app.post("/api/camera-groups", status_code=status.HTTP_201_CREATED)
@@ -1211,9 +1257,7 @@ def create_camera_group(
     payload: CameraGroupCreateRequest,
     _: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, str]:
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Group name is required")
+    name = payload.name
     group_id = str(uuid.uuid4())
     with connect() as db:
         try:
@@ -1221,6 +1265,64 @@ def create_camera_group(
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="A camera group with that name already exists") from exc
     return {"id": group_id, "name": name}
+
+
+@app.patch("/api/camera-groups/{group_id}")
+def update_camera_group(
+    group_id: str,
+    payload: CameraGroupUpdateRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        try:
+            db.execute("UPDATE camera_groups SET name=? WHERE id=?", (payload.name, group_id))
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="A camera group with that name already exists") from exc
+        group = db.execute("SELECT id,name FROM camera_groups WHERE id=?", (group_id,)).fetchone()
+        return _camera_group_view(db, group)
+
+
+@app.delete("/api/camera-groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_camera_group(
+    group_id: str,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> Response:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        if db.execute("SELECT 1 FROM cameras WHERE group_id=? LIMIT 1", (group_id,)).fetchone() is not None:
+            raise HTTPException(status_code=409, detail="Reassign cameras from this policy group before deleting it")
+        db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
+        db.execute("DELETE FROM retention_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
+        db.execute("DELETE FROM camera_groups WHERE id=?", (group_id,))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.put("/api/camera-groups/{group_id}/members")
+def replace_camera_group_members(
+    group_id: str,
+    payload: CameraGroupMembershipRequest,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    camera_ids = list(dict.fromkeys(payload.camera_ids))
+    with connect() as db:
+        group = db.execute("SELECT id,name FROM camera_groups WHERE id=?", (group_id,)).fetchone()
+        if group is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        if camera_ids:
+            placeholders = ",".join("?" for _ in camera_ids)
+            found = db.execute(f"SELECT id FROM cameras WHERE id IN ({placeholders})", camera_ids).fetchall()
+            if len(found) != len(camera_ids):
+                raise HTTPException(status_code=422, detail="One or more selected cameras do not exist")
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM camera_group_memberships WHERE group_id=?", (group_id,))
+        db.executemany(
+            "INSERT INTO camera_group_memberships(group_id,camera_id) VALUES(?,?)",
+            [(group_id, camera_id) for camera_id in camera_ids],
+        )
+        return _camera_group_view(db, group)
 
 
 @app.get("/api/camera-groups/{group_id}/retention")

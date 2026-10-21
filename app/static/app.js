@@ -92,7 +92,7 @@ function renderSidebar() {
     }, camera.recording_health?.state || camera.recording_status || "unknown");
   }
   for (const group of sidebarGroups) sidebarItem(groupList, group.name, group.name, () => {
-    setScreen("live"); const members = new Set(sidebarCameras.filter(camera => camera.group_name === group.name).map(camera => camera.id));
+    setScreen("live"); const members = new Set(group.camera_ids || []);
     document.querySelectorAll("[data-live-camera]").forEach(input => { input.checked = members.has(input.value); });
     if (!members.size) document.querySelector("#live-message").textContent = "This group has no available cameras.";
   });
@@ -541,6 +541,7 @@ async function refreshDiagnostics() {
 }
 async function refreshGroups() {
   const {groups}=await api("/api/camera-groups");
+  renderGroupManagement(groups);
   const select=document.querySelector("#bulk-group");
   const options=[new Option("Leave groups unchanged","__unchanged__"),new Option("Remove from group","")];
   for (const group of groups) options.push(new Option(group.name,group.name));
@@ -548,6 +549,42 @@ async function refreshGroups() {
   const scheduleSelect=document.querySelector("#schedule-group");
   scheduleSelect.replaceChildren(...(groups.length ? groups.map(group=>new Option(group.name,group.id)) : [new Option("Create a group first","")]));
   try { const runtime=await api("/api/ai/settings"); document.querySelector("#ai-max-active").value=runtime.max_active_cameras; } catch {}
+}
+function renderGroupManagement(groups) {
+  const target=document.querySelector("#group-management-list");
+  target.replaceChildren(...groups.map(group=>{
+    const card=document.createElement("article"),heading=document.createElement("h4");
+    heading.textContent=group.name+" · "+group.camera_count+" camera(s)";
+    const nameLabel=document.createElement("label"),name=document.createElement("input");
+    nameLabel.textContent="Group name ";name.value=group.name;name.maxLength=80;nameLabel.append(name);
+    const rename=document.createElement("button");rename.type="button";rename.textContent="Save group name";
+    rename.addEventListener("click",async()=>{
+      try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"PATCH",body:JSON.stringify({name:name.value})});await refresh();}
+      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
+    });
+    const members=new Set(group.camera_ids||[]),fieldset=document.createElement("fieldset"),legend=document.createElement("legend");
+    legend.textContent="Browsing members";fieldset.append(legend);
+    for(const camera of [...latestCameras].sort((a,b)=>a.name.localeCompare(b.name))){
+      const label=document.createElement("label"),checkbox=document.createElement("input");
+      checkbox.type="checkbox";checkbox.value=camera.id;checkbox.checked=members.has(camera.id);
+      if(camera.group_id===group.id){checkbox.disabled=true;checkbox.title="This is the camera’s policy group and stays in its browsing group automatically.";}
+      label.append(checkbox,document.createTextNode(" "+camera.name));fieldset.append(label);
+    }
+    const saveMembers=document.createElement("button");saveMembers.type="button";saveMembers.textContent="Save browsing members";
+    saveMembers.addEventListener("click",async()=>{
+      const camera_ids=[...fieldset.querySelectorAll('input[type="checkbox"]:checked')].map(input=>input.value);
+      try{await api("/api/camera-groups/"+encodeURIComponent(group.id)+"/members",{method:"PUT",body:JSON.stringify({camera_ids})});await refresh();}
+      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
+    });
+    const remove=document.createElement("button");remove.type="button";remove.textContent="Delete group";
+    remove.addEventListener("click",async()=>{
+      if(!window.confirm("Delete browsing group “"+group.name+"”? Groups that still own camera policies must be reassigned first."))return;
+      try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"DELETE"});await refresh();}
+      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
+    });
+    card.append(heading,nameLabel,rename,fieldset,saveMembers,remove);return card;
+  }));
+  if(!groups.length)target.textContent="No camera groups yet.";
 }
 async function refreshDiscovery() {
   const [{candidates}, inventory] = await Promise.all([api("/api/discovery/candidates"), api("/api/cameras")]);

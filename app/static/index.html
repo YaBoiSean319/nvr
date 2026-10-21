@@ -203,6 +203,8 @@
         <section id="bulk-admin" class="hidden" aria-labelledby="bulk-heading">
           <h3 id="bulk-heading">Camera groups and bulk onboarding</h3>
           <form id="group-form"><label for="new-group-name">Create camera group</label><input id="new-group-name" maxlength="80" required><button>Create group</button></form>
+          <p>Browsing groups can overlap. A camera’s recording, schedule, retention, AI, and storage policies continue to inherit from its single policy group and camera overrides.</p>
+          <div id="group-management-list" aria-live="polite"></div>
           <h4>Group recording schedule</h4>
           <p>Intervals use ISO weekdays (0=Monday through 6=Sunday), 24-hour local time, and start-inclusive/end-exclusive boundaries. During a fall-back repeated hour both occurrences follow the interval; skipped spring-forward minutes do not occur.</p>
           <label for="schedule-group">Camera group</label><select id="schedule-group"></select>
