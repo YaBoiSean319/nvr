@@ -12,6 +12,7 @@ let playbackMaster = null;
 let playbackSyncGuard = false;
 let exportPollTimer = null;
 let incidentPollTimer = null;
+let webhookPollTimer = null;
 function show(name) { if(name!=="status") stopSynchronizedPlayback(); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 async function showLogin() {
   const state = await api("/api/setup/status");
@@ -63,6 +64,7 @@ async function refresh() {
     document.querySelector("#status-list").classList.toggle("hidden", !admin);
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#diagnostics-admin").classList.toggle("hidden", !admin);
+    document.querySelector("#webhooks-admin").classList.toggle("hidden", !admin);
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
     document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
     document.querySelector("#bulk-admin").classList.toggle("hidden", !admin);
@@ -72,6 +74,7 @@ async function refresh() {
       document.querySelector("#status-list").replaceChildren(...rows.flatMap(([k,v]) => { const dt=document.createElement("dt"), dd=document.createElement("dd"); dt.textContent=k; dd.textContent=v; return [dt,dd]; }));
       await refreshSessions();
       await refreshDiagnostics();
+      await refreshWebhooks();
     }
     const inventory = await api("/api/cameras");
     if (admin) await refreshGroups();
@@ -133,6 +136,43 @@ async function refreshIncidents() {
     if(!result.incidents.length) { const item=document.createElement("li"); item.textContent="No incidents recorded."; target.append(item); }
   } catch(error) { message.textContent=error.message; }
 }
+async function refreshWebhooks() {
+  const list=document.querySelector("#webhook-list"), deliveries=document.querySelector("#webhook-deliveries"), options=document.querySelector("#webhook-event-options");
+  try {
+    const [{webhooks},{deliveries:history},{event_types}]=await Promise.all([
+      api("/api/webhooks"), api("/api/webhooks/deliveries?limit=50"), api("/api/webhooks/event-types")
+    ]);
+    if(!options.childElementCount) {
+      options.replaceChildren(...event_types.filter(type=>type!=="webhook.test").map(type=>{
+        const label=document.createElement("label"),input=document.createElement("input"); input.type="checkbox";input.value=type;input.dataset.webhookEvent="true";input.checked=true;
+        label.append(input,document.createTextNode(` ${type}`));return label;
+      }));
+    }
+    list.replaceChildren(...webhooks.map(webhook=>{
+      const item=document.createElement("li"),summary=document.createElement("span");
+      summary.textContent=`${webhook.enabled?"Enabled":"Disabled"} · ${webhook.name} · ${webhook.url_origin} · ${webhook.events.join(", ")}${webhook.allow_private_receiver?" · private IP authorized":""}`;item.append(summary);
+      const test=document.createElement("button");test.type="button";test.textContent="Send test";test.addEventListener("click",async()=>{try{const result=await api(`/api/webhooks/${encodeURIComponent(webhook.id)}/test`,{method:"POST"});document.querySelector("#webhook-message").textContent=`Test event ${result.event_id} queued.`;await refreshWebhooks();}catch(error){document.querySelector("#webhook-message").textContent=error.message;}});item.append(test);
+      const toggle=document.createElement("button");toggle.type="button";toggle.textContent=webhook.enabled?"Disable":"Enable";toggle.addEventListener("click",async()=>{try{await api(`/api/webhooks/${encodeURIComponent(webhook.id)}`,{method:"PATCH",body:JSON.stringify({enabled:!webhook.enabled})});await refreshWebhooks();}catch(error){document.querySelector("#webhook-message").textContent=error.message;}});item.append(toggle);
+      const rotate=document.createElement("button");rotate.type="button";rotate.textContent="Rotate signing secret";rotate.addEventListener("click",async()=>{try{const result=await api(`/api/webhooks/${encodeURIComponent(webhook.id)}/rotate-secret`,{method:"POST"});document.querySelector("#webhook-message").textContent=`New signing secret (shown once): ${result.signing_secret}`;}catch(error){document.querySelector("#webhook-message").textContent=error.message;}});item.append(rotate);
+      const remove=document.createElement("button");remove.type="button";remove.textContent="Delete";remove.addEventListener("click",async()=>{if(!window.confirm(`Delete webhook receiver “${webhook.name}”?`))return;try{await api(`/api/webhooks/${encodeURIComponent(webhook.id)}`,{method:"DELETE"});await refreshWebhooks();}catch(error){document.querySelector("#webhook-message").textContent=error.message;}});item.append(remove);
+      return item;
+    }));
+    if(!webhooks.length){const item=document.createElement("li");item.textContent="No webhook receivers configured.";list.append(item);}
+    deliveries.replaceChildren(...history.map(delivery=>{const item=document.createElement("li");item.textContent=`${delivery.endpoint_name} · ${delivery.event_type} · ${delivery.status} · attempts ${delivery.attempt_count}${delivery.response_status?` · HTTP ${delivery.response_status}`:""}${delivery.error_code?` · ${delivery.error_code}`:""} · ${delivery.event_id}`;return item;}));
+    if(!history.length){const item=document.createElement("li");item.textContent="No deliveries yet.";deliveries.append(item);}
+  } catch(error) { document.querySelector("#webhook-message").textContent=error.message; }
+}
+document.querySelector("#webhook-create").addEventListener("click",async()=>{
+  const message=document.querySelector("#webhook-message");
+  try {
+    const name=document.querySelector("#webhook-name").value.trim(),url=document.querySelector("#webhook-url").value.trim();
+    const events=[...document.querySelectorAll("[data-webhook-event]:checked")].map(input=>input.value);
+    const result=await api("/api/webhooks",{method:"POST",body:JSON.stringify({name,url,events,allow_private_receiver:document.querySelector("#webhook-allow-private").checked})});
+    message.textContent=`Receiver added. Save this signing secret now; it will not be shown again: ${result.signing_secret}`;
+    document.querySelector("#webhook-name").value="";document.querySelector("#webhook-url").value="";document.querySelector("#webhook-allow-private").checked=false;
+    await refreshWebhooks();
+  } catch(error) { message.textContent=error.message; }
+});
 function stopLiveViews() {
   if(liveStatusTimer) clearInterval(liveStatusTimer);
   liveStatusTimer=null;
@@ -876,7 +916,9 @@ window.addEventListener("pagehide",stopSynchronizedPlayback);
 window.addEventListener("pagehide",()=>{if(exportPollTimer)clearInterval(exportPollTimer);exportPollTimer=null;});
 if(incidentPollTimer) clearInterval(incidentPollTimer);
 incidentPollTimer=setInterval(()=>{if(currentRole)refreshIncidents();},15000);
-document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); show("login"); });
+if(webhookPollTimer) clearInterval(webhookPollTimer);
+webhookPollTimer=setInterval(()=>{if(currentRole==="administrator")refreshWebhooks();},10000);
+document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); document.querySelector("#webhook-list").replaceChildren(); document.querySelector("#webhook-deliveries").replaceChildren(); show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {
