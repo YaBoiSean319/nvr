@@ -19,6 +19,29 @@ async function api(path, options = {}) {
   if (!response.ok) throw new Error(data.detail || "Request failed");
   return data;
 }
+function cameraSourcePayload() {
+  const password=document.querySelector("#camera-password").value;
+  if(password!==document.querySelector("#camera-password-confirm").value) throw new Error("Camera passwords do not match");
+  const profile=document.querySelector("#camera-profile").value;
+  if(!profile) throw new Error("Load camera endpoints and select a stream profile first");
+  return {camera_ip:document.querySelector("#camera-ip").value.trim(),camera_username:document.querySelector("#camera-username").value||null,camera_password:password||null,camera_brand:document.querySelector("#camera-brand").value,onvif_profile_token:profile,device_service_url:document.querySelector("#motion-service-url").value||null};
+}
+async function loadCameraProfiles() {
+  const address=document.querySelector("#camera-ip").value.trim();
+  const port=Number(document.querySelector("#camera-port").value);
+  if(!address || !Number.isInteger(port) || port<1 || port>65535) throw new Error("Enter a camera IPv4 address and a valid ONVIF port");
+  const password=document.querySelector("#camera-password").value;
+  if(password!==document.querySelector("#camera-password-confirm").value) throw new Error("Camera passwords do not match");
+  const device_service_url=document.querySelector("#motion-service-url").value.trim()||`http://${address}:${port}/onvif/device_service`;
+  const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address,camera_username:document.querySelector("#camera-username").value||null,camera_password:password||null,camera_brand:document.querySelector("#camera-brand").value,device_service_url})});
+  const select=document.querySelector("#camera-profile");
+  select.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+  if(result.profiles.length>1) select.prepend(new Option("Select stream profile",""));
+  document.querySelector("#motion-service-url").value=result.device_service_url;
+  document.querySelector("#motion-username").value=document.querySelector("#camera-username").value;
+  document.querySelector("#motion-password").value=password;
+  document.querySelector("#camera-profile-message").textContent=`Found ${result.profiles.length} ONVIF stream profile(s).`;
+}
 async function refresh() {
   message.textContent = "";
   try {
@@ -72,7 +95,8 @@ async function refreshDiscovery() {
   target.replaceChildren(...candidates.map(candidate => {
     const card=document.createElement("article");
     const title=document.createElement("h4");
-    title.textContent=`ONVIF device ${candidate.device_uuid}`;
+    const candidateAddress = (() => { try { return new URL(candidate.service_urls[0]).hostname; } catch { return ""; } })();
+    title.textContent=candidate.device_uuid.startsWith("ipscan:") ? `Camera at ${candidateAddress}` : `ONVIF device ${candidate.device_uuid}`;
     const state=document.createElement("p");
     state.textContent=candidate.linked_camera_id ? `Already linked to camera ${candidate.linked_camera_id}` : `First seen ${new Date(candidate.first_seen_at).toLocaleString()} · Last seen ${new Date(candidate.last_seen_at).toLocaleString()}`;
     const services=document.createElement("p"); services.textContent=`Device service: ${candidate.service_urls.join(", ") || "unavailable"}`;
@@ -82,21 +106,49 @@ async function refreshDiscovery() {
     if (!candidate.linked_camera_id) {
       const nameLabel=document.createElement("label"); nameLabel.textContent="Camera name";
       const name=document.createElement("input"); name.maxLength=120; name.required=true; name.value=`Camera ${candidate.device_uuid.slice(0,8)}`;
-      const streamLabel=document.createElement("label"); streamLabel.textContent="RTSP or RTSPS stream URL";
-      const stream=document.createElement("input"); stream.type="url"; stream.autocomplete="off"; stream.required=true; stream.placeholder="rtsp://user:password@camera/stream";
-      const userLabel=document.createElement("label"); userLabel.textContent="ONVIF username (optional)";
+      const addressLabel=document.createElement("label"); addressLabel.textContent="Camera IP address";
+      const address=document.createElement("input"); address.inputMode="numeric"; address.autocomplete="off"; address.required=true; address.value=candidateAddress;
+      const portLabel=document.createElement("label"); portLabel.textContent="Camera ONVIF port";
+      const port=document.createElement("input"); port.type="number"; port.min="1"; port.max="65535"; port.value="80";
+      const brandLabel=document.createElement("label"); brandLabel.textContent="Camera brand";
+      const brand=document.createElement("select");
+      for(const [value,label] of [["auto","Auto-detect / ONVIF"],["acti","ACTi"],["axis","Axis"],["bosch","Bosch"],["dahua","Dahua"],["hanwha","Hanwha"],["hikvision","Hikvision"],["reolink","Reolink"],["samsung","Samsung"],["uniview","Uniview"],["other","Other / generic ONVIF"]]) { const option=new Option(label,value); brand.append(option); }
+      const userLabel=document.createElement("label"); userLabel.textContent="Camera username (optional)";
       const user=document.createElement("input"); user.autocomplete="off";
-      const passLabel=document.createElement("label"); passLabel.textContent="ONVIF password (optional)";
+      const passLabel=document.createElement("label"); passLabel.textContent="Camera password (optional)";
       const pass=document.createElement("input"); pass.type="password"; pass.autocomplete="new-password";
+      const confirmLabel=document.createElement("label"); confirmLabel.textContent="Confirm camera password";
+      const confirm=document.createElement("input"); confirm.type="password"; confirm.autocomplete="new-password";
+      const serviceLabel=document.createElement("label"); serviceLabel.textContent="ONVIF device endpoint URL (optional custom path)";
+      const serviceInput=document.createElement("input"); serviceInput.type="url"; serviceInput.autocomplete="off"; serviceInput.value=candidate.service_urls[0]||"";
+      const loadProfiles=document.createElement("button"); loadProfiles.type="button"; loadProfiles.textContent="Load camera endpoints";
+      const profileLabel=document.createElement("label"); profileLabel.textContent="Camera stream endpoint";
+      const profiles=document.createElement("select"); profiles.append(new Option("Load endpoints to choose a stream",""));
+      let serviceUrl=serviceInput.value;
+      serviceInput.addEventListener("input",()=>{ serviceUrl=serviceInput.value.trim(); profiles.replaceChildren(new Option("Load endpoints to choose a stream","")); });
+      loadProfiles.addEventListener("click",async()=>{
+        loadProfiles.disabled=true;
+        try {
+          if(pass.value!==confirm.value) throw new Error("Camera passwords do not match");
+          const portNumber=Number(port.value); if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535) throw new Error("Enter a valid camera ONVIF port");
+          const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address.value,camera_username:user.value||null,camera_password:pass.value||null,camera_brand:brand.value,device_service_url:serviceInput.value||`http://${address.value}:${portNumber}/onvif/device_service`})});
+          serviceUrl=result.device_service_url;
+          profiles.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+          if(result.profiles.length>1) profiles.prepend(new Option("Select stream profile",""));
+        } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
+        finally { loadProfiles.disabled=false; }
+      });
       const add=document.createElement("button"); add.type="button"; add.textContent="Test and add camera";
       add.addEventListener("click",async()=>{
         try {
-          const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value,stream_url:stream.value,recording_mode:"motion",recording_enabled:false,motion_username:user.value||null,motion_password:pass.value||null})});
+          if(pass.value!==confirm.value) throw new Error("Camera passwords do not match");
+          if(!profiles.value) throw new Error("Load camera endpoints and select a stream profile first");
+          const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value,camera_ip:address.value,camera_username:user.value||null,camera_password:pass.value||null,camera_brand:brand.value,onvif_profile_token:profiles.value,device_service_url:serviceUrl,motion_username:user.value||null,motion_password:pass.value||null,recording_mode:"motion",recording_enabled:false})});
           document.querySelector("#discovery-message").textContent=`${camera.name} added with recording disabled. Configure its event source and explicitly enable recording when ready.`;
           await refresh();
         } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
       });
-      card.append(nameLabel,name,streamLabel,stream,userLabel,user,passLabel,pass,add);
+      card.append(nameLabel,name,addressLabel,address,portLabel,port,brandLabel,brand,userLabel,user,passLabel,pass,confirmLabel,confirm,serviceLabel,serviceInput,loadProfiles,profileLabel,profiles,add);
       if (inventory.cameras.length) {
         const linkLabel=document.createElement("label"); linkLabel.textContent="Or link this device to an existing manually added camera";
         const select=document.createElement("select");
@@ -246,10 +298,17 @@ async function loadSegments(camera) {
     }));
   } catch (error) { message.textContent=error.message; }
 }
+document.querySelector("#load-camera-profiles").addEventListener("click", async event => {
+  const button=event.currentTarget; button.disabled=true;
+  try { await loadCameraProfiles(); }
+  catch(error) { document.querySelector("#camera-profile-message").textContent=error.message; }
+  finally { button.disabled=false; }
+});
 document.querySelector("#test-camera").addEventListener("click", async () => {
-  const message=document.querySelector("#camera-message"); message.textContent="Testing RTSP video…";
+  const message=document.querySelector("#camera-message"); message.textContent="Testing camera video…";
   try {
-    const result=await api("/api/cameras/test", { method:"POST", body:JSON.stringify({ stream_url:document.querySelector("#stream-url").value }) });
+    const source=cameraSourcePayload();
+    const result=await api("/api/cameras/test", { method:"POST", body:JSON.stringify({...source,motion_service_url:document.querySelector("#motion-service-url").value||null}) });
     message.textContent=result.reachable ? `Video available · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}` : result.reason;
   } catch (error) { message.textContent=error.message; }
 });
@@ -260,6 +319,18 @@ document.querySelector("#discover-cameras").addEventListener("click", async () =
   try {
     const result=await api("/api/discovery/scan",{method:"POST",body:JSON.stringify({timeout_seconds:Number(document.querySelector("#discovery-timeout").value)})});
     message.textContent=`Found ${result.discovered_count} device(s). ${result.partial_failures.join(" ")}`;
+    await refreshDiscovery();
+  } catch(error) { message.textContent=error.message; }
+  finally { button.disabled=false; }
+});
+document.querySelector("#discover-ip-range").addEventListener("click", async event => {
+  const button=event.currentTarget, message=document.querySelector("#discovery-message");
+  const ip_range=document.querySelector("#discovery-ip-range").value.trim();
+  if(!ip_range) { message.textContent="Enter a private IPv4 CIDR range, such as 10.45.50.0/24."; return; }
+  button.disabled=true; message.textContent="Scanning the camera range with unicast ONVIF probes…";
+  try {
+    const result=await api("/api/discovery/scan",{method:"POST",body:JSON.stringify({ip_range,timeout_seconds:Number(document.querySelector("#discovery-timeout").value)})});
+    message.textContent=`Checked ${result.targets_scanned} address(es); found ${result.discovered_count} ONVIF device(s).`;
     await refreshDiscovery();
   } catch(error) { message.textContent=error.message; }
   finally { button.disabled=false; }
@@ -337,9 +408,10 @@ document.querySelector("#camera-form").addEventListener("submit", async event =>
   event.preventDefault();
   const message=document.querySelector("#camera-message"); message.textContent="Testing camera and adding it…";
   try {
+    const source=cameraSourcePayload();
     const result=await api("/api/cameras", { method:"POST", body:JSON.stringify({
       name:document.querySelector("#camera-name").value,
-      stream_url:document.querySelector("#stream-url").value,
+      ...source,
       recording_mode:document.querySelector("#recording-mode").value,
       recording_enabled:document.querySelector("#recording-enabled").checked,
       motion_service_url:document.querySelector("#motion-service-url").value || null,
@@ -352,6 +424,7 @@ document.querySelector("#camera-form").addEventListener("submit", async event =>
       motion_sensitivity:Number(document.querySelector("#motion-sensitivity").value)
     }) });
     document.querySelector("#camera-form").reset();
+    document.querySelector("#camera-profile").replaceChildren(new Option("Load endpoints to choose a stream",""));
     message.textContent=`${result.name} added · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}`;
     await refresh();
   } catch (error) { message.textContent=error.message; }
