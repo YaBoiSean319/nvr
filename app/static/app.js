@@ -119,6 +119,7 @@ function setupConsoleShell() {
   for(const selector of ["#display-time-zone","#display-date-format","#display-clock-format"])document.querySelector(selector).addEventListener("input",previewDisplaySettings);
   document.querySelector("#display-settings-save").addEventListener("click",saveDisplaySettings);
   for(const field of ["start","end"])document.querySelector(`#playback-${field}`).addEventListener("change",()=>updateFoldChoices(field));
+  for(const field of ["start","end"])document.querySelector(`#playback-${field}-fold`).addEventListener("change",markPlaybackResultsStale);
   for(const selector of ["#playback-start","#playback-end"])document.querySelector(selector).addEventListener("input",markPlaybackResultsStale);
   document.querySelector("#playback-camera-picker").addEventListener("change",event=>{
     if(event.target.matches("[data-playback-camera]")){
@@ -159,6 +160,7 @@ async function saveDisplaySettings() {
     displaySettings=await api("/api/settings/display",{method:"PUT",body:JSON.stringify(readDisplaySettingsForm())});
     updateSiteTimeContext();
     for(const field of ["start","end"])updateFoldChoices(field);
+    markPlaybackResultsStale();
     message.textContent="Site date and time display settings saved.";
     await previewDisplaySettings();
   } catch(error) { message.textContent=error.message; }
