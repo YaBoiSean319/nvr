@@ -11,6 +11,7 @@ import sqlite3
 import uuid
 import json
 import time
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from authlib.integrations.starlette_client import OAuth
@@ -41,6 +42,10 @@ APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.@-]{3,128}$")
 CameraBrand = Literal["auto", "acti", "axis", "bosch", "dahua", "hanwha", "hikvision", "reolink", "samsung", "uniview", "other"]
+MAX_LIVE_VIEWERS = 8
+_live_view_lock = threading.Lock()
+_live_view_count = 0
+_live_camera_status: dict[str, dict[str, object]] = {}
 
 
 def _secure_cookie() -> bool:
@@ -135,6 +140,17 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class ViewerLayoutRequest(BaseModel):
+    camera_ids: list[str] = Field(min_length=1, max_length=MAX_LIVE_VIEWERS)
+
+    @field_validator("camera_ids")
+    @classmethod
+    def unique_cameras(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("A camera can appear only once in a layout")
+        return value
+
+
 class CameraProbeRequest(BaseModel):
     stream_url: str | None = Field(default=None, min_length=8, max_length=2048)
     camera_ip: str | None = Field(default=None, min_length=7, max_length=45)
@@ -142,6 +158,7 @@ class CameraProbeRequest(BaseModel):
     camera_password: str | None = Field(default=None, max_length=1024)
     camera_brand: CameraBrand = "auto"
     onvif_profile_token: str | None = Field(default=None, max_length=256)
+    live_substream_profile_token: str | None = Field(default=None, max_length=256)
     device_service_url: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
@@ -150,6 +167,10 @@ class CameraProbeRequest(BaseModel):
             raise ValueError("Provide either a camera IP address or an RTSP stream URL")
         if bool(self.camera_username) != bool(self.camera_password):
             raise ValueError("Provide both camera username and password, or leave both blank")
+        if self.live_substream_profile_token and (not self.camera_ip or not self.onvif_profile_token):
+            raise ValueError("A live substream requires an ONVIF camera address and a selected main profile")
+        if self.live_substream_profile_token and self.live_substream_profile_token == self.onvif_profile_token:
+            raise ValueError("Choose a different profile for the optional live substream")
         return self
 
 
@@ -515,6 +536,187 @@ def me(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, str]:
     return {"username": user["username"], "role": user["role"]}
 
 
+@app.get("/api/live/layouts")
+def get_viewer_layouts(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT name,camera_ids_json FROM viewer_layouts WHERE user_id=? ORDER BY name COLLATE NOCASE",
+            (int(user["id"]),),
+        ).fetchall()
+        cameras = {row["id"] for row in db.execute("SELECT id FROM cameras")}
+    layouts = []
+    for row in rows:
+        try:
+            camera_ids = [camera_id for camera_id in json.loads(row["camera_ids_json"]) if camera_id in cameras]
+        except (TypeError, json.JSONDecodeError):
+            camera_ids = []
+        if camera_ids:
+            layouts.append({"name": row["name"], "camera_ids": camera_ids})
+    return {"layouts": layouts}
+
+
+@app.put("/api/live/layouts/{name}")
+def save_viewer_layout(
+    name: str,
+    payload: ViewerLayoutRequest,
+    user: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, object]:
+    name = name.strip()
+    if not name or len(name) > 60:
+        raise HTTPException(status_code=422, detail="Layout name must be between 1 and 60 characters")
+    with connect() as db:
+        present = {row["id"] for row in db.execute(
+            f"SELECT id FROM cameras WHERE id IN ({','.join('?' for _ in payload.camera_ids)})",
+            tuple(payload.camera_ids),
+        ).fetchall()}
+        if present != set(payload.camera_ids):
+            raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
+        db.execute(
+            "INSERT INTO viewer_layouts(user_id,name,camera_ids_json,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(user_id,name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,updated_at=excluded.updated_at",
+            (int(user["id"]), name, json.dumps(payload.camera_ids), datetime.now(timezone.utc).isoformat()),
+        )
+    return {"name": name, "camera_ids": payload.camera_ids}
+
+
+@app.delete("/api/live/layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_viewer_layout(name: str, user: Annotated[sqlite3.Row, Depends(current_user)]) -> Response:
+    with connect() as db:
+        db.execute("DELETE FROM viewer_layouts WHERE user_id=? AND name=?", (int(user["id"]), name))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _acquire_live_view(camera_id: str) -> bool:
+    global _live_view_count
+    with _live_view_lock:
+        if _live_view_count >= MAX_LIVE_VIEWERS:
+            return False
+        _live_view_count += 1
+        status_data = _live_camera_status.setdefault(camera_id, {"viewers": 0, "last_frame_at": None})
+        status_data["viewers"] = int(status_data["viewers"]) + 1
+        return True
+
+
+def _release_live_view(camera_id: str) -> None:
+    global _live_view_count
+    with _live_view_lock:
+        _live_view_count = max(0, _live_view_count - 1)
+        status_data = _live_camera_status.get(camera_id)
+        if status_data:
+            status_data["viewers"] = max(0, int(status_data["viewers"]) - 1)
+            if not status_data["viewers"]:
+                _live_camera_status.pop(camera_id, None)
+
+
+@app.get("/api/cameras/{camera_id}/live/status")
+def live_view_status(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+    with _live_view_lock:
+        active = _live_camera_status.get(camera_id)
+        count = int(active["viewers"]) if active else 0
+        last_frame_at = active["last_frame_at"] if active else None
+    fresh = False
+    if last_frame_at:
+        try:
+            fresh = (datetime.now(timezone.utc) - datetime.fromisoformat(str(last_frame_at))).total_seconds() <= 12
+        except ValueError:
+            fresh = False
+    state = "live" if fresh else "stale" if count else "not_viewing"
+    return {"camera_id": camera_id, "active_viewers": count, "last_frame_at": last_frame_at, "state": state}
+
+
+async def _mjpeg_frames(camera_id: str, source: str, quality: str):
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        raise RuntimeError("Live video transcoding is unavailable")
+    width, fps, jpeg_quality = (640, 6, 8) if quality == "low" else (1280, 12, 5)
+    args = [
+        executable, "-hide_banner", "-nostats", "-loglevel", "error", "-f", "concat", "-safe", "0",
+        "-protocol_whitelist", "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto", "-i", "pipe:0",
+        "-map", "0:v:0", "-an", "-vf", f"fps={fps},scale={width}:-2:force_original_aspect_ratio=decrease",
+        "-q:v", str(jpeg_quality), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    if process.stdin is None or process.stdout is None:
+        raise RuntimeError("Live video transcoder did not start")
+    from .recording import _manifest_bytes
+    process.stdin.write(_manifest_bytes(source))
+    await process.stdin.drain()
+    process.stdin.close()
+    buffer = bytearray()
+    try:
+        while True:
+            chunk = await asyncio.wait_for(process.stdout.read(16384), timeout=15)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+            while True:
+                start = buffer.find(b"\xff\xd8")
+                if start < 0:
+                    if len(buffer) > 1:
+                        del buffer[:-1]
+                    break
+                end = buffer.find(b"\xff\xd9", start + 2)
+                if end < 0:
+                    if start:
+                        del buffer[:start]
+                    if len(buffer) > 4 * 1024 * 1024:
+                        raise RuntimeError("Camera frame exceeded the live-view limit")
+                    break
+                frame = bytes(buffer[start:end + 2])
+                del buffer[:end + 2]
+                with _live_view_lock:
+                    status_data = _live_camera_status.get(camera_id)
+                    if status_data:
+                        status_data["last_frame_at"] = datetime.now(timezone.utc).isoformat()
+                yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n"
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+
+@app.get("/api/cameras/{camera_id}/live")
+def live_camera(
+    camera_id: str,
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+    quality: Literal["low", "high"] = Query(default="low"),
+) -> StreamingResponse:
+    with connect() as db:
+        camera = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(status_code=503, detail="Live video transcoding is unavailable")
+    if not _acquire_live_view(camera_id):
+        raise HTTPException(status_code=503, detail="All live-view slots are in use; close another view and retry")
+    source = decrypt(camera["live_substream_url_ciphertext"] or camera["stream_url_ciphertext"]) if quality == "low" else decrypt(camera["stream_url_ciphertext"])
+    try:
+        safe_stream_url(source)
+    except ValueError as exc:
+        _release_live_view(camera_id)
+        raise HTTPException(status_code=503, detail="Camera stream configuration is invalid") from exc
+
+    async def stream():
+        try:
+            async for frame in _mjpeg_frames(camera_id, source, quality):
+                yield frame
+        except (OSError, RuntimeError, asyncio.TimeoutError):
+            return
+        finally:
+            _release_live_view(camera_id)
+
+    return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
 @app.get("/api/auth/oidc/status")
 def oidc_status() -> dict[str, bool]:
     return {"enabled": _oidc_settings() is not None}
@@ -694,6 +896,7 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
         "motion_sensitivity": row["motion_sensitivity"],
         "server_motion_status": row["server_motion_status"],
         "video": {"codec": row["video_codec"], "width": row["video_width"], "height": row["video_height"]},
+        "live_substream_available": bool(row["live_substream_url_ciphertext"]),
         "last_probe_at": row["last_probe_at"],
         "last_error": row["last_error"],
     }
@@ -717,6 +920,7 @@ def _insert_camera(
     motion_fallback_enabled: bool = False,
     motion_zones: list[MotionZoneRequest] | None = None,
     motion_sensitivity: int = 50,
+    live_substream_url: str | None = None,
 ) -> str:
     """Persist a camera only after its stream has passed the shared probe."""
     video = capability["video"]
@@ -732,12 +936,12 @@ def _insert_camera(
             raise ValueError("Provide both ONVIF motion username and password")
         credentials = encrypt(json.dumps({"username": motion_username, "password": motion_password}, separators=(",", ":")))
     db.execute(
-        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,recording_mode,recording_enabled,recording_status," 
+        "INSERT INTO cameras(id,name,onvif_uuid,group_id,stream_url_ciphertext,live_substream_url_ciphertext,recording_mode,recording_enabled,recording_status," 
         "motion_service_url,motion_credentials_ciphertext,motion_pre_roll_seconds,motion_post_roll_seconds,motion_source_status," 
         "motion_fallback_enabled,motion_zones_json,motion_sensitivity,server_motion_status,last_error," 
         "video_codec,video_width,video_height,last_probe_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), recording_mode, int(recording_enabled), status,
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        (camera_id, name, onvif_uuid, group_id, encrypt(stream_url.strip()), encrypt(live_substream_url.strip()) if live_substream_url else None, recording_mode, int(recording_enabled), status,
          motion_service_url, credentials, motion_pre_roll_seconds, motion_post_roll_seconds,
          "untested" if motion_service_url else "unsupported", int(motion_fallback_enabled),
          json.dumps([zone.model_dump() for zone in (motion_zones or [])], separators=(",", ":")), motion_sensitivity,
@@ -1399,6 +1603,26 @@ async def create_camera(
     capability = await probe_stream(stream_url)
     if not capability.get("reachable"):
         raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
+    live_substream_url = None
+    if payload.live_substream_profile_token:
+        try:
+            substream = await resolve_camera_stream(
+                payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
+                resolved_service_url or payload.device_service_url, payload.live_substream_profile_token, payload.camera_brand,
+            )
+            safe_stream_url(substream.stream_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="The selected live substream could not be resolved") from exc
+        substream_capability = await probe_stream(substream.stream_url)
+        if not substream_capability.get("reachable"):
+            raise HTTPException(status_code=422, detail="The selected live substream failed its video test")
+        main_video = capability.get("video") or {}
+        sub_video = substream_capability.get("video") or {}
+        main_pixels = int(main_video.get("width") or 0) * int(main_video.get("height") or 0)
+        sub_pixels = int(sub_video.get("width") or 0) * int(sub_video.get("height") or 0)
+        if not main_pixels or not sub_pixels or sub_pixels >= main_pixels:
+            raise HTTPException(status_code=422, detail="Choose an ONVIF profile with a lower video resolution for grid viewing")
+        live_substream_url = substream.stream_url
     with connect() as db:
         try:
             camera_id = _insert_camera(
@@ -1413,6 +1637,7 @@ async def create_camera(
                 motion_fallback_enabled=payload.motion_fallback_enabled,
                 motion_zones=payload.motion_zones,
                 motion_sensitivity=payload.motion_sensitivity,
+                live_substream_url=live_substream_url,
             )
             _record_discovery_probe(db, payload.onvif_uuid, capability)
         except sqlite3.IntegrityError as exc:
@@ -1537,7 +1762,7 @@ async def rotate_camera_credentials(
     video = capability["video"]
     with connect() as db:
         db.execute(
-            "UPDATE cameras SET stream_url_ciphertext=?,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
+            "UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
             (encrypt(stream_url), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
         )
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
