@@ -65,6 +65,7 @@ async function refresh() {
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#diagnostics-admin").classList.toggle("hidden", !admin);
     document.querySelector("#webhooks-admin").classList.toggle("hidden", !admin);
+    document.querySelector("#heartbeat-admin").classList.toggle("hidden", !admin);
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
     document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
     document.querySelector("#bulk-admin").classList.toggle("hidden", !admin);
@@ -75,6 +76,7 @@ async function refresh() {
       await refreshSessions();
       await refreshDiagnostics();
       await refreshWebhooks();
+      await refreshHeartbeatStatus();
     }
     const inventory = await api("/api/cameras");
     if (admin) await refreshGroups();
@@ -162,6 +164,37 @@ async function refreshWebhooks() {
     if(!history.length){const item=document.createElement("li");item.textContent="No deliveries yet.";deliveries.append(item);}
   } catch(error) { document.querySelector("#webhook-message").textContent=error.message; }
 }
+async function refreshHeartbeatStatus() {
+  try {
+    const state=await api("/api/heartbeat");
+    const target=document.querySelector("#heartbeat-state");
+    if(!state.configured) target.textContent="No external heartbeat receiver is configured.";
+    else {
+      const lastSuccess=state.last_success_at?new Date(state.last_success_at).toLocaleString():"none yet";
+      target.textContent=`${state.enabled?"Enabled":"Disabled"} · ${state.url_origin} · every ${state.interval_seconds}s · last successful send ${lastSuccess}${state.last_error?` · latest attempt failed: ${state.last_error}`:""}. ${state.checker_note}`;
+    }
+  }catch(error){document.querySelector("#heartbeat-message").textContent=error.message;}
+}
+document.querySelector("#heartbeat-save").addEventListener("click",async()=>{
+  const message=document.querySelector("#heartbeat-message");
+  try {
+    const result=await api("/api/heartbeat",{method:"PUT",body:JSON.stringify({target_url:document.querySelector("#heartbeat-url").value.trim(),interval_seconds:Number(document.querySelector("#heartbeat-interval").value),allow_private_receiver:document.querySelector("#heartbeat-allow-private").checked})});
+    message.textContent=result.signing_secret?`Heartbeat configured. Save this signing secret at the external receiver; it is shown once: ${result.signing_secret}`:"Heartbeat configuration updated. The signing secret was retained.";
+    await refreshHeartbeatStatus();
+  }catch(error){message.textContent=error.message;}
+});
+document.querySelector("#heartbeat-test").addEventListener("click",async()=>{
+  try{await api("/api/heartbeat/test",{method:"POST"});document.querySelector("#heartbeat-message").textContent="Test heartbeat queued.";setTimeout(refreshHeartbeatStatus,1500);}
+  catch(error){document.querySelector("#heartbeat-message").textContent=error.message;}
+});
+document.querySelector("#heartbeat-rotate").addEventListener("click",async()=>{
+  try{const result=await api("/api/heartbeat/rotate-secret",{method:"POST"});document.querySelector("#heartbeat-message").textContent=`New signing secret (shown once): ${result.signing_secret}`;}
+  catch(error){document.querySelector("#heartbeat-message").textContent=error.message;}
+});
+document.querySelector("#heartbeat-disable").addEventListener("click",async()=>{
+  try{await api("/api/heartbeat",{method:"DELETE"});document.querySelector("#heartbeat-message").textContent="Heartbeat sender disabled. The independent receiver will alert when its timeout expires.";await refreshHeartbeatStatus();}
+  catch(error){document.querySelector("#heartbeat-message").textContent=error.message;}
+});
 document.querySelector("#webhook-create").addEventListener("click",async()=>{
   const message=document.querySelector("#webhook-message");
   try {
@@ -917,7 +950,7 @@ window.addEventListener("pagehide",()=>{if(exportPollTimer)clearInterval(exportP
 if(incidentPollTimer) clearInterval(incidentPollTimer);
 incidentPollTimer=setInterval(()=>{if(currentRole)refreshIncidents();},15000);
 if(webhookPollTimer) clearInterval(webhookPollTimer);
-webhookPollTimer=setInterval(()=>{if(currentRole==="administrator")refreshWebhooks();},10000);
+webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
 document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); document.querySelector("#webhook-list").replaceChildren(); document.querySelector("#webhook-deliveries").replaceChildren(); show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
