@@ -11,6 +11,7 @@ let playbackViews = [];
 let playbackMaster = null;
 let playbackSyncGuard = false;
 let exportPollTimer = null;
+let incidentPollTimer = null;
 function show(name) { if(name!=="status") stopSynchronizedPlayback(); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
 async function showLogin() {
   const state = await api("/api/setup/status");
@@ -75,6 +76,7 @@ async function refresh() {
     const inventory = await api("/api/cameras");
     if (admin) await refreshGroups();
     latestCameras = inventory.cameras;
+    await refreshIncidents();
     renderCameras(inventory.cameras);
     renderLiveCameraPicker(inventory.cameras);
     renderPlaybackCameraPicker(inventory.cameras);
@@ -103,6 +105,33 @@ async function refreshLiveLayouts() {
     select.replaceChildren(new Option("Choose a saved layout",""),...layouts.map(layout=>new Option(layout.name,layout.name)));
     if(layouts.some(layout=>layout.name===previous)) select.value=previous;
   } catch(error) { document.querySelector("#live-message").textContent=error.message; }
+}
+async function refreshIncidents() {
+  const target=document.querySelector("#incidents-list"), message=document.querySelector("#incidents-message");
+  if(!currentRole) { target.replaceChildren(); return; }
+  try {
+    const result=await api("/api/incidents");
+    message.textContent="";
+    target.replaceChildren(...result.incidents.map(incident=>{
+      const item=document.createElement("li");
+      const summary=document.createElement("strong");
+      summary.textContent=`${incident.state.toUpperCase()} · ${incident.summary}`;
+      const details=document.createElement("p");
+      details.textContent=`First seen ${new Date(incident.first_seen_at).toLocaleString()} · Last seen ${new Date(incident.last_seen_at).toLocaleString()} · Recurrences ${Math.max(0,incident.recurrence_count-1)} · ${incident.events.length} history events`;
+      item.append(summary,details);
+      if(incident.state==="active") {
+        const acknowledge=document.createElement("button"); acknowledge.type="button"; acknowledge.textContent="Acknowledge";
+        acknowledge.addEventListener("click",async()=>{
+          acknowledge.disabled=true;
+          try { await api(`/api/incidents/${encodeURIComponent(incident.id)}/acknowledge`,{method:"POST"}); await refreshIncidents(); }
+          catch(error) { message.textContent=error.message; acknowledge.disabled=false; }
+        });
+        item.append(acknowledge);
+      }
+      return item;
+    }));
+    if(!result.incidents.length) { const item=document.createElement("li"); item.textContent="No incidents recorded."; target.append(item); }
+  } catch(error) { message.textContent=error.message; }
 }
 function stopLiveViews() {
   if(liveStatusTimer) clearInterval(liveStatusTimer);
@@ -845,7 +874,9 @@ document.querySelector("#playback-cursor").addEventListener("input",event=>{
 document.querySelector("#playback-rate").addEventListener("change",event=>{playbackViews.forEach(view=>{view.video.playbackRate=Number(event.target.value);});});
 window.addEventListener("pagehide",stopSynchronizedPlayback);
 window.addEventListener("pagehide",()=>{if(exportPollTimer)clearInterval(exportPollTimer);exportPollTimer=null;});
-document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); show("login"); });
+if(incidentPollTimer) clearInterval(incidentPollTimer);
+incidentPollTimer=setInterval(()=>{if(currentRole)refreshIncidents();},15000);
+document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {
