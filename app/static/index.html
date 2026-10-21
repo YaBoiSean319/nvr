@@ -84,6 +84,19 @@
         <ul id="webhook-list"></ul>
         <h3>Delivery history</h3><ul id="webhook-deliveries" aria-live="polite"></ul>
       </section>
+      <section id="heartbeat-admin" class="hidden" aria-labelledby="heartbeat-heading">
+        <h2 id="heartbeat-heading">External host heartbeat</h2>
+        <p>The NVR sends a signed heartbeat to a receiver that must run outside this NVR host. Configure that external system to alert when heartbeats stop. “Last successful send” only confirms the NVR received a successful response; it does not prove the external checker is alerting.</p>
+        <label for="heartbeat-url">External receiver URL</label><input id="heartbeat-url" type="url" maxlength="2048" placeholder="https://monitor.example.net/nvr-heartbeat">
+        <label for="heartbeat-interval">Heartbeat interval (seconds)</label><input id="heartbeat-interval" type="number" min="30" max="900" value="60">
+        <label><input id="heartbeat-allow-private" type="checkbox"> Authorize an explicit workplace-private receiver IP</label>
+        <button id="heartbeat-save" type="button">Save heartbeat receiver</button>
+        <button id="heartbeat-test" type="button">Send test heartbeat</button>
+        <button id="heartbeat-rotate" type="button">Rotate signing secret</button>
+        <button id="heartbeat-disable" type="button">Disable heartbeat</button>
+        <p id="heartbeat-message" role="status" aria-live="polite"></p>
+        <p id="heartbeat-state" aria-live="polite"></p>
+      </section>
       <section aria-labelledby="incidents-heading">
         <h2 id="incidents-heading">Incidents</h2>
         <p>Active faults remain visible after acknowledgement. Recovered incidents stay in the history and recur under the same incident identity if the fault returns.</p>
