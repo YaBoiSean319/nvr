@@ -268,6 +268,24 @@ def initialize() -> None:
             );
             CREATE INDEX IF NOT EXISTS webhook_deliveries_due_idx ON webhook_deliveries(status,next_attempt_at,created_at);
             CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint_idx ON webhook_deliveries(endpoint_id,created_at DESC);
+            CREATE TABLE IF NOT EXISTS heartbeat_configuration (
+                singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+                target_url_ciphertext BLOB,
+                signing_secret_ciphertext BLOB,
+                allow_private INTEGER NOT NULL DEFAULT 0 CHECK (allow_private IN (0,1)),
+                interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK (interval_seconds BETWEEN 30 AND 900),
+                enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+                instance_id TEXT NOT NULL,
+                force_next_test INTEGER NOT NULL DEFAULT 0 CHECK (force_next_test IN (0,1)),
+                next_attempt_at TEXT,
+                last_attempt_at TEXT,
+                last_success_at TEXT,
+                last_http_status INTEGER,
+                last_error TEXT,
+                created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         incident_event_columns = {row[1] for row in db.execute("PRAGMA table_info(incident_events)")}
