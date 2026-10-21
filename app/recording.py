@@ -19,6 +19,7 @@ from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
 from .health import recording_health
+from .incidents import sync_incident, sync_storage_incidents
 
 RECONNECT_MAX_SECONDS = 30
 
@@ -113,6 +114,7 @@ class RecordingManager:
         self.task_modes: dict[str, str] = {}
         self.scheduler_task: asyncio.Task[None] | None = None
         self.retention_task: asyncio.Task[None] | None = None
+        self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
 
     async def start(self) -> None:
@@ -123,6 +125,7 @@ class RecordingManager:
             await self.sync_camera(row["id"])
         self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
         self.retention_task = asyncio.create_task(self._retention_loop(), name="recording-retention-cleanup")
+        self.storage_task = asyncio.create_task(self._storage_loop(), name="recording-storage-health")
 
     async def stop(self) -> None:
         self.stopping = True
@@ -134,6 +137,10 @@ class RecordingManager:
             self.retention_task.cancel()
             await asyncio.gather(self.retention_task, return_exceptions=True)
         self.retention_task = None
+        if self.storage_task and not self.storage_task.done():
+            self.storage_task.cancel()
+            await asyncio.gather(self.storage_task, return_exceptions=True)
+        self.storage_task = None
         for task in list(self.tasks.values()):
             task.cancel()
         if self.tasks:
@@ -198,6 +205,23 @@ class RecordingManager:
                 pass
             await asyncio.sleep(300)
 
+    async def _storage_loop(self) -> None:
+        while not self.stopping:
+            try:
+                await asyncio.to_thread(self._sync_storage_health)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ValueError, sqlite3.Error):
+                pass
+            await asyncio.sleep(30)
+
+    @staticmethod
+    def _sync_storage_health() -> None:
+        from .storage import storage_status
+        status = storage_status()
+        with connect() as db:
+            sync_storage_incidents(db, status["volumes"])
+
     def _sync_coverage(self, camera_id: str) -> None:
         with connect() as db:
             row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -214,12 +238,25 @@ class RecordingManager:
             kind = str(health["coverage_kind"])
             if active and active["coverage_kind"] == kind:
                 db.execute("UPDATE coverage_intervals SET reason=? WHERE id=?", (str(health["detail"]), active["id"]))
-                return
-            now = datetime.now(timezone.utc).isoformat()
-            if active:
-                db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (now, active["id"]))
-            db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at) VALUES(?,?,?,?)",
-                       (camera_id, kind, str(health["detail"]), now))
+            else:
+                now = datetime.now(timezone.utc).isoformat()
+                if active:
+                    db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (now, active["id"]))
+                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at) VALUES(?,?,?,?)",
+                           (camera_id, kind, str(health["detail"]), now))
+            for fault_type, coverage_kinds, title in (
+                ("recording_failure", {"failure"}, "Recording coverage failure"),
+                ("recording_uncertain", {"uncertain"}, "Recording coverage is uncertain"),
+            ):
+                sync_incident(
+                    db,
+                    incident_key=f"{fault_type}:{camera_id}",
+                    camera_id=camera_id,
+                    fault_type=fault_type,
+                    summary=f"{title}: {row['name']} — {health['detail']}",
+                    active=kind in coverage_kinds,
+                    details={"coverage_kind": kind, "reason": str(health["detail"])},
+                )
 
     def _desired_mode(self, camera_id: str) -> str:
         with connect() as db:
