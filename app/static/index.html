@@ -95,6 +95,10 @@
           <label for="playback-end">To</label><input id="playback-end" type="datetime-local">
           <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
           <button id="playback-search" type="button">Load timeline</button><button id="playback-stop" type="button">Stop playback</button>
+          <button id="playback-export" type="button">Export selected footage</button>
+          <p>Exports run as bounded background jobs. Completed downloads contain one playable video per selected camera and metadata listing actual recorded intervals and missing time. Audio is omitted.</p>
+          <p id="export-message" role="status" aria-live="polite"></p>
+          <ul id="export-jobs" aria-live="polite"></ul>
           <label for="playback-cursor">Shared time</label><input id="playback-cursor" type="range" min="0" max="1000" value="0" disabled>
           <p id="playback-status" class="playback-status" role="status" aria-live="polite"></p>
           <div id="playback-grid" class="playback-grid"></div>
