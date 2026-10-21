@@ -20,8 +20,15 @@ from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
 from .health import recording_health
 
-SEGMENT_SECONDS = max(10, min(int(os.environ.get("NVR_SEGMENT_SECONDS", "60")), 3600))
 RECONNECT_MAX_SECONDS = 30
+
+
+def segment_seconds() -> int:
+    try:
+        configured = int(os.environ.get("NVR_SEGMENT_SECONDS", "60"))
+    except ValueError:
+        configured = 60
+    return max(10, min(configured, 3600))
 
 
 def recordings_path() -> Path:
@@ -508,6 +515,7 @@ class RecordingManager:
         if not executable:
             self._set_status(camera_id, "unavailable", "FFmpeg is not installed")
             return
+        segment_duration = segment_seconds()
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
@@ -520,8 +528,14 @@ class RecordingManager:
             except Exception:
                 self._set_status(camera_id, "failed", "Camera credentials are unavailable")
                 return
-            output_dir = recordings_path() / camera_id / uuid.uuid4().hex
-            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                from .storage import camera_recordings_dir
+                output_dir = camera_recordings_dir(camera_id) / uuid.uuid4().hex
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                self._set_status(camera_id, "unavailable", "Assigned recording volume is missing or not writable")
+                await asyncio.sleep(5)
+                continue
             list_path = output_dir / "segments.csv"
             self._set_status(camera_id, "connecting")
             args = [
@@ -529,7 +543,7 @@ class RecordingManager:
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
                 "-i", "pipe:0",
                 "-map", "0:v:0", "-an", "-c:v", "copy", "-f", "segment",
-                "-segment_time", str(SEGMENT_SECONDS), "-reset_timestamps", "1",
+                "-segment_time", str(segment_duration), "-reset_timestamps", "1",
                 "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart",
                 "-segment_list", str(list_path), "-segment_list_type", "csv", "-strftime", "1",
                 str(output_dir / "segment-%Y%m%dT%H%M%SZ.mp4"),
@@ -562,7 +576,7 @@ class RecordingManager:
                             (camera_id,),
                         ).fetchone()["latest"]
                     if latest:
-                        recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=SEGMENT_SECONDS * 2)).isoformat()
+                        recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
                         if latest >= recent_cutoff:
                             self._set_status(camera_id, "recording")
                         if latest and latest < recent_cutoff:

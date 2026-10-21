@@ -34,6 +34,7 @@ from .onvif_stream import list_camera_stream_profiles, resolve_camera_stream
 from .scheduling import effective_policy, validate_schedule
 from . import diagnostics
 from .retention import acquire_playback, coverage_summary, effective_retention, release_playback
+from .storage import assign_group_volume, configured_volumes, refresh_registry, storage_status
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -312,6 +313,10 @@ class CameraGroupCreateRequest(BaseModel):
 
 class RetentionRequest(BaseModel):
     retention_days: int = Field(ge=1, le=3650)
+
+
+class StorageAssignmentRequest(BaseModel):
+    volume_id: str | None = Field(default=None, max_length=64)
 
 
 class WeeklyScheduleInterval(BaseModel):
@@ -660,6 +665,7 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
         "id": row["id"],
         "name": row["name"],
         "group_name": row["group_name"] if "group_name" in row.keys() else None,
+        "storage_volume_id": row["storage_volume_id"] if "storage_volume_id" in row.keys() else None,
         "stream_url": visible_url,
         "enabled": bool(row["enabled"]),
         "recording_mode": row["recording_mode"],
@@ -892,6 +898,35 @@ def delete_camera_retention(camera_id: str, _: Annotated[sqlite3.Row, Depends(ad
             raise HTTPException(status_code=404, detail="Camera not found")
         db.execute("DELETE FROM retention_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/storage")
+def get_storage_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    refresh_registry()
+    return storage_status()
+
+
+@app.get("/api/camera-groups/{group_id}/storage-volume")
+def get_group_storage_volume(group_id: str, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    with connect() as db:
+        row=db.execute("SELECT id,name,storage_volume_id FROM camera_groups WHERE id=?",(group_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404,detail="Camera group not found")
+    return {"group_id":group_id,"volume_id":row["storage_volume_id"] or "default","configured_volumes":list(configured_volumes())}
+
+
+@app.put("/api/camera-groups/{group_id}/storage-volume")
+async def set_group_storage_volume(group_id: str, payload: StorageAssignmentRequest, request: Request, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    try:
+        assign_group_volume(group_id,payload.volume_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc
+    with connect() as db:
+        camera_ids=[row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?",(group_id,)).fetchall()]
+    await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id,force_restart=True) for camera_id in camera_ids))
+    return get_group_storage_volume(group_id,_=None)
 
 
 def _schedule_document(timezone_name: str, intervals: list[dict[str, object]]) -> dict[str, object]:
@@ -1579,14 +1614,26 @@ async def delete_camera(
         raise HTTPException(status_code=404, detail="Camera not found")
     await request.app.state.recorders.remove(camera_id)
     root = recordings_path()
-    camera_dir = (root / camera_id).resolve()
-    if camera_dir.parent == root and camera_dir.is_dir():
+    try:
+        from .storage import camera_recordings_dir, recording_file_path
+        with connect() as db:
+            media_paths=[row["relative_path"] for row in db.execute("SELECT relative_path FROM recording_segments WHERE camera_id=?",(camera_id,)).fetchall()]
+        for relative_path in media_paths:
+            media_path=recording_file_path(relative_path)
+            from .retention import unlink_if_unleased
+            if not unlink_if_unleased(media_path):
+                raise OSError("Recorded footage is currently being played")
+        camera_dir = camera_recordings_dir(camera_id).resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Assigned recording volume is unavailable; camera configuration was retained") from exc
+    if root in camera_dir.parents and camera_dir.is_dir():
         try:
             shutil.rmtree(camera_dir)
         except OSError as exc:
             raise HTTPException(status_code=500, detail="Stored footage could not be removed; camera configuration was retained") from exc
     with connect() as db:
         db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+        db.execute("DELETE FROM retention_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
         db.execute("DELETE FROM cameras WHERE id=?", (camera_id,))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

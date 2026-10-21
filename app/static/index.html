@@ -84,6 +84,10 @@
           <h4>Group retention policy</h4>
           <label for="group-retention-days">Retention target (days; default 30)</label><input id="group-retention-days" type="number" min="1" max="3650" value="30">
           <button id="load-group-retention" type="button">Load group retention</button><button id="save-group-retention" type="button">Save group retention</button><button id="clear-group-retention" type="button">Remove group retention</button>
+          <h4>Group storage volume</h4>
+          <label for="group-storage-volume">Assign recording volume</label><select id="group-storage-volume"><option value="default">default</option></select>
+          <button id="load-storage-volumes" type="button">Check storage volumes</button><button id="save-storage-volume" type="button">Assign volume to group</button>
+          <ul id="storage-volume-status" aria-live="polite"></ul>
           <p id="schedule-message" role="status" aria-live="polite"></p>
           <label for="bulk-group">Set group for selected cameras</label>
           <select id="bulk-group"><option value="__unchanged__">Leave groups unchanged</option><option value="">Remove from group</option></select>

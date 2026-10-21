@@ -13,3 +13,9 @@ The retention API is:
 - `GET /api/cameras/{id}/coverage`
 
 Retention targets are integers from 1 through 3650 days. Operators can read effective policy and achieved coverage; only administrators can change retention targets.
+
+## Multiple recording volumes
+
+The default Compose file provides a separate `archive` volume mounted at `/recordings/archive`. Set `NVR_STORAGE_VOLUMES` to a JSON object that maps volume names to directories below `NVR_RECORDINGS_PATH`, for example `{"default":"","archive":"archive"}`. Every non-default directory must be a mounted filesystem; the recorder reports it unavailable when the mount is missing. Add additional Compose bind or named volumes at matching paths to expose more local disks.
+
+Administrators can inspect `/api/storage` and assign a group through `GET/PUT /api/camera-groups/{id}/storage-volume`. Storage status includes mount, write-probe latency, capacity, free space, and affected cameras. Under pressure, cleanup continues to expire only footage past its configured retention target; it does not silently delete in-policy footage. Low free space and unavailable or slow volumes report affected cameras and retention risk.

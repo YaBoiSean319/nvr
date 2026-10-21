@@ -166,8 +166,9 @@ class MotionClipAssembler:
 
     async def _finalize(self, capture: _Capture) -> None:
         from .recording import recordings_path
+        from .storage import camera_recordings_dir
         staging = capture.staging_dir
-        output_dir = recordings_path() / self.camera_id / "motion"
+        output_dir = camera_recordings_dir(self.camera_id) / "motion"
         output_dir.mkdir(parents=True, exist_ok=True)
         output = output_dir / f"{capture.event_id}.mp4"
         manifest = staging / "concat.txt"

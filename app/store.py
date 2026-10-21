@@ -37,7 +37,13 @@ def initialize() -> None:
             CREATE TABLE IF NOT EXISTS camera_groups (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                storage_volume_id TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS storage_volumes (
+                id TEXT PRIMARY KEY,
+                relative_path TEXT NOT NULL,
+                configured_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE TABLE IF NOT EXISTS recording_policy_overrides (
                 scope_type TEXT NOT NULL CHECK (scope_type IN ('group','camera')),
@@ -156,6 +162,9 @@ def initialize() -> None:
         # Migrate installations created by the first implementation, which only
         # allowed administrator accounts and did not assign stable session IDs.
         camera_columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}
+        group_columns = {row[1] for row in db.execute("PRAGMA table_info(camera_groups)")}
+        if "storage_volume_id" not in group_columns:
+            db.execute("ALTER TABLE camera_groups ADD COLUMN storage_volume_id TEXT")
         if "onvif_uuid" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN onvif_uuid TEXT")
         if "group_id" not in camera_columns:

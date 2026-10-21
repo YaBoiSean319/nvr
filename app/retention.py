@@ -79,7 +79,14 @@ def coverage_summary(db, camera_id: str, root: Path | None = None, now: datetime
     age_seconds = max(1.0, actual_seconds)
     bytes_per_day = total_bytes / age_seconds * 86400 if total_bytes else 0.0
     try:
-        free_bytes = shutil.disk_usage(root).free
+        with connect() as connection:
+            group = connection.execute("SELECT g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?",(camera_id,)).fetchone()
+        if group and group["storage_volume_id"]:
+            from .storage import volume_path
+            capacity_path=volume_path(group["storage_volume_id"])
+        else:
+            capacity_path=root
+        free_bytes = shutil.disk_usage(capacity_path).free
     except OSError:
         free_bytes = None
     projected_days = min(days, actual_seconds / 86400 + free_bytes / bytes_per_day) if free_bytes is not None and bytes_per_day > 0 else None

@@ -11,6 +11,7 @@ services:
       NVR_LISTEN_PORT: ${NVR_PORT:-8280}
       NVR_DB_PATH: /data/nvr.sqlite3
       NVR_RECORDINGS_PATH: /recordings
+      NVR_STORAGE_VOLUMES: '{"default":"","archive":"archive"}'
       NVR_CREDENTIAL_KEY_PATH: /secrets/credentials.key
       NVR_SESSION_HOURS: ${NVR_SESSION_HOURS:-12}
       NVR_COOKIE_SECURE: ${NVR_COOKIE_SECURE:-false}
@@ -26,6 +27,7 @@ services:
       - nvr-data:/data
       - nvr-secrets:/secrets
       - nvr-recordings:/recordings
+      - nvr-archive:/recordings/archive
     healthcheck:
       test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('NVR_LISTEN_PORT','8280')+'/healthz', timeout=3)"]
       interval: 30s
@@ -37,3 +39,4 @@ volumes:
   nvr-data:
   nvr-secrets:
   nvr-recordings:
+  nvr-archive:
