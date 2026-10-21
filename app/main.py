@@ -41,6 +41,7 @@ from .exports import ExportManager, create_export_record, export_output_path, ge
 from .incidents import acknowledge_incident, incident_view, list_incidents, sync_storage_incidents
 from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, WebhookManager, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
 from .heartbeat import HeartbeatManager, configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
+from .detection import DetectionManager, detector_availability, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -70,7 +71,10 @@ async def lifespan(_: FastAPI):
     await app.state.heartbeat.start()
     app.state.recorders = RecordingManager()
     await app.state.recorders.start()
+    app.state.detectors = DetectionManager()
+    await app.state.detectors.start()
     yield
+    await app.state.detectors.stop()
     await app.state.exports.stop()
     await app.state.webhooks.stop()
     await app.state.heartbeat.stop()
@@ -407,6 +411,14 @@ class CameraUpdateRequest(BaseModel):
     @classmethod
     def require_update_fields(cls, value: str | None) -> str | None:
         return value
+
+
+class AIDetectionConfigRequest(BaseModel):
+    enabled: bool
+    analysis_fps: float = Field(default=0.5, ge=0.1, le=5)
+    confidence_threshold: float = Field(default=0.55, ge=0.1, le=0.99)
+    use_substream: bool = True
+    zones: list[MotionZoneRequest] = Field(default_factory=list, max_length=16)
 
 
 class CameraGroupCreateRequest(BaseModel):
@@ -1913,6 +1925,124 @@ def list_camera_motion_events(
         item["media_url"] = f"/api/cameras/{camera_id}/segments/{item['segment_id']}/media" if item["segment_id"] else None
         events.append(item)
     return {"events": events}
+
+
+def _ensure_ai_settings(camera_id: str) -> sqlite3.Row:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
+        row = db.execute("SELECT * FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+    return row
+
+
+@app.get("/api/cameras/{camera_id}/ai")
+def get_ai_detection_config(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    row = _ensure_ai_settings(camera_id)
+    return {
+        "camera_id": camera_id,
+        "enabled": bool(row["enabled"]),
+        "analysis_fps": row["analysis_fps"],
+        "confidence_threshold": row["confidence_threshold"],
+        "use_substream": bool(row["use_substream"]),
+        "zones": json.loads(row["zones_json"]),
+        "status": row["status"],
+        "last_attempt_at": row["last_attempt_at"],
+        "last_success_at": row["last_success_at"],
+        "last_error": row["last_error"],
+        "model": {"id": MODEL_ID, "version": MODEL_VERSION, "runtime": MODEL_RUNTIME, **detector_availability()},
+        "coverage_note": "No detections do not prove an object was absent; inspect AI coverage status and model results.",
+    }
+
+
+@app.put("/api/cameras/{camera_id}/ai")
+async def update_ai_detection_config(
+    camera_id: str,
+    payload: AIDetectionConfigRequest,
+    request: Request,
+    user: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    existing = _ensure_ai_settings(camera_id)
+    zones = [zone.model_dump() for zone in payload.zones]
+    with connect() as db:
+        camera = db.execute("SELECT live_substream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if payload.enabled and payload.use_substream and not camera["live_substream_url_ciphertext"]:
+            raise HTTPException(status_code=422, detail="Configure and validate a lower-resolution camera profile, or select the main stream")
+        if payload.enabled:
+            competing = db.execute("SELECT camera_id FROM ai_camera_settings WHERE enabled=1 AND camera_id<>? LIMIT 1", (camera_id,)).fetchone()
+            if competing:
+                raise HTTPException(status_code=409, detail="Initial CPU analysis supports one camera at a time; disable its AI analysis before selecting another")
+        db.execute(
+            "UPDATE ai_camera_settings SET enabled=?,analysis_fps=?,confidence_threshold=?,use_substream=?,zones_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE camera_id=?",
+            (int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":")), camera_id),
+        )
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "ai_detection_configured", "camera", camera_id,
+                    json.dumps({"enabled": payload.enabled, "analysis_fps": payload.analysis_fps, "model_id": MODEL_ID, "model_version": MODEL_VERSION}, separators=(",", ":"))))
+    await request.app.state.detectors.sync_camera(camera_id, force_restart=True)
+    return get_ai_detection_config(camera_id, _=user)
+
+
+@app.get("/api/ai/events")
+def search_ai_observations(
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+    camera_id: str | None = Query(default=None, max_length=64),
+    label: Literal["person", "vehicle"] | None = None,
+    start: str | None = Query(default=None, max_length=64),
+    end: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, object]:
+    clauses: list[str] = []
+    values: list[object] = []
+    if start and end:
+        try:
+            start_time = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            end_time = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            if start_time.tzinfo is None or end_time.tzinfo is None or end_time <= start_time:
+                raise ValueError
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Search range must be timezone-aware and have a positive duration") from exc
+    if camera_id:
+        with connect() as db:
+            if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Camera not found")
+        clauses.append("o.camera_id=?")
+        values.append(camera_id)
+    if label:
+        clauses.append("o.label=?")
+        values.append(label)
+    for column, raw, operator in (("o.first_seen_at", start, ">="), ("o.first_seen_at", end, "<=")):
+        if raw:
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError
+                values.append(parsed.astimezone(timezone.utc).isoformat())
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Search timestamps must include a timezone") from exc
+            clauses.append(f"{column}{operator}?")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    values.append(limit)
+    with connect() as db:
+        rows = db.execute(
+            "SELECT o.*,c.name AS camera_name FROM ai_observations o JOIN cameras c ON c.id=o.camera_id" + where + " ORDER BY o.first_seen_at DESC LIMIT ?",
+            values,
+        ).fetchall()
+    events = []
+    for row in rows:
+        item = dict(row)
+        item["box"] = json.loads(item.pop("box_json"))
+        events.append(item)
+    return {"events": events, "model": {"id": MODEL_ID, "version": MODEL_VERSION}, "coverage_note": "Search results describe analyzed frames only; empty results do not prove the scene was empty."}
+
+
+@app.get("/api/cameras/{camera_id}/ai/coverage")
+def get_ai_detection_coverage(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    _ensure_ai_settings(camera_id)
+    with connect() as db:
+        rows = db.execute("SELECT state,starts_at,ends_at,detail FROM ai_coverage WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500", (camera_id,)).fetchall()
+        setting = db.execute("SELECT status,last_attempt_at,last_success_at,last_error FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+    return {"status": setting["status"], "last_attempt_at": setting["last_attempt_at"], "last_success_at": setting["last_success_at"], "last_error": setting["last_error"], "intervals": [dict(row) for row in rows], "coverage_note": "A failed or delayed interval is unknown coverage; detections only describe sampled frames."}
 
 
 @app.delete("/api/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)

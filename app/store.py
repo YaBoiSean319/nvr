@@ -188,6 +188,42 @@ def initialize() -> None:
                 source_events_json TEXT NOT NULL DEFAULT '[]'
             );
             CREATE INDEX IF NOT EXISTS motion_events_camera_time_idx ON motion_events(camera_id, received_at);
+            CREATE TABLE IF NOT EXISTS ai_camera_settings (
+                camera_id TEXT PRIMARY KEY REFERENCES cameras(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+                analysis_fps REAL NOT NULL DEFAULT 0.5 CHECK (analysis_fps BETWEEN 0.1 AND 5),
+                confidence_threshold REAL NOT NULL DEFAULT 0.55 CHECK (confidence_threshold BETWEEN 0.1 AND 0.99),
+                use_substream INTEGER NOT NULL DEFAULT 1 CHECK (use_substream IN (0,1)),
+                zones_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'disabled',
+                last_attempt_at TEXT,
+                last_success_at TEXT,
+                last_error TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS ai_observations (
+                id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                label TEXT NOT NULL CHECK (label IN ('person','vehicle')),
+                confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+                box_json TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                frame_width INTEGER NOT NULL,
+                frame_height INTEGER NOT NULL,
+                model_id TEXT NOT NULL,
+                model_version TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ai_observations_search_idx ON ai_observations(camera_id,label,first_seen_at DESC);
+            CREATE TABLE IF NOT EXISTS ai_coverage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                state TEXT NOT NULL CHECK (state IN ('analyzed','delayed','failed','unanalyzed')),
+                starts_at TEXT NOT NULL,
+                ends_at TEXT,
+                detail TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS ai_coverage_camera_time_idx ON ai_coverage(camera_id,starts_at DESC);
             CREATE TABLE IF NOT EXISTS discovery_candidates (
                 id TEXT PRIMARY KEY,
                 device_uuid TEXT NOT NULL UNIQUE,

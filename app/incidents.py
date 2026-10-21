@@ -61,12 +61,16 @@ def sync_incident(
     if active:
         if row is None:
             incident_id = str(uuid.uuid4())
-            db.execute(
+            created = db.execute(
                 "INSERT INTO incidents(id,incident_key,camera_id,fault_type,summary,state,fault_active,recurrence_count,first_seen_at,last_seen_at,details_json) "
-                "VALUES(?,?,?,?,?,'active',1,1,?,?,?)",
+                "VALUES(?,?,?,?,?,'active',1,1,?,?,?) ON CONFLICT(incident_key) DO NOTHING",
                 (incident_id, incident_key, camera_id, fault_type, summary, now, now, details_json),
             )
-            _event(db, incident_id, "raised", details or {})
+            if created.rowcount:
+                _event(db, incident_id, "raised", details or {})
+            else:
+                # Another supervisor may have observed the same fault between our read and insert.
+                row = db.execute("SELECT * FROM incidents WHERE incident_key=?", (incident_key,)).fetchone()
         elif row["state"] == "recovered" or not row["fault_active"]:
             db.execute(
                 "UPDATE incidents SET camera_id=?,fault_type=?,summary=?,state='active',fault_active=1,recurrence_count=recurrence_count+1,last_seen_at=?,acknowledged_by=NULL,acknowledged_at=NULL,recovered_at=NULL,details_json=? WHERE id=?",

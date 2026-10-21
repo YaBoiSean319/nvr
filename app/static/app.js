@@ -623,6 +623,58 @@ function renderCameras(cameras) {
         }));
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
+    const aiEvents=document.createElement("button"); aiEvents.type="button"; aiEvents.textContent="Search person/vehicle events";
+    aiEvents.addEventListener("click",async()=>{
+      try {
+        const label=document.createElement("select");
+        for(const [value,text] of [["","All detections"],["person","Person"],["vehicle","Vehicle"]]){const option=document.createElement("option");option.value=value;option.textContent=text;label.append(option);}
+        const from=document.createElement("input");from.type="datetime-local";from.setAttribute("aria-label","AI event start time");
+        const to=document.createElement("input");to.type="datetime-local";to.setAttribute("aria-label","AI event end time");
+        const run=document.createElement("button");run.type="button";run.textContent="Apply AI event search";
+        const results=document.createElement("div");results.setAttribute("aria-live","polite");
+        const search=async()=>{
+          const params=new URLSearchParams({camera_id:camera.id});if(label.value)params.set("label",label.value);
+          if(from.value)params.set("start",new Date(from.value).toISOString());if(to.value)params.set("end",new Date(to.value).toISOString());
+          const found=await api(`/api/ai/events?${params}`);
+          results.replaceChildren();
+          const note=document.createElement("p");note.textContent=found.coverage_note;results.append(note);
+          for(const item of found.events){const row=document.createElement("p");row.textContent=`${new Date(item.first_seen_at).toLocaleString()} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version}`;
+            const play=document.createElement("button");play.type="button";play.textContent="Find playback";play.addEventListener("click",async()=>{
+              const at=new Date(item.first_seen_at),begin=new Date(at.getTime()-30000),finish=new Date(at.getTime()+30000);
+              const footage=await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments?from=${encodeURIComponent(begin.toISOString())}&to=${encodeURIComponent(finish.toISOString())}`);
+              const segment=footage.segments.find(s=>new Date(s.starts_at)<=at&&new Date(s.ends_at)>=at)||footage.segments[0];
+              if(!segment){row.append(document.createTextNode(" · no retained footage covers this observation"));return;}
+              const player=document.querySelector("#playback");player.src=segment.media_url;player.classList.remove("hidden");
+              player.addEventListener("loadedmetadata",()=>{const offset=Math.max(0,(at-new Date(segment.starts_at))/1000);player.currentTime=offset;},{once:true});player.play().catch(()=>{});
+            });row.append(play);results.append(row);
+          }
+          if(!found.events.length){const empty=document.createElement("p");empty.textContent="No analyzed detections match this search. Check analysis coverage; empty results do not prove the scene was empty.";results.append(empty);}
+        };
+        run.addEventListener("click",async()=>{try{await search();}catch(error){results.textContent=error.message;}});
+        await search();
+        document.querySelector("#segment-list").replaceChildren(label,from,to,run,results);
+      } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
+    let aiPanel=null;
+    const aiConfigure=document.createElement("button");aiConfigure.type="button";aiConfigure.textContent="Configure CPU person/vehicle detection";
+    aiConfigure.addEventListener("click",async()=>{
+      try{
+        const config=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`);
+        if(!aiPanel){aiPanel=document.createElement("section");card.append(aiPanel);}
+        aiPanel.replaceChildren();const heading=document.createElement("h4");heading.textContent="Local CPU AI analysis";
+        const availability=document.createElement("p");availability.textContent=`${config.model.id} ${config.model.version} · ${config.model.runtime} · ${config.model.available?"model ready":config.model.reason}`;
+        const enabledLabel=document.createElement("label");enabledLabel.textContent="Enable analysis ";const aiEnabled=document.createElement("input");aiEnabled.type="checkbox";aiEnabled.checked=config.enabled;enabledLabel.append(aiEnabled);
+        const fpsLabel=document.createElement("label");fpsLabel.textContent="Analysis frames per second";const fps=document.createElement("input");fps.type="number";fps.min="0.1";fps.max="5";fps.step="0.1";fps.value=config.analysis_fps;fpsLabel.append(fps);
+        const confidenceLabel=document.createElement("label");confidenceLabel.textContent="Minimum confidence (0.1–0.99)";const confidence=document.createElement("input");confidence.type="number";confidence.min="0.1";confidence.max="0.99";confidence.step="0.01";confidence.value=config.confidence_threshold;confidenceLabel.append(confidence);
+        const substreamLabel=document.createElement("label");substreamLabel.textContent="Use validated lower-resolution stream ";const substream=document.createElement("input");substream.type="checkbox";substream.checked=config.use_substream;substreamLabel.append(substream);
+        const zonesLabel=document.createElement("label");zonesLabel.textContent="AI zones (normalized rectangles; empty uses full frame)";const aiZones=document.createElement("textarea");aiZones.spellcheck=false;aiZones.value=JSON.stringify(config.zones);aiZones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';zonesLabel.append(aiZones);
+        const saveAI=document.createElement("button");saveAI.type="button";saveAI.textContent="Save AI settings";
+        const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${new Date(config.last_success_at).toLocaleString()}`:""}${config.last_error?` · ${config.last_error}`:""}`;
+        saveAI.addEventListener("click",async()=>{try{const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:JSON.parse(aiZones.value||"[]")})});aiStatus.textContent=`Status: ${saved.status}${saved.last_error?` · ${saved.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
+        const coverageButton=document.createElement("button");coverageButton.type="button";coverageButton.textContent="Refresh analysis coverage";coverageButton.addEventListener("click",async()=>{try{const status=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai/coverage`);aiStatus.textContent=`Status: ${status.status} · ${status.intervals.length} analysis coverage intervals${status.last_error?` · ${status.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
+        aiPanel.append(heading,availability,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,zonesLabel,saveAI,coverageButton,aiStatus);
+      }catch(error){document.querySelector("#camera-message").textContent=error.message;}
+    });
     const coverage=document.createElement("button"); coverage.type="button"; coverage.textContent="View coverage history";
     const coverageList=document.createElement("ul");
     coverage.addEventListener("click",async()=>{
@@ -676,7 +728,7 @@ function renderCameras(cameras) {
         rotateInput.value=""; await refresh();
       } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
     });
-    card.append(mode,enabledLabel,pre,post,save,scheduleLabel,inheritLabel,scheduleText,loadSchedule,saveSchedule,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,coverage,coverageList,remove,rotateLabel,rotateInput,rotate);
+    card.append(mode,enabledLabel,pre,post,save,scheduleLabel,inheritLabel,scheduleText,loadSchedule,saveSchedule,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,aiEvents,aiConfigure,coverage,coverageList,remove,rotateLabel,rotateInput,rotate);
     return card;
   }));
 }
