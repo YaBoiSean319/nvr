@@ -35,6 +35,7 @@ from .scheduling import effective_policy, validate_schedule
 from . import diagnostics
 from .retention import acquire_playback, coverage_summary, effective_retention, release_playback
 from .storage import assign_group_volume, configured_volumes, refresh_registry, storage_status
+from .preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -317,6 +318,10 @@ class RetentionRequest(BaseModel):
 
 class StorageAssignmentRequest(BaseModel):
     volume_id: str | None = Field(default=None, max_length=64)
+
+
+class HoldRequest(BaseModel):
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class WeeklyScheduleInterval(BaseModel):
@@ -1606,12 +1611,15 @@ def list_camera_motion_events(
 async def delete_camera(
     camera_id: str,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> Response:
     with connect() as db:
         exists = db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        protected=db.execute("SELECT 1 FROM recording_holds WHERE camera_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) LIMIT 1",(camera_id,)).fetchone()
     if exists is None:
         raise HTTPException(status_code=404, detail="Camera not found")
+    if protected:
+        raise HTTPException(status_code=409,detail="Camera has preserved footage; release its holds before deleting the camera")
     await request.app.state.recorders.remove(camera_id)
     root = recordings_path()
     try:
@@ -1635,6 +1643,7 @@ async def delete_camera(
         db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
         db.execute("DELETE FROM retention_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
         db.execute("DELETE FROM cameras WHERE id=?", (camera_id,))
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",(int(user["id"]),"delete","camera",camera_id,"{}"))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1653,19 +1662,19 @@ def list_camera_segments(
             raise HTTPException(status_code=422, detail="Provide both from and to, or neither")
         if start is None or end is None:
             rows = db.execute(
-                "SELECT id, starts_at, ends_at, size_bytes FROM recording_segments WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500",
+                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500",
                 (camera_id,),
             ).fetchall()
         else:
             if start.tzinfo is None or end.tzinfo is None or end <= start:
                 raise HTTPException(status_code=422, detail="from and to must be timezone-aware and form a positive interval")
             rows = db.execute(
-                "SELECT id, starts_at, ends_at, size_bytes FROM recording_segments "
+                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s "
                 "WHERE camera_id=? AND starts_at<? AND ends_at>? ORDER BY starts_at",
                 (camera_id, end.astimezone(timezone.utc).isoformat(), start.astimezone(timezone.utc).isoformat()),
             ).fetchall()
     segments = [
-        {"id": row["id"], "starts_at": row["starts_at"], "ends_at": row["ends_at"], "size_bytes": row["size_bytes"],
+        {"id": row["id"], "starts_at": row["starts_at"], "ends_at": row["ends_at"], "size_bytes": row["size_bytes"], "preserved":row["hold_id"] is not None,"hold_expires_at":row["hold_expires_at"],
          "media_url": f"/api/cameras/{camera_id}/segments/{row['id']}/media"}
         for row in rows
     ]
@@ -1699,6 +1708,54 @@ def list_camera_coverage(
             (camera_id,),
         ).fetchall()
     return {"camera_id": camera_id, "current": health, "intervals": [dict(row) for row in reversed(rows)]}
+
+
+@app.get("/api/cameras/{camera_id}/segments/{segment_id}/hold")
+def segment_hold_status(camera_id: str, segment_id: int, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    try:
+        return get_segment_hold(camera_id,segment_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+
+
+@app.post("/api/cameras/{camera_id}/segments/{segment_id}/hold",status_code=status.HTTP_201_CREATED)
+def preserve_camera_segment(camera_id: str, segment_id: int, payload: HoldRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+    if payload.expires_in_days is not None and user["role"]!="administrator":
+        raise HTTPException(status_code=403,detail="Only administrators can set a hold expiry")
+    try:
+        return preserve_segment(camera_id,segment_id,int(user["id"]),payload.expires_in_days)
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=410,detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503,detail="Assigned storage volume is unavailable") from exc
+
+
+@app.delete("/api/cameras/{camera_id}/segments/{segment_id}/hold",status_code=status.HTTP_204_NO_CONTENT)
+def release_camera_segment(camera_id: str, segment_id: int, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+    try:
+        release_segment_hold(camera_id,segment_id,int(user["id"]))
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+    return Response(status_code=204)
+
+
+@app.delete("/api/cameras/{camera_id}/segments/{segment_id}",status_code=status.HTTP_204_NO_CONTENT)
+def delete_camera_segment(camera_id: str, segment_id: int, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+    try:
+        delete_preserved_segment(camera_id,segment_id,int(user["id"]))
+    except LookupError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
+    except BlockingIOError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503,detail="Assigned storage volume is unavailable") from exc
+    return Response(status_code=204)
 
 
 @app.get("/api/cameras/{camera_id}/segments/{segment_id}/media")
