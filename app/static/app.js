@@ -344,10 +344,22 @@ async function loadSegments(camera) {
     }
     message.textContent = `${result.segments.length} indexed interval(s) for ${camera.name}.`;
     list.replaceChildren(...result.segments.map(segment => {
-      const button=document.createElement("button"); button.type="button";
-      button.textContent=`${new Date(segment.starts_at).toLocaleString()} – ${new Date(segment.ends_at).toLocaleTimeString()} · ${(segment.size_bytes/1048576).toFixed(1)} MiB`;
-      button.addEventListener("click", () => { player.src=segment.media_url; player.classList.remove("hidden"); player.play().catch(() => { message.textContent="Interval loaded. Press Play to start playback."; }); });
-      return button;
+      const item=document.createElement("li");
+      const play=document.createElement("button"); play.type="button";
+      play.textContent=`Play ${new Date(segment.starts_at).toLocaleString()} – ${new Date(segment.ends_at).toLocaleTimeString()} · ${(segment.size_bytes/1048576).toFixed(1)} MiB`;
+      play.addEventListener("click", () => { player.src=segment.media_url; player.classList.remove("hidden"); player.play().catch(() => { message.textContent="Interval loaded. Press Play to start playback."; }); });
+      item.append(play);
+      if(segment.preserved) {
+        const held=document.createElement("span"); held.textContent=segment.hold_expires_at ? ` Preserved until ${new Date(segment.hold_expires_at).toLocaleString()}.` : " Preserved until an administrator releases the hold."; item.append(held);
+        if(currentRole==="administrator") { const release=document.createElement("button"); release.type="button"; release.textContent="Release hold"; release.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments/${segment.id}/hold`,{method:"DELETE"});await loadSegments(camera);}catch(error){message.textContent=error.message;}}); item.append(release); }
+      } else {
+        const preserve=document.createElement("button"); preserve.type="button"; preserve.textContent="Preserve footage";
+        let expiryInput=null;
+        if(currentRole==="administrator"){expiryInput=document.createElement("input");expiryInput.type="number";expiryInput.min="1";expiryInput.max="3650";expiryInput.placeholder="No expiry";expiryInput.setAttribute("aria-label","Hold expiry in days");item.append(expiryInput);}
+        preserve.addEventListener("click",async()=>{try{const payload={};if(expiryInput&&expiryInput.value)payload.expires_in_days=Number(expiryInput.value);await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments/${segment.id}/hold`,{method:"POST",body:JSON.stringify(payload)});await loadSegments(camera);}catch(error){message.textContent=error.message;}}); item.append(preserve);
+      }
+      if(currentRole==="administrator") { const remove=document.createElement("button"); remove.type="button"; remove.textContent="Delete footage"; remove.disabled=segment.preserved; remove.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments/${segment.id}`,{method:"DELETE"});await loadSegments(camera);}catch(error){message.textContent=error.message;}});item.append(remove); }
+      return item;
     }));
   } catch (error) { message.textContent=error.message; }
 }
