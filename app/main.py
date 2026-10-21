@@ -40,6 +40,7 @@ from .preservation import delete_segment as delete_preserved_segment, get_segmen
 from .exports import ExportManager, create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 from .incidents import acknowledge_incident, incident_view, list_incidents, sync_storage_incidents
 from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, WebhookManager, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
+from .heartbeat import HeartbeatManager, configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -65,11 +66,14 @@ async def lifespan(_: FastAPI):
     await app.state.exports.start()
     app.state.webhooks = WebhookManager()
     await app.state.webhooks.start()
+    app.state.heartbeat = HeartbeatManager()
+    await app.state.heartbeat.start()
     app.state.recorders = RecordingManager()
     await app.state.recorders.start()
     yield
     await app.state.exports.stop()
     await app.state.webhooks.stop()
+    await app.state.heartbeat.stop()
     await app.state.recorders.stop()
 
 
@@ -242,6 +246,12 @@ class WebhookUpdateRequest(BaseModel):
         if value is not None and (len(set(value)) != len(value) or any(event not in WEBHOOK_EVENT_TYPES - {"webhook.test"} for event in value)):
             raise ValueError("Select one or more supported incident event types")
         return value
+
+
+class HeartbeatConfigRequest(BaseModel):
+    target_url: str = Field(min_length=8, max_length=2048)
+    interval_seconds: int = Field(default=60, ge=30, le=900)
+    allow_private_receiver: bool = False
 
 
 class CameraProfileRequest(BaseModel):
@@ -2035,6 +2045,53 @@ def post_incident_acknowledgement(
 @app.get("/api/webhooks/event-types")
 def get_webhook_event_types(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
     return {"event_types": sorted(WEBHOOK_EVENT_TYPES)}
+
+
+@app.get("/api/heartbeat")
+def get_heartbeat_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    return heartbeat_status()
+
+
+@app.put("/api/heartbeat")
+def put_heartbeat_config(payload: HeartbeatConfigRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    try:
+        result, secret = configure_heartbeat(payload.target_url, payload.interval_seconds, payload.allow_private_receiver, int(user["id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "heartbeat_configured", "heartbeat", "1", json.dumps({"interval_seconds": payload.interval_seconds, "allow_private_receiver": payload.allow_private_receiver})))
+    return {"heartbeat": result, "signing_secret": secret, "secret_notice": "A new signing secret is shown once. Store it at the external receiver." if secret else None}
+
+
+@app.post("/api/heartbeat/test", status_code=status.HTTP_202_ACCEPTED)
+def post_heartbeat_test(user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, str]:
+    if not queue_heartbeat_test():
+        raise HTTPException(status_code=409, detail="Configure and enable an external heartbeat receiver first")
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "heartbeat_test_requested", "heartbeat", "1", "{}"))
+    return {"status": "queued"}
+
+
+@app.post("/api/heartbeat/rotate-secret")
+def post_heartbeat_secret_rotation(user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, str]:
+    secret = rotate_heartbeat_secret()
+    if secret is None:
+        raise HTTPException(status_code=409, detail="Configure an enabled heartbeat receiver first")
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "heartbeat_secret_rotated", "heartbeat", "1", "{}"))
+    return {"signing_secret": secret, "secret_notice": "This secret is shown once. Update the receiver before the next heartbeat."}
+
+
+@app.delete("/api/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
+def delete_heartbeat_config(user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+    disable_heartbeat()
+    with connect() as db:
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "heartbeat_disabled", "heartbeat", "1", "{}"))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/webhooks")
