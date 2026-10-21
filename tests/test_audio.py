@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.credentials import encrypt
 from app.main import administrator, app, current_user
 from app.recording import audio_recording_args
 from app.store import connect, initialize
@@ -32,7 +33,8 @@ class CameraAudioApiTests(unittest.TestCase):
         with connect() as db:
             db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(1,'operator','unused','operator')")
             db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(2,'administrator','unused','administrator')")
-            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')", (self.camera_id, "Audio test"))
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,?,'disabled')",
+                       (self.camera_id, "Audio test", encrypt("rtsp://camera.invalid/audio")))
         self.active_user = {"id": 1, "username": "operator", "role": "operator"}
         app.dependency_overrides[current_user] = lambda: self.active_user
 

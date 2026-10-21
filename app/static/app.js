@@ -77,6 +77,7 @@ async function refresh() {
       await refreshDiagnostics();
       await refreshWebhooks();
       await refreshHeartbeatStatus();
+      await loadAiRuntimeSettings();
     }
     const inventory = await api("/api/cameras");
     if (admin) await refreshGroups();
@@ -659,7 +660,7 @@ function renderCameras(cameras) {
           const found=await api(`/api/ai/events?${params}`);
           results.replaceChildren();
           const note=document.createElement("p");note.textContent=found.coverage_note;results.append(note);
-          for(const item of found.events){const row=document.createElement("p");row.textContent=`${new Date(item.first_seen_at).toLocaleString()} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version}`;
+          for(const item of found.events){const row=document.createElement("p");row.textContent=`${new Date(item.first_seen_at).toLocaleString()} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version} · OpenVINO ${item.provider}`;
             const play=document.createElement("button");play.type="button";play.textContent="Find playback";play.addEventListener("click",async()=>{
               const at=new Date(item.first_seen_at),begin=new Date(at.getTime()-30000),finish=new Date(at.getTime()+30000);
               const footage=await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments?from=${encodeURIComponent(begin.toISOString())}&to=${encodeURIComponent(finish.toISOString())}`);
@@ -677,7 +678,7 @@ function renderCameras(cameras) {
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
     let aiPanel=null;
-    const aiConfigure=document.createElement("button");aiConfigure.type="button";aiConfigure.textContent="Configure CPU person/vehicle detection";
+    const aiConfigure=document.createElement("button");aiConfigure.type="button";aiConfigure.textContent="Configure person/vehicle detection";
     aiConfigure.addEventListener("click",async()=>{
       try{
         const config=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`);
@@ -968,18 +969,41 @@ document.querySelector("#load-group-ai").addEventListener("click",async()=>{
     document.querySelector("#ai-group-message").textContent=`${config.group_name}: ${config.inherited_camera_count}/${config.camera_count} camera(s) inherit these settings · ${config.model.available?"model ready":config.model.reason}.`;
   }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
 });
+async function loadAiRuntimeSettings() {
+  const result=await api("/api/ai/settings");
+  const model=result.model;
+  const providerSelect=document.querySelector("#ai-provider");
+  providerSelect.replaceChildren(...model.provider_options.map(item=>new Option(`${item.id} · ${item.available?"available":"unavailable"}${item.reason?` — ${item.reason}`:""}`,item.id)));
+  providerSelect.value=model.provider;
+  const models=document.querySelector("#ai-model");
+  models.replaceChildren(...model.model_options.map(item=>new Option(`${item.id} · ${item.version} · ${item.source}${item.available?"":" · files unavailable"}`,item.id)));
+  models.value=model.model_id;
+  document.querySelector("#ai-max-active").value=result.max_active_cameras;
+  document.querySelector("#ai-runtime-state").textContent=`Active: ${model.runtime} · ${model.model_id} ${model.model_version} · ${model.available?"available":"unavailable: "+model.reason} · ${model.validated?"validated "+model.validated_at:"not validated on this host"}. Model replacement requires an NVR-compatible 448×256 boxes/labels output contract.`;
+}
+document.querySelector("#load-ai-runtime").addEventListener("click",async()=>{
+  try{await loadAiRuntimeSettings();document.querySelector("#ai-group-message").textContent="AI provider and compatible model options refreshed.";}
+  catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
+});
+document.querySelector("#validate-ai-runtime").addEventListener("click",async()=>{
+  try{
+    const result=await api("/api/ai/settings/validate",{method:"POST",body:JSON.stringify({provider:document.querySelector("#ai-provider").value,model_id:document.querySelector("#ai-model").value})});
+    document.querySelector("#ai-runtime-state").textContent=result.valid?`${result.runtime} ${result.model_id} ${result.model_version} passed model compile and test inference; saving will validate again before activation. ${result.gpu_certification_note}`:`Validation failed for ${result.provider}/${result.model_id}: ${result.reason}`;
+  }catch(error){document.querySelector("#ai-runtime-state").textContent=error.message;}
+});
 document.querySelector("#save-group-ai").addEventListener("click",async()=>{
   const group=document.querySelector("#schedule-group").value;
   try{
     if(!group)throw new Error("Create or select a camera group first.");
     const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/ai`,{method:"PUT",body:JSON.stringify({enabled:document.querySelector("#group-ai-enabled").checked,analysis_fps:Number(document.querySelector("#group-ai-fps").value),confidence_threshold:Number(document.querySelector("#group-ai-confidence").value),use_substream:document.querySelector("#group-ai-substream").checked,zones:JSON.parse(document.querySelector("#group-ai-zones").value||"[]")})});
-    document.querySelector("#ai-group-message").textContent=`Saved group settings for ${result.inherited_camera_count} inherited camera(s). Cameras beyond the configured CPU limit will show skipped analysis coverage.`;
+    document.querySelector("#ai-group-message").textContent=`Saved group settings for ${result.inherited_camera_count} inherited camera(s). Cameras beyond the configured AI limit will show skipped analysis coverage.`;
   }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
 });
 document.querySelector("#save-ai-runtime").addEventListener("click",async()=>{
   try{
-    const result=await api("/api/ai/settings",{method:"PUT",body:JSON.stringify({max_active_cameras:Number(document.querySelector("#ai-max-active").value)})});
-    document.querySelector("#ai-group-message").textContent=`CPU analysis now allows ${result.max_active_cameras} active camera(s); inference remains serialized in one bounded slot to prioritize recording.`;
+    const result=await api("/api/ai/settings",{method:"PUT",body:JSON.stringify({max_active_cameras:Number(document.querySelector("#ai-max-active").value),provider:document.querySelector("#ai-provider").value,model_id:document.querySelector("#ai-model").value})});
+    document.querySelector("#ai-group-message").textContent=`${result.model.runtime} with ${result.model.model_id} ${result.model.model_version} validated and activated for ${result.max_active_cameras} active camera(s). Inference remains serialized in one bounded slot to prioritize recording.`;
+    await loadAiRuntimeSettings();
   }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
 });
 document.querySelector("#camera-form").addEventListener("submit", async event => {

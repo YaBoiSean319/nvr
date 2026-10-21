@@ -7,6 +7,7 @@ import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -75,14 +76,16 @@ class DetectionApiTests(unittest.TestCase):
         self.assertEqual(self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": False}).status_code, 403)
 
         event_at = datetime.now(timezone.utc)
-        record_observations(self.camera_id, [{"label": "person", "confidence": 0.91, "box": {"x": 0.2, "y": 0.2, "width": 0.1, "height": 0.3}}], event_at)
+        record_observations(self.camera_id, [{"label": "person", "confidence": 0.91, "box": {"x": 0.2, "y": 0.2, "width": 0.1, "height": 0.3}}], event_at, model_id="fixture-compatible", model_version="sha256:fixture-1", provider="GPU")
         start = (event_at - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
         end = (event_at + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
         results = self.client.get(f"/api/ai/events?camera_id={self.camera_id}&label=person&start={start}&end={end}")
         self.assertEqual(results.status_code, 200, results.text)
         item = results.json()["events"][0]
         self.assertEqual(item["label"], "person")
-        self.assertEqual(item["model_version"], MODEL_VERSION)
+        self.assertEqual(item["model_id"], "fixture-compatible")
+        self.assertEqual(item["model_version"], "sha256:fixture-1")
+        self.assertEqual(item["provider"], "GPU")
         self.assertIn("do not prove", results.json()["coverage_note"])
 
     def test_invalid_zones_and_substream_are_rejected_and_only_one_camera_can_be_enabled(self):
@@ -162,6 +165,29 @@ class DetectionApiTests(unittest.TestCase):
         with connect() as db:
             camera = db.execute("SELECT recording_enabled,recording_mode FROM cameras WHERE id=?", (self.camera_id,)).fetchone()
         self.assertEqual((camera["recording_enabled"], camera["recording_mode"]), (1, "continuous"))
+
+    def test_runtime_provider_and_model_are_validated_before_activation(self):
+        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        candidate = {"provider": "GPU", "model_id": MODEL_ID}
+        with patch("app.main.validate_detector", return_value={"valid": False, "reason": "GPU unavailable"}):
+            preview = self.client.post("/api/ai/settings/validate", json=candidate)
+            rejected = self.client.put("/api/ai/settings", json={"max_active_cameras": 2, **candidate})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertFalse(preview.json()["valid"])
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        with connect() as db:
+            runtime = db.execute("SELECT provider,model_id FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+        self.assertEqual((runtime["provider"], runtime["model_id"]), ("CPU", MODEL_ID))
+
+        with patch("app.main.validate_detector", return_value={"valid": True, "model_version": "sha256:fixture-1"}):
+            activated = self.client.put("/api/ai/settings", json={"max_active_cameras": 2, **candidate})
+        self.assertEqual(activated.status_code, 200, activated.text)
+        self.assertEqual(activated.json()["model"]["provider"], "GPU")
+        self.assertEqual(activated.json()["model"]["model_version"], "sha256:fixture-1")
+        with connect() as db:
+            runtime = db.execute("SELECT provider,model_id,model_version,validated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+        self.assertEqual((runtime["provider"], runtime["model_id"], runtime["model_version"]), ("GPU", MODEL_ID, "sha256:fixture-1"))
+        self.assertIsNotNone(runtime["validated_at"])
 
     def test_motion_recording_stream_keeps_writing_after_ai_is_stopped(self):
         test_stream = os.environ.get("NVR_RTSP_TEST_URL")

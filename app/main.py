@@ -41,7 +41,7 @@ from .exports import ExportManager, create_export_record, export_output_path, ge
 from .incidents import acknowledge_incident, incident_view, list_incidents, sync_storage_incidents
 from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, WebhookManager, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
 from .heartbeat import HeartbeatManager, configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
-from .detection import DetectionManager, detector_availability, effective_camera_config, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
+from .detection import DetectionManager, detector_availability, effective_camera_config, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
 
 APP_VERSION = "0.1.0"
 COOKIE_NAME = "nvr_session"
@@ -425,6 +425,13 @@ class AIDetectionConfigRequest(BaseModel):
 
 class AIRuntimeSettingsRequest(BaseModel):
     max_active_cameras: int = Field(ge=1, le=16)
+    provider: Literal["CPU", "GPU"] | None = None
+    model_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class AIRuntimeValidationRequest(BaseModel):
+    provider: Literal["CPU", "GPU"]
+    model_id: str = Field(min_length=1, max_length=128)
 
 
 class CameraGroupCreateRequest(BaseModel):
@@ -2046,6 +2053,31 @@ def _ensure_ai_settings(camera_id: str) -> sqlite3.Row:
     return row
 
 
+def _ai_runtime_model_view() -> dict[str, object]:
+    with connect() as db:
+        runtime = db.execute("SELECT provider,model_id,model_version,validated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+    provider = str(runtime["provider"]) if runtime else "CPU"
+    model_id = str(runtime["model_id"]) if runtime else MODEL_ID
+    stored_version = str(runtime["model_version"]) if runtime else MODEL_VERSION
+    options = model_options()
+    selected = next((item for item in options if item["id"] == model_id), None)
+    content_matches = bool(selected and selected["available"] and selected["version"] == stored_version)
+    availability = detector_availability(provider, model_id)
+    validated = bool(runtime and runtime["validated_at"] and content_matches)
+    return {
+        "provider": provider,
+        "model_id": model_id,
+        "model_version": stored_version,
+        "runtime": f"{MODEL_RUNTIME} {provider}",
+        "available": bool(availability["available"] and content_matches),
+        "reason": availability["reason"] if content_matches else "Model files changed since validation; validate the selected model before activation",
+        "validated": validated,
+        "validated_at": runtime["validated_at"] if runtime else None,
+        "provider_options": openvino_provider_options(),
+        "model_options": options,
+    }
+
+
 @app.get("/api/cameras/{camera_id}/ai")
 def get_ai_detection_config(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
     row = _ensure_ai_settings(camera_id)
@@ -2063,7 +2095,7 @@ def get_ai_detection_config(camera_id: str, _: Annotated[sqlite3.Row, Depends(cu
         "last_attempt_at": row["last_attempt_at"],
         "last_success_at": row["last_success_at"],
         "last_error": row["last_error"],
-        "model": {"id": MODEL_ID, "version": MODEL_VERSION, "runtime": MODEL_RUNTIME, **detector_availability()},
+        "model": _ai_runtime_model_view(),
         "coverage_note": "No detections do not prove an object was absent; inspect AI coverage status and model results.",
     }
 
@@ -2077,6 +2109,7 @@ async def update_ai_detection_config(
 ) -> dict[str, object]:
     existing = _ensure_ai_settings(camera_id)
     zones = [zone.model_dump() for zone in payload.zones]
+    active_model = _ai_runtime_model_view()
     with connect() as db:
         camera = db.execute("SELECT group_id,live_substream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if payload.inherit_group and not camera["group_id"]:
@@ -2089,7 +2122,7 @@ async def update_ai_detection_config(
         )
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "ai_detection_configured", "camera", camera_id,
-                    json.dumps({"enabled": payload.enabled, "inherit_group": payload.inherit_group, "analysis_fps": payload.analysis_fps, "model_id": MODEL_ID, "model_version": MODEL_VERSION}, separators=(",", ":"))))
+                    json.dumps({"enabled": payload.enabled, "inherit_group": payload.inherit_group, "analysis_fps": payload.analysis_fps, "model_id": active_model["model_id"], "model_version": active_model["model_version"], "provider": active_model["provider"]}, separators=(",", ":"))))
     await request.app.state.detectors.sync_camera(camera_id, force_restart=True)
     return get_ai_detection_config(camera_id, _=user)
 
@@ -2110,7 +2143,7 @@ def _group_ai_view(group_id: str) -> dict[str, object]:
         "use_substream": bool(config["use_substream"]) if config else True,
         "zones": json.loads(config["zones_json"]) if config else [],
         "camera_count": camera_count, "inherited_camera_count": inherited_count,
-        "model": {"id": MODEL_ID, "version": MODEL_VERSION, "runtime": MODEL_RUNTIME, **detector_availability()},
+        "model": _ai_runtime_model_view(),
     }
 
 
@@ -2127,6 +2160,7 @@ async def update_group_ai_config(
     user: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
     zones = [zone.model_dump() for zone in payload.zones]
+    active_model = _ai_runtime_model_view()
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
@@ -2142,7 +2176,7 @@ async def update_group_ai_config(
         camera_ids = [row[0] for row in db.execute("SELECT c.id FROM cameras c LEFT JOIN ai_camera_settings s ON s.camera_id=c.id WHERE c.group_id=? AND c.enabled=1 AND COALESCE(s.config_override,0)=0", (group_id,)).fetchall()]
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "ai_group_configured", "camera_group", group_id,
-                    json.dumps({"enabled": payload.enabled, "inherited_camera_count": len(camera_ids), "analysis_fps": payload.analysis_fps, "model_id": MODEL_ID, "model_version": MODEL_VERSION}, separators=(",", ":"))))
+                    json.dumps({"enabled": payload.enabled, "inherited_camera_count": len(camera_ids), "analysis_fps": payload.analysis_fps, "model_id": active_model["model_id"], "model_version": active_model["model_version"], "provider": active_model["provider"]}, separators=(",", ":"))))
     for camera_id in camera_ids:
         await request.app.state.detectors.sync_camera(camera_id, force_restart=True)
     return _group_ai_view(group_id)
@@ -2152,14 +2186,37 @@ async def update_group_ai_config(
 def get_ai_runtime_settings(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT max_active_cameras,updated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
-    return {"max_active_cameras": int(row["max_active_cameras"]), "inflight_inferences": 1, "updated_at": row["updated_at"], "resource_note": "Inference calls run through one bounded CPU slot to preserve headroom for recording. Cameras beyond the active limit are marked skipped; no unbounded analysis queue is maintained."}
+    return {"max_active_cameras": int(row["max_active_cameras"]), "inflight_inferences": 1, "updated_at": row["updated_at"],
+            "resource_note": "Inference calls run through one bounded slot to preserve headroom for recording. Cameras beyond the active limit are marked skipped; no unbounded analysis queue is maintained.",
+            "model": _ai_runtime_model_view()}
+
+
+@app.post("/api/ai/settings/validate")
+async def validate_ai_runtime_settings(payload: AIRuntimeValidationRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    result = await asyncio.to_thread(validate_detector, payload.provider, payload.model_id)
+    return {**result, "activation_changed": False, "gpu_certification_note": "GPU is certified only for this exact host, OpenVINO runtime, model, and active recording workload after validation."}
 
 
 @app.put("/api/ai/settings")
 async def update_ai_runtime_settings(payload: AIRuntimeSettingsRequest, request: Request, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
     with connect() as db:
-        db.execute("UPDATE ai_runtime_settings SET max_active_cameras=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (payload.max_active_cameras,))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (int(user["id"]), "ai_runtime_configured", "ai_runtime", "local", json.dumps({"max_active_cameras": payload.max_active_cameras}, separators=(",", ":"))))
+        current = db.execute("SELECT provider,model_id,model_version FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+    provider = payload.provider or str(current["provider"])
+    model_id = payload.model_id or str(current["model_id"])
+    model_version = str(current["model_version"])
+    validated_at: str | None = None
+    if payload.provider is not None or payload.model_id is not None:
+        validation = await asyncio.to_thread(validate_detector, provider, model_id)
+        if not validation["valid"]:
+            raise HTTPException(status_code=422, detail=f"AI runtime was not changed: {validation['reason']}")
+        model_version = str(validation["model_version"])
+        validated_at = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        db.execute("UPDATE ai_runtime_settings SET max_active_cameras=?,provider=?,model_id=?,model_version=?,validated_at=COALESCE(?,validated_at),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
+                   (payload.max_active_cameras, provider, model_id, model_version, validated_at))
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (int(user["id"]), "ai_runtime_configured", "ai_runtime", "local",
+                    json.dumps({"max_active_cameras": payload.max_active_cameras, "provider": provider, "model_id": model_id, "model_version": model_version, "validated": validated_at is not None}, separators=(",", ":"))))
     await request.app.state.detectors.reconcile()
     return get_ai_runtime_settings(_=user)
 
@@ -2214,7 +2271,8 @@ def search_ai_observations(
         item = dict(row)
         item["box"] = json.loads(item.pop("box_json"))
         events.append(item)
-    return {"events": events, "model": {"id": MODEL_ID, "version": MODEL_VERSION}, "coverage_note": "Search results describe analyzed frames only; empty results do not prove the scene was empty."}
+    models_used = sorted({(str(item["model_id"]), str(item["model_version"])) for item in events})
+    return {"events": events, "model": _ai_runtime_model_view(), "models_used": [{"id": model_id, "version": version} for model_id, version in models_used], "coverage_note": "Search results describe analyzed frames only; empty results do not prove the scene was empty."}
 
 
 @app.get("/api/cameras/{camera_id}/ai/coverage")

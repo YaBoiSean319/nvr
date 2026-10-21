@@ -1,6 +1,6 @@
 # Workplace NVR
 
-A self-hosted network video recorder for workplace cameras. The current implementation includes secure first-run administration, persistent Docker Compose storage, ONVIF motion-event recording with bounded pre/post-roll, optional server-side motion fallback, continuous and scheduled recording policies, group inheritance with per-camera overrides, authenticated playback of indexed MP4 footage, and administrator-controlled opt-in camera audio. The broader approved NVR specification remains in progress.
+A self-hosted network video recorder for workplace cameras. The current implementation includes secure first-run administration, persistent Docker Compose storage, ONVIF motion-event recording with bounded pre/post-roll, optional server-side motion fallback, continuous and scheduled recording policies, group inheritance with per-camera overrides, authenticated playback of indexed MP4 footage, administrator-controlled opt-in camera audio, and local person/vehicle analysis with validated OpenVINO provider/model selection. The broader approved NVR specification remains in progress.
 
 ## Requirements
 

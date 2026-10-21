@@ -216,6 +216,10 @@ def initialize() -> None:
             CREATE TABLE IF NOT EXISTS ai_runtime_settings (
                 singleton_id INTEGER PRIMARY KEY CHECK (singleton_id=1),
                 max_active_cameras INTEGER NOT NULL DEFAULT 4 CHECK (max_active_cameras BETWEEN 1 AND 16),
+                provider TEXT NOT NULL DEFAULT 'CPU' CHECK (provider IN ('CPU','GPU')),
+                model_id TEXT NOT NULL DEFAULT 'person-vehicle-bike-detection-2004',
+                model_version TEXT NOT NULL DEFAULT '2021.4-FP32',
+                validated_at TEXT,
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             INSERT OR IGNORE INTO ai_runtime_settings(singleton_id,max_active_cameras) VALUES(1,4);
@@ -230,7 +234,8 @@ def initialize() -> None:
                 frame_width INTEGER NOT NULL,
                 frame_height INTEGER NOT NULL,
                 model_id TEXT NOT NULL,
-                model_version TEXT NOT NULL
+                model_version TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'CPU'
             );
             CREATE INDEX IF NOT EXISTS ai_observations_search_idx ON ai_observations(camera_id,label,first_seen_at DESC);
             CREATE TABLE IF NOT EXISTS ai_coverage (
@@ -352,6 +357,18 @@ def initialize() -> None:
         ai_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_camera_settings)")}
         if ai_columns and "config_override" not in ai_columns:
             db.execute("ALTER TABLE ai_camera_settings ADD COLUMN config_override INTEGER NOT NULL DEFAULT 0 CHECK (config_override IN (0,1))")
+        runtime_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_runtime_settings)")}
+        for name, definition in (
+            ("provider", "TEXT NOT NULL DEFAULT 'CPU' CHECK (provider IN ('CPU','GPU'))"),
+            ("model_id", "TEXT NOT NULL DEFAULT 'person-vehicle-bike-detection-2004'"),
+            ("model_version", "TEXT NOT NULL DEFAULT '2021.4-FP32'"),
+            ("validated_at", "TEXT"),
+        ):
+            if name not in runtime_columns:
+                db.execute(f"ALTER TABLE ai_runtime_settings ADD COLUMN {name} {definition}")
+        observation_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_observations)")}
+        if "provider" not in observation_columns:
+            db.execute("ALTER TABLE ai_observations ADD COLUMN provider TEXT NOT NULL DEFAULT 'CPU'")
         ai_coverage_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_coverage'").fetchone()[0]
         if "'skipped'" not in ai_coverage_sql:
             db.execute("ALTER TABLE ai_coverage RENAME TO ai_coverage_legacy")

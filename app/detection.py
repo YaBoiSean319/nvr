@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -17,40 +19,114 @@ from .store import connect
 
 MODEL_ID = "person-vehicle-bike-detection-2004"
 MODEL_VERSION = "2021.4-FP32"
-MODEL_RUNTIME = "OpenVINO CPU"
+MODEL_RUNTIME = "OpenVINO"
 MODEL_HEIGHT = 256
 MODEL_WIDTH = 448
 MODEL_FRAME_BYTES = MODEL_HEIGHT * MODEL_WIDTH * 3
 MODEL_PATH = Path(os.environ.get("NVR_AI_MODEL_PATH", "/opt/nvr/models/person-vehicle-bike-detection-2004.xml"))
 MODEL_BINARY_SHA256 = "de10beb5a811bd1b38c828b4060898c32502c4919488fd7100269cbdc7595e08"
 MODEL_XML_SHA256 = "408e2a556cc935a59b765cb72045fb7c5f8071c4b0f2c5433711c2b38ff085d8"
+MODEL_DIRECTORY = Path(os.environ.get("NVR_AI_MODEL_DIRECTORY", "/data/models"))
 
 
-def detector_availability() -> dict[str, Any]:
+def _model_version(path: Path) -> str:
+    binary = path.with_suffix(".bin")
     try:
-        import openvino  # noqa: F401
-    except ImportError:
-        return {"available": False, "reason": "CPU inference runtime is not installed"}
-    binary = MODEL_PATH.with_suffix(".bin")
-    if not MODEL_PATH.is_file() or not binary.is_file():
-        return {"available": False, "reason": "Bundled detection model is unavailable"}
-    return {"available": True, "reason": None}
+        xml_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
+    except OSError:
+        return "unavailable"
+    if xml_hash == MODEL_XML_SHA256 and binary_hash == MODEL_BINARY_SHA256:
+        return MODEL_VERSION
+    digest = hashlib.sha256((xml_hash + binary_hash).encode("ascii")).hexdigest()
+    return "sha256:" + digest[:16]
 
 
-class OpenVINOCPUDetector:
-    """CPU-only adapter for the pinned Open Model Zoo detector."""
+def model_options() -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    candidates = [(MODEL_ID, MODEL_PATH)]
+    try:
+        MODEL_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        candidates.extend((path.stem, path) for path in sorted(MODEL_DIRECTORY.glob("*.xml"))
+                          if path.resolve() != MODEL_PATH.resolve() and path.stem != MODEL_ID)
+    except OSError:
+        pass
+    for model_id, path in candidates:
+        has_pair = path.is_file() and path.with_suffix(".bin").is_file()
+        options.append({"id": model_id, "version": _model_version(path) if has_pair else "unavailable", "available": has_pair,
+                        "source": "bundled" if path == MODEL_PATH else "local", "compatible_contract": "448x256 BGR; boxes [x1,y1,x2,y2,confidence]; labels 0=vehicle, 1=person"})
+    return options
 
-    def __init__(self, model_path: Path = MODEL_PATH, core: Any = None):
+
+def model_path_for(model_id: str) -> Path:
+    for item in model_options():
+        if item["id"] == model_id and item["available"]:
+            if model_id == MODEL_ID:
+                return MODEL_PATH
+            path = (MODEL_DIRECTORY / f"{model_id}.xml").resolve()
+            if path.parent == MODEL_DIRECTORY.resolve():
+                return path
+    raise ValueError("Selected AI model is unavailable")
+
+
+@lru_cache(maxsize=1)
+def available_openvino_devices() -> tuple[str, ...]:
+    try:
+        from openvino import Core
+        return tuple(Core().available_devices)
+    except Exception:
+        return ()
+
+
+def _provider_available(provider: str, devices: tuple[str, ...]) -> bool:
+    return provider in devices or (provider == "GPU" and any(device.startswith("GPU.") for device in devices))
+
+
+def openvino_provider_options() -> list[dict[str, Any]]:
+    devices = available_openvino_devices()
+    return [
+        {"id": provider, "available": _provider_available(provider, devices),
+         "reason": None if _provider_available(provider, devices) else f"OpenVINO {provider} is not available on this host"}
+        for provider in ("CPU", "GPU")
+    ]
+
+
+def detector_availability(provider: str = "CPU", model_id: str = MODEL_ID) -> dict[str, Any]:
+    options = {item["id"]: item for item in model_options()}
+    model = options.get(model_id)
+    if model is None or not model["available"]:
+        return {"available": False, "reason": "Selected compatible model and its weights are unavailable"}
+    devices = available_openvino_devices()
+    if not _provider_available(provider, devices):
+        runtime = "OpenVINO runtime is not installed" if not devices else f"OpenVINO device {provider} is unavailable on this host"
+        return {"available": False, "reason": runtime, "devices": list(devices)}
+    return {"available": True, "reason": None, "devices": list(devices), "model": model}
+
+
+class OpenVINODetector:
+    """OpenVINO adapter for models matching the NVR person/vehicle output contract."""
+
+    def __init__(self, provider: str = "CPU", model_path: Path = MODEL_PATH, core: Any = None):
         from openvino import Core
 
         self.core = core or Core()
+        if provider not in {"CPU", "GPU"}:
+            raise ValueError("Supported OpenVINO providers are CPU and GPU")
+        if not _provider_available(provider, tuple(self.core.available_devices)):
+            raise RuntimeError(f"OpenVINO device {provider} is unavailable on this host")
+        self.provider = provider
+        self.model_path = model_path
         try:
             configured_threads = int(os.environ.get("NVR_AI_CPU_THREADS", "2"))
         except ValueError:
             configured_threads = 2
         configured_threads = max(1, min(configured_threads, 8))
-        self.compiled = self.core.compile_model(self.core.read_model(str(model_path)), "CPU", {"INFERENCE_NUM_THREADS": configured_threads})
+        properties = {"INFERENCE_NUM_THREADS": configured_threads} if provider == "CPU" else {}
+        self.compiled = self.core.compile_model(self.core.read_model(str(model_path)), provider, properties)
         self.input = self.compiled.input(0)
+        shape = tuple(int(dimension) for dimension in self.input.shape)
+        if shape != (1, 3, MODEL_HEIGHT, MODEL_WIDTH):
+            raise ValueError("Compatible models must accept a fixed 1x3x256x448 input")
         self.output_by_name = {}
         for port in self.compiled.outputs:
             names = port.get_names()
@@ -89,6 +165,20 @@ class OpenVINOCPUDetector:
         return events
 
 
+OpenVINOCPUDetector = OpenVINODetector
+
+
+def validate_detector(provider: str, model_id: str) -> dict[str, Any]:
+    available_openvino_devices.cache_clear()
+    try:
+        model_path = model_path_for(model_id)
+        detector = OpenVINODetector(provider=provider, model_path=model_path)
+        detector.infer(bytes(MODEL_FRAME_BYTES), 0.0)
+    except Exception as exc:
+        return {"valid": False, "provider": provider, "model_id": model_id, "reason": str(exc)[:240] or "Model validation failed"}
+    return {"valid": True, "provider": provider, "model_id": model_id, "model_version": _model_version(model_path), "runtime": f"OpenVINO {provider}", "reason": None}
+
+
 def point_in_zones(box: dict[str, float], zones: list[dict[str, float]]) -> bool:
     if not zones:
         return True
@@ -114,6 +204,7 @@ def effective_camera_config(camera_id: str) -> dict[str, Any] | None:
             return None
         personal = db.execute("SELECT * FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
         group = db.execute("SELECT * FROM ai_group_settings WHERE group_id=?", (camera["group_id"],)).fetchone() if camera["group_id"] else None
+        runtime = db.execute("SELECT provider,model_id,model_version FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
     if personal and personal["config_override"]:
         result = dict(personal)
         result["config_source"] = "camera"
@@ -124,18 +215,31 @@ def effective_camera_config(camera_id: str) -> dict[str, Any] | None:
         result = {"enabled": 0, "analysis_fps": 0.5, "confidence_threshold": 0.55, "use_substream": 1, "zones_json": "[]", "config_source": "default"}
     result["enabled"] = bool(result["enabled"])
     result["use_substream"] = bool(result["use_substream"])
+    result["provider"] = str(runtime["provider"]) if runtime else "CPU"
+    result["model_id"] = str(runtime["model_id"]) if runtime else MODEL_ID
+    model = next((item for item in model_options() if item["id"] == result["model_id"]), None)
+    result["model_version"] = str(runtime["model_version"]) if runtime else MODEL_VERSION
+    result["model_available"] = bool(model and model["available"] and model["version"] == result["model_version"])
     return result
 
 
-def record_observations(camera_id: str, observations: Iterable[dict[str, Any]], at: datetime | None = None) -> int:
+def record_observations(
+    camera_id: str,
+    observations: Iterable[dict[str, Any]],
+    at: datetime | None = None,
+    model_id: str = MODEL_ID,
+    model_version: str | None = None,
+    provider: str = "CPU",
+) -> int:
     when = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     stamp = when.isoformat()
+    version = model_version or MODEL_VERSION
     count = 0
     with connect() as db:
         for item in observations:
             candidates = db.execute(
-                "SELECT id,box_json FROM ai_observations WHERE camera_id=? AND label=? AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 100",
-                (camera_id, item["label"], (when - timedelta(seconds=5)).isoformat()),
+                "SELECT id,box_json FROM ai_observations WHERE camera_id=? AND label=? AND model_id=? AND model_version=? AND provider=? AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 100",
+                (camera_id, item["label"], model_id, version, provider, (when - timedelta(seconds=5)).isoformat()),
             ).fetchall()
             previous = max(
                 (candidate for candidate in candidates if box_iou(json.loads(candidate["box_json"]), item["box"]) >= 0.2),
@@ -148,15 +252,15 @@ def record_observations(camera_id: str, observations: Iterable[dict[str, Any]], 
             else:
                 observation_id = str(uuid.uuid4())
                 db.execute(
-                    "INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (observation_id, camera_id, item["label"], item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, stamp, MODEL_WIDTH, MODEL_HEIGHT, MODEL_ID, MODEL_VERSION),
+                    "INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version,provider) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (observation_id, camera_id, item["label"], item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, stamp, MODEL_WIDTH, MODEL_HEIGHT, model_id, version, provider),
                 )
                 event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "nvr-ai-observation:" + observation_id))
                 from .webhooks import enqueue_event
                 enqueue_event(db, "ai.detection", {
                     "event_id": event_id, "event_type": "ai.detection", "occurred_at": stamp,
                     "observation_id": observation_id, "camera_id": camera_id, "label": item["label"],
-                    "confidence": item["confidence"], "box": item["box"], "model_id": MODEL_ID, "model_version": MODEL_VERSION,
+                    "confidence": item["confidence"], "box": item["box"], "model_id": model_id, "model_version": version, "provider": provider,
                 })
                 count += 1
     return count
@@ -238,9 +342,10 @@ async def _raw_frames(source: str, fps: float):
 
 
 class DetectionManager:
-    def __init__(self, detector_factory: Callable[[], Any] = OpenVINOCPUDetector):
+    def __init__(self, detector_factory: Callable[..., Any] = OpenVINODetector):
         self.detector_factory = detector_factory
         self.detector: Any | None = None
+        self._detectors: dict[tuple[str, str, str], Any] = {}
         self._model_lock = asyncio.Lock()
         self._inference_slots = asyncio.Semaphore(1)
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -289,6 +394,7 @@ class DetectionManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.clear()
         self.task_configs.clear()
+        self._detectors.clear()
 
     async def sync_camera(self, camera_id: str, force_restart: bool = False, capacity_allowed: bool | None = None) -> None:
         if self.stopping:
@@ -298,6 +404,7 @@ class DetectionManager:
         signature = None if config is None else (
             bool(config["enabled"]), float(config["analysis_fps"]), float(config["confidence_threshold"]),
             bool(config["use_substream"]), config["zones_json"], config["config_source"],
+            config["provider"], config["model_id"], config["model_version"],
         )
         if task and not task.done() and self.task_configs.get(camera_id) != signature:
             force_restart = True
@@ -313,6 +420,9 @@ class DetectionManager:
             self.tasks.pop(camera_id, None)
             self.task_configs.pop(camera_id, None)
             set_camera_state(camera_id, "disabled")
+            return
+        if not config.get("model_available", False) and self.detector is None:
+            set_camera_state(camera_id, "failed", "Selected model changed or is unvalidated; validate and save the AI runtime settings")
             return
         if capacity_allowed is False:
             if task and not task.done():
@@ -331,21 +441,27 @@ class DetectionManager:
             self.task_configs.pop(camera_id, None)
             return
         if task is None or task.done() or force_restart:
-            if self.detector is None:
+            detector = self.detector
+            detector_key = (str(config["provider"]), str(config["model_id"]), str(config["model_version"]))
+            if detector is None:
                 async with self._model_lock:
-                    if self.detector is None:
+                    detector = self._detectors.get(detector_key)
+                    if detector is None:
                         try:
-                            self.detector = await asyncio.to_thread(self.detector_factory)
+                            detector = await asyncio.to_thread(
+                                self.detector_factory, str(config["provider"]), model_path_for(str(config["model_id"]))
+                            )
+                            self._detectors[detector_key] = detector
                         except Exception:
-                            set_camera_state(camera_id, "failed", "CPU inference model could not be loaded")
+                            set_camera_state(camera_id, "failed", "Selected OpenVINO provider/model could not be loaded")
                             return
-            if self.detector is None:
+            if detector is None:
                 return
             set_camera_state(camera_id, "connecting")
-            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, config), name=f"ai-detection-{camera_id}")
+            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, config, detector), name=f"ai-detection-{camera_id}")
             self.task_configs[camera_id] = signature
 
-    async def _run(self, camera_id: str, config: dict[str, Any]) -> None:
+    async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         while not self.stopping:
             try:
                 source = _camera_source(camera_id, bool(config["use_substream"]))
@@ -360,9 +476,9 @@ class DetectionManager:
                         queue_wait = asyncio.get_running_loop().time() - wait_started
                         if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
                             set_camera_state(camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
-                        observations = await asyncio.to_thread(self.detector.infer, frame, float(config["confidence_threshold"]))
+                        observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
-                    record_observations(camera_id, observations)
+                    record_observations(camera_id, observations, model_id=str(config["model_id"]), model_version=str(config["model_version"]), provider=str(config["provider"]))
                     set_camera_state(camera_id, "analyzed")
                 if not self.stopping:
                     raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
