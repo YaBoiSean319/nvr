@@ -24,6 +24,14 @@
     .live-tile { min-width:0; padding:.75rem; border:1px solid #8793a155; border-radius:.6rem }
     .live-tile img { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#000; margin-top:.5rem }
     .live-state { display:inline-block; margin-left:.5rem; color:var(--muted) }
+    .playback-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr)); gap:1rem; margin-top:1rem }
+    .playback-camera { min-width:0; padding:.75rem; border:1px solid #8793a155; border-radius:.6rem }
+    .playback-camera video { display:block; width:100%; aspect-ratio:16/9; background:#000; margin-top:.5rem }
+    .playback-track { position:relative; height:2rem; margin:.75rem 0; background:#8793a122; border-radius:.3rem }
+    .playback-gap { position:absolute; top:0; bottom:0; background:#b4231855; border:1px solid #b42318; }
+    .playback-gap.expected_idle { background:#8793a155; border-color:#8793a1 }
+    .playback-motion { position:absolute; top:0; height:100%; width:.8rem; transform:translateX(-50%); padding:0; background:#f5a623; border:1px solid #925f00; }
+    .playback-status { color:var(--muted); min-height:1.5em }
     .hidden { display:none } .badge { color:#087443 }
   </style>
 </head>
@@ -78,6 +86,18 @@
           <button id="live-stop" type="button">Stop viewing</button>
           <p id="live-message" role="status" aria-live="polite"></p>
           <div id="live-grid" class="live-grid"></div>
+        </section>
+        <section aria-labelledby="playback-heading">
+          <h3 id="playback-heading">Synchronized playback</h3>
+          <p>Choose up to eight cameras and a time range up to 24 hours. Streams stay aligned to the same wall-clock time; timeline gaps distinguish expected idle, recording failure, uncertain coverage, and unindexed footage.</p>
+          <div id="playback-camera-picker"></div>
+          <label for="playback-start">From</label><input id="playback-start" type="datetime-local">
+          <label for="playback-end">To</label><input id="playback-end" type="datetime-local">
+          <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+          <button id="playback-search" type="button">Load timeline</button><button id="playback-stop" type="button">Stop playback</button>
+          <label for="playback-cursor">Shared time</label><input id="playback-cursor" type="range" min="0" max="1000" value="0" disabled>
+          <p id="playback-status" class="playback-status" role="status" aria-live="polite"></p>
+          <div id="playback-grid" class="playback-grid"></div>
         </section>
         <section id="discovery-admin" class="hidden" aria-labelledby="discovery-heading">
           <h3 id="discovery-heading">Discover cameras</h3>
