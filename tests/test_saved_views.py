@@ -96,6 +96,22 @@ class SavedViewsTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200, created.text)
         self.assertEqual(self.client.delete("/api/live/shared-layouts/Good").status_code, 204)
 
+    def test_deleted_camera_remains_in_saved_view_as_an_unavailable_member(self):
+        camera_id = self.camera_ids[0]
+        response = self.client.put(
+            "/api/live/layouts/Desk",
+            json={"camera_ids": [camera_id], "grid_size": 1, "tile_camera_ids": [camera_id]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        with connect() as db:
+            db.execute("DELETE FROM cameras WHERE id=?", (camera_id,))
+
+        view = self.client.get("/api/live/views").json()["layouts"][0]
+        self.assertEqual(view["camera_ids"], [camera_id])
+        self.assertEqual(view["tile_camera_ids"], [camera_id])
+        self.assertEqual(self.client.get("/api/live/layouts").json()["layouts"], [])
+
     def test_workspace_round_trips_per_user_layout_and_sidebar_state_without_audio(self):
         camera_a, camera_b, _ = self.camera_ids
         saved = self.client.put(
