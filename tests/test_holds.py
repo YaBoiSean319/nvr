@@ -56,6 +56,11 @@ class PreservationHoldTests(unittest.TestCase):
 
     def test_operator_hold_blocks_cleanup_and_delete_until_admin_release_then_audits(self):
         url=f"/api/cameras/{self.camera}/segments/{self.segment_id}"
+        with connect() as db:
+            self.assertIsNotNone(
+                db.execute("SELECT 1 FROM recording_segments WHERE id=? AND camera_id=?", (self.segment_id, self.camera)).fetchone(),
+                "the test interval must still exist after application startup",
+            )
         denied=self.client.post(url+"/hold",json={"expires_in_days":3})
         self.assertEqual(denied.status_code,403)
         held=self.client.post(url+"/hold",json={})
