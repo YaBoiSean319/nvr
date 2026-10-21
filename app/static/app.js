@@ -32,7 +32,7 @@ async function loadCameraProfiles() {
   if(!address || !Number.isInteger(port) || port<1 || port>65535) throw new Error("Enter a camera IPv4 address and a valid ONVIF port");
   const password=document.querySelector("#camera-password").value;
   if(password!==document.querySelector("#camera-password-confirm").value) throw new Error("Camera passwords do not match");
-  const device_service_url=`http://${address}:${port}/onvif/device_service`;
+  const device_service_url=document.querySelector("#motion-service-url").value.trim()||`http://${address}:${port}/onvif/device_service`;
   const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address,camera_username:document.querySelector("#camera-username").value||null,camera_password:password||null,camera_brand:document.querySelector("#camera-brand").value,device_service_url})});
   const select=document.querySelector("#camera-profile");
   select.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
@@ -119,16 +119,19 @@ async function refreshDiscovery() {
       const pass=document.createElement("input"); pass.type="password"; pass.autocomplete="new-password";
       const confirmLabel=document.createElement("label"); confirmLabel.textContent="Confirm camera password";
       const confirm=document.createElement("input"); confirm.type="password"; confirm.autocomplete="new-password";
+      const serviceLabel=document.createElement("label"); serviceLabel.textContent="ONVIF device endpoint URL (optional custom path)";
+      const serviceInput=document.createElement("input"); serviceInput.type="url"; serviceInput.autocomplete="off"; serviceInput.value=candidate.service_urls[0]||"";
       const loadProfiles=document.createElement("button"); loadProfiles.type="button"; loadProfiles.textContent="Load camera endpoints";
       const profileLabel=document.createElement("label"); profileLabel.textContent="Camera stream endpoint";
       const profiles=document.createElement("select"); profiles.append(new Option("Load endpoints to choose a stream",""));
-      let serviceUrl=candidate.service_urls[0]||"";
+      let serviceUrl=serviceInput.value;
+      serviceInput.addEventListener("input",()=>{ serviceUrl=serviceInput.value.trim(); profiles.replaceChildren(new Option("Load endpoints to choose a stream","")); });
       loadProfiles.addEventListener("click",async()=>{
         loadProfiles.disabled=true;
         try {
           if(pass.value!==confirm.value) throw new Error("Camera passwords do not match");
           const portNumber=Number(port.value); if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535) throw new Error("Enter a valid camera ONVIF port");
-          const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address.value,camera_username:user.value||null,camera_password:pass.value||null,camera_brand:brand.value,device_service_url:`http://${address.value}:${portNumber}/onvif/device_service`})});
+          const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address.value,camera_username:user.value||null,camera_password:pass.value||null,camera_brand:brand.value,device_service_url:serviceInput.value||`http://${address.value}:${portNumber}/onvif/device_service`})});
           serviceUrl=result.device_service_url;
           profiles.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
           if(result.profiles.length>1) profiles.prepend(new Option("Select stream profile",""));
@@ -145,7 +148,7 @@ async function refreshDiscovery() {
           await refresh();
         } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
       });
-      card.append(nameLabel,name,addressLabel,address,portLabel,port,brandLabel,brand,userLabel,user,passLabel,pass,confirmLabel,confirm,loadProfiles,profileLabel,profiles,add);
+      card.append(nameLabel,name,addressLabel,address,portLabel,port,brandLabel,brand,userLabel,user,passLabel,pass,confirmLabel,confirm,serviceLabel,serviceInput,loadProfiles,profileLabel,profiles,add);
       if (inventory.cameras.length) {
         const linkLabel=document.createElement("label"); linkLabel.textContent="Or link this device to an existing manually added camera";
         const select=document.createElement("select");
