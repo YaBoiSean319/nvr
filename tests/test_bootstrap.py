@@ -63,6 +63,28 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/system/status").status_code, 200)
         self.assertEqual(self.client.post("/api/setup/admin", json={"username":"second-admin", "password":"AnotherStrongPass2026"}).status_code, 409)
 
+    def test_ip_range_discovery_is_bounded_and_reports_scan_targets(self):
+        from app.discovery import DiscoveredDevice, DiscoveryResult
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        result=DiscoveryResult((DiscoveredDevice("ipscan:" + "a" * 32, ("http://10.45.50.25:80/onvif/device_service",), ()),), 0, 254)
+        with patch("app.main.discover_onvif_ip_range", new=AsyncMock(return_value=result)) as scan:
+            response=self.client.post("/api/discovery/scan",json={"ip_range":"10.45.50.0/24"})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()["scan_mode"],"ip_range")
+        self.assertEqual(response.json()["targets_scanned"],254)
+        self.assertEqual(response.json()["discovered_count"],1)
+        scan.assert_awaited_once_with("10.45.50.0/24")
+
+    def test_onvif_profiles_require_admin_and_return_only_profile_labels(self):
+        from app.onvif_stream import OnvifStreamProfile
+        self.assertEqual(self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"10.45.50.25"}).status_code,401)
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        with patch("app.main.list_camera_stream_profiles",new=AsyncMock(return_value=("http://10.45.50.25:80/onvif/device_service",(OnvifStreamProfile("profile1","Main stream"),)))):
+            response=self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"10.45.50.25","camera_brand":"hikvision","camera_username":"admin","camera_password":"example"})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()["profiles"],[{"token":"profile1","name":"Main stream"}])
+        self.assertNotIn("example",response.text)
+
     def test_admin_can_capture_and_download_bounded_redacted_diagnostics(self):
         self.assertEqual(self.client.get("/api/diagnostics/status").status_code, 401)
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
