@@ -12,10 +12,36 @@ def _now() -> str:
 
 
 def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: dict[str, Any], actor_id: int | None = None) -> None:
+    event_id = str(uuid.uuid4())
+    occurred_at = _now()
     db.execute(
-        "INSERT INTO incident_events(incident_id,event_type,actor_id,occurred_at,details_json) VALUES(?,?,?,?,?)",
-        (incident_id, event_type, actor_id, _now(), json.dumps(details, sort_keys=True)),
+        "INSERT INTO incident_events(event_id,incident_id,event_type,actor_id,occurred_at,details_json) VALUES(?,?,?,?,?,?)",
+        (event_id, incident_id, event_type, actor_id, occurred_at, json.dumps(details, sort_keys=True)),
     )
+    if event_type not in {"raised", "recurred", "recovered"}:
+        return
+    incident = db.execute("SELECT fault_type,camera_id,summary,recurrence_count FROM incidents WHERE id=?", (incident_id,)).fetchone()
+    if incident is None:
+        return
+    category = "storage" if incident["fault_type"] == "storage" else "recording"
+    if event_type == "recovered":
+        webhook_type = f"{category}.recovered"
+    elif incident["fault_type"] == "recording_uncertain":
+        webhook_type = "recording.uncertain"
+    else:
+        webhook_type = f"{category}.failure"
+    from .webhooks import enqueue_event
+    enqueue_event(db, webhook_type, {
+        "event_id": event_id,
+        "event_type": webhook_type,
+        "occurred_at": occurred_at,
+        "incident_id": incident_id,
+        "fault_type": incident["fault_type"],
+        "camera_id": incident["camera_id"],
+        "summary": incident["summary"],
+        "recurrence_count": int(incident["recurrence_count"]),
+        "details": details,
+    })
 
 
 def sync_incident(
@@ -80,10 +106,11 @@ def incident_view(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     result = dict(row)
     result["fault_active"] = bool(result["fault_active"])
     result["details"] = json.loads(result.pop("details_json"))
-    result["events"] = [
-        {**dict(event), "details": json.loads(event["details_json"])}
-        for event in db.execute("SELECT * FROM incident_events WHERE incident_id=? ORDER BY id", (row["id"],)).fetchall()
-    ]
+    result["events"] = []
+    for event in db.execute("SELECT * FROM incident_events WHERE incident_id=? ORDER BY id", (row["id"],)).fetchall():
+        event_data = dict(event)
+        event_data["details"] = json.loads(event_data.pop("details_json"))
+        result["events"].append(event_data)
     return result
 
 
