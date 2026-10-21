@@ -107,6 +107,28 @@ def initialize() -> None:
                 size_bytes INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS recording_holds (
+                id TEXT PRIMARY KEY,
+                segment_id INTEGER REFERENCES recording_segments(id) ON DELETE SET NULL,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                expires_at TEXT,
+                released_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                released_at TEXT,
+                CHECK (expires_at IS NULL OR expires_at > created_at)
+            );
+            CREATE INDEX IF NOT EXISTS recording_holds_active_idx ON recording_holds(segment_id,released_at,expires_at);
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                action TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at DESC);
             CREATE INDEX IF NOT EXISTS recording_camera_time_idx ON recording_segments(camera_id, starts_at, ends_at);
             CREATE TABLE IF NOT EXISTS coverage_intervals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
