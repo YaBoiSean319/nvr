@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import subprocess
@@ -528,6 +529,90 @@ class BootstrapTests(unittest.TestCase):
         cameras = {camera["id"]:camera for camera in self.client.get("/api/cameras").json()["cameras"]}
         self.assertTrue(cameras[first["id"]]["recording_enabled"])
         self.assertFalse(cameras[second["id"]]["recording_enabled"])
+
+    def test_group_schedule_inheritance_camera_override_and_restoration(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
+        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)), \
+             patch("app.main.app.state.recorders.sync_camera", new=AsyncMock()):
+            camera = self.client.post("/api/cameras", json={
+                "name":"Scheduled camera", "stream_url":"rtsp://10.1.2.40/stream", "recording_mode":"continuous"
+            }).json()
+            group = self.client.post("/api/camera-groups", json={"name":"Night shift"}).json()
+            assigned = self.client.post("/api/cameras/bulk-update", json={"camera_ids":[camera["id"]],"group_name":group["name"]})
+            self.assertEqual(assigned.status_code, 200, assigned.text)
+            intervals = lambda mode: [
+                {"days":[day], "start":"00:00", "end":"12:00", "mode":mode} for day in range(7)
+            ] + [
+                {"days":[day], "start":"12:00", "end":"00:00", "mode":mode} for day in range(7)
+            ]
+            schedule = {"timezone":"UTC", "intervals":intervals("continuous")}
+            saved_group = self.client.put(f"/api/camera-groups/{group['id']}/schedule", json=schedule)
+            self.assertEqual(saved_group.status_code, 200, saved_group.text)
+            self.client.patch(f"/api/cameras/{camera['id']}", json={"recording_enabled":True})
+            inherited = self.client.get(f"/api/cameras/{camera['id']}/schedule")
+            self.assertTrue(inherited.json()["inherits_group"])
+            inventory = self.client.get("/api/cameras").json()["cameras"][0]
+            self.assertEqual(inventory["effective_recording_mode"], "continuous")
+            self.assertEqual(inventory["recording_policy_source"], "group")
+
+            override = self.client.put(f"/api/cameras/{camera['id']}/schedule", json={
+                "timezone":"UTC", "intervals":intervals("motion")
+            })
+            self.assertEqual(override.status_code, 200, override.text)
+            self.assertFalse(override.json()["inherits_group"])
+            inventory = self.client.get("/api/cameras").json()["cameras"][0]
+            self.assertEqual(inventory["effective_recording_mode"], "motion")
+            self.assertEqual(inventory["recording_policy_source"], "camera")
+
+            restored = self.client.put(f"/api/cameras/{camera['id']}/schedule", json={"inherit_group":True})
+            self.assertEqual(restored.status_code, 200, restored.text)
+            self.assertEqual(restored.json()["effective_recording_mode"], "continuous")
+            self.assertTrue(restored.json()["inherits_group"])
+
+    def test_schedule_overlap_validation_and_operator_write_denial(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        group = self.client.post("/api/camera-groups", json={"name":"Schedule ACL"}).json()
+        invalid = self.client.put(f"/api/camera-groups/{group['id']}/schedule", json={
+            "timezone":"UTC", "intervals":[
+                {"days":[0],"start":"08:00","end":"10:00","mode":"motion"},
+                {"days":[0],"start":"09:00","end":"11:00","mode":"continuous"},
+            ]
+        })
+        self.assertEqual(invalid.status_code, 422)
+        from app.security import hash_password
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", ("operator-one",hash_password("OperatorPassphrase2026"),"operator"))
+        self.client.post("/api/auth/logout")
+        self.assertEqual(self.client.post("/api/auth/login", json={"username":"operator-one","password":"OperatorPassphrase2026"}).status_code, 200)
+        self.assertEqual(self.client.get(f"/api/camera-groups/{group['id']}/schedule").status_code, 200)
+        denied = self.client.put(f"/api/camera-groups/{group['id']}/schedule", json={"timezone":"UTC","intervals":[]})
+        self.assertEqual(denied.status_code, 403)
+
+    def test_recording_manager_switches_modes_when_group_schedule_changes(self):
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
+        async def hold_recording(*_args):
+            await asyncio.Event().wait()
+        manager = self.client_ctx.app.state.recorders
+        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)), \
+             patch.object(manager, "_run", new=AsyncMock(side_effect=hold_recording)):
+            camera = self.client.post("/api/cameras", json={
+                "name":"Scheduled runtime camera", "stream_url":"rtsp://10.1.2.41/stream", "recording_mode":"continuous"
+            }).json()
+            group = self.client.post("/api/camera-groups", json={"name":"Runtime schedule"}).json()
+            self.client.post("/api/cameras/bulk-update", json={"camera_ids":[camera["id"]],"group_name":group["name"]})
+            all_week = lambda mode: [
+                {"days":[day],"start":"00:00","end":"12:00","mode":mode} for day in range(7)
+            ] + [
+                {"days":[day],"start":"12:00","end":"00:00","mode":mode} for day in range(7)
+            ]
+            self.client.put(f"/api/camera-groups/{group['id']}/schedule", json={"timezone":"UTC","intervals":all_week("continuous")})
+            self.client.patch(f"/api/cameras/{camera['id']}", json={"recording_enabled":True})
+            self.assertEqual(manager.task_modes[camera["id"]], "continuous")
+            switched = self.client.put(f"/api/camera-groups/{group['id']}/schedule", json={"timezone":"UTC","intervals":all_week("motion")})
+            self.assertEqual(switched.status_code, 200, switched.text)
+            self.assertEqual(manager.task_modes[camera["id"]], "motion")
 
     def test_server_motion_fallback_configuration_is_validated_and_exposed(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})

@@ -87,6 +87,8 @@ async function refreshGroups() {
   const options=[new Option("Leave groups unchanged","__unchanged__"),new Option("Remove from group","")];
   for (const group of groups) options.push(new Option(group.name,group.name));
   select.replaceChildren(...options);
+  const scheduleSelect=document.querySelector("#schedule-group");
+  scheduleSelect.replaceChildren(...(groups.length ? groups.map(group=>new Option(group.name,group.id)) : [new Option("Create a group first","")]));
 }
 async function refreshDiscovery() {
   const [{candidates}, inventory] = await Promise.all([api("/api/discovery/candidates"), api("/api/cameras")]);
@@ -195,7 +197,9 @@ function renderCameras(cameras) {
     }
     const summary = document.createElement("p");
     const video = camera.video || {};
-    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · " + camera.recording_mode + " · " + camera.recording_status + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status + " · server fallback " + (camera.motion_fallback_enabled ? camera.server_motion_status : "disabled") : "") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
+    const effectiveMode=camera.effective_recording_mode || camera.recording_mode;
+    const policyLabel=camera.recording_policy_source === "group" ? "group schedule" : camera.schedule_timezone ? "camera schedule" : "camera policy";
+    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · effective " + effectiveMode + " (" + policyLabel + ") · " + camera.recording_status + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status + " · server fallback " + (camera.motion_fallback_enabled ? camera.server_motion_status : "disabled") : "") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
     card.append(title, summary);
     if (camera.last_error) { const note=document.createElement("p"); note.textContent=camera.last_error; card.append(note); }
     const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
@@ -255,6 +259,29 @@ function renderCameras(cameras) {
         }));
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
+    const scheduleLabel=document.createElement("label"); scheduleLabel.textContent="Camera weekly recording schedule override (JSON; blank intervals mean scheduled idle)";
+    const scheduleText=document.createElement("textarea"); scheduleText.spellcheck=false; scheduleText.placeholder='{"timezone":"America/Indiana/Indianapolis","intervals":[{"days":[0,1,2,3,4],"start":"08:00","end":"17:00","mode":"continuous"}]}';
+    const inheritLabel=document.createElement("label"); inheritLabel.textContent="Inherit assigned group schedule ";
+    const inheritSchedule=document.createElement("input"); inheritSchedule.type="checkbox"; inheritSchedule.checked=true; inheritLabel.append(inheritSchedule);
+    const loadSchedule=document.createElement("button"); loadSchedule.type="button"; loadSchedule.textContent="Load camera schedule";
+    loadSchedule.addEventListener("click",async()=>{
+      try {
+        const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/schedule`);
+        inheritSchedule.checked=result.inherits_group;
+        scheduleText.value=JSON.stringify({timezone:result.timezone,intervals:result.intervals},null,2);
+        document.querySelector("#camera-message").textContent=`Loaded ${result.source} schedule${result.configured ? "" : " (no schedule configured)"}.`;
+      } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
+    const saveSchedule=document.createElement("button"); saveSchedule.type="button"; saveSchedule.textContent="Save camera schedule";
+    saveSchedule.addEventListener("click",async()=>{
+      try {
+        const config=inheritSchedule.checked ? {} : JSON.parse(scheduleText.value||"{}");
+        const payload=inheritSchedule.checked ? {inherit_group:true} : {timezone:config.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC",intervals:config.intervals||[]};
+        const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/schedule`,{method:"PUT",body:JSON.stringify(payload)});
+        document.querySelector("#camera-message").textContent=`${camera.name}: effective scheduled mode is ${result.effective_recording_mode}.`;
+        await refresh();
+      } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
     const remove=document.createElement("button"); remove.type="button"; remove.textContent="Remove camera";
     remove.addEventListener("click", async () => {
       if (!window.confirm(`Remove ${camera.name} and its saved footage?`)) return;
@@ -271,7 +298,7 @@ function renderCameras(cameras) {
         rotateInput.value=""; await refresh();
       } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
     });
-    card.append(mode,enabledLabel,pre,post,save,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,remove,rotateLabel,rotateInput,rotate);
+    card.append(mode,enabledLabel,pre,post,save,scheduleLabel,inheritLabel,scheduleText,loadSchedule,saveSchedule,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,remove,rotateLabel,rotateInput,rotate);
     return card;
   }));
 }
@@ -359,6 +386,34 @@ document.querySelector("#group-form").addEventListener("submit",async event=>{
     document.querySelector("#bulk-message").textContent=`Created camera group ${result.name}.`;
     event.currentTarget.reset(); await refreshGroups();
   } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
+});
+document.querySelector("#load-group-schedule").addEventListener("click",async()=>{
+  const group=document.querySelector("#schedule-group").value;
+  if(!group) { document.querySelector("#schedule-message").textContent="Create or select a camera group first."; return; }
+  try {
+    const schedule=await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`);
+    document.querySelector("#group-schedule-json").value=JSON.stringify({timezone:schedule.timezone,intervals:schedule.intervals},null,2);
+    document.querySelector("#schedule-message").textContent=schedule.configured ? "Group schedule loaded." : "No group schedule is configured.";
+  } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
+});
+document.querySelector("#save-group-schedule").addEventListener("click",async()=>{
+  const group=document.querySelector("#schedule-group").value;
+  try {
+    if(!group) throw new Error("Create or select a camera group first.");
+    const schedule=JSON.parse(document.querySelector("#group-schedule-json").value||"{}");
+    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"PUT",body:JSON.stringify({timezone:schedule.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC",intervals:schedule.intervals||[]})});
+    document.querySelector("#schedule-message").textContent=`Saved ${result.intervals.length} group schedule interval(s).`;
+    await refresh();
+  } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
+});
+document.querySelector("#clear-group-schedule").addEventListener("click",async()=>{
+  const group=document.querySelector("#schedule-group").value;
+  try {
+    if(!group) throw new Error("Create or select a camera group first.");
+    await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"DELETE"});
+    document.querySelector("#schedule-message").textContent="Group schedule removed; assigned cameras now use their camera policy or camera-level override.";
+    await refresh();
+  } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
 });
 document.querySelector("#apply-bulk").addEventListener("click",async()=>{
   const camera_ids=[...document.querySelectorAll("[data-camera-select]:checked")].map(input=>input.value);

@@ -39,6 +39,14 @@ def initialize() -> None:
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS recording_policy_overrides (
+                scope_type TEXT NOT NULL CHECK (scope_type IN ('group','camera')),
+                scope_id TEXT NOT NULL,
+                timezone_name TEXT NOT NULL,
+                schedule_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY(scope_type, scope_id)
+            );
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT NOT NULL UNIQUE,
                 token_hash TEXT PRIMARY KEY,

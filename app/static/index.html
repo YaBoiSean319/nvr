@@ -75,6 +75,13 @@
         <section id="bulk-admin" class="hidden" aria-labelledby="bulk-heading">
           <h3 id="bulk-heading">Camera groups and bulk onboarding</h3>
           <form id="group-form"><label for="new-group-name">Create camera group</label><input id="new-group-name" maxlength="80" required><button>Create group</button></form>
+          <h4>Group recording schedule</h4>
+          <p>Intervals use ISO weekdays (0=Monday through 6=Sunday), 24-hour local time, and start-inclusive/end-exclusive boundaries. During a fall-back repeated hour both occurrences follow the interval; skipped spring-forward minutes do not occur.</p>
+          <label for="schedule-group">Camera group</label><select id="schedule-group"></select>
+          <label for="group-schedule-json">Weekly schedule JSON</label>
+          <textarea id="group-schedule-json" spellcheck="false" placeholder='{"timezone":"America/Indiana/Indianapolis","intervals":[{"days":[0,1,2,3,4],"start":"08:00","end":"17:00","mode":"continuous"}]}'></textarea>
+          <button id="load-group-schedule" type="button">Load group schedule</button><button id="save-group-schedule" type="button">Save group schedule</button><button id="clear-group-schedule" type="button">Remove group schedule</button>
+          <p id="schedule-message" role="status" aria-live="polite"></p>
           <label for="bulk-group">Set group for selected cameras</label>
           <select id="bulk-group"><option value="__unchanged__">Leave groups unchanged</option><option value="">Remove from group</option></select>
           <label for="bulk-recording-mode">Set recording mode for selected cameras</label>

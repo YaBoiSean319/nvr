@@ -16,7 +16,7 @@ RUN apt-get update \
     && chown -R nvr:nvr /app /data /secrets /recordings
 COPY --chown=nvr:nvr app ./app
 USER nvr
-EXPOSE 8080
+EXPOSE 8280
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+  CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('NVR_LISTEN_PORT', '8280') + '/healthz', timeout=3)"
+CMD ["python", "-m", "app.entrypoint"]

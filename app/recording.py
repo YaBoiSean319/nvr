@@ -17,6 +17,7 @@ from .store import connect
 from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
+from .scheduling import effective_policy
 
 SEGMENT_SECONDS = max(10, min(int(os.environ.get("NVR_SEGMENT_SECONDS", "60")), 3600))
 RECONNECT_MAX_SECONDS = 30
@@ -101,40 +102,78 @@ async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, obje
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.task_modes: dict[str, str] = {}
+        self.scheduler_task: asyncio.Task[None] | None = None
         self.stopping = False
 
     async def start(self) -> None:
         self.stopping = False
         with connect() as db:
-            rows = db.execute("SELECT id FROM cameras WHERE enabled=1 AND recording_enabled=1 AND recording_mode IN ('continuous','motion')").fetchall()
+            rows = db.execute("SELECT id FROM cameras").fetchall()
         for row in rows:
-            self.ensure(row["id"])
+            await self.sync_camera(row["id"])
+        self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
 
     async def stop(self) -> None:
         self.stopping = True
+        if self.scheduler_task and not self.scheduler_task.done():
+            self.scheduler_task.cancel()
+            await asyncio.gather(self.scheduler_task, return_exceptions=True)
+        self.scheduler_task = None
         for task in list(self.tasks.values()):
             task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks.values(), return_exceptions=True)
         self.tasks.clear()
+        self.task_modes.clear()
 
     def ensure(self, camera_id: str) -> None:
         task = self.tasks.get(camera_id)
         if task is None or task.done():
-            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id), name=f"record-{camera_id}")
+            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, "continuous"), name=f"record-{camera_id}")
+            self.task_modes[camera_id] = "continuous"
 
     async def remove(self, camera_id: str) -> None:
         task = self.tasks.pop(camera_id, None)
+        self.task_modes.pop(camera_id, None)
         if task and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    async def sync_camera(self, camera_id: str) -> None:
-        await self.remove(camera_id)
+    async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
         with connect() as db:
-            row = db.execute("SELECT enabled, recording_enabled, recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if row and row["enabled"] and row["recording_enabled"] and row["recording_mode"] in {"continuous", "motion"} and not self.stopping:
-            self.ensure(camera_id)
+            policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
+            row = db.execute("SELECT enabled,recording_enabled,recording_status FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] else "disabled"
+        task = self.tasks.get(camera_id)
+        if task is not None and self.task_modes.get(camera_id) == desired:
+            if not task.done() or not force_restart:
+                return
+        await self.remove(camera_id)
+        if desired in {"motion", "continuous"} and not self.stopping:
+            self.task_modes[camera_id] = desired
+            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, desired), name=f"record-{camera_id}")
+        elif row and row["enabled"] and row["recording_enabled"] and policy["scheduled"]:
+            if row["recording_status"] != "scheduled_idle":
+                self._set_status(camera_id, "scheduled_idle")
+        elif row and row["recording_status"] != "stopped":
+            self._set_status(camera_id, "stopped")
+
+    async def _schedule_loop(self) -> None:
+        while not self.stopping:
+            try:
+                with connect() as db:
+                    rows = db.execute("SELECT id FROM cameras").fetchall()
+                await asyncio.gather(*(self.sync_camera(row["id"]) for row in rows))
+            except asyncio.CancelledError:
+                raise
+            except sqlite3.Error:
+                pass
+            await asyncio.sleep(5)
+
+    def _desired_mode(self, camera_id: str) -> str:
+        with connect() as db:
+            return str(effective_policy(db, camera_id, datetime.now(timezone.utc))["mode"])
 
     def _camera(self, camera_id: str) -> sqlite3.Row | None:
         with connect() as db:
@@ -182,24 +221,24 @@ class RecordingManager:
                 continue
         return indexed
 
-    async def _run(self, camera_id: str) -> None:
+    async def _run(self, camera_id: str, expected_mode: str) -> None:
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
-            if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] == "disabled":
+            if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
                 self._set_status(camera_id, "stopped")
                 return
-            if row["recording_mode"] == "motion":
+            if expected_mode == "motion":
                 should_retry = await self._run_motion(camera_id)
                 row = self._camera(camera_id)
-                if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] != "motion" or self.stopping:
+                if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode or self.stopping:
                     return
                 if not should_retry:
                     return
                 failures += 1
                 await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
             else:
-                await self._run_continuous(camera_id)
+                await self._run_continuous(camera_id, expected_mode)
                 return
 
     async def _run_motion(self, camera_id: str) -> bool:
@@ -407,7 +446,7 @@ class RecordingManager:
                 with connect() as db:
                     db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
 
-    async def _run_continuous(self, camera_id: str) -> None:
+    async def _run_continuous(self, camera_id: str, expected_mode: str = "continuous") -> None:
         executable = shutil.which("ffmpeg")
         if not executable:
             self._set_status(camera_id, "unavailable", "FFmpeg is not installed")
@@ -415,7 +454,7 @@ class RecordingManager:
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
-            if row is None or not row["enabled"] or not row["recording_enabled"] or row["recording_mode"] != "continuous":
+            if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
                 self._set_status(camera_id, "stopped")
                 return
             try:

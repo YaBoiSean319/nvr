@@ -29,6 +29,7 @@ from .credentials import encrypt, decrypt
 from .recording import RecordingManager, masked_stream_url, probe_stream, recordings_path, safe_stream_url
 from .discovery import DiscoveryResult, discover_onvif, discover_onvif_ip_range
 from .onvif_stream import list_camera_stream_profiles, resolve_camera_stream
+from .scheduling import effective_policy, validate_schedule
 from . import diagnostics
 
 APP_VERSION = "0.1.0"
@@ -304,6 +305,38 @@ class CameraUpdateRequest(BaseModel):
 
 class CameraGroupCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+
+
+class WeeklyScheduleInterval(BaseModel):
+    days: list[Annotated[int, Field(ge=0, le=6)]] = Field(min_length=1, max_length=7)
+    start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    mode: Literal["motion", "continuous", "disabled"]
+
+
+class GroupScheduleRequest(BaseModel):
+    timezone: str = Field(min_length=1, max_length=128)
+    intervals: list[WeeklyScheduleInterval] = Field(max_length=200)
+
+    @model_validator(mode="after")
+    def validate_intervals(self) -> "GroupScheduleRequest":
+        try:
+            validate_schedule(self.timezone, [interval.model_dump() for interval in self.intervals])
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
+
+
+class CameraScheduleRequest(GroupScheduleRequest):
+    timezone: str = "UTC"
+    intervals: list[WeeklyScheduleInterval] = Field(default_factory=list, max_length=200)
+    inherit_group: bool = False
+
+    @model_validator(mode="after")
+    def require_policy_or_inheritance(self) -> "CameraScheduleRequest":
+        if not self.inherit_group and not self.timezone.strip():
+            raise ValueError("Choose a timezone or inherit the assigned camera group's schedule")
+        return self
 
 
 class DiscoveryScanRequest(BaseModel):
@@ -746,7 +779,12 @@ async def _resolve_camera_source(payload: CameraProbeRequest, service_url: str |
 def list_cameras(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
     with connect() as db:
         rows = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE").fetchall()
-    return {"cameras": [_camera_view(row) for row in rows]}
+        cameras = []
+        for row in rows:
+            camera = _camera_view(row)
+            camera.update(_effective_schedule_view(db, row["id"]))
+            cameras.append(camera)
+    return {"cameras": cameras}
 
 
 @app.get("/api/camera-groups")
@@ -771,6 +809,136 @@ def create_camera_group(
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="A camera group with that name already exists") from exc
     return {"id": group_id, "name": name}
+
+
+def _schedule_document(timezone_name: str, intervals: list[dict[str, object]]) -> dict[str, object]:
+    return {"timezone": timezone_name, "intervals": intervals}
+
+
+def _effective_schedule_view(db: sqlite3.Connection, camera_id: str) -> dict[str, object]:
+    policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
+    return {
+        "effective_recording_mode": policy["mode"],
+        "recording_policy_source": policy["source"],
+        "schedule_timezone": policy["timezone"],
+    }
+
+
+@app.get("/api/camera-groups/{group_id}/schedule")
+def get_group_schedule(
+    group_id: str,
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, object]:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        row = db.execute("SELECT timezone_name,schedule_json,updated_at FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,)).fetchone()
+    if row is None:
+        return {"group_id": group_id, "configured": False, "timezone": "UTC", "intervals": []}
+    return {"group_id": group_id, "configured": True, "timezone": row["timezone_name"], "intervals": json.loads(row["schedule_json"]), "updated_at": row["updated_at"]}
+
+
+@app.put("/api/camera-groups/{group_id}/schedule")
+async def update_group_schedule(
+    group_id: str,
+    payload: GroupScheduleRequest,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    intervals = validate_schedule(payload.timezone, [item.model_dump() for item in payload.intervals])
+    with connect() as db:
+        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        db.execute(
+            "INSERT INTO recording_policy_overrides(scope_type,scope_id,timezone_name,schedule_json) VALUES('group',?,?,?) "
+            "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            (group_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
+        )
+        camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
+    await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id, force_restart=True) for camera_id in camera_ids))
+    return {"group_id": group_id, "configured": True, **_schedule_document(payload.timezone, intervals)}
+
+
+@app.delete("/api/camera-groups/{group_id}/schedule", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_group_schedule(
+    group_id: str,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> Response:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera group not found")
+        db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
+        camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
+    await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id, force_restart=True) for camera_id in camera_ids))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/cameras/{camera_id}/schedule")
+def get_camera_schedule(
+    camera_id: str,
+    _: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict[str, object]:
+    with connect() as db:
+        camera = db.execute("SELECT id,group_id FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if camera is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        local = db.execute("SELECT timezone_name,schedule_json FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,)).fetchone()
+        inherited = None
+        if local is None and camera["group_id"]:
+            inherited = db.execute("SELECT timezone_name,schedule_json FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (camera["group_id"],)).fetchone()
+        source = "camera" if local else "group" if inherited else "camera"
+        row = local or inherited
+        policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
+    return {
+        "camera_id": camera_id,
+        "inherits_group": local is None and bool(camera["group_id"]),
+        "source": source,
+        "configured": row is not None,
+        "timezone": row["timezone_name"] if row else "UTC",
+        "intervals": json.loads(row["schedule_json"]) if row else [],
+        "effective_recording_mode": policy["mode"],
+    }
+
+
+@app.put("/api/cameras/{camera_id}/schedule")
+async def update_camera_schedule(
+    camera_id: str,
+    payload: CameraScheduleRequest,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> dict[str, object]:
+    if payload.inherit_group:
+        intervals = []
+    else:
+        intervals = validate_schedule(payload.timezone, [item.model_dump() for item in payload.intervals])
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        if payload.inherit_group:
+            db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+        else:
+            db.execute(
+                "INSERT INTO recording_policy_overrides(scope_type,scope_id,timezone_name,schedule_json) VALUES('camera',?,?,?) "
+                "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                (camera_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
+            )
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+    return get_camera_schedule(camera_id, _=None)
+
+
+@app.delete("/api/cameras/{camera_id}/schedule", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_camera_schedule(
+    camera_id: str,
+    request: Request,
+    _: Annotated[sqlite3.Row, Depends(administrator)],
+) -> Response:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _camera_import_records(csv_text: str) -> list[dict[str, str | None]]:
@@ -916,8 +1084,7 @@ async def apply_camera_import(
             db.rollback()
             raise
     for index,camera_id,mode in inserted:
-        if mode == "continuous":
-            request.app.state.recorders.ensure(camera_id)
+        await request.app.state.recorders.sync_camera(camera_id)
         results[index]["status"] = "created"
     return {"rows": results, "created_count": len(inserted), "failed_count": sum(row["status"] not in {"created","duplicate"} for row in results)}
 
@@ -1127,8 +1294,7 @@ async def create_camera(
             _record_discovery_probe(db, payload.onvif_uuid, capability)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="A camera with that name or ONVIF identity already exists") from exc
-    if payload.recording_enabled and payload.recording_mode != "disabled":
-        request.app.state.recorders.ensure(camera_id)
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
@@ -1165,7 +1331,7 @@ async def update_camera(
             assignments.extend(("recording_status='connecting'", "last_error=NULL"))
         values.append(camera_id)
         db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values)
-    await request.app.state.recorders.sync_camera(camera_id)
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
@@ -1216,8 +1382,8 @@ async def bulk_update_cameras(
         values.append(datetime.now(timezone.utc).isoformat())
         values.extend(payload.camera_ids)
         db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", values)
-    if payload.recording_mode is not None or payload.recording_enabled is not None:
-        await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id) for camera_id in payload.camera_ids))
+    if "group_name" in payload.model_fields_set or payload.recording_mode is not None or payload.recording_enabled is not None:
+        await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id, force_restart=True) for camera_id in payload.camera_ids))
     with connect() as db:
         updated = db.execute(
             f"SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id IN ({','.join('?' for _ in payload.camera_ids)}) ORDER BY c.name COLLATE NOCASE",
@@ -1251,7 +1417,7 @@ async def rotate_camera_credentials(
             "UPDATE cameras SET stream_url_ciphertext=?,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
             (encrypt(stream_url), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
         )
-    await request.app.state.recorders.sync_camera(camera_id)
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(row)
@@ -1291,7 +1457,7 @@ async def configure_motion_source(
         db.execute(
             f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values,
         )
-    await request.app.state.recorders.sync_camera(camera_id)
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         camera = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return _camera_view(camera)
@@ -1337,6 +1503,7 @@ async def delete_camera(
         except OSError as exc:
             raise HTTPException(status_code=500, detail="Stored footage could not be removed; camera configuration was retained") from exc
     with connect() as db:
+        db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
         db.execute("DELETE FROM cameras WHERE id=?", (camera_id,))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
