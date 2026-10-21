@@ -136,6 +136,13 @@ class ExportJobTests(unittest.TestCase):
 
     def test_accepted_export_protects_source_during_lease_handoff_and_until_terminal(self):
         with connect() as db:
+            # Keep background retention from removing this deliberately old fixture
+            # before the export request can reserve it. The test lowers the policy
+            # after acceptance to exercise the cleanup/export race itself.
+            db.execute(
+                "INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days) VALUES('camera',?,3650)",
+                (self.camera,),
+            )
             db.execute(
                 "UPDATE recording_segments SET starts_at='2020-01-01T10:00:00+00:00',ends_at='2020-01-01T10:00:01+00:00' WHERE id=?",
                 (self.segment_id,),
@@ -149,6 +156,11 @@ class ExportJobTests(unittest.TestCase):
             accepted = self.client.post("/api/exports", json=payload)
         self.assertEqual(accepted.status_code, 202, accepted.text)
         job_id = accepted.json()["id"]
+        with connect() as db:
+            db.execute(
+                "UPDATE retention_policy_overrides SET retention_days=1 WHERE scope_type='camera' AND scope_id=?",
+                (self.camera,),
+            )
 
         lease_started, allow_lease = threading.Event(), threading.Event()
         cleanup_done = threading.Event()
@@ -248,6 +260,73 @@ class ExportJobTests(unittest.TestCase):
             "camera_ids": [self.camera], "start": "2026-10-20T00:00:00Z", "end": "2026-10-21T01:00:00Z",
         })
         self.assertEqual(too_long.status_code, 422)
+
+
+    def test_evidence_package_hashes_bytes_and_verification_is_independent_of_media_probe(self):
+        if not self.ffmpeg:
+            self.skipTest("FFmpeg is required to create an evidence export")
+        job_id = self._create()
+        completed = self._wait_for_status(job_id, "completed", "failed")
+        self.assertEqual(completed["status"], "completed", completed)
+        payload = self.client.get(completed["download_url"]).content
+        response = self.client.post(f"/api/exports/{job_id}/verify", content=payload, headers={"content-type": "application/zip"})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertTrue(result["checksums_valid"])
+        self.assertEqual(result["media_validation"], "not_performed")
+        with zipfile.ZipFile(__import__("io").BytesIO(payload)) as archive:
+            names = set(archive.namelist())
+            metadata = json.loads(archive.read("metadata.json"))
+            integrity = json.loads(archive.read("integrity.json"))
+        self.assertIn("integrity.json", names)
+        self.assertEqual(metadata["audit_reference"], {"resource_type": "export", "resource_id": job_id})
+        self.assertIn("UTC", metadata["timestamp_provenance"])
+        self.assertEqual(set(item["path"] for item in integrity["files"]), names - {"integrity.json"})
+        self.assertNotIn("stream_url", json.dumps(metadata).lower())
+        self.assertNotIn("password", json.dumps(metadata).lower())
+        with connect() as db:
+            entries = db.execute("SELECT actor_id,action,details_json FROM audit_log WHERE resource_id=? ORDER BY id", (job_id,)).fetchall()
+        self.assertEqual(entries[-1]["actor_id"], self.user_id)
+        self.assertEqual(entries[-1]["action"], "evidence_verified")
+        self.assertEqual(json.loads(entries[-1]["details_json"])["outcome"], "valid")
+
+    def test_evidence_verification_detects_modified_delivered_bytes_and_audits_outcome(self):
+        if not self.ffmpeg:
+            self.skipTest("FFmpeg is required to create an evidence export")
+        job_id = self._create()
+        completed = self._wait_for_status(job_id, "completed", "failed")
+        self.assertEqual(completed["status"], "completed", completed)
+        original = self.client.get(completed["download_url"]).content
+        changed = __import__("io").BytesIO()
+        with zipfile.ZipFile(__import__("io").BytesIO(original)) as source, zipfile.ZipFile(changed, "w", compression=zipfile.ZIP_STORED) as altered:
+            for name in source.namelist():
+                content = source.read(name)
+                if name == "camera-0.mp4":
+                    content = content[:-1] + bytes([content[-1] ^ 0x01])
+                altered.writestr(name, content)
+        response = self.client.post(f"/api/exports/{job_id}/verify", content=changed.getvalue(), headers={"content-type": "application/zip"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["checksums_valid"])
+        self.assertTrue(any(not item["matches"] for item in response.json()["files"]))
+        with connect() as db:
+            row = db.execute("SELECT actor_id,action,details_json FROM audit_log WHERE resource_id=? ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+        self.assertEqual(row["actor_id"], self.user_id)
+        self.assertEqual(row["action"], "evidence_verification_failed")
+        self.assertEqual(json.loads(row["details_json"])["outcome"], "invalid")
+
+    def test_evidence_verification_is_authenticated_and_scoped_to_export_owner(self):
+        job_id = self._create()
+        response = self.client.post(f"/api/exports/{job_id}/verify", content=b"", headers={"content-type": "application/zip"})
+        self.assertEqual(response.status_code, 409)
+        app.dependency_overrides[current_user] = lambda: {"id": self.other_user_id, "username": "second", "role": "operator"}
+        denied = self.client.post(f"/api/exports/{job_id}/verify", content=b"", headers={"content-type": "application/zip"})
+        self.assertEqual(denied.status_code, 404)
+        app.dependency_overrides.pop(current_user, None)
+        try:
+            unauthenticated = self.client.post(f"/api/exports/{job_id}/verify", content=b"", headers={"content-type": "application/zip"})
+        finally:
+            app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+        self.assertEqual(unauthenticated.status_code, 401)
 
 
 if __name__ == "__main__":
