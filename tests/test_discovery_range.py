@@ -1,6 +1,7 @@
 import unittest
 
 from app.discovery import IP_RANGE_MAX_HOSTS, parse_camera_ip_range
+from app.onvif_stream import _stream_lookup_inputs
 
 
 class CameraRangeTests(unittest.TestCase):
@@ -16,6 +17,16 @@ class CameraRangeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_camera_ip_range(value)
         self.assertGreater(IP_RANGE_MAX_HOSTS, 0)
+
+    def test_custom_onvif_path_must_stay_on_entered_camera(self):
+        address, username, urls = _stream_lookup_inputs(
+            "10.45.50.25", "operator", "secret", "http://10.45.50.25:8080/custom/onvif", "hikvision"
+        )
+        self.assertEqual(str(address), "10.45.50.25")
+        self.assertEqual(username, "operator")
+        self.assertEqual(urls, ("http://10.45.50.25:8080/custom/onvif",))
+        with self.assertRaisesRegex(ValueError, "host must match"):
+            _stream_lookup_inputs("10.45.50.25", "", "", "http://example.test/onvif/device_service", "auto")
 
 
 if __name__ == "__main__":
