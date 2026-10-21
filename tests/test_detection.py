@@ -67,7 +67,7 @@ class DetectionApiTests(unittest.TestCase):
         })
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertTrue(saved.json()["enabled"])
-        self.assertEqual(saved.json()["model"]["id"], MODEL_ID)
+        self.assertEqual(saved.json()["model"]["model_id"], MODEL_ID)
         self.assertEqual(saved.json()["status"], "connecting")
         coverage = self.client.get(f"/api/cameras/{self.camera_id}/ai/coverage")
         self.assertEqual(coverage.status_code, 200, coverage.text)
