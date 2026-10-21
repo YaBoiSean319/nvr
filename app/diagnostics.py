@@ -13,6 +13,8 @@ EVENT_FIELDS = {
         "outcome": {"completed", "failed"},
         "elapsed_ms": (0, 60000),
         "interface_configured": {True, False},
+        "scan_mode": {"multicast", "ip_range"},
+        "targets_scanned": (0, 256),
         "discovered_count": (0, 10000),
         "ignored_responses": (0, 10000),
         "error_category": {"network", "configuration"},
