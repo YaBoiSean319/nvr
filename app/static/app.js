@@ -74,6 +74,14 @@ let cameraBulkSession = 0;
 let cameraBulkStatusDialog = null;
 let activeCameraWorkspace = "cameras";
 let mobileCameraEditorOpen = false;
+const groupWorkspaceState=window.NvrCameraGroups.createGroupWorkspaceState();
+let groupWorkspaceInitialized=false;
+let groupWorkspaceSaveInProgress=false;
+let groupPolicyLoading=false;
+let groupPolicyLoadFailures=new Set();
+let unavailableGroupId=null;
+const GROUP_POLICY_SECTIONS={general:["group-name","group-members"],recording:["group-schedule","group-retention"],storage:["group-storage"],ai:["group-ai"]};
+const GROUP_SECTION_TAB=Object.fromEntries(Object.entries(GROUP_POLICY_SECTIONS).flatMap(([tab,sections])=>sections.map(section=>[section,tab])));
 const cameraInventoryFilters = { archive:"active", group:"all", connection:"all", health:"all", sortKey:"name", sortDirection:1 };
 let displaySettings = {time_zone:"UTC",date_format:"friendly",clock_format:"12"};
 let currentBranding = {app_name:"Workplace NVR",primary_color:"#17212b",accent_color:"#69a1ff",assets:{}};
@@ -215,11 +223,12 @@ function cameraWorkspace(id, title) {
   return section;
 }
 async function setCameraWorkspace(id) {
+  if(id==="groups"&&currentRole!=="administrator")return false;
   const target=document.querySelector(`[data-camera-workspace="${id}"]`);
   if(!target)return false;
   const current=document.querySelector(`[data-camera-workspace="${activeCameraWorkspace}"]`);
   if(current&&current!==target){
-    const allowed=activeCameraWorkspace==="cameras"?await guardCameraDrafts():guardDraftsIn(current);
+    const allowed=activeCameraWorkspace==="cameras"?await guardCameraDrafts():activeCameraWorkspace==="groups"?await guardGroupDrafts():guardDraftsIn(current);
     if(!allowed)return false;
   }
   if(activeCameraWorkspace==="cameras"&&id!=="cameras")cameraPreviewWorkspace.leave();
@@ -255,6 +264,7 @@ function setupCameraAdminWorkspaces() {
   const nav=document.createElement("nav");nav.id="camera-workspace-nav";nav.className="camera-workspace-nav";nav.setAttribute("aria-label","Camera settings workspaces");
   for(const [id,label] of [["cameras","Cameras"],["add","Add Cameras"],["groups","Groups & Policies"]]){
     const button=document.createElement("button");button.type="button";button.textContent=label;button.dataset.cameraWorkspaceButton=id;
+    if(id==="groups"&&currentRole!=="administrator")button.classList.add("hidden");
     if(id===activeCameraWorkspace)button.setAttribute("aria-current","page");
     button.addEventListener("click",()=>setCameraWorkspace(id));nav.append(button);
   }
@@ -667,6 +677,7 @@ function applySidebarCameraSelection(nextIds) {
 }
 function renderSidebar() {
   const cameraList = document.querySelector("#sidebar-cameras"), groupList = document.querySelector("#sidebar-groups"), viewList = document.querySelector("#sidebar-views");
+  document.querySelector('[data-camera-workspace-button="groups"]')?.classList.toggle("hidden",currentRole!=="administrator");
   cameraList.replaceChildren(); groupList.replaceChildren(); viewList.replaceChildren();
   for (const camera of [...sidebarCameras].filter(camera=>!camera.archived_at).sort((a, b) => a.name.localeCompare(b.name))) {
     const address=camera.camera_ip||"";
@@ -674,7 +685,7 @@ function renderSidebar() {
     const row=sidebarItem(cameraList, camera.name, `${camera.name} ${address}`, async () => {
       if(activeScreen==="camera-settings"||activeScreen==="app-settings"){
         if(selectedCameraId===camera.id){if(activeScreen==="app-settings"&&!await setScreen("camera-settings"))return;if(activeScreen==="camera-settings")await setCameraWorkspace("cameras");mobileCameraOpen(camera.id);return;}
-        if(selectedCameraId!==camera.id&&!await guardCameraDrafts())return;
+        if(selectedCameraId!==camera.id&&!(activeCameraWorkspace==="groups"?await guardGroupDrafts():await guardCameraDrafts()))return;
         if(activeScreen==="app-settings"&&!await setScreen("camera-settings"))return;
         if(!await setCameraWorkspace("cameras"))return;
         selectedCameraId=camera.id;cameraEditorState.selectCamera(camera.id);clearCameraHistory();mobileCameraEditorOpen=true;renderCameras(latestCameras);renderSidebar();return;
@@ -733,12 +744,14 @@ function markConfigDraftElement(target){
   }
   const tab=window.NvrCameraEditor.CAMERA_EDITOR_TABS.find(item=>item.sections.includes(scope.dataset.configSection));if(tab)setCameraTabStatus(tab.id,"Unsaved changes","dirty");
   refreshCameraTabStatuses();
+  refreshGroupTabStatuses();
 }
 function clearConfigDraft(scope){
   if(!scope)return;
   delete scope.dataset.configDirty;
   scope.querySelector(":scope > .unsaved-draft-notice")?.remove();
   refreshCameraTabStatuses();
+  refreshGroupTabStatuses();
 }
 function guardDraftsIn(root){
   const candidates=[...(root?.matches?.('[data-config-dirty="true"]')?[root]:[]),...(root?.querySelectorAll?.('[data-config-dirty="true"]')||[])];
@@ -762,9 +775,11 @@ function ensureCameraDirtyDialog(){
   dialog.addEventListener("cancel",event=>{event.preventDefault();if(cameraDirtyDecisionResolve){const resolve=cameraDirtyDecisionResolve;cameraDirtyDecisionResolve=null;dialog.close();resolve("cancel");}});
   document.body.append(dialog);cameraDirtyDecisionDialog=dialog;return dialog;
 }
-function askCameraDirtyDecision(){
+function askCameraDirtyDecision({title="Unsaved camera settings",description="Save or discard your changes before continuing."}={}){
   if(cameraDirtyDecisionPromise)return cameraDirtyDecisionPromise;
   const dialog=ensureCameraDirtyDialog();
+  dialog.querySelector("#camera-dirty-decision-title").textContent=title;
+  dialog.querySelector("#camera-dirty-decision-title + p").textContent=description;
   const status=dialog.querySelector("[data-dialog-status]");status.textContent="";
   cameraDirtyDecisionPromise=new Promise(resolve=>{cameraDirtyDecisionResolve=value=>{cameraDirtyDecisionResolve=null;cameraDirtyDecisionPromise=null;resolve(value);};dialog.showModal();dialog.querySelector('[data-decision="save"]').focus();});
   return cameraDirtyDecisionPromise;
@@ -940,7 +955,7 @@ async function guardCameraDrafts(root=document.querySelector("#camera-list")){
 }
 async function guardScreenDrafts(screen){
   if(screen==="app-settings")return guardDraftsIn(document.querySelector("#app-settings-content"));
-  if(screen==="camera-settings")return guardCameraDrafts();
+  if(screen==="camera-settings")return activeCameraWorkspace==="groups"?guardGroupDrafts():guardCameraDrafts();
   return true;
 }
 function clearSavedConfigDraft(path,options,button){
@@ -2224,12 +2239,12 @@ function renderZoneEditor(container,zones=[]){
   container.append(help,stage,list,add);
 }
 function readZoneEditor(container){return (container._zoneValues||[]).map(zone=>({x:Number(zone.x),y:Number(zone.y),width:Number(zone.width),height:Number(zone.height)}));}
-async function loadRepresentativeZoneFrame(cameraId,editor){
+async function loadRepresentativeZoneFrame(cameraId,editor,isCurrent=()=>true){
   try{
     const result=await api(`/api/cameras/${encodeURIComponent(cameraId)}/segments`),segment=result.segments?.at(-1);
-    if(!segment)return;
+    if(!segment||!isCurrent())return;
     const at=segment.starts_at,url=`/api/cameras/${encodeURIComponent(cameraId)}/segments/${encodeURIComponent(segment.id)}/snapshot?at=${encodeURIComponent(at)}`;
-    const image=new Image();image.alt="Representative recorded frame for zone placement";image.onload=()=>{const stage=editor.querySelector(".zone-stage");if(stage&&image.naturalWidth&&image.naturalHeight){stage.style.aspectRatio=`${image.naturalWidth} / ${image.naturalHeight}`;stage.setAttribute("aria-label",`Camera frame ${image.naturalWidth} by ${image.naturalHeight} pixels. Zones use normalized coordinates.`);stage.style.backgroundImage=`url("${url}")`;stage.classList.add("has-zone-frame");stage.querySelector(".zone-stage-placeholder")?.classList.add("hidden");}};image.src=url;
+    const image=new Image();image.alt="Representative recorded frame for zone placement";image.onload=()=>{if(!isCurrent())return;const stage=editor.querySelector(".zone-stage");if(stage&&image.naturalWidth&&image.naturalHeight){stage.style.aspectRatio=`${image.naturalWidth} / ${image.naturalHeight}`;stage.setAttribute("aria-label",`Camera frame ${image.naturalWidth} by ${image.naturalHeight} pixels. Zones use normalized coordinates.`);stage.style.backgroundImage=`url("${url}")`;stage.classList.add("has-zone-frame");stage.querySelector(".zone-stage-placeholder")?.classList.add("hidden");}};image.src=url;
   }catch{}
 }
 async function requestPlaybackExport() {
@@ -2266,56 +2281,355 @@ async function refreshDiagnostics() {
     ? `Capture is on until ${formatDateTime(state.capture_until)} · ${state.event_count} event(s) collected.`
     : `${state.event_count} event(s) available for download. Capture is off.`;
 }
-async function refreshGroups() {
+function setupGroupPolicyWorkspace(){
+  if(groupWorkspaceInitialized)return;
+  const root=document.querySelector("#bulk-admin");if(!root)return;
+  const heading=root.querySelector("#bulk-heading"),groupForm=root.querySelector("#group-form"),instructions=groupForm?.nextElementSibling,list=root.querySelector("#group-management-list");
+  const schedule=root.querySelector('[data-config-section="group-schedule"]'),retention=root.querySelector('[data-config-section="group-retention"]'),storage=root.querySelector('[data-config-section="group-storage"]'),ai=root.querySelector('[data-config-section="group-ai"]');
+  const runtime=root.querySelector('[data-config-section="ai-runtime"]'),scheduleMessage=root.querySelector("#schedule-message"),aiMessage=root.querySelector("#ai-group-message");
+  const layout=document.createElement("div");layout.id="group-policy-layout";layout.className="group-policy-layout";
+  const listPane=document.createElement("aside");listPane.className="group-list-pane";listPane.setAttribute("aria-labelledby","group-list-heading");
+  const listHeading=document.createElement("h4");listHeading.id="group-list-heading";listHeading.textContent="Camera groups";
+  const searchLabel=document.createElement("label");searchLabel.htmlFor="group-search";searchLabel.textContent="Search groups";
+  const search=document.createElement("input");search.type="search";search.id="group-search";search.autocomplete="off";search.placeholder="Group name";
+  const createMessage=document.createElement("p");createMessage.id="group-create-message";createMessage.setAttribute("role","status");createMessage.setAttribute("aria-live","polite");
+  const filteredNotice=document.createElement("p");filteredNotice.id="group-filter-notice";filteredNotice.className="group-filter-notice hidden";
+  const showGroup=document.createElement("button");showGroup.type="button";showGroup.textContent="Show selected group in list";showGroup.addEventListener("click",()=>{search.value="";groupWorkspaceState.setQuery("");renderGroupManagement(groupWorkspaceState.groups);document.querySelector(`#group-management-list button[data-group-id="${CSS.escape(groupWorkspaceState.selectedGroupId||"")}"]`)?.focus();});
+  filteredNotice.append(document.createTextNode("The selected group is outside the current search. "),showGroup);
+  const empty=document.createElement("p");empty.id="group-editor-empty";empty.className="group-editor-empty";empty.textContent="Select a group to view its membership and shared policies.";
+  const loadStatus=document.createElement("div");loadStatus.id="group-policy-load-status";loadStatus.className="group-editor-empty hidden";loadStatus.setAttribute("role","status");loadStatus.setAttribute("aria-live","polite");
+  const loadMessage=document.createElement("p");loadMessage.id="group-policy-load-message";loadStatus.append(loadMessage);
+  const retryLoad=document.createElement("button");retryLoad.type="button";retryLoad.id="retry-group-policy-loads";retryLoad.textContent="Retry failed settings";retryLoad.className="hidden";retryLoad.addEventListener("click",()=>void retryGroupPolicyLoads());loadStatus.append(retryLoad);
+  const editor=document.createElement("section");editor.id="group-management-editor";editor.className="group-general-editor";editor.setAttribute("aria-label","Selected group details");
+  const editorPane=document.createElement("section");editorPane.className="group-editor-pane";editorPane.setAttribute("aria-labelledby","group-editor-heading");
+  const editorHeading=document.createElement("h4");editorHeading.id="group-editor-heading";editorHeading.textContent="Select a group";
+  const tabNav=document.createElement("nav");tabNav.id="group-policy-tabs";tabNav.className="group-editor-tabs";tabNav.setAttribute("role","tablist");tabNav.setAttribute("aria-label","Group policy sections");
+  const panels=new Map();
+  for(const tab of window.NvrCameraGroups.GROUP_POLICY_TABS){
+    const panel=document.createElement("section");panel.id=`group-policy-panel-${tab.id}`;panel.className="group-policy-panel";panel.dataset.groupPolicyPanel=tab.id;panel.setAttribute("role","tabpanel");panel.setAttribute("aria-label",tab.label);panel.tabIndex=0;
+    const actions=document.createElement("div");actions.className="group-tab-actions";
+    const status=document.createElement("p");status.dataset.groupTabStatus=tab.id;status.setAttribute("role","status");status.setAttribute("aria-live","polite");status.textContent="Saved";status.dataset.state="saved";
+    const save=document.createElement("button");save.type="button";save.textContent="Save";save.dataset.groupTabSave=tab.id;save.setAttribute("aria-label",`Save ${tab.label} settings`);save.addEventListener("click",()=>void saveGroupTab(tab.id));
+    const revert=document.createElement("button");revert.type="button";revert.textContent="Revert";revert.dataset.groupTabRevert=tab.id;revert.setAttribute("aria-label",`Revert ${tab.label} settings`);revert.addEventListener("click",()=>void revertGroupTab(tab.id));
+    actions.append(status,save,revert);panel.append(actions);panels.set(tab.id,panel);
+    const button=document.createElement("button");button.type="button";button.id=`group-policy-tab-${tab.id}`;button.textContent=tab.label;button.dataset.groupPolicyTab=tab.id;button.setAttribute("role","tab");button.setAttribute("aria-controls",panel.id);
+    panel.setAttribute("aria-labelledby",button.id);button.addEventListener("click",()=>void navigateGroupTab(tab.id));
+    button.addEventListener("keydown",event=>{const buttons=[...tabNav.querySelectorAll('[role="tab"]')],index=buttons.indexOf(button);let next=null;if(event.key==="ArrowRight")next=buttons[(index+1)%buttons.length];else if(event.key==="ArrowLeft")next=buttons[(index-1+buttons.length)%buttons.length];else if(event.key==="Home")next=buttons[0];else if(event.key==="End")next=buttons.at(-1);if(next){event.preventDefault();next.focus();void navigateGroupTab(next.dataset.groupPolicyTab);}});
+    tabNav.append(button);
+  }
+  const panelContent=document.createElement("div");panelContent.id="group-policy-panel-content";
+  panels.get("general").append(editor);
+  if(schedule)panels.get("recording").append(schedule);
+  if(retention)panels.get("recording").append(retention);
+  if(scheduleMessage)panels.get("recording").append(scheduleMessage);
+  if(storage)panels.get("storage").append(storage);
+  if(ai)panels.get("ai").append(ai);
+  if(aiMessage)panels.get("ai").append(aiMessage);
+  panelContent.append(...panels.values());
+  editorPane.append(editorHeading,empty,loadStatus,filteredNotice,tabNav,panelContent);
+  if(groupForm)listPane.append(groupForm);
+  if(instructions){instructions.textContent="Browsing groups can overlap. A camera inherits recording, schedule, retention, storage, and AI settings from its single policy group unless a supported camera override applies.";listPane.append(instructions);}
+  listPane.append(listHeading,searchLabel,search);
+  if(list)listPane.append(list);
+  listPane.append(createMessage);
+  layout.append(listPane,editorPane);
+  if(heading)root.replaceChildren(heading,layout);else root.replaceChildren(layout);
+  if(runtime)document.querySelector("#app-settings-content")?.append(runtime);
+  const scheduleSelect=document.querySelector("#schedule-group"),scheduleLabel=document.querySelector('label[for="schedule-group"]');
+  if(scheduleSelect){scheduleSelect.hidden=true;scheduleSelect.setAttribute("aria-hidden","true");}
+  if(scheduleLabel){scheduleLabel.hidden=true;scheduleLabel.setAttribute("aria-hidden","true");}
+  for(const selector of ["#save-group-schedule","#save-group-retention","#save-storage-volume","#save-group-ai"]){const button=document.querySelector(selector);if(button)button.hidden=true;}
+  search.addEventListener("input",()=>{groupWorkspaceState.setQuery(search.value);renderGroupManagement(groupWorkspaceState.groups);});
+  groupForm.groupSaveConfig=async()=>{
+    const name=document.querySelector("#new-group-name").value.trim();
+    if(!name)throw new Error("Enter a camera group name.");
+    if(name.length>80)throw new Error("Group names are limited to 80 characters.");
+    const result=await api("/api/camera-groups",{method:"POST",body:JSON.stringify({name})});
+    groupForm.reset();createMessage.textContent=`Created camera group ${result.name}.`;
+  };
+  if(schedule){schedule.groupSaveConfig=saveGroupSchedule;schedule.groupLoadConfig=loadGroupSchedule;}
+  if(retention){retention.groupSaveConfig=saveGroupRetention;retention.groupLoadConfig=loadGroupRetention;}
+  if(storage){storage.groupSaveConfig=saveGroupStorage;storage.groupLoadConfig=loadGroupStorage;}
+  if(ai){ai.groupSaveConfig=saveGroupAi;ai.groupLoadConfig=loadGroupAi;}
+  groupWorkspaceInitialized=true;
+}
+function setGroupTabStatus(tabId,text,state="saved"){
+  const status=document.querySelector(`[data-group-tab-status="${tabId}"]`);if(!status)return;
+  status.textContent=text;status.dataset.state=state;
+}
+function groupPolicyScopeIds(tabId){return GROUP_POLICY_SECTIONS[tabId]||[];}
+function groupDirtyScopes(root=document.querySelector("#bulk-admin")){
+  return [...(root?.matches?.('[data-config-dirty="true"]')?[root]:[]),...(root?.querySelectorAll?.('[data-config-dirty="true"]')||[])].filter(scope=>scope.dataset.configSection&&scope.closest("#bulk-admin"));
+}
+function groupTabDirtyScopes(tabId){
+  const panel=document.querySelector(`[data-group-policy-panel="${tabId}"]`),ids=new Set(groupPolicyScopeIds(tabId));
+  return [...(panel?.querySelectorAll?.('[data-config-dirty="true"]')||[])].filter(scope=>ids.has(scope.dataset.configSection));
+}
+function refreshGroupTabStatuses(){
+  if(!groupWorkspaceInitialized)return;
+  for(const tab of window.NvrCameraGroups.GROUP_POLICY_TABS){
+    const dirty=groupTabDirtyScopes(tab.id),status=document.querySelector(`[data-group-tab-status="${tab.id}"]`);
+    const save=document.querySelector(`[data-group-tab-save="${tab.id}"]`),revert=document.querySelector(`[data-group-tab-revert="${tab.id}"]`);
+    if(save)save.disabled=!dirty.length||groupWorkspaceSaveInProgress||currentRole!=="administrator";
+    if(revert)revert.disabled=!dirty.length||groupWorkspaceSaveInProgress||currentRole!=="administrator";
+    if(!dirty.length)setGroupTabStatus(tab.id,"Saved","saved");
+    else if(status?.dataset.state!=="saving"&&status?.dataset.state!=="error")setGroupTabStatus(tab.id,`${dirty.length} unsaved section${dirty.length===1?"":"s"}`,"dirty");
+  }
+}
+function activateGroupTab(tabId){
+  if(!groupWorkspaceState.selectedGroup()||!groupWorkspaceState.selectTab(tabId))return false;
+  for(const button of document.querySelectorAll("#group-policy-tabs [role=tab]")){
+    const active=button.dataset.groupPolicyTab===tabId;button.setAttribute("aria-selected",String(active));button.tabIndex=active?0:-1;
+  }
+  for(const panel of document.querySelectorAll("[data-group-policy-panel]"))panel.classList.toggle("hidden",panel.dataset.groupPolicyPanel!==tabId);
+  refreshGroupTabStatuses();return true;
+}
+async function navigateGroupTab(tabId){
+  if(tabId===groupWorkspaceState.activeTab)return true;
+  if(!await guardGroupDrafts()){
+    document.querySelector(`[role=tab][data-group-policy-tab="${CSS.escape(groupWorkspaceState.activeTab)}"]`)?.focus();return false;
+  }
+  return activateGroupTab(tabId);
+}
+function updateGroupEditorVisibility(){
+  const selected=groupWorkspaceState.selectedGroup(),empty=document.querySelector("#group-editor-empty"),tabs=document.querySelector("#group-policy-tabs"),heading=document.querySelector("#group-editor-heading"),notice=document.querySelector("#group-filter-notice"),loadStatus=document.querySelector("#group-policy-load-status"),loadMessage=document.querySelector("#group-policy-load-message"),retry=document.querySelector("#retry-group-policy-loads");
+  if(!empty||!tabs||!heading)return;
+  const unavailable=Boolean(!selected&&unavailableGroupId&&groupDirtyScopes().length);
+  const blockedByLoad=Boolean(selected&&(groupPolicyLoading||groupPolicyLoadFailures.size));
+  empty.classList.toggle("hidden",Boolean(selected)||unavailable);tabs.classList.toggle("hidden",!selected||blockedByLoad);
+  heading.textContent=selected?`${selected.name} · ${selected.camera_count} camera(s)`:unavailable?"Group unavailable":"Select a group";
+  const visible=groupWorkspaceState.visibleGroups().some(group=>group.id===selected?.id);notice?.classList.toggle("hidden",!selected||visible);
+  loadStatus?.classList.toggle("hidden",!blockedByLoad&&!unavailable);
+  if(loadMessage)loadMessage.textContent=unavailable?"This group was removed while it had unsaved changes. Discard those changes before selecting another group.":selected?(groupPolicyLoading?`Loading shared settings for ${selected.name}…`:`Some settings for ${selected.name} could not be loaded. Retry before editing this group.`):"";
+  retry?.classList.toggle("hidden",unavailable||groupPolicyLoading||!groupPolicyLoadFailures.size);
+  for(const panel of document.querySelectorAll("[data-group-policy-panel]"))panel.classList.toggle("hidden",!selected||blockedByLoad||panel.dataset.groupPolicyPanel!==groupWorkspaceState.activeTab);
+  if(selected&&!blockedByLoad)activateGroupTab(groupWorkspaceState.activeTab);
+}
+async function selectGroupForEditing(groupId){
+  if(groupWorkspaceState.selectedGroupId===groupId)return true;
+  if(!await guardGroupDrafts())return false;
+  if(!groupWorkspaceState.selectGroup(groupId))return false;
+  const select=document.querySelector("#schedule-group");if(select)select.value=groupId;
+  groupPolicyLoadFailures.clear();resetGroupPolicyControls();groupPolicyLoading=true;
+  renderGroupManagement(groupWorkspaceState.groups);
+  const selection=groupWorkspaceState.captureSelection();
+  await loadSelectedGroupPolicies(groupId,selection,["group-schedule","group-retention","group-storage","group-ai"]);
+  return true;
+}
+function resetGroupPolicyControls(){
+  document.querySelector("#group-schedule-timezone").value="UTC";renderScheduleEditor(document.querySelector("#group-schedule-editor"),[]);document.querySelector("#group-schedule-json").value="";
+  document.querySelector("#group-retention-days").value="30";
+  const storage=document.querySelector("#group-storage-volume");storage.replaceChildren(new Option("Loading storage volumes…","default"));document.querySelector("#storage-volume-status").replaceChildren();
+  document.querySelector("#group-ai-enabled").checked=false;document.querySelector("#group-ai-fps").value="0.5";document.querySelector("#group-ai-confidence").value="0.55";document.querySelector("#group-ai-substream").checked=true;document.querySelector("#group-ai-zones").value="[]";renderZoneEditor(document.querySelector("#group-ai-zones-editor"),[]);
+  document.querySelector("#schedule-message").textContent="";document.querySelector("#ai-group-message").textContent="";
+}
+async function loadSelectedGroupPolicies(groupId,selection,sectionIds){
+  groupPolicyLoading=true;updateGroupEditorVisibility();
+  const scopes=sectionIds.map(id=>document.querySelector(`#bulk-admin [data-config-section="${id}"]`)).filter(Boolean);
+  const results=await Promise.all(scopes.map(async scope=>{
+    try{const loaded=await scope.groupLoadConfig?.(groupId,selection);return {id:scope.dataset.configSection,loaded:loaded!==false};}
+    catch(error){setGroupTabStatus(GROUP_SECTION_TAB[scope.dataset.configSection],`Load failed: ${error.message}`,"error");return {id:scope.dataset.configSection,error};}
+  }));
+  if(!groupWorkspaceState.isCurrent(selection))return false;
+  for(const result of results){if(result.error||!result.loaded)groupPolicyLoadFailures.add(result.id);else groupPolicyLoadFailures.delete(result.id);}
+  groupPolicyLoading=false;updateGroupEditorVisibility();return groupPolicyLoadFailures.size===0;
+}
+async function retryGroupPolicyLoads(){
+  const selected=groupWorkspaceState.selectedGroup();if(!selected||groupPolicyLoading||!groupPolicyLoadFailures.size)return false;
+  const failed=[...groupPolicyLoadFailures],selection=groupWorkspaceState.captureSelection();
+  groupPolicyLoadFailures.clear();
+  return loadSelectedGroupPolicies(selected.id,selection,failed);
+}
+function renderGroupManagement(groups){
+  const target=document.querySelector("#group-management-list"),editor=document.querySelector("#group-management-editor");
+  if(!target||!editor)return;
+  const visible=groupWorkspaceState.visibleGroups().slice().sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id));
+  target.replaceChildren(...visible.map(group=>{
+    const button=document.createElement("button");button.type="button";button.dataset.groupId=group.id;button.setAttribute("aria-pressed",String(group.id===groupWorkspaceState.selectedGroupId));
+    const name=document.createElement("span");name.textContent=group.name;
+    const count=document.createElement("span");count.className="group-camera-count";count.textContent=`${group.camera_count} camera${group.camera_count===1?"":"s"}`;
+    button.append(name,count);button.addEventListener("click",()=>void selectGroupForEditing(group.id));return button;
+  }));
+  if(!visible.length){const empty=document.createElement("p");empty.className="muted";empty.textContent=groups.length?"No groups match this search.":"No camera groups yet. Create a group to manage shared policies.";target.append(empty);}
+  for(const button of target.querySelectorAll("[data-group-id]"))button.setAttribute("aria-pressed",String(button.dataset.groupId===groupWorkspaceState.selectedGroupId));
+  const selected=groupWorkspaceState.selectedGroup();
+  if(!selected){editor.replaceChildren();updateGroupEditorVisibility();return;}
+  const dirty=editor.querySelector('[data-config-dirty="true"]');
+  if(!dirty||editor.dataset.groupId!==selected.id){
+    editor.dataset.groupId=selected.id;editor.replaceChildren();
+    const namePanel=document.createElement("fieldset"),nameLegend=document.createElement("legend");namePanel.dataset.configSection="group-name";nameLegend.textContent="Group name";namePanel.append(nameLegend);
+    const nameLabel=document.createElement("label"),name=document.createElement("input");name.type="text";name.value=selected.name;name.maxLength=80;name.autocomplete="off";nameLabel.textContent="Policy group name ";nameLabel.append(name);namePanel.append(nameLabel);namePanel.groupSaveConfig=async()=>{const value=name.value.trim();if(!value)throw new Error("Group names cannot be empty.");if(value.length>80)throw new Error("Group names are limited to 80 characters.");await api(`/api/camera-groups/${encodeURIComponent(selected.id)}`,{method:"PATCH",body:JSON.stringify({name:value})});};
+    const members=new Set(selected.camera_ids||[]),memberPanel=document.createElement("fieldset"),memberLegend=document.createElement("legend");memberPanel.dataset.configSection="group-members";memberLegend.textContent="Browsing membership";memberPanel.append(memberLegend);
+    const help=document.createElement("p");help.textContent="Browsing membership can overlap. A camera’s single policy group controls inherited settings.";memberPanel.append(help);
+    for(const camera of [...latestCameras].sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id))){
+      const label=document.createElement("label"),checkbox=document.createElement("input");checkbox.type="checkbox";checkbox.value=camera.id;checkbox.checked=members.has(camera.id);
+      if(camera.group_id===selected.id){checkbox.disabled=true;checkbox.title="A camera remains a member of its policy group automatically.";}
+      label.append(checkbox,document.createTextNode(` ${camera.name}${camera.group_id===selected.id?" · policy group":""}`));memberPanel.append(label);
+    }
+    memberPanel.groupSaveConfig=async()=>{const camera_ids=[...memberPanel.querySelectorAll('input[type="checkbox"]:checked')].map(input=>input.value);await api(`/api/camera-groups/${encodeURIComponent(selected.id)}/members`,{method:"PUT",body:JSON.stringify({camera_ids})});};
+    const remove=document.createElement("button");remove.type="button";remove.textContent="Delete group";remove.addEventListener("click",async()=>{if(!window.confirm(`Delete group “${selected.name}”? A group assigned to camera policies must first be reassigned.`))return;if(!await guardGroupDrafts())return;try{await api(`/api/camera-groups/${encodeURIComponent(selected.id)}`,{method:"DELETE"});await refreshGroups();}catch(error){document.querySelector("#group-create-message").textContent=error.message;}});
+    editor.append(namePanel,memberPanel,remove);
+  }
+  updateGroupEditorVisibility();
+}
+async function loadGroupSchedule(groupId,selection=groupWorkspaceState.captureSelection()){
+  const result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/schedule`);if(!groupWorkspaceState.isCurrent(selection))return false;
+  const timezone=document.querySelector("#group-schedule-timezone"),editor=document.querySelector("#group-schedule-editor"),advanced=document.querySelector("#group-schedule-json");
+  timezone.value=result.timezone||"UTC";renderScheduleEditor(editor,result.intervals||[]);advanced.value=JSON.stringify({timezone:result.timezone,intervals:result.intervals},null,2);
+  document.querySelector("#schedule-message").textContent=result.configured?"Group schedule loaded.":"No group schedule is configured.";return true;
+}
+async function saveGroupSchedule(groupId){
+  const schedule={timezone:document.querySelector("#group-schedule-timezone").value.trim()||"UTC",intervals:readScheduleEditor(document.querySelector("#group-schedule-editor"))};
+  const result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/schedule`,{method:"PUT",body:JSON.stringify(schedule)});
+  document.querySelector("#group-schedule-json").value=JSON.stringify(schedule,null,2);document.querySelector("#schedule-message").textContent=`Saved ${result.intervals.length} group schedule interval(s).`;
+}
+async function loadGroupRetention(groupId,selection=groupWorkspaceState.captureSelection()){
+  const policy=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/retention`);if(!groupWorkspaceState.isCurrent(selection))return false;
+  document.querySelector("#group-retention-days").value=policy.retention_days;document.querySelector("#schedule-message").textContent=policy.configured?"Group retention loaded.":"Group uses the 30 day default.";return true;
+}
+async function saveGroupRetention(groupId){
+  const retention_days=Number(document.querySelector("#group-retention-days").value),policy=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/retention`,{method:"PUT",body:JSON.stringify({retention_days})});
+  document.querySelector("#schedule-message").textContent=`Saved group retention target: ${policy.retention_days} days.`;
+}
+async function loadGroupStorage(groupId,selection=groupWorkspaceState.captureSelection()){
+  const [status,assignment]=await Promise.all([api("/api/storage"),api(`/api/camera-groups/${encodeURIComponent(groupId)}/storage-volume`)]);if(!groupWorkspaceState.isCurrent(selection))return false;
+  const select=document.querySelector("#group-storage-volume");select.replaceChildren(...status.volumes.map(volume=>new Option(`${volume.id} · ${volume.state} · ${volume.free_bytes==null?"capacity unknown":Math.round(volume.free_bytes/1048576)+" MiB free"}`,volume.id)));select.value=assignment.volume_id;
+  document.querySelector("#storage-volume-status").replaceChildren(...status.volumes.map(volume=>{const item=document.createElement("li");item.textContent=`${volume.id}: ${volume.state}; ${volume.cameras.length} assigned camera(s)${volume.retention_at_risk?" · retention at risk":""}`;return item;}));return true;
+}
+async function saveGroupStorage(groupId){
+  const volume_id=document.querySelector("#group-storage-volume").value,result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/storage-volume`,{method:"PUT",body:JSON.stringify({volume_id})});
+  document.querySelector("#schedule-message").textContent=`Assigned group cameras to ${result.volume_id}.`;
+}
+async function loadGroupAi(groupId,selection=groupWorkspaceState.captureSelection()){
+  const config=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/ai`);if(!groupWorkspaceState.isCurrent(selection))return false;
+  document.querySelector("#group-ai-enabled").checked=config.enabled;document.querySelector("#group-ai-fps").value=config.analysis_fps;document.querySelector("#group-ai-confidence").value=config.confidence_threshold;
+  document.querySelector("#group-ai-substream").checked=config.use_substream;document.querySelector("#group-ai-zones").value=JSON.stringify(config.zones);
+  renderZoneEditor(document.querySelector("#group-ai-zones-editor"),config.zones||[]);
+  document.querySelector("#ai-group-message").textContent=`${config.group_name}: ${config.inherited_camera_count}/${config.camera_count} camera(s) inherit these settings · ${config.model.available?"model ready":config.model.reason}.`;
+  return true;
+}
+async function saveGroupAi(groupId){
+  const zones=readZoneEditor(document.querySelector("#group-ai-zones-editor"));document.querySelector("#group-ai-zones").value=JSON.stringify(zones);
+  const result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/ai`,{method:"PUT",body:JSON.stringify({enabled:document.querySelector("#group-ai-enabled").checked,analysis_fps:Number(document.querySelector("#group-ai-fps").value),confidence_threshold:Number(document.querySelector("#group-ai-confidence").value),use_substream:document.querySelector("#group-ai-substream").checked,zones})});
+  document.querySelector("#ai-group-message").textContent=`Saved group settings for ${result.inherited_camera_count} inherited camera(s). Cameras beyond the configured AI limit will show skipped analysis coverage.`;
+}
+function groupScopeLabel(scope){return scope?.querySelector(":scope > legend")?.textContent?.trim()||scope?.dataset.configSection||"Group settings";}
+function lockGroupControls(){
+  const controls=new Map(),root=document.querySelector("#bulk-admin");
+  for(const control of root.querySelectorAll("input,select,textarea,button")){controls.set(control,control.disabled);control.disabled=true;}
+  return ()=>{for(const [control,disabled] of controls)control.disabled=disabled;};
+}
+async function saveGroupScopes(scopes,{refreshAfter=false,statusTabId=null}={}){
+  if(groupWorkspaceSaveInProgress)return false;
+  const unique=[...new Set(scopes)].filter(Boolean);if(!unique.length)return true;
+  const groupId=groupWorkspaceState.selectedGroupId,selection=groupWorkspaceState.captureSelection();
+  if(unique.some(scope=>scope.dataset.configSection!=="group-form")&&!groupId)return false;
+  const labels=[];let failedScope=null,saveError=null,affectedTabs=new Set(unique.map(scope=>GROUP_SECTION_TAB[scope.dataset.configSection]).filter(Boolean));if(statusTabId)affectedTabs.add(statusTabId);
+  const unlock=lockGroupControls();groupWorkspaceSaveInProgress=true;
+  affectedTabs.forEach(tab=>setGroupTabStatus(tab,"Saving…","saving"));refreshGroupTabStatuses();
+  try{
+    for(const scope of unique){
+      failedScope=scope;
+      if(typeof scope.groupSaveConfig!=="function")throw new Error(`Saving ${groupScopeLabel(scope)} is not available.`);
+      await scope.groupSaveConfig(groupId);
+      if(scope.dataset.configSection!=="group-form"&&!groupWorkspaceState.isCurrent(selection))throw new Error("Group selection changed during save. Reload the selected group before retrying.");
+      clearConfigDraft(scope);labels.push(groupScopeLabel(scope));
+    }
+  }catch(error){saveError=error;}
+  finally{unlock();groupWorkspaceSaveInProgress=false;}
+  if(saveError){
+    const failedTab=GROUP_SECTION_TAB[failedScope?.dataset.configSection]||statusTabId;
+    if(failedTab)setGroupTabStatus(failedTab,`Save failed: ${saveError.message}`,"error");
+    const status=failedScope?.dataset.configSection==="group-form"?document.querySelector("#group-create-message"):failedTab==="ai"?document.querySelector("#ai-group-message"):document.querySelector("#schedule-message");
+    if(status)status.textContent=labels.length?`${labels.join(", ")} saved. ${groupScopeLabel(failedScope)} failed: ${saveError.message} Remaining changes are still available to save.`:`${groupScopeLabel(failedScope)} could not be saved: ${saveError.message} Your changes are still available.`;
+    refreshGroupTabStatuses();return false;
+  }
+  for(const tab of affectedTabs)setGroupTabStatus(tab,"Saved","saved");refreshGroupTabStatuses();
+  if(refreshAfter){try{await refresh();}catch(error){const status=statusTabId==="ai"?document.querySelector("#ai-group-message"):document.querySelector("#schedule-message");if(status)status.textContent=`Settings saved, but the workspace could not refresh: ${error.message}`;}}
+  return true;
+}
+async function revertGroupScopes(scopes){
+  if(groupWorkspaceSaveInProgress)return false;
+  const unique=[...new Set(scopes)].filter(Boolean),groupId=groupWorkspaceState.selectedGroupId,selection=groupWorkspaceState.captureSelection();
+  if(unique.some(scope=>scope.dataset.configSection!=="group-form")&&!groupId)return false;
+  const unlock=lockGroupControls();groupWorkspaceSaveInProgress=true;refreshGroupTabStatuses();let failure=null,needsGroupRefresh=false;
+  try{
+    for(const scope of unique){
+      if(scope.dataset.configSection==="group-form"){scope.reset();clearConfigDraft(scope);continue;}
+      if(["group-name","group-members"].includes(scope.dataset.configSection)){needsGroupRefresh=true;continue;}
+      if(typeof scope.groupLoadConfig!=="function")throw new Error(`Reloading ${groupScopeLabel(scope)} is not available.`);
+      await scope.groupLoadConfig(groupId,selection);
+      if(!groupWorkspaceState.isCurrent(selection))throw new Error("The selected group changed while saved settings were loading.");
+      clearConfigDraft(scope);
+    }
+    if(needsGroupRefresh){
+      const {groups}=await api("/api/camera-groups");if(!groupWorkspaceState.isCurrent(selection))throw new Error("The selected group changed while saved settings were loading.");
+      groupWorkspaceState.setGroups(groups);sidebarGroups=groups;clearConfigDrafts(unique.filter(scope=>["group-name","group-members"].includes(scope.dataset.configSection)));renderGroupManagement(groups);
+    }
+  }catch(error){failure=error;}
+  finally{unlock();groupWorkspaceSaveInProgress=false;refreshGroupTabStatuses();}
+  if(failure){const tab=GROUP_SECTION_TAB[unique.find(scope=>scope.dataset.configDirty==="true")?.dataset.configSection]||groupWorkspaceState.activeTab;setGroupTabStatus(tab,`Revert failed: ${failure.message}`,"error");return false;}
+  return true;
+}
+function clearConfigDrafts(scopes){scopes.forEach(clearConfigDraft);}
+async function saveGroupTab(tabId=groupWorkspaceState.activeTab){
+  const dirty=groupTabDirtyScopes(tabId);if(!dirty.length)return true;return saveGroupScopes(dirty,{refreshAfter:true,statusTabId:tabId});
+}
+async function revertGroupTab(tabId=groupWorkspaceState.activeTab){
+  const dirty=groupTabDirtyScopes(tabId);if(!dirty.length)return true;
+  const success=await revertGroupScopes(dirty);if(success)setGroupTabStatus(tabId,"Reverted to saved settings","saved");return success;
+}
+async function guardGroupDrafts(){
+  if(groupWorkspaceSaveInProgress)return false;
+  const dirty=groupDirtyScopes();if(!dirty.length)return true;
+  const decision=await askCameraDirtyDecision({title:"Unsaved group settings",description:"Save or discard group changes before continuing."});
+  if(decision==="save"){
+    if(unavailableGroupId&&!groupWorkspaceState.selectedGroup()){
+      updateGroupEditorVisibility();return false;
+    }
+    return saveGroupScopes(dirty,{refreshAfter:true,statusTabId:groupWorkspaceState.activeTab});
+  }
+  if(decision==="discard"){
+    if(unavailableGroupId&&!groupWorkspaceState.selectedGroup()){
+      clearConfigDrafts(dirty);groupWorkspaceState.clearSelection();unavailableGroupId=null;groupPolicyLoadFailures.clear();groupPolicyLoading=false;resetGroupPolicyControls();renderGroupManagement(groupWorkspaceState.groups);return true;
+    }
+    return revertGroupScopes(dirty);
+  }
+  return false;
+}
+async function guardCameraAdminDrafts(){return activeCameraWorkspace==="groups"?guardGroupDrafts():guardCameraDrafts();}
+async function loadGroupScopeWithGuard(sectionId){
+  if(!await guardGroupDrafts())return false;
+  const scope=document.querySelector(`#bulk-admin [data-config-section="${sectionId}"]`),groupId=groupWorkspaceState.selectedGroupId,selection=groupWorkspaceState.captureSelection();
+  if(!scope||!groupId)return false;
+  const tab=GROUP_SECTION_TAB[sectionId],unlock=lockGroupControls();if(tab)setGroupTabStatus(tab,"Loading saved settings…","saving");
+  try{
+    const loaded=await scope.groupLoadConfig?.(groupId,selection);if(!loaded||!groupWorkspaceState.isCurrent(selection))return false;clearConfigDraft(scope);
+    if(sectionId==="group-ai"&&groupWorkspaceState.isCurrent(selection)){const representative=groupWorkspaceState.selectedGroup()?.camera_ids?.[0];if(representative)await loadRepresentativeZoneFrame(representative,document.querySelector("#group-ai-zones-editor"),()=>groupWorkspaceState.isCurrent(selection));}
+    if(tab)setGroupTabStatus(tab,"Saved settings loaded","saved");
+    return true;
+  }
+  catch(error){const message=sectionId==="group-ai"?document.querySelector("#ai-group-message"):document.querySelector("#schedule-message");if(message)message.textContent=error.message;if(tab)setGroupTabStatus(tab,`Load failed: ${error.message}`,"error");return false;}
+  finally{unlock();}
+}
+async function refreshGroups(){
+  setupGroupPolicyWorkspace();
   const {groups}=await api("/api/camera-groups");
-  if(!document.querySelector('#group-management-list [data-config-dirty="true"]'))renderGroupManagement(groups);
+  const priorSelection=groupWorkspaceState.selectedGroupId,hadSelectedGroup=Boolean(priorSelection);
+  groupWorkspaceState.setGroups(groups);sidebarGroups=groups;
+  if(hadSelectedGroup&&!groupWorkspaceState.selectedGroupId&&groupDirtyScopes().length)unavailableGroupId=priorSelection;
+  if(unavailableGroupId&&groups.some(group=>group.id===unavailableGroupId)){groupWorkspaceState.selectGroup(unavailableGroupId);unavailableGroupId=null;}
   const select=document.querySelector("#bulk-group");
   const options=[new Option("Leave groups unchanged","__unchanged__"),new Option("Remove from group","")];
-  for (const group of groups) options.push(new Option(group.name,group.name));
-  select.replaceChildren(...options);
+  for(const group of groups)options.push(new Option(group.name,group.name));
+  select?.replaceChildren(...options);
   const scheduleSelect=document.querySelector("#schedule-group");
-  scheduleSelect.replaceChildren(...(groups.length ? groups.map(group=>new Option(group.name,group.id)) : [new Option("Create a group first","")]));
-  try { const runtime=await api("/api/ai/settings"); document.querySelector("#ai-max-active").value=runtime.max_active_cameras; } catch {}
-}
-function renderGroupManagement(groups) {
-  const target=document.querySelector("#group-management-list");
-  target.replaceChildren(...groups.map(group=>{
-    const card=document.createElement("article"),heading=document.createElement("h4");
-    heading.textContent=group.name+" · "+group.camera_count+" camera(s)";
-    const namePanel=document.createElement("fieldset"),nameLegend=document.createElement("legend");namePanel.dataset.configSection="group-name";nameLegend.textContent="Group name";namePanel.append(nameLegend);
-    const nameLabel=document.createElement("label"),name=document.createElement("input");
-    nameLabel.textContent="Group name ";name.value=group.name;name.maxLength=80;nameLabel.append(name);
-    const rename=document.createElement("button");rename.type="button";rename.textContent="Save group name";
-    rename.dataset.configSaves="group-name";
-    rename.addEventListener("click",async()=>{
-      try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"PATCH",body:JSON.stringify({name:name.value})});await refresh();}
-      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
-    });
-    const members=new Set(group.camera_ids||[]),fieldset=document.createElement("fieldset"),legend=document.createElement("legend");
-    fieldset.dataset.configSection="group-members";legend.textContent="Browsing members";fieldset.append(legend);
-    for(const camera of [...latestCameras].sort((a,b)=>a.name.localeCompare(b.name))){
-      const label=document.createElement("label"),checkbox=document.createElement("input");
-      checkbox.type="checkbox";checkbox.value=camera.id;checkbox.checked=members.has(camera.id);
-      if(camera.group_id===group.id){checkbox.disabled=true;checkbox.title="This is the camera’s policy group and stays in its browsing group automatically.";}
-      label.append(checkbox,document.createTextNode(" "+camera.name));fieldset.append(label);
-    }
-    const saveMembers=document.createElement("button");saveMembers.type="button";saveMembers.textContent="Save browsing members";
-    saveMembers.dataset.configSaves="group-members";
-    saveMembers.addEventListener("click",async()=>{
-      const camera_ids=[...fieldset.querySelectorAll('input[type="checkbox"]:checked')].map(input=>input.value);
-      try{await api("/api/camera-groups/"+encodeURIComponent(group.id)+"/members",{method:"PUT",body:JSON.stringify({camera_ids})});await refresh();}
-      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
-    });
-    const remove=document.createElement("button");remove.type="button";remove.textContent="Delete group";
-    remove.addEventListener("click",async()=>{
-      if(!window.confirm("Delete browsing group “"+group.name+"”? Groups that still own camera policies must be reassigned first."))return;
-      if(!guardDraftsIn(card))return;
-      try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"DELETE"});await refresh();}
-      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
-    });
-    namePanel.append(nameLabel,rename);card.append(heading,namePanel,fieldset,saveMembers,remove);return card;
-  }));
-  if(!groups.length)target.textContent="No camera groups yet.";
+  if(scheduleSelect){scheduleSelect.replaceChildren(new Option("No group selected",""),...groups.map(group=>new Option(group.name,group.id)));scheduleSelect.value=groupWorkspaceState.selectedGroupId||"";}
+  const editor=document.querySelector("#group-management-editor");
+  if(!editor?.querySelector('[data-config-dirty="true"]'))renderGroupManagement(groups);
+  else if(unavailableGroupId)updateGroupEditorVisibility();
+  const groupButton=document.querySelector('[data-camera-workspace-button="groups"]');groupButton?.classList.toggle("hidden",currentRole!=="administrator");
+  try{const runtime=await api("/api/ai/settings");const max=document.querySelector("#ai-max-active");if(max)max.value=runtime.max_active_cameras;}catch{}
 }
 function ensureDiscoveryWorkspace() {
   const root=document.querySelector("#discovery-admin");
@@ -3259,78 +3573,33 @@ document.querySelector("#diagnostics-download").addEventListener("click", async 
   } catch(error) { document.querySelector("#diagnostics-message").textContent=error.message; }
 });
 document.querySelector("#group-form").addEventListener("submit",async event=>{
-  event.preventDefault();
-  const form=event.currentTarget;
-  try {
-    const result=await api("/api/camera-groups",{method:"POST",body:JSON.stringify({name:document.querySelector("#new-group-name").value})});
-    document.querySelector("#bulk-message").textContent=`Created camera group ${result.name}.`;
-    clearConfigDraft(form);form.reset();await refreshGroups();
-  } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
+  event.preventDefault();await saveGroupScopes([event.currentTarget],{refreshAfter:true});
 });
-document.querySelector("#load-group-schedule").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  if(!group) { document.querySelector("#schedule-message").textContent="Create or select a camera group first."; return; }
-  try {
-    const schedule=await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`);
-    document.querySelector("#group-schedule-timezone").value=schedule.timezone||"UTC";
-    renderScheduleEditor(document.querySelector("#group-schedule-editor"),schedule.intervals||[]);
-    document.querySelector("#group-schedule-json").value=JSON.stringify({timezone:schedule.timezone,intervals:schedule.intervals},null,2);
-    document.querySelector("#schedule-message").textContent=schedule.configured ? "Group schedule loaded." : "No group schedule is configured.";
-  } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
-});
-document.querySelector("#save-group-schedule").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  try {
-    if(!group) throw new Error("Create or select a camera group first.");
-    const schedule={timezone:document.querySelector("#group-schedule-timezone").value.trim()||"UTC",intervals:readScheduleEditor(document.querySelector("#group-schedule-editor"))};
-    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"PUT",body:JSON.stringify(schedule)});
-    document.querySelector("#group-schedule-json").value=JSON.stringify(schedule,null,2);
-    document.querySelector("#schedule-message").textContent=`Saved ${result.intervals.length} group schedule interval(s).`;
-    await refresh();
-  } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
-});
+document.querySelector("#load-group-schedule").addEventListener("click",()=>void loadGroupScopeWithGuard("group-schedule"));
+document.querySelector("#save-group-schedule").addEventListener("click",()=>void saveGroupTab("recording"));
 document.querySelector("#clear-group-schedule").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  try {
-    if(!group) throw new Error("Create or select a camera group first.");
-    await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"DELETE"});
-    document.querySelector("#group-schedule-timezone").value="";renderScheduleEditor(document.querySelector("#group-schedule-editor"),[]);document.querySelector("#group-schedule-json").value="";
-    document.querySelector("#schedule-message").textContent="Group schedule removed; assigned cameras now use their camera policy or camera-level override.";
-    await refresh();
-  } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
+  if(!await guardGroupDrafts())return;const group=groupWorkspaceState.selectedGroupId;
+  if(!group){document.querySelector("#schedule-message").textContent="Select a group first.";return;}
+  const selection=groupWorkspaceState.captureSelection(),unlock=lockGroupControls();let removed=false;
+  try{await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"DELETE"});removed=true;const scope=document.querySelector('#group-policy-panel-recording [data-config-section="group-schedule"]');clearConfigDraft(scope);await loadGroupSchedule(group,selection);if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent="Group schedule removed; assigned cameras use their camera policy or camera-level override.";}
+  catch(error){if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent=error.message;}
+  finally{unlock();}
+  if(removed)await refresh();
 });
 document.querySelector("#add-group-schedule-interval").addEventListener("click",()=>{const editor=document.querySelector("#group-schedule-editor");markConfigDraftElement(editor);addScheduleInterval(editor);});
-document.querySelector("#load-group-retention").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  if(!group) { document.querySelector("#schedule-message").textContent="Create or select a camera group first."; return; }
-  try { const policy=await api(`/api/camera-groups/${encodeURIComponent(group)}/retention`); document.querySelector("#group-retention-days").value=policy.retention_days; document.querySelector("#schedule-message").textContent=policy.configured ? "Group retention loaded." : "Group uses the 30 day default."; }
-  catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
-});
-document.querySelector("#save-group-retention").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  try { if(!group) throw new Error("Create or select a camera group first."); const retention_days=Number(document.querySelector("#group-retention-days").value); const policy=await api(`/api/camera-groups/${encodeURIComponent(group)}/retention`,{method:"PUT",body:JSON.stringify({retention_days})}); document.querySelector("#schedule-message").textContent=`Saved group retention target: ${policy.retention_days} days.`; await refresh(); }
-  catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
-});
+document.querySelector("#load-group-retention").addEventListener("click",()=>void loadGroupScopeWithGuard("group-retention"));
+document.querySelector("#save-group-retention").addEventListener("click",()=>void saveGroupTab("recording"));
 document.querySelector("#clear-group-retention").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  try { if(!group) throw new Error("Create or select a camera group first."); await api(`/api/camera-groups/${encodeURIComponent(group)}/retention`,{method:"DELETE"}); document.querySelector("#schedule-message").textContent="Group retention removed; cameras use their camera override or the 30 day default."; await refresh(); }
-  catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
+  if(!await guardGroupDrafts())return;const group=groupWorkspaceState.selectedGroupId;
+  if(!group){document.querySelector("#schedule-message").textContent="Select a group first.";return;}
+  const selection=groupWorkspaceState.captureSelection(),unlock=lockGroupControls();let removed=false;
+  try{await api(`/api/camera-groups/${encodeURIComponent(group)}/retention`,{method:"DELETE"});removed=true;const scope=document.querySelector('#group-policy-panel-recording [data-config-section="group-retention"]');clearConfigDraft(scope);await loadGroupRetention(group,selection);if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent="Group retention removed; cameras use their camera override or the 30 day default.";}
+  catch(error){if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent=error.message;}
+  finally{unlock();}
+  if(removed)await refresh();
 });
-document.querySelector("#load-storage-volumes").addEventListener("click",async()=>{
-  try {
-    const group=document.querySelector("#schedule-group").value;
-    const [status,assignment]=await Promise.all([api("/api/storage"),group?api(`/api/camera-groups/${encodeURIComponent(group)}/storage-volume`):Promise.resolve({volume_id:"default"})]);
-    const select=document.querySelector("#group-storage-volume");
-    select.replaceChildren(...status.volumes.map(volume=>new Option(`${volume.id} · ${volume.state} · ${volume.free_bytes==null?"capacity unknown":Math.round(volume.free_bytes/1048576)+" MiB free"}`,volume.id)));
-    select.value=assignment.volume_id;
-    document.querySelector("#storage-volume-status").replaceChildren(...status.volumes.map(volume=>{const item=document.createElement("li");item.textContent=`${volume.id}: ${volume.state}; ${volume.cameras.length} assigned camera(s)${volume.retention_at_risk?" · retention at risk":""}`;return item;}));
-  } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
-});
-document.querySelector("#save-storage-volume").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  try {if(!group) throw new Error("Create or select a camera group first.");const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/storage-volume`,{method:"PUT",body:JSON.stringify({volume_id:document.querySelector("#group-storage-volume").value})});document.querySelector("#schedule-message").textContent=`Assigned group cameras to ${result.volume_id}.`;await refresh();}
-  catch(error){document.querySelector("#schedule-message").textContent=error.message;}
-});
+document.querySelector("#load-storage-volumes").addEventListener("click",()=>void loadGroupScopeWithGuard("group-storage"));
+document.querySelector("#save-storage-volume").addEventListener("click",()=>void saveGroupTab("storage"));
 function bulkActionChanges(){
   const changes={};
   const group=document.querySelector("#bulk-group").value;
@@ -3554,21 +3823,7 @@ document.querySelector("#apply-import").addEventListener("click",async()=>{
     importCanApply=false; await refresh();
   } catch(error) { document.querySelector("#bulk-message").textContent=error.message; button.disabled=false; }
 });
-document.querySelector("#load-group-ai").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  try{
-    if(!group)throw new Error("Create or select a camera group first.");
-    const config=await api(`/api/camera-groups/${encodeURIComponent(group)}/ai`);
-    document.querySelector("#group-ai-enabled").checked=config.enabled;
-    document.querySelector("#group-ai-fps").value=config.analysis_fps;
-    document.querySelector("#group-ai-confidence").value=config.confidence_threshold;
-    document.querySelector("#group-ai-substream").checked=config.use_substream;
-    document.querySelector("#group-ai-zones").value=JSON.stringify(config.zones);
-    const zoneEditor=document.querySelector("#group-ai-zones-editor");renderZoneEditor(zoneEditor,config.zones||[]);
-    const representative=sidebarGroups.find(item=>item.id===group)?.camera_ids?.[0];if(representative)loadRepresentativeZoneFrame(representative,zoneEditor);
-    document.querySelector("#ai-group-message").textContent=`${config.group_name}: ${config.inherited_camera_count}/${config.camera_count} camera(s) inherit these settings · ${config.model.available?"model ready":config.model.reason}.`;
-  }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
-});
+document.querySelector("#load-group-ai").addEventListener("click",()=>void loadGroupScopeWithGuard("group-ai"));
 async function loadAiRuntimeSettings() {
   const result=await api("/api/ai/settings");
   const model=result.model;
@@ -3582,8 +3837,9 @@ async function loadAiRuntimeSettings() {
   document.querySelector("#ai-runtime-state").textContent=`Active: ${model.runtime} · ${model.model_id} ${model.model_version} · ${model.available?"available":"unavailable: "+model.reason} · ${model.validated?"validated "+model.validated_at:"not validated on this host"}. Model replacement requires an NVR-compatible 448×256 boxes/labels output contract.`;
 }
 document.querySelector("#load-ai-runtime").addEventListener("click",async()=>{
-  try{await loadAiRuntimeSettings();document.querySelector("#ai-group-message").textContent="AI provider and compatible model options refreshed.";}
-  catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
+  const state=document.querySelector("#ai-runtime-state");
+  try{await loadAiRuntimeSettings();state.textContent=`Runtime options refreshed. ${state.textContent}`;}
+  catch(error){state.textContent=error.message;}
 });
 document.querySelector("#validate-ai-runtime").addEventListener("click",async()=>{
   try{
@@ -3591,21 +3847,13 @@ document.querySelector("#validate-ai-runtime").addEventListener("click",async()=
     document.querySelector("#ai-runtime-state").textContent=result.valid?`${result.runtime} ${result.model_id} ${result.model_version} passed model compile and test inference; saving will validate again before activation. ${result.gpu_certification_note}`:`Validation failed for ${result.provider}/${result.model_id}: ${result.reason}`;
   }catch(error){document.querySelector("#ai-runtime-state").textContent=error.message;}
 });
-document.querySelector("#save-group-ai").addEventListener("click",async()=>{
-  const group=document.querySelector("#schedule-group").value;
-  try{
-    if(!group)throw new Error("Create or select a camera group first.");
-    const zones=readZoneEditor(document.querySelector("#group-ai-zones-editor"));document.querySelector("#group-ai-zones").value=JSON.stringify(zones);
-    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/ai`,{method:"PUT",body:JSON.stringify({enabled:document.querySelector("#group-ai-enabled").checked,analysis_fps:Number(document.querySelector("#group-ai-fps").value),confidence_threshold:Number(document.querySelector("#group-ai-confidence").value),use_substream:document.querySelector("#group-ai-substream").checked,zones})});
-    document.querySelector("#ai-group-message").textContent=`Saved group settings for ${result.inherited_camera_count} inherited camera(s). Cameras beyond the configured AI limit will show skipped analysis coverage.`;
-  }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
-});
+document.querySelector("#save-group-ai").addEventListener("click",()=>void saveGroupTab("ai"));
 document.querySelector("#save-ai-runtime").addEventListener("click",async()=>{
   try{
     const result=await api("/api/ai/settings",{method:"PUT",body:JSON.stringify({max_active_cameras:Number(document.querySelector("#ai-max-active").value),provider:document.querySelector("#ai-provider").value,model_id:document.querySelector("#ai-model").value})});
-    document.querySelector("#ai-group-message").textContent=`${result.model.runtime} with ${result.model.model_id} ${result.model.model_version} validated and activated for ${result.max_active_cameras} active camera(s). Inference remains serialized in one bounded slot to prioritize recording.`;
     await loadAiRuntimeSettings();
-  }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
+    document.querySelector("#ai-runtime-state").textContent=`${result.model.runtime} with ${result.model.model_id} ${result.model.model_version} validated and activated for ${result.max_active_cameras} active camera(s). Inference remains serialized in one bounded slot to prioritize recording.`;
+  }catch(error){document.querySelector("#ai-runtime-state").textContent=error.message;}
 });
 document.querySelector("#camera-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -3746,10 +3994,10 @@ if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
 document.querySelector("#logout").addEventListener("click", async () => {
   if(cameraBulkOperationInProgress&&!window.confirm("A bulk update is still running. Signing out will not cancel it, and its results will be cleared from this session. Sign out anyway?"))return;
-  if(!await guardCameraDrafts())return;
+  if(!await guardCameraAdminDrafts())return;
   stopLiveViews();cameraPreviewWorkspace.clearSelection();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();
   await api("/api/auth/logout", { method:"POST" });
-  resetCameraBulkSession();currentRole=null;currentUsername="";selectedCameraId=null;cameraEditorState.selectCamera(null);clearCameraHistory();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;
+  resetCameraBulkSession();groupWorkspaceState.clearSelection();groupWorkspaceState.setQuery("");groupPolicyLoading=false;groupPolicyLoadFailures.clear();unavailableGroupId=null;if(document.querySelector("#group-search"))document.querySelector("#group-search").value="";currentRole=null;currentUsername="";selectedCameraId=null;cameraEditorState.selectCamera(null);clearCameraHistory();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;
   Object.assign(cameraInventoryFilters,{archive:"active",group:"all",connection:"all",health:"all",sortKey:"name",sortDirection:1,query:""});document.querySelector("#camera-inventory-search").value="";
   document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section.dataset.cameraWorkspace!=="cameras"));
   document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{if(button.dataset.cameraWorkspaceButton==="cameras")button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");});

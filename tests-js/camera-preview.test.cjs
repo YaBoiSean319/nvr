@@ -248,4 +248,3 @@ test("a removed or archived camera releases its active frame and media reader", 
   assert.equal(stream.cancelled, true);
   preview.stop();
 });
-

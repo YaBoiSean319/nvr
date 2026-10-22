@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>Workplace NVR</title>
   <link id="brand-favicon" rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/camera-groups.css">
   <style>
     :root { color-scheme:dark; font:15px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; --bg:#0d1117; --panel:#121922; --panel-raised:#18222d; --panel-hover:#202d39; --ink:#eef3f8; --muted:#9aaaba; --line:#2a3948; --accent:#69a1ff; --accent-ink:#071321; --good:#38c98a; --warn:#f3b74f; --bad:#ff7272; --radius:.75rem; }
     :root[data-theme="light"] { color-scheme:light; --bg:#f4f6f8; --panel:#fff; --panel-raised:#fff; --panel-hover:#f1f4f7; --ink:#15202b; --muted:#536273; --line:#d8e0e7; --accent:#175ec8; --accent-ink:#fff; --good:#087443; --warn:#925f00; --bad:#b42318; }
@@ -452,7 +453,7 @@
           <p>Overnight intervals belong to their start day. Overlapping intervals are rejected. Empty intervals mean cameras are scheduled idle.</p>
           <div id="group-schedule-editor" aria-label="Visual weekly recording schedule"></div>
           <button id="add-group-schedule-interval" type="button">Add schedule interval</button>
-          <details><summary>Advanced schedule JSON</summary><label for="group-schedule-json">Weekly schedule JSON</label><textarea id="group-schedule-json" spellcheck="false" placeholder='{"timezone":"America/Indiana/Indianapolis","intervals":[{"days":[0,1,2,3,4],"start":"08:00","end":"17:00","mode":"continuous"}]}'></textarea></details>
+          <details><summary>Schedule JSON view</summary><label for="group-schedule-json">Weekly schedule JSON (read-only view)</label><textarea id="group-schedule-json" spellcheck="false" readonly placeholder='{"timezone":"America/Indiana/Indianapolis","intervals":[{"days":[0,1,2,3,4],"start":"08:00","end":"17:00","mode":"continuous"}]}'></textarea></details>
           <button id="load-group-schedule" type="button">Load group schedule</button><button id="save-group-schedule" type="button">Save group schedule</button><button id="clear-group-schedule" type="button">Remove group schedule</button>
           </fieldset>
           <fieldset data-config-section="group-retention"><legend>Group retention policy</legend>
@@ -471,7 +472,7 @@
           <label for="group-ai-confidence">Minimum detection confidence</label><input id="group-ai-confidence" type="number" min="0.1" max="0.99" step="0.01" value="0.55">
           <label><input id="group-ai-substream" type="checkbox" checked> Use validated lower-resolution streams</label>
           <div id="group-ai-zones-editor" aria-label="Visual group AI zones"></div>
-          <details><summary>Advanced AI zone JSON</summary><label for="group-ai-zones">AI zones (normalized rectangles; empty uses full frame)</label><textarea id="group-ai-zones" spellcheck="false" placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]'></textarea></details>
+          <details><summary>AI zone JSON view</summary><label for="group-ai-zones">AI zones JSON (read-only view; coordinates are normalized; empty uses full frame)</label><textarea id="group-ai-zones" spellcheck="false" readonly placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]'></textarea></details>
           <button id="save-group-ai" type="button">Save group AI settings</button>
           </fieldset>
           <fieldset data-config-section="ai-runtime"><legend>AI runtime and model</legend>
@@ -545,6 +546,7 @@
   </main>
   <script src="/workspace-layout.js" defer></script>
   <script src="/camera-inventory.js" defer></script>
+  <script src="/camera-groups.js" defer></script>
   <script src="/camera-bulk-actions.js" defer></script>
   <script src="/camera-preview.js" defer></script>
   <script src="/camera-preview-ui.js" defer></script>
