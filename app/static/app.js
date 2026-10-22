@@ -5,6 +5,21 @@ let importCanApply = false;
 let lastPreviewCsv = "";
 let liveViews = [];
 let liveStatusTimer = null;
+let cameraAddModes = null;
+let cameraManualGeneration = 0;
+let cameraManualSubmitInProgress = false;
+let cameraManualReconcileInProgress = false;
+let cameraManualOutcomeUnknown = false;
+let cameraManualAttempt = null;
+let importRequestGeneration = 0;
+let importApplyInProgress = false;
+let importRows = [];
+let importSourceCsv = "";
+let importPendingCsv = "";
+let importPendingRowMap = [];
+let importOutcomeUnknown = false;
+let importRetryPrepared = false;
+let importPreviewFresh = false;
 const LIVE_GRID_SIZES = [1, 4, 9, 16];
 const {autoLayoutForCount, reconcileCameraOrder} = window.NvrWorkspaceLayout;
 let activeLiveCameraIds = [];
@@ -228,7 +243,7 @@ async function setCameraWorkspace(id) {
   if(!target)return false;
   const current=document.querySelector(`[data-camera-workspace="${activeCameraWorkspace}"]`);
   if(current&&current!==target){
-    const allowed=activeCameraWorkspace==="cameras"?await guardCameraDrafts():activeCameraWorkspace==="groups"?await guardGroupDrafts():guardDraftsIn(current);
+    const allowed=activeCameraWorkspace==="cameras"?await guardCameraDrafts():activeCameraWorkspace==="add"?await guardAddCameraDrafts(cameraAddModes?.activeMode):activeCameraWorkspace==="groups"?await guardGroupDrafts():guardDraftsIn(current);
     if(!allowed)return false;
   }
   if(activeCameraWorkspace==="cameras"&&id!=="cameras")cameraPreviewWorkspace.leave();
@@ -310,9 +325,19 @@ function setupCameraAdminWorkspaces() {
 
   const add=cameraWorkspace("add","Add Cameras");
   const addHeading=document.createElement("h3");addHeading.textContent="Add Cameras";add.append(addHeading);
-  if(discovery)add.append(discovery);
-  if(form)add.append(form);
-  if(cameraImport)add.append(cameraImport);
+  const cameraAddMessage=document.createElement("p");cameraAddMessage.id="camera-add-message";cameraAddMessage.setAttribute("role","status");cameraAddMessage.setAttribute("aria-live","polite");
+  cameraAddModes=window.NvrCameraOnboarding.mountAddCameraModes(add,{
+    discovery,
+    manualForm:form,
+    csvPanel:cameraImport,
+    manualStatus:cameraAddMessage,
+  },{
+    onBeforeModeChange:(from)=>from==="discover"?guardDraftsIn(document.querySelector("#camera-discovery-mode")):guardAddCameraDrafts(from),
+    onOpenInventory:()=>setCameraWorkspace("cameras"),
+  });
+  const reconcileManual=document.createElement("button");reconcileManual.id="reconcile-manual-camera";reconcileManual.type="button";reconcileManual.textContent="Reconcile add outcome";reconcileManual.classList.add("hidden");
+  reconcileManual.addEventListener("click",()=>void reconcileManualCameraOutcome());
+  cameraAddModes?.getPanel("manual")?.append(reconcileManual);
 
   const groupsWorkspace=cameraWorkspace("groups","Groups & Policies");
   if(groups){const groupHeading=groups.querySelector("#bulk-heading");if(groupHeading)groupHeading.textContent="Groups & Policies";groupsWorkspace.append(groups);}
@@ -412,9 +437,14 @@ function setupConsoleShell() {
   for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#display-settings-admin", "#branding-admin", "#identity-settings", "#settings-recording-link", "#settings-integrations-link", "#logout"]) moveInto(selector, "#app-settings-content");
   setupSettingsCategories();
   for(const selector of ["#discovery-admin","#camera-form","#group-form","#display-settings-admin","#branding-admin","#diagnostics-admin"]){const element=document.querySelector(selector);if(element)element.dataset.configSection=selector.slice(1);}
-  for(const [selector,sections] of Object.entries({"#brand-save":"branding-admin","#brand-reset":"branding-admin","#display-settings-save":"display-settings-admin","#diagnostics-toggle":"diagnostics-admin","#webhook-create":"webhook-create","#heartbeat-save":"heartbeat-config","#save-group-schedule":"group-schedule","#clear-group-schedule":"group-schedule","#save-group-retention":"group-retention","#clear-group-retention":"group-retention","#save-storage-volume":"group-storage","#save-group-ai":"group-ai","#save-ai-runtime":"ai-runtime","#apply-bulk":"bulk-update","#apply-import":"camera-import"})){const button=document.querySelector(selector);if(button)button.dataset.configSaves=sections;}
+  for(const [selector,sections] of Object.entries({"#brand-save":"branding-admin","#brand-reset":"branding-admin","#display-settings-save":"display-settings-admin","#diagnostics-toggle":"diagnostics-admin","#webhook-create":"webhook-create","#heartbeat-save":"heartbeat-config","#save-group-schedule":"group-schedule","#clear-group-schedule":"group-schedule","#save-group-retention":"group-retention","#clear-group-retention":"group-retention","#save-storage-volume":"group-storage","#save-group-ai":"group-ai","#save-ai-runtime":"ai-runtime","#apply-bulk":"bulk-update"})){const button=document.querySelector(selector);if(button)button.dataset.configSaves=sections;}
   document.addEventListener("input",markConfigDraft,true);
   document.addEventListener("change",markConfigDraft,true);
+  const manualCameraForm=document.querySelector("#camera-form");
+  for(const eventName of ["input","change"])manualCameraForm?.addEventListener(eventName,()=>{
+    cameraManualGeneration+=1;
+    cameraAddModes?.clearInventoryActions();
+  });
   window.addEventListener("beforeunload",event=>{if(document.querySelector('[data-config-dirty="true"]')){event.preventDefault();event.returnValue="";}});
   document.querySelectorAll("[data-screen]").forEach(button => button.addEventListener("click", () => void setScreen(button.dataset.screen)));
   const statusToggle=document.querySelector("#ops-status-toggle"),statusDrawer=document.querySelector("#ops-status-drawer");
@@ -953,9 +983,69 @@ async function guardCameraDrafts(root=document.querySelector("#camera-list")){
     discard:async()=>{dirty.forEach(clearConfigDraft);renderCameras(latestCameras);},
   });
 }
+function onboardingDirtyScopes(mode){
+  const root=document.querySelector(mode==="manual"?"#camera-form":mode==="csv"?'[data-config-section="camera-import"]':"#camera-discovery-mode");
+  if(!root)return [];
+  return [...(root.matches?.('[data-config-dirty="true"]')?[root]:[]),...(root.querySelectorAll?.('[data-config-dirty="true"]')||[])];
+}
+function discardCameraOnboardingDraft(mode){
+  const scopes=onboardingDirtyScopes(mode);scopes.forEach(clearConfigDraft);
+  if(mode==="manual"){
+    document.querySelector("#camera-form")?.reset();
+    document.querySelector("#camera-profile")?.replaceChildren(new Option("Load endpoints to choose a stream",""));
+    document.querySelector("#camera-live-profile")?.replaceChildren(new Option("Use main stream for grid",""));
+    cameraManualGeneration+=1;
+    cameraManualAttempt=null;cameraManualOutcomeUnknown=false;
+    document.querySelector("#reconcile-manual-camera")?.classList.add("hidden");
+    const submit=document.querySelector('#camera-form [type="submit"]');if(submit)submit.disabled=false;
+    document.querySelector("#camera-add-message").textContent="Camera setup discarded.";
+  }
+  if(mode==="csv"){
+    document.querySelector("#camera-import-csv").value="";
+    importRows=[];importSourceCsv="";importPendingCsv="";importPendingRowMap=[];importCanApply=false;importOutcomeUnknown=false;importRetryPrepared=false;importPreviewFresh=false;lastPreviewCsv="";
+    document.querySelector("#camera-import-csv").disabled=false;
+    document.querySelector("#import-preview")?.replaceChildren();
+    document.querySelector("#import-row-details")?.replaceChildren();
+    document.querySelector("#retry-import-failed").classList.add("hidden");
+    document.querySelector("#reconcile-import").classList.add("hidden");
+    document.querySelector("#apply-import").disabled=true;
+    document.querySelector("#camera-import-message").textContent="CSV import draft discarded.";
+  }
+}
+async function guardAddCameraDrafts(mode=cameraAddModes?.activeMode){
+  if(mode==="manual"&&cameraManualSubmitInProgress)return false;
+  if(mode==="manual"&&cameraManualReconcileInProgress)return false;
+  if(mode==="manual"&&cameraManualOutcomeUnknown)return reconcileManualCameraOutcome();
+  if(mode==="csv"&&importApplyInProgress)return false;
+  const dirty=onboardingDirtyScopes(mode);if(!dirty.length)return true;
+  if(mode==="discover")return guardDraftsIn(document.querySelector("#camera-discovery-mode"));
+  const dialog=ensureCameraDirtyDialog();
+  const heading=dialog.querySelector("h2"),description=dialog.querySelector("p");
+  const priorHeading=heading.textContent,priorDescription=description.textContent;
+  heading.textContent="Unsaved camera onboarding";
+  description.textContent=mode==="manual"?"Test and add this camera, discard its setup, or keep editing.":"Review and import these rows, discard the CSV, or keep editing.";
+  const decision=await askCameraDirtyDecision();
+  heading.textContent=priorHeading;description.textContent=priorDescription;
+  if(decision==="cancel")return false;
+  if(decision==="discard"){discardCameraOnboardingDraft(mode);return true;}
+  if(mode==="manual")return saveManualCamera();
+  if(mode==="csv"){
+    if(!importCanApply||lastPreviewCsv!==document.querySelector("#camera-import-csv").value){
+      const previewed=await previewCameraImport();
+      if(previewed)document.querySelector("#camera-import-message").textContent="Preview is ready. Review accepted rows, then use Import before leaving this mode.";
+      return false;
+    }
+    return applyCameraImport({duringGuard:true});
+  }
+  return false;
+}
 async function guardScreenDrafts(screen){
   if(screen==="app-settings")return guardDraftsIn(document.querySelector("#app-settings-content"));
-  if(screen==="camera-settings")return activeCameraWorkspace==="groups"?guardGroupDrafts():guardCameraDrafts();
+  if(screen==="camera-settings"){
+    if(activeCameraWorkspace==="cameras")return guardCameraDrafts();
+    if(activeCameraWorkspace==="add")return guardAddCameraDrafts();
+    if(activeCameraWorkspace==="groups")return guardGroupDrafts();
+  }
   return true;
 }
 function clearSavedConfigDraft(path,options,button){
@@ -988,7 +1078,99 @@ function cameraSourcePayload() {
   if(!profile) throw new Error("Load camera endpoints and select a stream profile first");
   return {camera_ip:document.querySelector("#camera-ip").value.trim(),camera_username:document.querySelector("#camera-username").value||null,camera_password:password||null,camera_brand:document.querySelector("#camera-brand").value,onvif_profile_token:profile,live_substream_profile_token:document.querySelector("#camera-live-profile").value||null,device_service_url:document.querySelector("#motion-service-url").value||null};
 }
+async function saveManualCamera(){
+  const form=document.querySelector("#camera-form"),status=document.querySelector("#camera-add-message");
+  if(cameraManualSubmitInProgress)return false;
+  if(cameraManualOutcomeUnknown){status.textContent="Reconcile the previous add outcome before retrying.";return false;}
+  if(!form.reportValidity())return false;
+  cameraManualSubmitInProgress=true;
+  const generation=++cameraManualGeneration,submit=form.querySelector('[type="submit"]');
+  const manualActions=[submit,document.querySelector("#load-camera-profiles"),document.querySelector("#test-camera")].filter(Boolean);
+  manualActions.forEach(button=>button.disabled=true);
+  status.textContent="Testing the camera connection and adding it…";
+  try{
+    const source=cameraSourcePayload();
+    const submittedName=document.querySelector("#camera-name").value;
+    cameraManualAttempt={name:submittedName,cameraIp:source.camera_ip,generation};
+    const result=await api("/api/cameras",{method:"POST",body:JSON.stringify({
+      name:submittedName,
+      ...source,
+      recording_mode:document.querySelector("#recording-mode").value,
+      recording_enabled:document.querySelector("#recording-enabled").checked,
+      motion_service_url:document.querySelector("#motion-service-url").value||null,
+      motion_username:document.querySelector("#motion-username").value||null,
+      motion_password:document.querySelector("#motion-password").value||null,
+      motion_pre_roll_seconds:Number(document.querySelector("#motion-pre-roll").value),
+      motion_post_roll_seconds:Number(document.querySelector("#motion-post-roll").value),
+      motion_fallback_enabled:document.querySelector("#motion-fallback-enabled").checked,
+      motion_zones:JSON.parse(document.querySelector("#motion-zones").value||"[]"),
+      motion_sensitivity:Number(document.querySelector("#motion-sensitivity").value)
+    })});
+    const changed=generation!==cameraManualGeneration;
+    const resolution=result.video?.width&&result.video?.height?`${result.video.width}×${result.video.height}`:"resolution unavailable";
+    const recording=result.recording_enabled===true?"Recording was explicitly enabled.":"Recording remains off.";
+    status.textContent=`${result.name||"Camera"} added · ${result.video?.codec||"video checked"} ${resolution}. ${recording}${changed?" The form changed while the request was running, so those newer edits were kept.":""}`;
+    cameraManualOutcomeUnknown=false;cameraManualAttempt=null;
+    document.querySelector("#reconcile-manual-camera")?.classList.add("hidden");
+    cameraAddModes?.showInventoryAction("manual");
+    if(!changed){
+      clearConfigDraft(form);
+      form.reset();
+      document.querySelector("#camera-profile").replaceChildren(new Option("Load endpoints to choose a stream",""));
+      document.querySelector("#camera-live-profile").replaceChildren(new Option("Use main stream for grid",""));
+      cameraManualGeneration+=1;
+    }
+    try{await refresh();}
+    catch(error){status.textContent+=` Inventory refresh failed: ${error.message}`;}
+    return !changed;
+  }catch(error){
+    if(error instanceof TypeError){
+      cameraManualOutcomeUnknown=true;
+      document.querySelector("#reconcile-manual-camera")?.classList.remove("hidden");
+      status.textContent="The add response was interrupted. Reconcile its outcome before retrying; the form is unchanged.";
+    }else{
+      cameraManualAttempt=null;
+      status.textContent=error.message;
+    }
+    return false;
+  }finally{
+    cameraManualSubmitInProgress=false;
+    manualActions.forEach(button=>button.disabled=button===submit?cameraManualOutcomeUnknown:false);
+  }
+}
+async function reconcileManualCameraOutcome(){
+  if(!cameraManualOutcomeUnknown||!cameraManualAttempt||cameraManualReconcileInProgress)return false;
+  const status=document.querySelector("#camera-add-message"),button=document.querySelector("#reconcile-manual-camera");
+  cameraManualReconcileInProgress=true;button.disabled=true;status.textContent="Checking the camera inventory for the interrupted add…";
+  try{
+    const inventory=await api("/api/cameras");
+    latestCameras=inventory.cameras||[];sidebarCameras=latestCameras;renderCameras(latestCameras);renderSidebar();
+    const attempt=cameraManualAttempt;
+    const existing=latestCameras.find(camera=>camera.name?.toLocaleLowerCase()===attempt.name.trim().toLocaleLowerCase()&&camera.camera_ip===attempt.cameraIp);
+    const unchanged=cameraManualGeneration===attempt.generation;
+    cameraManualOutcomeUnknown=false;cameraManualAttempt=null;button.classList.add("hidden");
+    const submit=document.querySelector('#camera-form [type="submit"]');if(submit)submit.disabled=false;
+    if(existing){
+      cameraAddModes?.showInventoryAction("manual");
+      if(unchanged){
+        const form=document.querySelector("#camera-form");clearConfigDraft(form);form.reset();
+        document.querySelector("#camera-profile").replaceChildren(new Option("Load endpoints to choose a stream",""));
+        document.querySelector("#camera-live-profile").replaceChildren(new Option("Use main stream for grid",""));
+        cameraManualGeneration+=1;
+      }
+      status.textContent=`${attempt.name} is already in the camera inventory. The interrupted add completed${unchanged?"":"; newer form edits were kept"}.`;
+      return unchanged;
+    }
+    status.textContent=`No camera named ${attempt.name} at ${attempt.cameraIp} appears in the current inventory. Review the form before retrying.`;
+    return false;
+  }catch(error){
+    status.textContent=`Could not verify the camera inventory: ${error.message}. The add outcome is still unknown.`;
+    return false;
+  }finally{cameraManualReconcileInProgress=false;button.disabled=false;}
+}
 async function loadCameraProfiles() {
+  if(cameraManualSubmitInProgress)return null;
+  const requestGeneration=cameraManualGeneration;
   const address=document.querySelector("#camera-ip").value.trim();
   const port=Number(document.querySelector("#camera-port").value);
   if(!address || !Number.isInteger(port) || port<1 || port>65535) throw new Error("Enter a camera IPv4 address and a valid ONVIF port");
@@ -996,6 +1178,7 @@ async function loadCameraProfiles() {
   if(password!==document.querySelector("#camera-password-confirm").value) throw new Error("Camera passwords do not match");
   const device_service_url=document.querySelector("#motion-service-url").value.trim()||`http://${address}:${port}/onvif/device_service`;
   const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address,camera_username:document.querySelector("#camera-username").value||null,camera_password:password||null,camera_brand:document.querySelector("#camera-brand").value,device_service_url})});
+  if(requestGeneration!==cameraManualGeneration)return null;
   const select=document.querySelector("#camera-profile");
   select.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
   if(result.profiles.length>1) select.prepend(new Option("Select stream profile",""));
@@ -1030,6 +1213,9 @@ async function refresh() {
     document.querySelector("#webhooks-admin").classList.toggle("hidden", !admin);
     document.querySelector("#heartbeat-admin").classList.toggle("hidden", !admin);
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
+    document.querySelector('[data-camera-workspace-button="add"]')?.classList.toggle("hidden",!admin);
+    document.querySelector('[data-camera-workspace="add"]')?.classList.toggle("hidden",!admin||activeCameraWorkspace!=="add");
+    if(!admin&&activeCameraWorkspace==="add"){activeCameraWorkspace="cameras";document.querySelector('[data-camera-workspace="cameras"]')?.classList.remove("hidden");}
     document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
     document.querySelector("#bulk-admin").classList.toggle("hidden", !admin);
     await refreshDisplaySettings();
@@ -2597,7 +2783,7 @@ async function guardGroupDrafts(){
   }
   return false;
 }
-async function guardCameraAdminDrafts(){return activeCameraWorkspace==="groups"?guardGroupDrafts():guardCameraDrafts();}
+async function guardCameraAdminDrafts(){return activeCameraWorkspace==="groups"?guardGroupDrafts():activeCameraWorkspace==="add"?guardAddCameraDrafts():guardCameraDrafts();}
 async function loadGroupScopeWithGuard(sectionId){
   if(!await guardGroupDrafts())return false;
   const scope=document.querySelector(`#bulk-admin [data-config-section="${sectionId}"]`),groupId=groupWorkspaceState.selectedGroupId,selection=groupWorkspaceState.captureSelection();
@@ -3539,15 +3725,18 @@ document.querySelector("#load-camera-profiles").addEventListener("click", async 
   const button=event.currentTarget; button.disabled=true;
   try { await loadCameraProfiles(); }
   catch(error) { document.querySelector("#camera-profile-message").textContent=error.message; }
-  finally { button.disabled=false; }
+  finally { button.disabled=cameraManualSubmitInProgress; }
 });
-document.querySelector("#test-camera").addEventListener("click", async () => {
-  const message=document.querySelector("#camera-message"); message.textContent="Testing camera video…";
+document.querySelector("#test-camera").addEventListener("click", async event => {
+  const button=event.currentTarget,generation=cameraManualGeneration;
+  const status=document.querySelector("#camera-add-message");button.disabled=true;status.textContent="Testing camera video…";
   try {
     const source=cameraSourcePayload();
     const result=await api("/api/cameras/test", { method:"POST", body:JSON.stringify({...source,motion_service_url:document.querySelector("#motion-service-url").value||null}) });
-    message.textContent=result.reachable ? `Video available · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}` : result.reason;
-  } catch (error) { message.textContent=error.message; }
+    if(generation!==cameraManualGeneration)return;
+    status.textContent=result.reachable ? `Video available · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}. Recording remains off until you explicitly enable it.` : result.reason;
+  } catch (error) { if(generation===cameraManualGeneration)status.textContent=error.message; }
+  finally {button.disabled=cameraManualSubmitInProgress;}
 });
 document.querySelector("#discover-cameras").addEventListener("click", async () => {
   await runDiscoveryScan();
@@ -3793,35 +3982,190 @@ async function retryFailedBulkTargets(){
   }
 }
 document.querySelector("#apply-bulk").addEventListener("click",openBulkReviewDialog);
-document.querySelector("#preview-import").addEventListener("click",async()=>{
-  const message=document.querySelector("#bulk-message");
-  const csv_text=document.querySelector("#camera-import-csv").value;
-  importCanApply=false; lastPreviewCsv=""; document.querySelector("#apply-import").disabled=true;
-  try {
-    const result=await api("/api/cameras/import/preview",{method:"POST",body:JSON.stringify({csv_text})});
-    const target=document.querySelector("#import-preview");
-    target.replaceChildren(...result.rows.map(row=>{
-      const line=document.createElement("p");
-      line.textContent=`CSV row ${row.row} · ${row.name || "Unnamed"} · ${row.group_name || "No group"} · ${row.status}${row.errors.length ? ` · ${row.errors.join("; ")}` : ""}`;
-      return line;
-    }));
-    message.textContent=`Preview: ${result.accepted_count} accepted, ${result.rejected_count} rejected. Stream credentials are not echoed.`;
-    importCanApply=result.accepted_count>0; lastPreviewCsv=csv_text; document.querySelector("#apply-import").disabled=!importCanApply;
-  } catch(error) { message.textContent=error.message; }
-});
-document.querySelector("#apply-import").addEventListener("click",async()=>{
-  if(!importCanApply || lastPreviewCsv!==document.querySelector("#camera-import-csv").value) {
-    document.querySelector("#bulk-message").textContent="Preview the current CSV again before importing."; return;
+function importStatusLabel(status){
+  return ({accepted:"Ready to import",created:"Added",duplicate:"Already exists",invalid:"Needs correction",failed:"Import failed"})[status]||status;
+}
+function mergeImportRows(current,updates){
+  const rows=new Map((current||[]).map(row=>[Number(row.row),row]));
+  for(const row of updates||[])rows.set(Number(row.row),row);
+  return [...rows.values()].sort((left,right)=>Number(left.row)-Number(right.row));
+}
+function renderCameraImportRows(){
+  const target=document.querySelector("#import-preview");if(!target)return;
+  target.replaceChildren();
+  const summary=document.createElement("p");summary.id="import-summary";summary.setAttribute("role","status");summary.setAttribute("aria-live","polite");
+  const counts={created:0,failed:0,accepted:0,duplicate:0,invalid:0};
+  for(const row of importRows)if(Object.hasOwn(counts,row.status))counts[row.status]+=1;
+  summary.textContent=importRows.length
+    ? `${counts.created} added · ${counts.failed} failed · ${counts.accepted} ready · ${counts.duplicate} duplicates · ${counts.invalid} invalid`
+    : "Preview CSV rows to see eligible, duplicate, and invalid entries.";
+  target.append(summary);
+  if(!importRows.length)return;
+  const scroll=document.createElement("div");scroll.className="camera-import-results-scroll";scroll.tabIndex=0;scroll.setAttribute("role","region");scroll.setAttribute("aria-label","Camera CSV import results");
+  const table=document.createElement("table");table.className="camera-import-results-table";
+  const caption=document.createElement("caption");caption.textContent="Camera CSV import results";table.append(caption);
+  const head=document.createElement("thead"),header=document.createElement("tr");
+  for(const label of ["CSV row","Camera","Group","Result","Details"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;header.append(cell);}
+  head.append(header);table.append(head);
+  const body=document.createElement("tbody");
+  for(const row of importRows){
+    const tr=document.createElement("tr");tr.dataset.importStatus=row.status;
+    const number=document.createElement("th");number.scope="row";number.textContent=String(row.row);tr.append(number);
+    const name=document.createElement("td");name.textContent=row.name||"Unnamed";tr.append(name);
+    const group=document.createElement("td");group.textContent=row.group_name||"No group";tr.append(group);
+    const result=document.createElement("td");result.textContent=importStatusLabel(row.status);result.dataset.state=row.status;tr.append(result);
+    const detail=document.createElement("td");const button=document.createElement("button");button.type="button";button.textContent="View details";button.setAttribute("aria-label",`View details for CSV row ${row.row}, ${row.name||"Unnamed"}`);button.addEventListener("click",()=>showCameraImportRowDetails(row));detail.append(button);tr.append(detail);
+    body.append(tr);
   }
-  const button=document.querySelector("#apply-import"); button.disabled=true;
-  try {
-    const result=await api("/api/cameras/import/apply",{method:"POST",body:JSON.stringify({csv_text:lastPreviewCsv})});
-    clearConfigDraft(button.closest("[data-config-section]"));
-    const target=document.querySelector("#import-preview");
-    target.replaceChildren(...result.rows.map(row=>{ const line=document.createElement("p"); line.textContent=`CSV row ${row.row} · ${row.name || "Unnamed"} · ${row.status}${row.errors.length ? ` · ${row.errors.join("; ")}` : ""}`; return line; }));
-    document.querySelector("#bulk-message").textContent=`Imported ${result.created_count} camera(s); ${result.failed_count} row(s) need attention.`;
-    importCanApply=false; await refresh();
-  } catch(error) { document.querySelector("#bulk-message").textContent=error.message; button.disabled=false; }
+  table.append(body);scroll.append(table);target.append(scroll);
+}
+function showCameraImportRowDetails(row){
+  const details=document.querySelector("#import-row-details");if(!details)return;
+  details.replaceChildren();
+  const heading=document.createElement("h4");heading.textContent=`CSV row ${row.row} · ${row.name||"Unnamed"}`;details.append(heading);
+  const state=document.createElement("p");state.textContent=importStatusLabel(row.status);details.append(state);
+  const errors=Array.isArray(row.errors)?row.errors:[];
+  if(errors.length){const list=document.createElement("ul");for(const error of errors){const item=document.createElement("li");item.textContent=error;list.append(item);}details.append(list);}
+  else {const note=document.createElement("p");note.textContent="No additional row detail.";details.append(note);}
+}
+function setCameraImportActions({applying=false,retrying=false,unknown=importOutcomeUnknown}={}){
+  const input=document.querySelector("#camera-import-csv");
+  const preview=document.querySelector("#preview-import");
+  const apply=document.querySelector("#apply-import");
+  const retry=document.querySelector("#retry-import-failed");
+  const reconcile=document.querySelector("#reconcile-import");
+  if(input)input.disabled=unknown||applying||retrying;
+  if(preview)preview.disabled=applying||retrying||unknown;
+  if(apply)apply.disabled=applying||retrying||unknown||!importCanApply;
+  if(retry){const failed=importRows.some(row=>row.status==="failed");retry.classList.toggle("hidden",unknown||!(importRetryPrepared||importPreviewFresh&&failed));retry.disabled=applying||retrying;}
+  if(reconcile){reconcile.classList.toggle("hidden",!unknown);reconcile.disabled=applying||retrying;}
+}
+async function previewCameraImport({csvText=document.querySelector("#camera-import-csv").value,reconcile=false,rowMap=null}={}){
+  if(importApplyInProgress)return false;
+  if(importOutcomeUnknown&&!reconcile){document.querySelector("#camera-import-message").textContent="Reconcile the previous import outcome before starting another preview.";return false;}
+  const generation=++importRequestGeneration;
+  const status=document.querySelector("#camera-import-message");
+  status.textContent=reconcile?"Checking the prior import against the current inventory…":"Validating CSV rows…";
+  setCameraImportActions({applying:true,unknown:importOutcomeUnknown});
+  try{
+    const result=await api("/api/cameras/import/preview",{method:"POST",body:JSON.stringify({csv_text:csvText})});
+    if(generation!==importRequestGeneration)return false;
+    if(!reconcile&&csvText!==document.querySelector("#camera-import-csv").value)return false;
+    const mapping=rowMap||result.rows.map(row=>row.row);
+    const mapped=result.rows.map((row,index)=>({...row,row:mapping[index]??row.row}));
+    if(reconcile){
+      importRows=mergeImportRows(importRows,mapped);
+      importOutcomeUnknown=false;
+      const accepted=result.rows.map((row,index)=>({row,index})).filter(item=>item.row.status==="accepted");
+      importPendingCsv=window.NvrCameraOnboarding.buildCsvForStatuses(csvText,result.rows,["accepted"]);
+      importPendingRowMap=accepted.map(item=>mapping[item.index]??item.row.row);
+      importCanApply=false;
+      importRetryPrepared=Boolean(importPendingCsv);importPreviewFresh=true;
+      document.querySelector("#camera-import-message").textContent=importPendingCsv
+        ? "Inventory checked. Only rows still eligible for addition are ready to retry."
+        : "Inventory checked. No unconfirmed row is eligible to add again.";
+      if(mapped.some(row=>row.status==="duplicate")){
+        cameraAddModes?.showInventoryAction("csv");
+        try{await refresh();}catch{}
+      }
+      if(!importPendingCsv&&!importRows.some(row=>["accepted","failed","invalid"].includes(row.status))){
+        document.querySelector("#camera-import-csv").value="";importSourceCsv="";lastPreviewCsv="";
+        clearConfigDraft(document.querySelector('[data-config-section="camera-import"]'));
+      }
+      const retry=document.querySelector("#retry-import-failed");
+      retry.textContent="Retry unconfirmed rows";
+      retry.classList.toggle("hidden",!importPendingCsv);
+      document.querySelector("#apply-import").disabled=true;
+    }else{
+      importSourceCsv=csvText;
+      importRows=mapped;
+      lastPreviewCsv=csvText;
+      importRetryPrepared=false;importPreviewFresh=true;
+      const accepted=result.rows.filter(row=>row.status==="accepted");
+      importPendingCsv=window.NvrCameraOnboarding.buildCsvForStatuses(csvText,result.rows,["accepted"]);
+      importPendingRowMap=accepted.map(row=>row.row);
+      importCanApply=Boolean(importPendingCsv);
+      document.querySelector("#camera-import-message").textContent=`Preview: ${result.accepted_count} eligible, ${result.rejected_count} duplicate or invalid. Only eligible rows will be sent for testing and import.`;
+      document.querySelector("#retry-import-failed").textContent="Retry failed rows";
+      document.querySelector("#retry-import-failed").classList.add("hidden");
+      if(csvText!==""&&result.accepted_count===0)document.querySelector("#camera-import-message").textContent+=" No rows are eligible to add.";
+    }
+    renderCameraImportRows();
+    setCameraImportActions({unknown:false});
+    return true;
+  }catch(error){
+    if(generation===importRequestGeneration){status.textContent=error.message;if(!reconcile)importPreviewFresh=false;}
+    return false;
+  }finally{
+    if(generation===importRequestGeneration)setCameraImportActions({unknown:importOutcomeUnknown});
+  }
+}
+async function applyCameraImport({duringGuard=false}={}){
+  if(importApplyInProgress)return false;
+  const status=document.querySelector("#camera-import-message");
+  const csvText=importPendingCsv;
+  const rowMap=[...importPendingRowMap];
+  if(!importCanApply||!csvText){status.textContent="Preview the current CSV again before importing.";return false;}
+  if(!duringGuard&&!importOutcomeUnknown&&lastPreviewCsv!==document.querySelector("#camera-import-csv").value){status.textContent="The CSV changed after preview. Preview the current text before importing.";return false;}
+  const generation=++importRequestGeneration;
+  setCameraImportActions({applying:true,unknown:false});
+  importApplyInProgress=true;
+  status.textContent=`Testing and importing ${rowMap.length} reviewed eligible camera row(s)…`;
+  try{
+    const result=await api("/api/cameras/import/apply",{method:"POST",body:JSON.stringify({csv_text:csvText})});
+    if(generation!==importRequestGeneration)return false;
+    const mapped=result.rows.map((row,index)=>({...row,row:rowMap[index]??row.row}));
+    importRows=mergeImportRows(importRows,mapped);
+    importPendingCsv="";importPendingRowMap=[];importCanApply=false;importOutcomeUnknown=false;
+    importRetryPrepared=false;importPreviewFresh=true;
+    const attention=importRows.filter(row=>!["created","duplicate"].includes(row.status));
+    status.textContent=`Added ${result.created_count} camera(s); ${attention.length} row(s) still need attention. Stream credentials are not shown.`;
+    if(result.created_count>0){cameraAddModes?.showInventoryAction("csv");await refresh();}
+    if(!attention.length){
+      clearConfigDraft(document.querySelector('[data-config-section="camera-import"]'));
+      document.querySelector("#camera-import-csv").value="";importSourceCsv="";lastPreviewCsv="";
+      status.textContent+=" The source CSV was cleared; row results are retained.";
+    }
+    document.querySelector("#retry-import-failed").textContent="Retry failed rows";
+    renderCameraImportRows();
+    setCameraImportActions({unknown:false});
+    return attention.length===0;
+  }catch(error){
+    if(generation===importRequestGeneration){
+      if(error instanceof TypeError){
+        importOutcomeUnknown=true;
+        importRetryPrepared=false;importPreviewFresh=false;
+        document.querySelector("#reconcile-import").textContent="Reconcile import outcome";
+        status.textContent="The import response was interrupted. Its outcome is unknown. Reconcile against the current inventory before retrying.";
+      }else status.textContent=error.message;
+      setCameraImportActions({unknown:importOutcomeUnknown});
+    }
+    return false;
+  }finally{
+    importApplyInProgress=false;
+    if(generation===importRequestGeneration)setCameraImportActions({unknown:importOutcomeUnknown});
+  }
+}
+async function retryFailedCameraImport(){
+  if(importOutcomeUnknown){document.querySelector("#camera-import-message").textContent="Reconcile the previous import outcome before retrying.";return false;}
+  if(importRetryPrepared)importCanApply=Boolean(importPendingCsv);
+  else if(!importPendingCsv){
+    importPendingCsv=window.NvrCameraOnboarding.buildRetryCsv(importSourceCsv,importRows);
+    importPendingRowMap=importRows.filter(row=>row.status==="failed").map(row=>row.row);
+    importCanApply=Boolean(importPendingCsv);
+  }
+  return applyCameraImport();
+}
+document.querySelector("#preview-import").addEventListener("click",()=>void previewCameraImport());
+document.querySelector("#apply-import").addEventListener("click",()=>void applyCameraImport());
+document.querySelector("#retry-import-failed").addEventListener("click",()=>void retryFailedCameraImport());
+document.querySelector("#reconcile-import").addEventListener("click",()=>void previewCameraImport({csvText:importPendingCsv,reconcile:true,rowMap:importPendingRowMap}));
+document.querySelector("#camera-import-csv").addEventListener("input",()=>{
+  importRequestGeneration+=1;
+  if(importOutcomeUnknown)return;
+  importCanApply=false;importPendingCsv="";importPendingRowMap=[];lastPreviewCsv="";importRetryPrepared=false;importPreviewFresh=false;
+  document.querySelector("#camera-import-message").textContent="CSV changed. Preview this text before importing.";
+  setCameraImportActions({unknown:false});
 });
 document.querySelector("#load-group-ai").addEventListener("click",()=>void loadGroupScopeWithGuard("group-ai"));
 async function loadAiRuntimeSettings() {
@@ -3855,34 +4199,7 @@ document.querySelector("#save-ai-runtime").addEventListener("click",async()=>{
     document.querySelector("#ai-runtime-state").textContent=`${result.model.runtime} with ${result.model.model_id} ${result.model.model_version} validated and activated for ${result.max_active_cameras} active camera(s). Inference remains serialized in one bounded slot to prioritize recording.`;
   }catch(error){document.querySelector("#ai-runtime-state").textContent=error.message;}
 });
-document.querySelector("#camera-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  const form=event.currentTarget;
-  const message=document.querySelector("#camera-message"); message.textContent="Testing camera and adding it…";
-  try {
-    const source=cameraSourcePayload();
-    const result=await api("/api/cameras", { method:"POST", body:JSON.stringify({
-      name:document.querySelector("#camera-name").value,
-      ...source,
-      recording_mode:document.querySelector("#recording-mode").value,
-      recording_enabled:document.querySelector("#recording-enabled").checked,
-      motion_service_url:document.querySelector("#motion-service-url").value || null,
-      motion_username:document.querySelector("#motion-username").value || null,
-      motion_password:document.querySelector("#motion-password").value || null,
-      motion_pre_roll_seconds:Number(document.querySelector("#motion-pre-roll").value),
-      motion_post_roll_seconds:Number(document.querySelector("#motion-post-roll").value),
-      motion_fallback_enabled:document.querySelector("#motion-fallback-enabled").checked,
-      motion_zones:JSON.parse(document.querySelector("#motion-zones").value||"[]"),
-      motion_sensitivity:Number(document.querySelector("#motion-sensitivity").value)
-    }) });
-    clearConfigDraft(form);
-    document.querySelector("#camera-form").reset();
-    document.querySelector("#camera-profile").replaceChildren(new Option("Load endpoints to choose a stream",""));
-    document.querySelector("#camera-live-profile").replaceChildren(new Option("Use main stream for grid",""));
-    message.textContent=`${result.name} added · ${result.video.codec} ${result.video.width || "?"}×${result.video.height || "?"}`;
-    await refresh();
-  } catch (error) { message.textContent=error.message; }
-});
+document.querySelector("#camera-form").addEventListener("submit",event=>{event.preventDefault();void saveManualCamera();});
 document.querySelector("#setup-form").addEventListener("submit", async event => {
   event.preventDefault(); message.textContent = "";
   try { await api("/api/setup/admin", { method:"POST", body:JSON.stringify({ username:document.querySelector("#setup-user").value, password:document.querySelector("#setup-pass").value }) }); await refresh(); }
@@ -3994,7 +4311,7 @@ if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
 document.querySelector("#logout").addEventListener("click", async () => {
   if(cameraBulkOperationInProgress&&!window.confirm("A bulk update is still running. Signing out will not cancel it, and its results will be cleared from this session. Sign out anyway?"))return;
-  if(!await guardCameraAdminDrafts())return;
+  if(!await guardScreenDrafts("camera-settings"))return;
   stopLiveViews();cameraPreviewWorkspace.clearSelection();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();
   await api("/api/auth/logout", { method:"POST" });
   resetCameraBulkSession();groupWorkspaceState.clearSelection();groupWorkspaceState.setQuery("");groupPolicyLoading=false;groupPolicyLoadFailures.clear();unavailableGroupId=null;if(document.querySelector("#group-search"))document.querySelector("#group-search").value="";currentRole=null;currentUsername="";selectedCameraId=null;cameraEditorState.selectCamera(null);clearCameraHistory();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;
