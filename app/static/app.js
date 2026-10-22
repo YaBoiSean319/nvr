@@ -48,6 +48,17 @@ let workspaceSaveTimer = null;
 let liveViewDirty = false;
 let cachedLiveArrangement = null;
 let selectedCameraId = null;
+const cameraDiscoveryState=window.NvrCameraDiscovery.createDiscoveryState();
+let discoveryWorkspaceReady=false;
+let discoveryScanGeneration=0;
+let discoverySelectionGeneration=0;
+let discoveryScanPending=false;
+let discoveryLastScanText="No scan has run in this session.";
+let discoveryLastScanRequest=null;
+let discoveryRenderedCandidateId=null;
+let discoverySelectedSnapshot=null;
+let discoveryResultsLoaded=false;
+const discoveryAddPendingIds=new Set();
 const cameraEditorState=window.NvrCameraEditor.createCameraEditorState();
 const cameraPreviewWorkspace=window.NvrCameraPreviewWorkspace.createCameraPreviewWorkspace();
 let cameraEditorSaveInProgress=false;
@@ -692,6 +703,7 @@ async function showLogin() {
 }
 function markConfigDraft(event){
   if(!(event.target instanceof HTMLElement)||event.target.type==="search"||event.target.id==="schedule-group")return;
+  if(event.target.closest("#discovery-admin")&&!event.target.closest('[data-config-section="discovery-candidate-setup"]'))return;
   markConfigDraftElement(event.target);
 }
 function markConfigDraftElement(target){
@@ -2289,86 +2301,361 @@ function renderGroupManagement(groups) {
   }));
   if(!groups.length)target.textContent="No camera groups yet.";
 }
-async function refreshDiscovery() {
-  const [{candidates}, inventory] = await Promise.all([api("/api/discovery/candidates"), api("/api/cameras")]);
-  const target=document.querySelector("#discovery-candidates");
-  if (!candidates.length) { target.textContent="No discovered cameras awaiting review."; return; }
-  target.replaceChildren(...candidates.map(candidate => {
-    const card=document.createElement("article");
-    const title=document.createElement("h4");
-    const candidateAddress = (() => { try { return new URL(candidate.service_urls[0]).hostname; } catch { return ""; } })();
-    title.textContent=candidate.device_uuid.startsWith("ipscan:") ? `Camera at ${candidateAddress}` : `ONVIF device ${candidate.device_uuid}`;
-    const state=document.createElement("p");
-    state.textContent=candidate.linked_camera_id ? `Already linked to camera ${candidate.linked_camera_id}` : `First seen ${formatDateTime(candidate.first_seen_at)} · Last seen ${formatDateTime(candidate.last_seen_at)}`;
-    const services=document.createElement("p"); services.textContent=`Device service: ${candidate.service_urls.join(", ") || "unavailable"}`;
-    const capabilities=document.createElement("p");
-    capabilities.textContent=`Capabilities · ${Object.entries(candidate.capabilities).map(([name,result])=>`${name}: ${result}`).join(" · ")}`;
-    card.append(title,state,services,capabilities);
-    if (!candidate.linked_camera_id) {
-      const nameLabel=document.createElement("label"); nameLabel.textContent="Camera name";
-      const name=document.createElement("input"); name.maxLength=120; name.required=true; name.value=`Camera ${candidate.device_uuid.slice(0,8)}`;
-      const addressLabel=document.createElement("label"); addressLabel.textContent="Camera IP address";
-      const address=document.createElement("input"); address.inputMode="numeric"; address.autocomplete="off"; address.required=true; address.value=candidateAddress;
-      const portLabel=document.createElement("label"); portLabel.textContent="Camera ONVIF port";
-      const port=document.createElement("input"); port.type="number"; port.min="1"; port.max="65535"; port.value="80";
-      const brandLabel=document.createElement("label"); brandLabel.textContent="Camera brand";
-      const brand=document.createElement("select");
-      for(const [value,label] of [["auto","Auto-detect / ONVIF"],["acti","ACTi"],["axis","Axis"],["bosch","Bosch"],["dahua","Dahua"],["hanwha","Hanwha"],["hikvision","Hikvision"],["reolink","Reolink"],["samsung","Samsung"],["uniview","Uniview"],["other","Other / generic ONVIF"]]) { const option=new Option(label,value); brand.append(option); }
-      const userLabel=document.createElement("label"); userLabel.textContent="Camera username (optional)";
-      const user=document.createElement("input"); user.autocomplete="off";
-      const passLabel=document.createElement("label"); passLabel.textContent="Camera password (optional)";
-      const pass=document.createElement("input"); pass.type="password"; pass.autocomplete="new-password";
-      const confirmLabel=document.createElement("label"); confirmLabel.textContent="Confirm camera password";
-      const confirm=document.createElement("input"); confirm.type="password"; confirm.autocomplete="new-password";
-      const serviceLabel=document.createElement("label"); serviceLabel.textContent="ONVIF device endpoint URL (optional custom path)";
-      const serviceInput=document.createElement("input"); serviceInput.type="url"; serviceInput.autocomplete="off"; serviceInput.value=candidate.service_urls[0]||"";
-      const loadProfiles=document.createElement("button"); loadProfiles.type="button"; loadProfiles.textContent="Load camera endpoints";
-      const profileLabel=document.createElement("label"); profileLabel.textContent="Camera stream endpoint";
-      const profiles=document.createElement("select"); profiles.append(new Option("Load endpoints to choose a stream",""));
-      let serviceUrl=serviceInput.value;
-      serviceInput.addEventListener("input",()=>{ serviceUrl=serviceInput.value.trim(); profiles.replaceChildren(new Option("Load endpoints to choose a stream","")); });
-      loadProfiles.addEventListener("click",async()=>{
-        loadProfiles.disabled=true;
-        try {
-          if(pass.value!==confirm.value) throw new Error("Camera passwords do not match");
-          const portNumber=Number(port.value); if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535) throw new Error("Enter a valid camera ONVIF port");
-          const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address.value,camera_username:user.value||null,camera_password:pass.value||null,camera_brand:brand.value,device_service_url:serviceInput.value||`http://${address.value}:${portNumber}/onvif/device_service`})});
-          serviceUrl=result.device_service_url;
-          profiles.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
-          if(result.profiles.length>1) profiles.prepend(new Option("Select stream profile",""));
-        } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
-        finally { loadProfiles.disabled=false; }
-      });
-      const add=document.createElement("button"); add.type="button"; add.textContent="Test and add camera";
-      add.addEventListener("click",async()=>{
-        try {
-          if(pass.value!==confirm.value) throw new Error("Camera passwords do not match");
-          if(!profiles.value) throw new Error("Load camera endpoints and select a stream profile first");
-          const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value,camera_ip:address.value,camera_username:user.value||null,camera_password:pass.value||null,camera_brand:brand.value,onvif_profile_token:profiles.value,device_service_url:serviceUrl,motion_username:user.value||null,motion_password:pass.value||null,recording_mode:"motion",recording_enabled:false})});
-          document.querySelector("#discovery-message").textContent=`${camera.name} added with recording disabled. Configure its event source and explicitly enable recording when ready.`;
-          await refresh();
-        } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
-      });
-      card.append(nameLabel,name,addressLabel,address,portLabel,port,brandLabel,brand,userLabel,user,passLabel,pass,confirmLabel,confirm,serviceLabel,serviceInput,loadProfiles,profileLabel,profiles,add);
-      if (inventory.cameras.length) {
-        const linkLabel=document.createElement("label"); linkLabel.textContent="Or link this device to an existing manually added camera";
-        const select=document.createElement("select");
-        for (const camera of inventory.cameras) {
-          const option=document.createElement("option"); option.value=camera.id; option.textContent=camera.name; select.append(option);
-        }
-        const link=document.createElement("button"); link.type="button"; link.textContent="Link identity to selected camera";
-        link.addEventListener("click",async()=>{
-          try {
-            await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/link`,{method:"POST",body:JSON.stringify({camera_id:select.value})});
-            document.querySelector("#discovery-message").textContent="Discovered identity linked to the existing camera; recorded footage and camera identity were preserved.";
-            await refresh();
-          } catch(error) { document.querySelector("#discovery-message").textContent=error.message; }
-        });
-        card.append(linkLabel,select,link);
-      }
+function ensureDiscoveryWorkspace() {
+  const root=document.querySelector("#discovery-admin");
+  if(!root||root.dataset.discoveryWorkspaceReady==="true")return;
+  const heading=root.querySelector("#discovery-heading")||document.createElement("h3");
+  heading.id="discovery-heading";heading.textContent="Discover cameras";
+  const description=root.querySelector("p")||document.createElement("p");
+  description.textContent="Use multicast on the camera VLAN or scan a routed private IPv4 range. Devices stay candidates until an administrator reviews and tests one; scanning never starts recording.";
+  const ipLabel=root.querySelector('label[for="discovery-ip-range"]')||document.createElement("label");ipLabel.htmlFor="discovery-ip-range";ipLabel.textContent="Private IPv4 range (CIDR)";
+  const ipRange=root.querySelector("#discovery-ip-range")||document.createElement("input");ipRange.id="discovery-ip-range";ipRange.inputMode="numeric";ipRange.autocomplete="off";ipRange.placeholder="192.168.1.0/24";
+  const timeoutLabel=root.querySelector('label[for="discovery-timeout"]')||document.createElement("label");timeoutLabel.htmlFor="discovery-timeout";timeoutLabel.textContent="VLAN scan duration (seconds)";
+  const timeout=root.querySelector("#discovery-timeout")||document.createElement("input");timeout.id="discovery-timeout";timeout.type="number";timeout.min="0.5";timeout.max="15";timeout.step="0.5";timeout.value=timeout.value||"5";
+  const vlanButton=root.querySelector("#discover-cameras")||document.createElement("button");vlanButton.id="discover-cameras";vlanButton.type="button";vlanButton.textContent="Scan camera VLAN";
+  const rangeButton=root.querySelector("#discover-ip-range")||document.createElement("button");rangeButton.id="discover-ip-range";rangeButton.type="button";rangeButton.textContent="Scan private range";
+  const message=root.querySelector("#discovery-message")||document.createElement("p");message.id="discovery-message";message.setAttribute("role","status");message.setAttribute("aria-live","polite");
+  const candidates=root.querySelector("#discovery-candidates")||document.createElement("div");candidates.id="discovery-candidates";
+  const scanControls=document.createElement("div");scanControls.className="discovery-scan-toolbar";scanControls.setAttribute("aria-label","Discovery scan controls");
+  const vlanScan=document.createElement("div");vlanScan.className="discovery-scan-action";vlanScan.append(vlanButton);
+  const rangeScan=document.createElement("div");rangeScan.className="discovery-range-scan";
+  const rangeField=document.createElement("div");rangeField.className="discovery-scan-field";rangeField.append(ipLabel,ipRange);rangeScan.append(rangeField,rangeButton);
+  const advanced=document.createElement("details");advanced.className="discovery-scan-advanced";
+  const advancedSummary=document.createElement("summary");advancedSummary.textContent="VLAN scan timing";advanced.append(advancedSummary);
+  const timingField=document.createElement("div");timingField.className="discovery-scan-field";timingField.append(timeoutLabel,timeout);
+  const timingNote=document.createElement("p");timingNote.textContent="VLAN scans are bounded to 0.5–15 seconds. Private-range scans use unicast ONVIF probes and are limited to 256 addresses per scan.";advanced.append(timingField,timingNote);
+  const retryScan=document.createElement("button");retryScan.id="discovery-retry-scan";retryScan.type="button";retryScan.textContent="Retry last scan";retryScan.className="hidden";
+  retryScan.addEventListener("click",()=>{if(discoveryLastScanRequest)void runDiscoveryScan(discoveryLastScanRequest.ip_range,discoveryLastScanRequest.timeout_seconds);});
+  scanControls.append(vlanScan,rangeScan,advanced,retryScan);
+  const lastScan=document.createElement("p");lastScan.id="discovery-last-scan";lastScan.className="discovery-last-scan";lastScan.setAttribute("role","status");lastScan.textContent=discoveryLastScanText;
+  const toolbar=document.createElement("div");toolbar.className="discovery-results-toolbar";
+  const searchLabel=document.createElement("label");searchLabel.htmlFor="discovery-search";searchLabel.textContent="Search discovered devices";
+  const search=document.createElement("input");search.id="discovery-search";search.type="search";search.autocomplete="off";search.placeholder="Name, address, or identity";
+  search.addEventListener("input",()=>{cameraDiscoveryState.query=search.value;renderDiscoveryResults();});
+  const linkedLabel=document.createElement("label");linkedLabel.className="discovery-linked-filter";linkedLabel.htmlFor="discovery-show-linked";linkedLabel.textContent="Show added devices";
+  const showLinked=document.createElement("input");showLinked.id="discovery-show-linked";showLinked.type="checkbox";
+  linkedLabel.append(showLinked);
+  showLinked.addEventListener("change",()=>{cameraDiscoveryState.showLinked=showLinked.checked;renderDiscoveryResults();});
+  const refreshButton=document.createElement("button");refreshButton.type="button";refreshButton.textContent="Refresh results";refreshButton.addEventListener("click",()=>void refreshDiscovery());
+  toolbar.append(searchLabel,search,linkedLabel,refreshButton);
+  const count=document.createElement("p");count.className="discovery-result-count";count.dataset.discoveryCount="";count.setAttribute("aria-live","polite");
+  const layout=document.createElement("div");layout.className="discovery-layout";
+  const resultsPane=document.createElement("section");resultsPane.className="discovery-results-pane";resultsPane.setAttribute("aria-labelledby","discovery-results-heading");
+  const resultsHeading=document.createElement("h4");resultsHeading.id="discovery-results-heading";resultsHeading.textContent="Discovered devices";
+  const tableScroll=document.createElement("div");tableScroll.className="discovery-table-scroll";tableScroll.id="discovery-table-scroll";tableScroll.tabIndex=0;tableScroll.setAttribute("role","region");tableScroll.setAttribute("aria-label","Discovered devices results");
+  tableScroll.textContent="Loading discovered devices…";count.textContent="Loading discovery results…";
+  resultsPane.append(resultsHeading,count,tableScroll);
+  const selectedPane=document.createElement("section");selectedPane.id="discovery-device-panel";selectedPane.className="discovery-selected-pane";selectedPane.setAttribute("aria-labelledby","discovery-selected-heading");
+  layout.append(resultsPane,selectedPane);
+  candidates.className="discovery-workspace";candidates.replaceChildren(toolbar,layout);
+  root.replaceChildren(heading,description,scanControls,lastScan,message,candidates);
+  root.dataset.discoveryWorkspaceReady="true";
+}
+
+function discoveryStatusMessage(messageText) {
+  const target=document.querySelector("#discovery-message");if(target)target.textContent=messageText;
+}
+
+function safeDiscoveryError(error, sensitiveValues=[]) {
+  let message=String(error?.message||"Discovery request failed");
+  for(const value of sensitiveValues){if(value)message=message.split(String(value)).join("[redacted]");}
+  return message;
+}
+
+function safeDiscoveredEndpoint(value) {
+  try {
+    const url=new URL(value);
+    if(!["http:","https:"].includes(url.protocol)||!url.hostname)return "";
+    url.username="";url.password="";url.search="";url.hash="";
+    return url.toString();
+  } catch { return ""; }
+}
+
+function discoveryEndpointUrl(value) {
+  try {
+    const url=new URL(value);
+    if(!["http:","https:"].includes(url.protocol)||!url.hostname||url.username||url.password||url.search||url.hash)throw new Error();
+    return url.toString();
+  } catch { throw new Error("Use an HTTP(S) device endpoint without embedded credentials, a query string, or a fragment."); }
+}
+
+function renderDiscoveryResults() {
+  const scroll=document.querySelector("#discovery-table-scroll"),count=document.querySelector("[data-discovery-count]");
+  if(!scroll||!count)return;
+  const rows=window.NvrCameraDiscovery.visibleCandidates(cameraDiscoveryState);
+  const allUnlinked=cameraDiscoveryState.candidates.filter(candidate=>!candidate.linked_camera_id).length;
+  const allLinked=cameraDiscoveryState.candidates.length-allUnlinked;
+  count.textContent=cameraDiscoveryState.showLinked
+    ? `${rows.length} shown · ${allUnlinked} not added · ${allLinked} already added`
+    : `${rows.length} not-added device${rows.length===1?"":"s"} shown${allLinked?` · ${allLinked} added hidden`:""}`;
+  if(!rows.length){
+    const empty=document.createElement("p");empty.className="discovery-empty-state";
+    empty.textContent=cameraDiscoveryState.candidates.length
+      ? "No discovered devices match this search and filter."
+      : "No discovered devices yet. Start a VLAN scan or scan a private IPv4 range.";
+    scroll.replaceChildren(empty);return;
+  }
+  const table=document.createElement("table");table.className="discovery-table";table.setAttribute("aria-label","Discovered cameras");
+  const head=document.createElement("thead"),headRow=document.createElement("tr");
+  for(const label of ["Device","Address","Identity","State","Last seen"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;headRow.append(cell);}
+  head.append(headRow);table.append(head);
+  const body=document.createElement("tbody");
+  for(const candidate of rows){
+    const row=document.createElement("tr");row.classList.toggle("selected-discovery-candidate",candidate.id===cameraDiscoveryState.selectedCandidateId);
+    const nameCell=document.createElement("th");nameCell.scope="row";
+    const select=document.createElement("button");select.type="button";select.className="discovery-candidate-select";select.dataset.discoveryCandidateId=candidate.id;select.textContent=window.NvrCameraDiscovery.candidateLabel(candidate);select.setAttribute("aria-pressed",String(candidate.id===cameraDiscoveryState.selectedCandidateId));
+    select.addEventListener("click",()=>void selectDiscoveryCandidate(candidate.id));nameCell.append(select);row.append(nameCell);
+    const address=document.createElement("td");address.textContent=window.NvrCameraDiscovery.candidateAddress(candidate)||"Not reported";row.append(address);
+    const identity=document.createElement("td");identity.textContent=String(candidate.device_uuid||"").startsWith("ipscan:")?"Not advertised":candidate.device_uuid||"Not advertised";row.append(identity);
+    const state=document.createElement("td"),linked=window.NvrCameraDiscovery.linkedCamera(cameraDiscoveryState,candidate);
+    state.textContent=candidate.linked_camera_id?`Already added${linked?` · ${linked.name}`:""}`:candidate.add_in_progress?"Add in progress":"Not added";row.append(state);
+    const seen=document.createElement("td");seen.textContent=candidate.last_seen_at?formatDateTime(candidate.last_seen_at,true):"Unknown";row.append(seen);body.append(row);
+  }
+  table.append(body);scroll.replaceChildren(table);
+}
+
+function renderDiscoverySelection() {
+  const target=document.querySelector("#discovery-device-panel");if(!target)return;
+  const candidate=cameraDiscoveryState.candidates.find(item=>item.id===cameraDiscoveryState.selectedCandidateId)||discoverySelectedSnapshot;
+  if(!candidate){
+    discoveryRenderedCandidateId=null;
+    const empty=document.createElement("div");empty.className="discovery-selected-empty";
+    const heading=document.createElement("h4");heading.id="discovery-selected-heading";heading.textContent="Device setup";
+    const note=document.createElement("p");note.textContent="Select a discovered device to review its identity, load stream profiles, test the connection, or link it to an existing camera.";
+    empty.append(heading,note);target.replaceChildren(empty);return;
+  }
+  if(discoveryRenderedCandidateId!==candidate.id){
+    discoveryRenderedCandidateId=candidate.id;target.replaceChildren();
+    const heading=document.createElement("h4");heading.id="discovery-selected-heading";heading.textContent="Selected device";
+    const label=document.createElement("strong");label.className="discovery-selected-name";label.textContent=window.NvrCameraDiscovery.candidateLabel(candidate);
+    const address=document.createElement("p");address.className="discovery-selected-address";address.textContent=`Address · ${window.NvrCameraDiscovery.candidateAddress(candidate)||"Not reported"}`;
+    const identity=document.createElement("p");identity.className="discovery-selected-identity";identity.textContent=String(candidate.device_uuid||"").startsWith("ipscan:")?"ONVIF identity was not advertised. This result is tracked by an address-based fingerprint.":`ONVIF identity · ${candidate.device_uuid}`;
+    const state=document.createElement("p");state.className="discovery-candidate-state";state.dataset.discoveryCandidateState="";state.setAttribute("role","status");
+    const feedback=document.createElement("p");feedback.className="discovery-device-message";feedback.id="discovery-device-message";feedback.setAttribute("role","status");feedback.setAttribute("aria-live","polite");
+    target.append(heading,label,address,identity);
+    const endpoints=(candidate.service_urls||[]).map(safeDiscoveredEndpoint).filter(Boolean);
+    if(endpoints.length){
+      const endpointDetails=document.createElement("details"),endpointSummary=document.createElement("summary"),endpointList=document.createElement("ul");
+      endpointDetails.className="discovery-endpoint-details";endpointSummary.textContent=`${endpoints.length} advertised ONVIF endpoint${endpoints.length===1?"":"s"}`;
+      for(const endpoint of endpoints){const item=document.createElement("li");item.textContent=endpoint;endpointList.append(item);}
+      endpointDetails.append(endpointSummary,endpointList);target.append(endpointDetails);
     }
-    return card;
-  }));
+    const capabilities=candidate.capabilities&&typeof candidate.capabilities==="object"?Object.entries(candidate.capabilities):[];
+    if(capabilities.length){
+      const capabilityDetails=document.createElement("details"),capabilitySummary=document.createElement("summary"),list=document.createElement("ul");
+      capabilityDetails.className="discovery-capabilities";capabilitySummary.textContent="Reported capabilities";
+      for(const [name,value] of capabilities){const item=document.createElement("li");item.textContent=`${name.replaceAll("_"," ")} · ${String(value||"unknown")}`;list.append(item);}
+      capabilityDetails.append(capabilitySummary,list);target.append(capabilityDetails);
+    }
+    target.append(state,feedback);
+    const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
+    if(!current){state.textContent="This device is no longer in the current discovery results. Refresh the results before continuing.";updateDiscoverySelectedStatus(candidate);return;}
+    if(current.linked_camera_id){
+      const linked=window.NvrCameraDiscovery.linkedCamera(cameraDiscoveryState,current);
+      state.textContent=linked?`Already added as ${linked.name}. Duplicate addition is disabled.`:"Already linked to an existing camera. Duplicate addition is disabled.";
+      if(linked){const open=document.createElement("button");open.type="button";open.className="discovery-open-camera";open.dataset.discoveryOpenExisting="";open.textContent="Open existing camera";open.onclick=()=>void inspectCameraFromStatus(linked.id);target.append(open);}
+      return;
+    }
+    target.append(buildDiscoveryCandidateSetup(current));
+  }
+  updateDiscoverySelectedStatus(cameraDiscoveryState.candidates.find(item=>item.id===candidate.id)||candidate);
+}
+
+function updateDiscoverySelectedStatus(candidate) {
+  const state=document.querySelector("[data-discovery-candidate-state]");if(!state)return;
+  const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
+  const linked=current&&window.NvrCameraDiscovery.linkedCamera(cameraDiscoveryState,current);
+  if(!current){state.textContent="This device is no longer in the current discovery results. Its draft is kept here but cannot be submitted.";}
+  else if(current.linked_camera_id){state.textContent=linked?`Already added as ${linked.name}. Your current draft is preserved, but duplicate addition is disabled.`:"Already linked to an existing camera. Your current draft is preserved, but duplicate addition is disabled.";}
+  else if(current.add_in_progress)state.textContent="Another request is testing or adding this device. Wait for it to finish before retrying.";
+  else state.textContent=`First seen ${current.first_seen_at?formatDateTime(current.first_seen_at):"unknown"} · Last seen ${current.last_seen_at?formatDateTime(current.last_seen_at):"unknown"}. Testing must pass before the camera is added.`;
+  let open= document.querySelector("#discovery-device-panel [data-discovery-open-existing]");
+  if(linked&&!open){open=document.createElement("button");open.type="button";open.className="discovery-open-camera";open.dataset.discoveryOpenExisting="";open.textContent="Open existing camera";state.after(open);}
+  if(linked&&open)open.onclick=()=>void inspectCameraFromStatus(linked.id);
+  else open?.remove();
+  const unavailable=!current||Boolean(current.linked_camera_id)||Boolean(current.add_in_progress);
+  for(const button of document.querySelectorAll("#discovery-device-panel [data-discovery-submit]"))button.disabled=unavailable;
+}
+
+function discoveryField(labelText,control) {
+  const label=document.createElement("label");label.textContent=labelText;label.append(control);return label;
+}
+
+function buildDiscoveryCandidateSetup(candidate) {
+  const setup=document.createElement("fieldset");setup.className="discovery-candidate-setup";setup.dataset.configSection="discovery-candidate-setup";
+  const legend=document.createElement("legend");legend.textContent="Test and add this camera";setup.append(legend);
+  const name=document.createElement("input");name.maxLength=120;name.required=true;name.autocomplete="off";name.value=window.NvrCameraDiscovery.candidateLabel(candidate);name.dataset.discoveryField="name";
+  setup.append(discoveryField("Camera name",name));
+  const address=document.createElement("input");address.inputMode="decimal";address.autocomplete="off";address.required=true;address.value=window.NvrCameraDiscovery.candidateAddress(candidate);address.dataset.discoveryField="address";
+  setup.append(discoveryField("Camera IPv4 address",address));
+  const serviceUrl=(candidate.service_urls||[]).map(safeDiscoveredEndpoint).find(Boolean)||"";
+  const port=document.createElement("input");port.type="number";port.min="1";port.max="65535";port.value=(()=>{try{return new URL(serviceUrl).port|| (new URL(serviceUrl).protocol==="https:"?"443":"80");}catch{return "80";}})();port.dataset.discoveryField="port";
+  setup.append(discoveryField("ONVIF port",port));
+  const brand=document.createElement("select");brand.dataset.discoveryField="brand";
+  for(const [value,label] of [["auto","Auto-detect / ONVIF"],["acti","ACTi"],["axis","Axis"],["bosch","Bosch"],["dahua","Dahua"],["hanwha","Hanwha"],["hikvision","Hikvision"],["reolink","Reolink"],["samsung","Samsung"],["uniview","Uniview"],["other","Other / generic ONVIF"]])brand.append(new Option(label,value));
+  setup.append(discoveryField("Camera brand",brand));
+  const username=document.createElement("input");username.autocomplete="off";username.dataset.discoveryField="username";
+  setup.append(discoveryField("Camera username (optional)",username));
+  const password=document.createElement("input");password.type="password";password.autocomplete="new-password";password.dataset.discoveryField="password";
+  setup.append(discoveryField("Camera password (optional)",password));
+  const confirm=document.createElement("input");confirm.type="password";confirm.autocomplete="new-password";confirm.dataset.discoveryField="password-confirm";
+  setup.append(discoveryField("Confirm camera password",confirm));
+  const endpoint=document.createElement("input");endpoint.type="url";endpoint.autocomplete="off";endpoint.value=serviceUrl;endpoint.dataset.discoveryField="endpoint";
+  setup.append(discoveryField("ONVIF device endpoint URL",endpoint));
+  const profiles=document.createElement("select");profiles.dataset.discoveryField="profile";profiles.append(new Option("Load stream profiles first",""));
+  const substream=document.createElement("select");substream.dataset.discoveryField="substream";substream.append(new Option("Use main stream for live view",""));
+  const loadProfiles=document.createElement("button");loadProfiles.type="button";loadProfiles.textContent="Load stream profiles";
+  const profileMessage=document.createElement("p");profileMessage.className="discovery-profile-message";profileMessage.setAttribute("role","status");
+  endpoint.addEventListener("input",()=>{profiles.replaceChildren(new Option("Load stream profiles first",""));substream.replaceChildren(new Option("Use main stream for live view",""));});
+  loadProfiles.addEventListener("click",async()=>{
+    const selectionGeneration=discoverySelectionGeneration;
+    loadProfiles.disabled=true;profileMessage.textContent="Loading advertised stream profiles…";
+    try {
+      if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
+      const portNumber=Number(port.value);if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535)throw new Error("Enter a valid camera ONVIF port");
+      const device_service_url=discoveryEndpointUrl(endpoint.value.trim()||`http://${address.value.trim()}:${portNumber}/onvif/device_service`);
+      const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,camera_brand:brand.value,device_service_url})});
+      if(selectionGeneration!==discoverySelectionGeneration||cameraDiscoveryState.selectedCandidateId!==candidate.id)return;
+      endpoint.value=discoveryEndpointUrl(result.device_service_url||device_service_url);
+      profiles.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+      if(result.profiles.length>1)profiles.prepend(new Option("Select a main stream",""));
+      substream.replaceChildren(new Option("Use main stream for live view",""),...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+      profileMessage.textContent=result.profiles.length?`Found ${result.profiles.length} stream profile(s).`:"The camera did not advertise a stream profile.";
+    } catch(error) {
+      if(selectionGeneration===discoverySelectionGeneration)profileMessage.textContent=safeDiscoveryError(error,[username.value,password.value,confirm.value]);
+    } finally {loadProfiles.disabled=false;}
+  });
+  setup.append(loadProfiles,discoveryField("Main stream profile",profiles),discoveryField("Live substream profile (optional)",substream),profileMessage);
+  const add=document.createElement("button");add.type="button";add.className="primary";add.textContent="Test connection and add camera";add.dataset.discoverySubmit="";
+  add.addEventListener("click",async()=>{
+    const selectionGeneration=discoverySelectionGeneration;
+    const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
+    if(!current||current.linked_camera_id||current.add_in_progress) {updateDiscoverySelectedStatus(candidate);return;}
+    if(discoveryAddPendingIds.has(candidate.id))return;
+    const sensitive=[username.value,password.value,confirm.value];
+    let submitted=false;
+    try {
+      if(!name.value.trim())throw new Error("Enter a camera name");
+      if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
+      if(!profiles.value)throw new Error("Load stream profiles and select a main stream first");
+      const portNumber=Number(port.value);if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535)throw new Error("Enter a valid camera ONVIF port");
+      const device_service_url=discoveryEndpointUrl(endpoint.value.trim()||`http://${address.value.trim()}:${portNumber}/onvif/device_service`);
+      discoveryAddPendingIds.add(candidate.id);add.disabled=true;add.textContent="Testing camera connection…";
+      profileMessage.textContent="The stream is being tested. Recording will remain disabled.";
+      submitted=true;
+      const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value.trim(),camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,camera_brand:brand.value,onvif_profile_token:profiles.value,live_substream_profile_token:substream.value||null,device_service_url,motion_username:username.value||null,motion_password:password.value||null,recording_mode:"motion",recording_enabled:false})});
+      if(selectionGeneration===discoverySelectionGeneration&&cameraDiscoveryState.selectedCandidateId===candidate.id){clearConfigDraft(setup);cameraDiscoveryState.selectedCandidateId=null;discoverySelectedSnapshot=null;discoveryRenderedCandidateId=null;}
+      discoveryStatusMessage(`${camera.name} was added after its connection test. Recording is disabled; review its recording settings before enabling it.`);
+      await refresh();
+      const statusMessage=document.querySelector("#discovery-message");if(statusMessage){statusMessage.tabIndex=-1;statusMessage.focus();}
+    } catch(error) {
+      if(selectionGeneration===discoverySelectionGeneration)profileMessage.textContent=safeDiscoveryError(error,sensitive);
+      if(submitted)await refreshDiscovery();
+    } finally {discoveryAddPendingIds.delete(candidate.id);add.disabled=false;add.textContent="Test connection and add camera";}
+  });
+  setup.append(add);
+  if(cameraDiscoveryState.cameras.length){
+    const linkFieldset=document.createElement("fieldset");linkFieldset.className="discovery-link-existing";linkFieldset.dataset.configSection="discovery-candidate-setup";
+    const linkLegend=document.createElement("legend");linkLegend.textContent="Link to an existing camera";linkFieldset.append(linkLegend);
+    const existing=document.createElement("select");existing.dataset.discoveryField="existing-camera";
+    for(const camera of cameraDiscoveryState.cameras){const option=new Option(`${camera.name}${camera.archived_at?" · Archived":""}`,camera.id);existing.append(option);}
+    linkFieldset.append(discoveryField("Existing camera",existing));
+    const link=document.createElement("button");link.type="button";link.textContent="Link identity to selected camera";link.dataset.discoverySubmit="";
+    link.addEventListener("click",async()=>{
+      const selectionGeneration=discoverySelectionGeneration;
+      const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
+      if(!current||current.linked_camera_id||current.add_in_progress){updateDiscoverySelectedStatus(candidate);return;}
+      if(!guardDraftsIn(document.querySelector("#discovery-device-panel")))return;
+      link.disabled=true;link.textContent="Linking device identity…";
+      try {
+        await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/link`,{method:"POST",body:JSON.stringify({camera_id:existing.value})});
+        clearConfigDraft(linkFieldset);
+        if(selectionGeneration===discoverySelectionGeneration)discoveryStatusMessage("Discovered identity linked to the existing camera. Camera ID and recording history were preserved.");
+        await refresh();
+        requestAnimationFrame(()=>document.querySelector("#discovery-device-panel [data-discovery-open-existing]")?.focus());
+      } catch(error) {if(selectionGeneration===discoverySelectionGeneration)profileMessage.textContent=safeDiscoveryError(error);await refreshDiscovery();}
+      finally {link.disabled=false;link.textContent="Link identity to selected camera";}
+    });
+    linkFieldset.append(link);setup.append(linkFieldset);
+  }
+  return setup;
+}
+
+async function selectDiscoveryCandidate(candidateId) {
+  if(candidateId===cameraDiscoveryState.selectedCandidateId)return;
+  const panel=document.querySelector("#discovery-device-panel");
+  if(panel&&!guardDraftsIn(panel)){renderDiscoveryResults();requestAnimationFrame(()=>document.querySelector(`#discovery-table-scroll [data-discovery-candidate-id="${CSS.escape(candidateId)}"]`)?.focus());return;}
+  if(!window.NvrCameraDiscovery.selectCandidate(cameraDiscoveryState,candidateId))return;
+  discoverySelectionGeneration+=1;discoverySelectedSnapshot=cameraDiscoveryState.candidates.find(candidate=>candidate.id===candidateId)||null;
+  discoveryRenderedCandidateId=null;renderDiscoveryResults();renderDiscoverySelection();
+  requestAnimationFrame(()=>document.querySelector(`#discovery-table-scroll [data-discovery-candidate-id="${CSS.escape(candidateId)}"]`)?.focus());
+}
+
+async function runDiscoveryScan(ip_range=null,requestedTimeout=null) {
+  if(discoveryScanPending)return;
+  const rangeInput=document.querySelector("#discovery-ip-range"),timeoutInput=document.querySelector("#discovery-timeout");
+  const vlanButton=document.querySelector("#discover-cameras"),rangeButton=document.querySelector("#discover-ip-range"),retryButton=document.querySelector("#discovery-retry-scan");
+  const range=ip_range===null?null:String(ip_range).trim();
+  if(ip_range!==null&&!range){rangeInput?.focus();discoveryStatusMessage("Enter a private IPv4 CIDR range, such as 192.168.1.0/24.");return;}
+  const timeoutSeconds=requestedTimeout??Number(timeoutInput?.value||5);
+  discoveryLastScanRequest={ip_range:range,timeout_seconds:timeoutSeconds};
+  discoveryScanPending=true;window.NvrCameraDiscovery.beginRefresh(cameraDiscoveryState);
+  for(const button of [vlanButton,rangeButton,retryButton])if(button)button.disabled=true;
+  if(vlanButton)vlanButton.textContent=range?"Scan camera VLAN":"Scanning camera VLAN…";
+  if(rangeButton)rangeButton.textContent=range?"Scanning private range…":"Scan private range";
+  discoveryStatusMessage(range?`Scanning ${range} with bounded unicast ONVIF probes…`:"Scanning the camera VLAN for ONVIF devices…");
+  try {
+    const body={timeout_seconds:timeoutSeconds};if(range)body.ip_range=range;
+    const result=await api("/api/discovery/scan",{method:"POST",body:JSON.stringify(body)});
+    const when=formatDateTime(new Date());
+    const targetText=range?`${result.targets_scanned} address(es) checked`:"camera VLAN scanned";
+    discoveryLastScanText=`Last scan · ${range||"camera VLAN"} · ${targetText} · ${result.discovered_count} device(s) found · ${when}`;
+    const lastScan=document.querySelector("#discovery-last-scan");if(lastScan)lastScan.textContent=discoveryLastScanText;
+    const partial=(result.partial_failures||[]).join(" ");
+    discoveryStatusMessage(`Scan complete: ${result.discovered_count} device(s) found. ${partial}`.trim());
+    if(retryButton)retryButton.classList.add("hidden");
+    await refreshDiscovery();
+  } catch(error) {
+    discoveryStatusMessage(`Scan failed. ${safeDiscoveryError(error)} The scan controls are ready to retry.`);
+    if(retryButton){retryButton.classList.remove("hidden");retryButton.disabled=false;}
+  } finally {
+    discoveryScanPending=false;
+    if(vlanButton){vlanButton.disabled=false;vlanButton.textContent="Scan camera VLAN";}
+    if(rangeButton){rangeButton.disabled=false;rangeButton.textContent="Scan private range";}
+    if(retryButton)retryButton.disabled=false;
+  }
+}
+
+async function refreshDiscovery() {
+  ensureDiscoveryWorkspace();
+  const generation=window.NvrCameraDiscovery.beginRefresh(cameraDiscoveryState);
+  try {
+    const [{candidates},inventory]=await Promise.all([api("/api/discovery/candidates"),api("/api/cameras")]);
+    if(!window.NvrCameraDiscovery.isCurrentRefresh(cameraDiscoveryState,generation))return;
+    const previousId=cameraDiscoveryState.selectedCandidateId;
+    const previousCandidate=cameraDiscoveryState.candidates.find(candidate=>candidate.id===previousId)||discoverySelectedSnapshot;
+    const selectionMissing=previousId&&!candidates.some(candidate=>candidate.id===previousId);
+    const panel=document.querySelector("#discovery-device-panel");
+    const updatedCandidate=candidates.find(candidate=>candidate.id===previousId);
+    const statusChanged=previousCandidate&&updatedCandidate&&(previousCandidate.linked_camera_id!==updatedCandidate.linked_camera_id||previousCandidate.add_in_progress!==updatedCandidate.add_in_progress);
+    if(selectionMissing&&panel?.querySelector('[data-config-dirty="true"]')&&!guardDraftsIn(panel)){
+      cameraDiscoveryState.candidates=[...candidates];cameraDiscoveryState.cameras=[...inventory.cameras];discoverySelectedSnapshot=previousCandidate;
+      renderDiscoveryResults();renderDiscoverySelection();return;
+    }
+    window.NvrCameraDiscovery.replaceResults(cameraDiscoveryState,candidates,inventory.cameras);
+    discoveryResultsLoaded=true;
+    if(statusChanged&&!panel?.querySelector('[data-config-dirty="true"]'))discoveryRenderedCandidateId=null;
+    discoverySelectedSnapshot=cameraDiscoveryState.candidates.find(candidate=>candidate.id===cameraDiscoveryState.selectedCandidateId)||null;
+    renderDiscoveryResults();renderDiscoverySelection();
+  } catch(error) {
+    if(!window.NvrCameraDiscovery.isCurrentRefresh(cameraDiscoveryState,generation))return;
+    discoveryStatusMessage(`Could not refresh discovered devices. ${safeDiscoveryError(error)}`);
+    if(!discoveryResultsLoaded){
+      const count=document.querySelector("[data-discovery-count]"),scroll=document.querySelector("#discovery-table-scroll");
+      if(count)count.textContent="Discovery results unavailable";
+      if(scroll){const unavailable=document.createElement("p");unavailable.className="discovery-empty-state";unavailable.textContent="The candidate list could not be loaded. Use Refresh results to retry.";scroll.replaceChildren(unavailable);}
+    }
+  }
 }
 async function refreshSessions() {
   const target = document.querySelector("#sessions-list");
@@ -2902,27 +3189,10 @@ document.querySelector("#test-camera").addEventListener("click", async () => {
   } catch (error) { message.textContent=error.message; }
 });
 document.querySelector("#discover-cameras").addEventListener("click", async () => {
-  const message=document.querySelector("#discovery-message");
-  const button=document.querySelector("#discover-cameras");
-  button.disabled=true; message.textContent="Scanning the camera VLAN for ONVIF devices…";
-  try {
-    const result=await api("/api/discovery/scan",{method:"POST",body:JSON.stringify({timeout_seconds:Number(document.querySelector("#discovery-timeout").value)})});
-    message.textContent=`Found ${result.discovered_count} device(s). ${result.partial_failures.join(" ")}`;
-    await refreshDiscovery();
-  } catch(error) { message.textContent=error.message; }
-  finally { button.disabled=false; }
+  await runDiscoveryScan();
 });
 document.querySelector("#discover-ip-range").addEventListener("click", async event => {
-  const button=event.currentTarget, message=document.querySelector("#discovery-message");
-  const ip_range=document.querySelector("#discovery-ip-range").value.trim();
-  if(!ip_range) { message.textContent="Enter a private IPv4 CIDR range, such as 192.0.2.0/24."; return; }
-  button.disabled=true; message.textContent="Scanning the camera range with unicast ONVIF probes…";
-  try {
-    const result=await api("/api/discovery/scan",{method:"POST",body:JSON.stringify({ip_range,timeout_seconds:Number(document.querySelector("#discovery-timeout").value)})});
-    message.textContent=`Checked ${result.targets_scanned} address(es); found ${result.discovered_count} ONVIF device(s).`;
-    await refreshDiscovery();
-  } catch(error) { message.textContent=error.message; }
-  finally { button.disabled=false; }
+  await runDiscoveryScan(event.currentTarget.id==="discover-ip-range"?document.querySelector("#discovery-ip-range").value.trim():null);
 });
 document.querySelector("#diagnostics-toggle").addEventListener("click", async () => {
   const button=document.querySelector("#diagnostics-toggle"); button.disabled=true;
