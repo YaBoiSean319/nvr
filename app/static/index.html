@@ -87,6 +87,19 @@
     .camera-back-button { display:none; margin-bottom:.55rem; }
     .camera-editor-pane #camera-list > article { padding:.65rem; }
     .camera-editor-pane #camera-list > article > fieldset { margin:.55rem 0; border:1px solid var(--line); border-radius:.5rem; }
+    .camera-editor-tabs { display:flex; flex-wrap:wrap; gap:.3rem; margin:.65rem 0 .5rem; border-bottom:1px solid var(--line); }
+    .camera-editor-tabs [role=tab] { min-height:2.2rem; padding:.35rem .6rem; border-radius:.5rem .5rem 0 0; font-size:.82rem; }
+    .camera-editor-tabs [role=tab][aria-selected=true] { border-color:var(--accent); color:var(--accent); box-shadow:inset 0 -2px var(--accent); }
+    .camera-tab-panel { min-width:0; }
+    .camera-tab-actions { display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; margin:.25rem 0 .75rem; padding:.45rem; border:1px solid var(--line); border-radius:.5rem; background:var(--panel-raised); }
+    .camera-tab-actions p { flex:1 1 12rem; margin:0; font-size:.82rem; }
+    .camera-tab-actions [data-state=dirty] { color:var(--warn); }
+    .camera-tab-actions [data-state=error] { color:var(--bad); }
+    .camera-health-history { margin:.6rem 0; padding:.65rem; border:1px solid var(--line); border-radius:.5rem; background:var(--panel); }
+    #camera-dirty-decision { width:min(100% - 2rem,28rem); border:1px solid var(--line); border-radius:.8rem; padding:1.1rem; color:var(--ink); background:var(--panel); box-shadow:0 1.5rem 5rem #0008; }
+    #camera-dirty-decision::backdrop { background:#0009; }
+    #camera-dirty-decision h2 { font-size:1rem; }
+    #camera-dirty-decision .toolbar-row { justify-content:flex-end; }
     .camera-admin-workspace > #bulk-admin { max-height:calc(100vh - 12rem); overflow:auto; }
     .health-dot { flex:none; width:.62rem; height:.62rem; border-radius:50%; background:#8793a1; box-shadow:0 0 0 3px color-mix(in srgb,#8793a1 17%,transparent); }
     .health-dot[data-health="healthy"],.health-dot[data-health="covered"] { background:var(--good); } .health-dot[data-health="failure"],.health-dot[data-health="unavailable"] { background:var(--bad); } .health-dot[data-health="uncertain"],.health-dot[data-health="expected_idle"] { background:var(--warn); }
@@ -471,6 +484,7 @@
   </main>
   <script src="/workspace-layout.js" defer></script>
   <script src="/camera-inventory.js" defer></script>
+  <script src="/camera-editor.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>
