@@ -308,8 +308,11 @@ class ExportJobTests(unittest.TestCase):
         available = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", "0.2", "-i", str(rendered), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True, timeout=20).stdout
         frame = available
         self.assertGreater(max(pixel(x, y)[1] for x in range(18, 300, 5) for y in range(12, 100, 5)), 100, "camera and source labels should render at the top-left")
-        dark = pixel(1440, 810)
-        self.assertLess(max(dark), 20, "a selected camera without footage must remain a dark tile")
+        # Sample the tile background away from the centered subtitle text.
+        dark_selected = pixel(20, 560)
+        self.assertLess(max(dark_selected), 20, "a selected camera without footage must remain a dark tile")
+        dark_blank = pixel(1000, 560)
+        self.assertLess(max(dark_blank), 20, "an empty grid position must remain a dark tile")
         before_first = pixel(1440, 270)
         self.assertLess(max(before_first), 20, "a tile must remain dark before its first recording")
         accepted_4k = self.client.post("/api/exports", json={
