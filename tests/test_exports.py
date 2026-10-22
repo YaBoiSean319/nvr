@@ -313,7 +313,7 @@ class ExportJobTests(unittest.TestCase):
         self.assertLess(max(dark_selected), 20, "a selected camera without footage must remain a dark tile")
         dark_blank = pixel(1000, 560)
         self.assertLess(max(dark_blank), 20, "an empty grid position must remain a dark tile")
-        before_first = pixel(1440, 270)
+        before_first = pixel(1000, 20)
         self.assertLess(max(before_first), 20, "a tile must remain dark before its first recording")
         accepted_4k = self.client.post("/api/exports", json={
             "camera_ids": [self.camera, second, empty], "tile_camera_ids": [self.camera, second, empty, None],
