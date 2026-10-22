@@ -66,6 +66,12 @@ let cameraDirtyDecisionDialog=null;
 let cameraDirtyDecisionResolve=null;
 let cameraDirtyDecisionPromise=null;
 const cameraBulkSelection = new Set();
+let cameraBulkVisibleIds = [];
+let cameraBulkReview = null;
+let cameraBulkResults = [];
+let cameraBulkOperationInProgress = false;
+let cameraBulkSession = 0;
+let cameraBulkStatusDialog = null;
 let activeCameraWorkspace = "cameras";
 let mobileCameraEditorOpen = false;
 const cameraInventoryFilters = { archive:"active", group:"all", connection:"all", health:"all", sortKey:"name", sortDirection:1 };
@@ -267,8 +273,17 @@ function setupCameraAdminWorkspaces() {
   inventory.append(filters);
   const groupNote=document.createElement("p");groupNote.className="camera-inventory-note";groupNote.textContent="Group shows the camera’s policy group. Browsing groups can overlap.";inventory.append(groupNote);
   if(searchLabel&&search)inventory.append(searchLabel,search);
+  const bulkToolbar=document.createElement("div");bulkToolbar.id="camera-bulk-toolbar";bulkToolbar.className="camera-bulk-toolbar";bulkToolbar.hidden=true;bulkToolbar.setAttribute("role","group");bulkToolbar.setAttribute("aria-label","Selected camera bulk actions");
+  const bulkSummary=document.createElement("p");bulkSummary.id="camera-bulk-summary";bulkSummary.setAttribute("role","status");
+  const selectMatching=document.createElement("button");selectMatching.id="camera-bulk-select-matching";selectMatching.type="button";selectMatching.addEventListener("click",()=>{cameraBulkVisibleIds.forEach(id=>cameraBulkSelection.add(id));renderCameras(latestCameras);});
+  const clearSelection=document.createElement("button");clearSelection.id="camera-bulk-clear-selection";clearSelection.type="button";clearSelection.textContent="Clear selection";clearSelection.addEventListener("click",()=>{cameraBulkSelection.clear();renderCameras(latestCameras);});
+  bulkToolbar.append(bulkSummary,selectMatching,clearSelection);inventory.append(bulkToolbar);
+  const bulkStatus=document.createElement("div");bulkStatus.id="camera-bulk-operation-status";bulkStatus.className="camera-bulk-status";bulkStatus.hidden=true;bulkStatus.setAttribute("role","status");bulkStatus.setAttribute("aria-live","polite");
+  const bulkStatusText=document.createElement("p");bulkStatusText.id="camera-bulk-operation-summary";
+  const viewBulkResults=document.createElement("button");viewBulkResults.id="camera-bulk-view-results";viewBulkResults.type="button";viewBulkResults.textContent="View bulk results";viewBulkResults.addEventListener("click",openBulkResultsDialog);
+  bulkStatus.append(bulkStatusText,viewBulkResults);inventory.append(bulkStatus);
   const table=document.createElement("div");table.id="camera-inventory-table";table.className="camera-inventory-table-scroll";table.setAttribute("role","region");table.setAttribute("aria-label","Camera inventory table");table.tabIndex=0;inventory.append(table);
-  if(bulkUpdate)inventory.append(bulkUpdate);
+  if(bulkUpdate){bulkUpdate.hidden=true;const applyBulk=bulkUpdate.querySelector("#apply-bulk");if(applyBulk)applyBulk.textContent="Review changes";inventory.append(bulkUpdate);}
 
   const details=document.createElement("section");details.className="camera-editor-pane";details.setAttribute("aria-labelledby","selected-camera-heading");
   const back=document.createElement("button");back.id="camera-back-to-inventory";back.type="button";back.textContent="Back to Cameras";back.className="camera-back-button";back.addEventListener("click",async()=>{if(!await guardCameraDrafts())return;mobileCameraEditorOpen=false;layout.dataset.mobileEditor="false";requestAnimationFrame(()=>document.querySelector(`#camera-inventory-table button[data-camera-id="${CSS.escape(selectedCameraId||"")}"]`)?.focus());});details.append(back);
@@ -296,6 +311,7 @@ function setupCameraAdminWorkspaces() {
   if(heading)content.append(heading);
   content.append(nav,cameras,add,groupsWorkspace);
   ensureCameraDirtyDialog();
+  refreshCameraBulkToolbar();
   if(aiRuntime)document.querySelector("#app-settings-content").append(aiRuntime);
 
   const refreshFilters=()=>{
@@ -946,7 +962,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...options.headers }, credentials: "same-origin" });
   if (response.status === 204) {clearSavedConfigDraft(path,options,actionButton);return null;}
   const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || "Request failed");
+  if (!response.ok) {const error=new Error(data.detail || "Request failed");error.status=response.status;throw error;}
   clearSavedConfigDraft(path,options,actionButton);
   return data;
 }
@@ -2670,11 +2686,42 @@ async function refreshSessions() {
   }));
   if (!sessions.length) target.textContent="No active sessions.";
 }
+function refreshCameraBulkToolbar(){
+  const toolbar=document.querySelector("#camera-bulk-toolbar"),summary=document.querySelector("#camera-bulk-summary"),bulkUpdate=document.querySelector('[data-config-section="bulk-update"]');
+  if(!toolbar||!summary)return;
+  const admin=currentRole==="administrator";
+  const counts=window.NvrCameraBulkActions.selectionCounts(cameraBulkSelection,latestCameras,cameraBulkVisibleIds);
+  const hasSelection=admin&&counts.selected>0;
+  toolbar.hidden=!hasSelection;
+  if(hasSelection)summary.textContent=`${counts.selected} selected · ${counts.hidden} hidden by filters${counts.unavailable?` · ${counts.unavailable} no longer in inventory`:""}`;
+  const selectMatching=document.querySelector("#camera-bulk-select-matching"),clear=document.querySelector("#camera-bulk-clear-selection");
+  const allVisibleSelected=cameraBulkVisibleIds.length>0&&cameraBulkVisibleIds.every(id=>cameraBulkSelection.has(id));
+  if(selectMatching){selectMatching.textContent=`Select all ${cameraBulkVisibleIds.length} matching cameras`;selectMatching.disabled=!admin||cameraBulkOperationInProgress||!cameraBulkVisibleIds.length||allVisibleSelected;}
+  if(clear)clear.disabled=cameraBulkOperationInProgress||counts.selected===0;
+  if(bulkUpdate){bulkUpdate.hidden=!hasSelection;bulkUpdate.disabled=cameraBulkOperationInProgress;const button=bulkUpdate.querySelector("#apply-bulk");if(button)button.disabled=!hasSelection||cameraBulkOperationInProgress;}
+  for(const selector of ["#bulk-group","#bulk-recording-mode","#bulk-recording-enabled"]){const input=document.querySelector(selector);if(input)input.disabled=cameraBulkOperationInProgress;}
+
+  const status=document.querySelector("#camera-bulk-operation-status"),statusText=document.querySelector("#camera-bulk-operation-summary");
+  if(!status||!statusText)return;
+  const hasOperation=Boolean(cameraBulkReview&&(cameraBulkOperationInProgress||cameraBulkResults.length));
+  status.hidden=!hasOperation;
+  if(!hasOperation)return;
+  const totals=cameraBulkResults.reduce((counts,result)=>{counts[result.status]=(counts[result.status]||0)+1;return counts;},{});
+  const success=totals.success||0,failed=totals.failed||0,unknown=totals.unknown||0,pending=totals.pending||0;
+  if(cameraBulkOperationInProgress)statusText.textContent=`Bulk update running for ${cameraBulkReview.cameraIds.length} reviewed camera(s); ${pending} outcome(s) are waiting. Closing this panel will not cancel the update.`;
+  else statusText.textContent=`Bulk update finished: ${success} succeeded, ${failed} failed, ${unknown} need verification.`;
+}
+function resetCameraBulkSession(){
+  cameraBulkSession+=1;cameraBulkSelection.clear();cameraBulkVisibleIds=[];cameraBulkReview=null;cameraBulkResults=[];cameraBulkOperationInProgress=false;
+  if(cameraBulkStatusDialog?.open)cameraBulkStatusDialog.close();
+  cameraBulkStatusDialog=null;refreshCameraBulkToolbar();
+}
 function renderCameraInventoryTable(cameras) {
   const target=document.querySelector("#camera-inventory-table");
   if(!target)return;
+  cameraBulkVisibleIds=cameras.map(camera=>String(camera.id));
   target.replaceChildren();
-  if(!cameras.length){const empty=document.createElement("p");empty.textContent=latestCameras.length?"No cameras match these filters.":"No cameras have been added.";target.append(empty);return;}
+  if(!cameras.length){const empty=document.createElement("p");empty.textContent=latestCameras.length?"No cameras match these filters.":"No cameras have been added.";target.append(empty);refreshCameraBulkToolbar();return;}
 
   const table=document.createElement("table");table.className="camera-inventory-table";table.setAttribute("aria-label","Camera inventory");
   const head=document.createElement("thead"),headRow=document.createElement("tr");
@@ -2698,7 +2745,7 @@ function renderCameraInventoryTable(cameras) {
   for(const camera of cameras){
     const row=document.createElement("tr");row.dataset.cameraId=camera.id;row.classList.toggle("selected-camera",camera.id===selectedCameraId);row.tabIndex=0;
     if(currentRole==="administrator"){
-      const selectCell=document.createElement("td"),checkbox=document.createElement("input");selectCell.className="camera-select-column";checkbox.type="checkbox";checkbox.dataset.cameraSelect="true";checkbox.value=camera.id;checkbox.checked=cameraBulkSelection.has(camera.id);checkbox.setAttribute("aria-label",`Select ${camera.name} for bulk changes`);checkbox.addEventListener("change",()=>{if(checkbox.checked)cameraBulkSelection.add(camera.id);else cameraBulkSelection.delete(camera.id);});selectCell.append(checkbox);row.append(selectCell);
+      const selectCell=document.createElement("td"),checkbox=document.createElement("input");selectCell.className="camera-select-column";checkbox.type="checkbox";checkbox.dataset.cameraSelect="true";checkbox.value=camera.id;checkbox.checked=cameraBulkSelection.has(camera.id);checkbox.setAttribute("aria-label",`Select ${camera.name} for bulk changes`);checkbox.disabled=cameraBulkOperationInProgress;checkbox.addEventListener("change",()=>{if(checkbox.checked)cameraBulkSelection.add(camera.id);else cameraBulkSelection.delete(camera.id);refreshCameraBulkToolbar();});selectCell.append(checkbox);row.append(selectCell);
     }
     const nameCell=document.createElement("td"),name=document.createElement("button");name.type="button";name.textContent=camera.archived_at?`${camera.name} · Archived`:camera.name;name.dataset.cameraId=camera.id;name.setAttribute("aria-pressed",String(camera.id===selectedCameraId));name.addEventListener("click",()=>void selectCamera(camera.id));nameCell.append(name);row.append(nameCell);
     const addCell=value=>{const cell=document.createElement("td");cell.textContent=value;row.append(cell);};
@@ -2711,7 +2758,7 @@ function renderCameraInventoryTable(cameras) {
     row.addEventListener("keydown",event=>{if(event.target===row&&(event.key==="Enter"||event.key===" ")){event.preventDefault();void selectCamera(camera.id);}});
     body.append(row);
   }
-  table.append(body);target.append(table);
+  table.append(body);target.append(table);refreshCameraBulkToolbar();
 }
 function clearCameraHistory(){
   const list=document.querySelector("#segment-list"),player=document.querySelector("#playback");
@@ -3284,22 +3331,199 @@ document.querySelector("#save-storage-volume").addEventListener("click",async()=
   try {if(!group) throw new Error("Create or select a camera group first.");const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/storage-volume`,{method:"PUT",body:JSON.stringify({volume_id:document.querySelector("#group-storage-volume").value})});document.querySelector("#schedule-message").textContent=`Assigned group cameras to ${result.volume_id}.`;await refresh();}
   catch(error){document.querySelector("#schedule-message").textContent=error.message;}
 });
-document.querySelector("#apply-bulk").addEventListener("click",async()=>{
-  const camera_ids=[...cameraBulkSelection];
-  const payload={camera_ids};
+function bulkActionChanges(){
+  const changes={};
   const group=document.querySelector("#bulk-group").value;
   const mode=document.querySelector("#bulk-recording-mode").value;
   const recordingEnabled=document.querySelector("#bulk-recording-enabled").value;
-  if(group!=="__unchanged__") payload.group_name=group || null;
-  if(mode) payload.recording_mode=mode;
-  if(recordingEnabled) payload.recording_enabled=recordingEnabled==="true";
-  try {
-    const result=await api("/api/cameras/bulk-update",{method:"POST",body:JSON.stringify(payload)});
-    document.querySelector("#bulk-message").textContent=`Updated ${result.cameras.length} camera(s).`;
-    cameraBulkSelection.clear();
-    await refresh();
-  } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
-});
+  if(group!=="__unchanged__")changes.group_name=group||null;
+  if(mode)changes.recording_mode=mode;
+  if(recordingEnabled)changes.recording_enabled=recordingEnabled==="true";
+  return changes;
+}
+function bulkChangeDescriptions(changes){
+  const descriptions=[];
+  if(Object.prototype.hasOwnProperty.call(changes,"group_name"))descriptions.push(changes.group_name?`Assign policy group “${changes.group_name}”.`:"Remove the policy group.");
+  if(changes.recording_mode)descriptions.push(`Set recording mode to ${changes.recording_mode}.`);
+  if(Object.prototype.hasOwnProperty.call(changes,"recording_enabled"))descriptions.push(`${changes.recording_enabled?"Enable":"Disable"} recording.`);
+  return descriptions;
+}
+function bulkTargetStateText(target,changes,after=false){
+  if(target.status!=="ready")return after?"Excluded; no settings will be changed during this apply.":target.status==="archived"?"Archived camera":"Camera no longer available";
+  const state=window.NvrCameraBulkActions.plannedState(target,after?changes:{});
+  const result=[`Policy group: ${state.groupName||"None"}`,`Recording mode: ${state.recordingMode}`,`Recording: ${state.recordingEnabled?"enabled":"disabled"}`];
+  if(after&&state.enablementBlockedByMode)result.push("mode keeps recording disabled");
+  return result.join(" · ");
+}
+function openBulkReviewDialog(){
+  if(cameraBulkOperationInProgress)return;
+  if(cameraBulkReview&&cameraBulkResults.some(result=>["failed","unknown"].includes(result.status))){
+    document.querySelector("#bulk-message").textContent="Resolve or explicitly dismiss the previous per-camera outcomes before starting another bulk change.";
+    openBulkResultsDialog();return;
+  }
+  let review;
+  try{
+    if(!cameraBulkSelection.size)throw new Error("Select at least one camera using its checkbox.");
+    const changes=bulkActionChanges();
+    if(!Object.keys(changes).length)throw new Error("Choose at least one change to review.");
+    review=window.NvrCameraBulkActions.createReview(cameraBulkSelection,latestCameras,cameraBulkVisibleIds,changes);
+  }catch(error){document.querySelector("#bulk-message").textContent=error.message;return;}
+
+  const dialog=document.createElement("dialog");dialog.className="camera-bulk-dialog";dialog.setAttribute("aria-labelledby","camera-bulk-review-title");
+  const title=document.createElement("h2");title.id="camera-bulk-review-title";title.textContent="Review camera changes";title.tabIndex=-1;
+  const intro=document.createElement("p");intro.textContent=`This review is fixed to ${review.cameraIds.length} selected camera ID(s). Filtering or refreshing the table will not change this target list.`;
+  const changeHeading=document.createElement("h3");changeHeading.textContent="Changes to apply";
+  const changesList=document.createElement("ul");changesList.replaceChildren(...bulkChangeDescriptions(review.changes).map(description=>{const item=document.createElement("li");item.textContent=description;return item;}));
+  let policyNote=null;
+  if(Object.prototype.hasOwnProperty.call(review.changes,"group_name")){
+    policyNote=document.createElement("p");policyNote.textContent="Changing the policy group may change inherited schedule, retention, storage, and AI settings for cameras without their own overrides. Browsing-group membership and camera-level overrides are unchanged.";
+  }
+  const eligible=review.targets.filter(target=>target.status==="ready").length,excluded=review.targets.length-eligible;
+  const count=document.createElement("p");count.textContent=`${eligible} eligible to update · ${excluded} excluded for revalidation`;
+  const tableWrap=document.createElement("div");tableWrap.className="camera-bulk-review-table-wrap";
+  const table=document.createElement("table");table.setAttribute("aria-label","Reviewed bulk camera targets");
+  const head=document.createElement("thead"),headRow=document.createElement("tr");
+  for(const label of ["Camera","Stable ID","Current policy and recording","Planned policy and recording","Review status"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;headRow.append(cell);}head.append(headRow);
+  const body=document.createElement("tbody");
+  for(const target of review.targets){
+    const row=document.createElement("tr");
+    for(const value of [target.name,target.id,bulkTargetStateText(target,review.changes),bulkTargetStateText(target,review.changes,true),target.status==="ready"?"Ready":target.status==="archived"?"Archived · excluded":"Missing · excluded"]){const cell=document.createElement("td");cell.textContent=value;row.append(cell);}
+    body.append(row);
+  }
+  table.append(head,body);tableWrap.append(table);
+  const actions=document.createElement("div");actions.className="toolbar-row";
+  const cancel=document.createElement("button");cancel.type="button";cancel.textContent="Cancel";cancel.addEventListener("click",()=>dialog.close());
+  const apply=document.createElement("button");apply.type="button";apply.className="primary";apply.textContent=`Apply to ${eligible} eligible camera(s)`;apply.disabled=!eligible;
+  apply.addEventListener("click",()=>{dialog.close();dialog.remove();void executeBulkReview(review);});
+  actions.append(cancel,apply);dialog.append(title,intro,changeHeading,changesList);if(policyNote)dialog.append(policyNote);dialog.append(count,tableWrap,actions);document.body.append(dialog);
+  dialog.addEventListener("close",()=>dialog.remove());dialog.showModal();title.focus();
+}
+function ensureBulkResultsDialog(){
+  if(cameraBulkStatusDialog)return cameraBulkStatusDialog;
+  const dialog=document.createElement("dialog");dialog.id="camera-bulk-results-dialog";dialog.className="camera-bulk-dialog";dialog.setAttribute("aria-labelledby","camera-bulk-results-title");
+  const title=document.createElement("h2");title.id="camera-bulk-results-title";title.textContent="Bulk camera results";title.tabIndex=-1;
+  const summary=document.createElement("p");summary.id="camera-bulk-results-summary";summary.setAttribute("role","status");summary.setAttribute("aria-live","polite");
+  const tableWrap=document.createElement("div");tableWrap.className="camera-bulk-results-table-wrap";
+  const table=document.createElement("table");table.setAttribute("aria-label","Per-camera bulk results");
+  const head=document.createElement("thead"),headRow=document.createElement("tr");
+  for(const label of ["Camera","Stable ID","Outcome","Details"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;headRow.append(cell);}head.append(headRow);
+  const body=document.createElement("tbody");body.id="camera-bulk-results-body";table.append(head,body);tableWrap.append(table);
+  const actions=document.createElement("div");actions.className="toolbar-row";
+  const reconcile=document.createElement("button");reconcile.id="camera-bulk-reconcile";reconcile.type="button";reconcile.textContent="Check current inventory";reconcile.hidden=true;reconcile.addEventListener("click",()=>void reconcileBulkOutcomes());
+  const retry=document.createElement("button");retry.id="camera-bulk-retry-failed";retry.type="button";retry.textContent="Retry failed only";retry.hidden=true;retry.addEventListener("click",()=>void retryFailedBulkTargets());
+  const dismiss=document.createElement("button");dismiss.id="camera-bulk-dismiss-results";dismiss.type="button";dismiss.textContent="Dismiss results";dismiss.hidden=true;dismiss.addEventListener("click",dismissBulkResults);
+  const close=document.createElement("button");close.id="camera-bulk-hide-results";close.type="button";close.textContent="Close panel";close.addEventListener("click",()=>dialog.close());
+  actions.append(reconcile,retry,dismiss,close);dialog.append(title,summary,tableWrap,actions);document.body.append(dialog);
+  dialog.addEventListener("cancel",event=>{event.preventDefault();dialog.close();});
+  cameraBulkStatusDialog=dialog;return dialog;
+}
+function refreshBulkResultsDialog(){
+  if(!cameraBulkReview)return;
+  const dialog=ensureBulkResultsDialog(),summary=dialog.querySelector("#camera-bulk-results-summary"),body=dialog.querySelector("#camera-bulk-results-body");
+  const targetById=new Map(cameraBulkReview.targets.map(target=>[target.id,target]));
+  const results=window.NvrCameraBulkActions.orderedResults(cameraBulkReview.cameraIds,cameraBulkResults);
+  const totals=results.reduce((counts,result)=>{counts[result.status]=(counts[result.status]||0)+1;return counts;},{});
+  const success=totals.success||0,failed=totals.failed||0,unknown=totals.unknown||0,pending=totals.pending||0;
+  summary.textContent=cameraBulkOperationInProgress?`Applying reviewed changes; ${pending} result(s) are still pending. This request continues if you close this panel.`:`${success} succeeded · ${failed} failed · ${unknown} unknown and not safe to retry yet.`;
+  body.replaceChildren(...results.map(result=>{
+    const target=targetById.get(String(result.camera_id)),camera=latestCameras.find(item=>item.id===result.camera_id),row=document.createElement("tr");
+    const values=[target?.name||camera?.name||"Camera no longer available",result.camera_id,result.status==="unknown"?"Outcome unknown":result.status==="pending"?"Pending":result.status[0].toLocaleUpperCase()+result.status.slice(1),[result.detail,result.warning].filter(Boolean).join(" ")|| (result.status==="pending"?"Waiting for the server to confirm this camera.":"")];
+    values.forEach((value,index)=>{const cell=document.createElement("td");cell.textContent=value;cell.className=index===2?"camera-bulk-outcome":"";if(index===2)cell.dataset.status=result.status;row.append(cell);});return row;
+  }));
+  const retryIds=window.NvrCameraBulkActions.retryableIds(results,latestCameras);
+  dialog.querySelector("#camera-bulk-retry-failed").hidden=cameraBulkOperationInProgress||retryIds.length===0;
+  dialog.querySelector("#camera-bulk-retry-failed").textContent=`Retry ${retryIds.length} failed camera(s) only`;
+  dialog.querySelector("#camera-bulk-reconcile").hidden=cameraBulkOperationInProgress||unknown===0;
+  dialog.querySelector("#camera-bulk-dismiss-results").hidden=cameraBulkOperationInProgress||pending>0;
+  dialog.querySelector("#camera-bulk-hide-results").textContent=cameraBulkOperationInProgress?"Close panel · request continues":"Close panel";
+  refreshCameraBulkToolbar();
+}
+function openBulkResultsDialog(){
+  if(!cameraBulkReview)return;
+  const dialog=ensureBulkResultsDialog();refreshBulkResultsDialog();
+  if(!dialog.open){dialog.showModal();dialog.querySelector("#camera-bulk-results-title").focus();}
+}
+function dismissBulkResults(){
+  if(cameraBulkOperationInProgress)return;
+  if(cameraBulkResults.some(result=>result.status!=="success")&&!window.confirm("Dismiss the saved per-camera outcomes? Any failed or unknown target will no longer be available for retry in this session."))return;
+  cameraBulkReview=null;cameraBulkResults=[];cameraBulkStatusDialog?.close();refreshCameraBulkToolbar();document.querySelector("#camera-inventory-heading")?.focus();
+}
+function mergeBulkResults(review,baseResults,updates){
+  const byId=new Map((baseResults||[]).map(result=>[String(result.camera_id),result]));
+  for(const result of updates||[])byId.set(String(result.camera_id),result);
+  return window.NvrCameraBulkActions.orderedResults(review.cameraIds,[...byId.values()]);
+}
+async function refreshBulkInventory(session=cameraBulkSession){
+  const result=await api("/api/cameras");if(session!==cameraBulkSession)return null;latestCameras=result.cameras||[];sidebarCameras=latestCameras;renderCameras(latestCameras);renderSidebar();return latestCameras;
+}
+async function reconcileBulkOutcomes(){
+  if(!cameraBulkReview||cameraBulkOperationInProgress)return;
+  const session=cameraBulkSession;
+  const summary=ensureBulkResultsDialog().querySelector("#camera-bulk-results-summary");summary.textContent="Checking current camera settings before allowing any retry…";
+  try{
+    const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;
+    cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(cameraBulkReview.cameraIds,cameraBulkResults,cameras,cameraBulkReview.changes);
+    refreshBulkResultsDialog();
+  }catch(error){
+    if(session!==cameraBulkSession)return;
+    summary.textContent=`Current outcomes remain unknown. Inventory could not be checked: ${error.message}. No retry was sent.`;
+  }
+}
+async function executeBulkReview(review,requestedIds=null,priorResults=null){
+  if(cameraBulkOperationInProgress)return;
+  const session=cameraBulkSession;
+  const ids=requestedIds||review.targets.filter(target=>target.status==="ready").map(target=>target.id);
+  if(!ids.length)return;
+  const base=priorResults||review.targets.map(target=>target.status==="ready"
+    ?{camera_id:target.id,status:"pending",detail:"Waiting for the server to confirm this camera."}
+    :{camera_id:target.id,status:"failed",code:target.status,detail:target.status==="archived"?"Archived camera excluded during review.":"Camera no longer available during review."});
+  const pending=ids.map(camera_id=>({camera_id,status:"pending",detail:"Waiting for the server to confirm this camera."}));
+  cameraBulkReview=review;cameraBulkResults=mergeBulkResults(review,base,pending);cameraBulkOperationInProgress=true;
+  if(!priorResults)cameraBulkSelection.clear();
+  refreshCameraBulkToolbar();renderCameras(latestCameras);refreshBulkResultsDialog();openBulkResultsDialog();
+  try{
+    const response=await api("/api/cameras/bulk-update",{method:"POST",body:JSON.stringify({camera_ids:ids,...review.changes})});
+    if(session!==cameraBulkSession)return;
+    cameraBulkResults=mergeBulkResults(review,cameraBulkResults,window.NvrCameraBulkActions.orderedResults(ids,response.results));
+    try{const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(review.cameraIds,cameraBulkResults,cameras,review.changes);}
+    catch{ /* The API's per-camera result remains visible if refreshing the inventory fails. */ }
+  }catch(error){
+    if(session!==cameraBulkSession)return;
+    if(error.status===401||error.status===403){
+      const denied=ids.map(camera_id=>({camera_id,status:"failed",code:"unauthorized",detail:"This session is no longer authorized to change cameras. No retry was sent; sign in with administrator access before starting a new review."}));
+      cameraBulkResults=mergeBulkResults(review,cameraBulkResults,denied);
+    }else{
+      const uncertain=ids.map(camera_id=>({camera_id,status:"unknown",code:"outcome_unknown",detail:"The request did not return a confirmed result. Checking current camera settings before allowing retry."}));
+      cameraBulkResults=mergeBulkResults(review,cameraBulkResults,uncertain);
+      try{const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(review.cameraIds,cameraBulkResults,cameras,review.changes);}
+      catch{
+        cameraBulkResults=cameraBulkResults.map(result=>result.status==="unknown"?{...result,detail:"Unable to verify this outcome. No automatic retry was sent."}:result);
+      }
+    }
+    const message=document.querySelector("#bulk-message");if(message)message.textContent=`Bulk request response was incomplete: ${error.message}. Check the per-camera outcomes before retrying.`;
+  }finally{
+    if(session!==cameraBulkSession)return;
+    cameraBulkOperationInProgress=false;
+    clearConfigDraft(document.querySelector('[data-config-section="bulk-update"]'));
+    refreshBulkResultsDialog();
+    if(cameraBulkStatusDialog?.open)cameraBulkStatusDialog.querySelector("#camera-bulk-hide-results")?.focus();
+  }
+}
+async function retryFailedBulkTargets(){
+  if(!cameraBulkReview||cameraBulkOperationInProgress)return;
+  const session=cameraBulkSession;
+  try{
+    const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;
+    cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(cameraBulkReview.cameraIds,cameraBulkResults,cameras,cameraBulkReview.changes);
+    const ids=window.NvrCameraBulkActions.retryableIds(cameraBulkResults,cameras);
+    if(!ids.length){refreshBulkResultsDialog();return;}
+    await executeBulkReview(cameraBulkReview,ids,cameraBulkResults);
+  }catch(error){
+    if(session!==cameraBulkSession)return;
+    const summary=ensureBulkResultsDialog().querySelector("#camera-bulk-results-summary");summary.textContent=`Current camera status could not be verified: ${error.message}. No retry was sent.`;
+  }
+}
+document.querySelector("#apply-bulk").addEventListener("click",openBulkReviewDialog);
 document.querySelector("#preview-import").addEventListener("click",async()=>{
   const message=document.querySelector("#bulk-message");
   const csv_text=document.querySelector("#camera-import-csv").value;
@@ -3520,7 +3744,17 @@ if(incidentPollTimer) clearInterval(incidentPollTimer);
 incidentPollTimer=setInterval(()=>{if(currentRole){refreshOperationalInventory();refreshIncidents();}},15000);
 if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
-document.querySelector("#logout").addEventListener("click", async () => { if(!await guardCameraDrafts())return;stopLiveViews();cameraPreviewWorkspace.clearSelection();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();await api("/api/auth/logout", { method:"POST" });currentRole=null;currentUsername="";selectedCameraId=null;cameraEditorState.selectCamera(null);clearCameraHistory();cameraBulkSelection.clear();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;Object.assign(cameraInventoryFilters,{archive:"active",group:"all",connection:"all",health:"all",sortKey:"name",sortDirection:1,query:""});document.querySelector("#camera-inventory-search").value="";document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section.dataset.cameraWorkspace!=="cameras"));document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{if(button.dataset.cameraWorkspaceButton==="cameras")button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");});document.querySelector("#camera-admin-layout").dataset.mobileEditor="false";latestSystemStatus=null;latestStorageStatus=null;document.querySelector("#ops-status-drawer").classList.add("hidden");document.querySelector("#ops-status-toggle").setAttribute("aria-expanded","false");document.querySelector("#ops-storage-section").classList.add("hidden");document.querySelector("#incidents-list").replaceChildren();document.querySelector("#webhook-list").replaceChildren();document.querySelector("#webhook-deliveries").replaceChildren();show("login"); });
+document.querySelector("#logout").addEventListener("click", async () => {
+  if(cameraBulkOperationInProgress&&!window.confirm("A bulk update is still running. Signing out will not cancel it, and its results will be cleared from this session. Sign out anyway?"))return;
+  if(!await guardCameraDrafts())return;
+  stopLiveViews();cameraPreviewWorkspace.clearSelection();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();
+  await api("/api/auth/logout", { method:"POST" });
+  resetCameraBulkSession();currentRole=null;currentUsername="";selectedCameraId=null;cameraEditorState.selectCamera(null);clearCameraHistory();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;
+  Object.assign(cameraInventoryFilters,{archive:"active",group:"all",connection:"all",health:"all",sortKey:"name",sortDirection:1,query:""});document.querySelector("#camera-inventory-search").value="";
+  document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section.dataset.cameraWorkspace!=="cameras"));
+  document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{if(button.dataset.cameraWorkspaceButton==="cameras")button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");});
+  document.querySelector("#camera-admin-layout").dataset.mobileEditor="false";latestSystemStatus=null;latestStorageStatus=null;document.querySelector("#ops-status-drawer").classList.add("hidden");document.querySelector("#ops-status-toggle").setAttribute("aria-expanded","false");document.querySelector("#ops-storage-section").classList.add("hidden");document.querySelector("#incidents-list").replaceChildren();document.querySelector("#webhook-list").replaceChildren();document.querySelector("#webhook-deliveries").replaceChildren();show("login");
+});
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {

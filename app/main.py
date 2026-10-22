@@ -2652,49 +2652,87 @@ async def bulk_update_cameras(
         raise HTTPException(status_code=422, detail="Specify a group assignment, recording mode, or enablement")
     if len(set(payload.camera_ids)) != len(payload.camera_ids):
         raise HTTPException(status_code=422, detail="Camera IDs must be unique")
-    with connect() as db:
-        rows = db.execute(f"SELECT id FROM cameras WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", payload.camera_ids).fetchall()
-        if len(rows) != len(payload.camera_ids):
-            raise HTTPException(status_code=404, detail="One or more cameras were not found")
-        group_id = None
-        if "group_name" in payload.model_fields_set and payload.group_name:
-            group = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (payload.group_name,)).fetchone()
-            if group:
-                group_id = group["id"]
-            else:
-                group_id = str(uuid.uuid4())
-                db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, payload.group_name))
+    results: list[dict[str, object]] = []
+    updated: list[dict[str, object]] = []
+    for camera_id in payload.camera_ids:
+        try:
+            with connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT id,archived_at,recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
+                if current is None:
+                    results.append({"camera_id": camera_id, "status": "failed", "code": "missing", "detail": "Camera is no longer available."})
+                    continue
+                if current["archived_at"]:
+                    results.append({"camera_id": camera_id, "status": "failed", "code": "archived", "detail": "Archived cameras are excluded from bulk changes."})
+                    continue
 
-        assignments = []
-        values: list[object] = []
-        if "group_name" in payload.model_fields_set:
-            assignments.append("group_id=?")
-            values.append(group_id)
-        if payload.recording_mode is not None:
-            assignments.append("recording_mode=?")
-            values.append(payload.recording_mode)
-            if payload.recording_mode == "disabled":
-                assignments.extend(("recording_enabled=0", "recording_status='stopped'", "last_error=NULL"))
-        if payload.recording_enabled is not None:
-            assignments.append("recording_enabled=?")
-            values.append(int(payload.recording_enabled and payload.recording_mode != "disabled"))
-            assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL AND motion_fallback_enabled=0 THEN 'Configure an ONVIF event service or enable server motion fallback' ELSE NULL END"))
-            effective_enabled = int(payload.recording_enabled and payload.recording_mode != "disabled")
-            values.extend((effective_enabled, effective_enabled))
-        elif payload.recording_mode is not None and payload.recording_mode != "disabled":
-            assignments.extend(("recording_status=CASE WHEN recording_enabled=1 THEN 'connecting' ELSE 'stopped' END", "last_error=NULL"))
-        assignments.append("updated_at=?")
-        values.append(datetime.now(timezone.utc).isoformat())
-        values.extend(payload.camera_ids)
-        db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", values)
-    if "group_name" in payload.model_fields_set or payload.recording_mode is not None or payload.recording_enabled is not None:
-        await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id, force_restart=True) for camera_id in payload.camera_ids))
-    with connect() as db:
-        updated = db.execute(
-            f"SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id IN ({','.join('?' for _ in payload.camera_ids)}) ORDER BY c.name COLLATE NOCASE",
-            payload.camera_ids,
-        ).fetchall()
-    return {"cameras": [_camera_view(row) for row in updated]}
+                group_id = None
+                if "group_name" in payload.model_fields_set and payload.group_name:
+                    group = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (payload.group_name,)).fetchone()
+                    if group:
+                        group_id = group["id"]
+                    else:
+                        group_id = str(uuid.uuid4())
+                        db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, payload.group_name))
+
+                assignments = []
+                values: list[object] = []
+                if "group_name" in payload.model_fields_set:
+                    assignments.append("group_id=?")
+                    values.append(group_id)
+                if payload.recording_mode is not None:
+                    assignments.append("recording_mode=?")
+                    values.append(payload.recording_mode)
+                    if payload.recording_mode == "disabled":
+                        assignments.extend(("recording_enabled=0", "recording_status='stopped'", "last_error=NULL"))
+                enablement_blocked_by_mode = False
+                if payload.recording_enabled is not None:
+                    assignments.append("recording_enabled=?")
+                    effective_mode = payload.recording_mode or current["recording_mode"]
+                    effective_enabled = int(payload.recording_enabled and effective_mode != "disabled")
+                    enablement_blocked_by_mode = payload.recording_enabled and effective_mode == "disabled"
+                    values.append(effective_enabled)
+                    assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL AND motion_fallback_enabled=0 THEN 'Configure an ONVIF event service or enable server motion fallback' ELSE NULL END"))
+                    values.extend((effective_enabled, effective_enabled))
+                elif payload.recording_mode is not None and payload.recording_mode != "disabled":
+                    assignments.extend(("recording_status=CASE WHEN recording_enabled=1 THEN 'connecting' ELSE 'stopped' END", "last_error=NULL"))
+                assignments.append("updated_at=?")
+                values.extend((datetime.now(timezone.utc).isoformat(), camera_id))
+                changed = db.execute(
+                    f"UPDATE cameras SET {','.join(assignments)} WHERE id=? AND archived_at IS NULL",
+                    values,
+                )
+                if changed.rowcount != 1:
+                    results.append({"camera_id": camera_id, "status": "failed", "code": "unavailable", "detail": "Camera became unavailable before the update."})
+                    continue
+        except Exception:
+            # A failed commit can leave the caller unable to know whether SQLite committed.
+            results.append({"camera_id": camera_id, "status": "unknown", "code": "outcome_unknown", "detail": "The server could not confirm whether this camera's changes were saved."})
+            continue
+
+        warnings = []
+        if enablement_blocked_by_mode:
+            warnings.append("Recording remains disabled because this camera's recording mode is disabled.")
+        try:
+            await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+        except Exception:
+            # Configuration is committed. Do not invite a retry that could duplicate side effects;
+            # make the operational warning visible while reporting the durable update as successful.
+            warnings.append("Settings were saved, but the recorder could not be refreshed. Check camera status.")
+        with connect() as db:
+            row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
+        if row is None:
+            results.append({"camera_id": camera_id, "status": "unknown", "code": "outcome_unknown", "detail": "Settings were saved, but the camera is no longer available."})
+            continue
+        camera_view = _camera_view(row)
+        updated.append(camera_view)
+        result: dict[str, object] = {"camera_id": camera_id, "status": "success", "code": None}
+        if warnings:
+            result["warning"] = " ".join(warnings)
+        results.append(result)
+
+    updated.sort(key=lambda camera: (str(camera["name"]).casefold(), str(camera["id"])))
+    return {"cameras": updated, "results": results}
 
 
 @app.post("/api/cameras/{camera_id}/credentials")
