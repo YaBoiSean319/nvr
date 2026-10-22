@@ -730,6 +730,11 @@ def workspace_layout_javascript() -> FileResponse:
     return FileResponse(Path(__file__).with_name("static") / "workspace-layout.js", media_type="text/javascript")
 
 
+@app.get("/camera-inventory.js", include_in_schema=False)
+def camera_inventory_javascript() -> FileResponse:
+    return FileResponse(Path(__file__).with_name("static") / "camera-inventory.js", media_type="text/javascript")
+
+
 @app.get("/healthz", include_in_schema=False)
 def health() -> dict[str, str]:
     try:

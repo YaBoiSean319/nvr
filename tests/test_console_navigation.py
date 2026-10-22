@@ -17,6 +17,10 @@ class ConsoleNavigationTests(unittest.TestCase):
         self.assertIn('data-screen="app-settings"', response.text)
         self.assertIn('id="console-sidebar"', response.text)
         self.assertIn('id="sidebar-search"', response.text)
+        self.assertIn('<script src="/camera-inventory.js" defer></script>', response.text)
+        inventory_script = TestClient(app).get("/camera-inventory.js")
+        self.assertEqual(inventory_script.status_code, 200)
+        self.assertIn("filterAndSortCameras", inventory_script.text)
 
     def test_live_grid_offers_the_four_approved_capacities(self):
         response = TestClient(app).get("/")

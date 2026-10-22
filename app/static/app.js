@@ -48,6 +48,10 @@ let workspaceSaveTimer = null;
 let liveViewDirty = false;
 let cachedLiveArrangement = null;
 let selectedCameraId = null;
+const cameraBulkSelection = new Set();
+let activeCameraWorkspace = "cameras";
+let mobileCameraEditorOpen = false;
+const cameraInventoryFilters = { archive:"active", group:"all", connection:"all", health:"all", sortKey:"name", sortDirection:1 };
 let displaySettings = {time_zone:"UTC",date_format:"friendly",clock_format:"12"};
 let currentBranding = {app_name:"Workplace NVR",primary_color:"#17212b",accent_color:"#69a1ff",assets:{}};
 let brandingPreviewUrl = null;
@@ -179,6 +183,110 @@ function moveInto(selector, targetSelector) {
   const element = document.querySelector(selector), target = document.querySelector(targetSelector);
   if (element && target) target.append(element);
 }
+function cameraWorkspace(id, title) {
+  const section=document.createElement("section");
+  section.className="camera-admin-workspace";
+  section.dataset.cameraWorkspace=id;
+  section.setAttribute("aria-label",title);
+  section.classList.toggle("hidden",id!==activeCameraWorkspace);
+  return section;
+}
+function setCameraWorkspace(id) {
+  const target=document.querySelector(`[data-camera-workspace="${id}"]`);
+  if(!target)return false;
+  const current=document.querySelector(`[data-camera-workspace="${activeCameraWorkspace}"]`);
+  if(current&&current!==target&&!guardDraftsIn(current))return false;
+  activeCameraWorkspace=id;
+  document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section!==target));
+  document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{
+    if(button.dataset.cameraWorkspaceButton===id)button.setAttribute("aria-current","page");
+    else button.removeAttribute("aria-current");
+  });
+  mobileCameraEditorOpen=false;
+  const layout=document.querySelector("#camera-admin-layout");if(layout)layout.dataset.mobileEditor="false";
+  return true;
+}
+function setupCameraAdminWorkspaces() {
+  const content=document.querySelector("#camera-settings-content");
+  if(content.querySelector("#camera-workspace-nav"))return;
+
+  const heading=document.querySelector("#camera-heading");
+  const searchLabel=document.querySelector('label[for="camera-inventory-search"]');
+  const search=document.querySelector("#camera-inventory-search");
+  const editor=document.querySelector("#camera-list");
+  const message=document.querySelector("#camera-message");
+  const segmentsHeading=[...document.querySelectorAll("h3")].find(item=>item.textContent.trim()==="Recorded footage");
+  const segments=document.querySelector("#segment-list");
+  const player=document.querySelector("#playback");
+  const form=document.querySelector("#camera-form");
+  const discovery=document.querySelector("#discovery-admin");
+  const groups=document.querySelector("#bulk-admin");
+  const bulkUpdate=groups?.querySelector('[data-config-section="bulk-update"]');
+  const cameraImport=groups?.querySelector('[data-config-section="camera-import"]');
+  const aiRuntime=groups?.querySelector('[data-config-section="ai-runtime"]');
+
+  const nav=document.createElement("nav");nav.id="camera-workspace-nav";nav.className="camera-workspace-nav";nav.setAttribute("aria-label","Camera settings workspaces");
+  for(const [id,label] of [["cameras","Cameras"],["add","Add Cameras"],["groups","Groups & Policies"]]){
+    const button=document.createElement("button");button.type="button";button.textContent=label;button.dataset.cameraWorkspaceButton=id;
+    if(id===activeCameraWorkspace)button.setAttribute("aria-current","page");
+    button.addEventListener("click",()=>setCameraWorkspace(id));nav.append(button);
+  }
+
+  const cameras=cameraWorkspace("cameras","Cameras");
+  const layout=document.createElement("div");layout.id="camera-admin-layout";layout.className="camera-admin-layout";
+  const inventory=document.createElement("section");inventory.className="camera-inventory-pane";inventory.setAttribute("aria-labelledby","camera-inventory-heading");
+  const inventoryHeading=document.createElement("h3");inventoryHeading.id="camera-inventory-heading";inventoryHeading.textContent="Camera inventory";inventory.append(inventoryHeading);
+  const filters=document.createElement("div");filters.id="camera-inventory-filters";filters.className="camera-inventory-filters";
+  const selectFilter=(id,labelText)=>{const label=document.createElement("label"),select=document.createElement("select");label.htmlFor=id;label.textContent=labelText;select.id=id;label.append(select);filters.append(label);return select;};
+  const archive=selectFilter("camera-filter-archive","Camera state");
+  archive.append(new Option("Active","active"),new Option("Archived","archived"),new Option("All cameras","all"));archive.value=cameraInventoryFilters.archive;
+  selectFilter("camera-filter-group","Group");
+  selectFilter("camera-filter-connection","Connection");
+  selectFilter("camera-filter-health","Recording health");
+  inventory.append(filters);
+  const groupNote=document.createElement("p");groupNote.className="camera-inventory-note";groupNote.textContent="Group shows the camera’s policy group. Browsing groups can overlap.";inventory.append(groupNote);
+  if(searchLabel&&search)inventory.append(searchLabel,search);
+  const table=document.createElement("div");table.id="camera-inventory-table";table.className="camera-inventory-table-scroll";table.setAttribute("role","region");table.setAttribute("aria-label","Camera inventory table");table.tabIndex=0;inventory.append(table);
+  if(bulkUpdate)inventory.append(bulkUpdate);
+
+  const details=document.createElement("section");details.className="camera-editor-pane";details.setAttribute("aria-labelledby","selected-camera-heading");
+  const back=document.createElement("button");back.id="camera-back-to-inventory";back.type="button";back.textContent="Back to Cameras";back.className="camera-back-button";back.addEventListener("click",()=>{if(!guardDraftsIn(editor))return;mobileCameraEditorOpen=false;layout.dataset.mobileEditor="false";requestAnimationFrame(()=>document.querySelector(`#camera-inventory-table button[data-camera-id="${CSS.escape(selectedCameraId||"")}"]`)?.focus());});details.append(back);
+  const detailsHeading=document.createElement("h3");detailsHeading.id="selected-camera-heading";detailsHeading.tabIndex=-1;detailsHeading.textContent="Selected camera";details.append(detailsHeading);
+  if(editor)details.append(editor);
+  if(segmentsHeading)details.append(segmentsHeading);
+  if(segments)details.append(segments);
+  if(player)details.append(player);
+  if(message)details.append(message);
+  layout.append(inventory,details);
+  cameras.append(layout);
+
+  const add=cameraWorkspace("add","Add Cameras");
+  const addHeading=document.createElement("h3");addHeading.textContent="Add Cameras";add.append(addHeading);
+  if(discovery)add.append(discovery);
+  if(form)add.append(form);
+  if(cameraImport)add.append(cameraImport);
+
+  const groupsWorkspace=cameraWorkspace("groups","Groups & Policies");
+  if(groups){const groupHeading=groups.querySelector("#bulk-heading");if(groupHeading)groupHeading.textContent="Groups & Policies";groupsWorkspace.append(groups);}
+
+  content.replaceChildren();
+  if(heading)content.append(heading);
+  content.append(nav,cameras,add,groupsWorkspace);
+  if(aiRuntime)document.querySelector("#app-settings-content").append(aiRuntime);
+
+  const refreshFilters=()=>{
+    const values={
+      query:search?.value||"",archive:archive.value,
+      group:document.querySelector("#camera-filter-group").value,
+      connection:document.querySelector("#camera-filter-connection").value,
+      health:document.querySelector("#camera-filter-health").value,
+      sortKey:cameraInventoryFilters.sortKey,sortDirection:cameraInventoryFilters.sortDirection,
+    };
+    Object.assign(cameraInventoryFilters,values);
+    renderCameras(latestCameras);
+  };
+  for(const select of filters.querySelectorAll("select"))select.addEventListener("change",refreshFilters);
+}
 function setupSettingsCategories() {
   const root=document.querySelector("#app-settings-content");
   if(root.querySelector(".settings-category-nav"))return;
@@ -189,6 +297,7 @@ function setupSettingsCategories() {
     ["recording","Recording & storage",["#settings-recording-link"]],
     ["notifications","Notifications",["#webhooks-admin","#heartbeat-admin"]],
     ["integrations","Integrations",["#settings-integrations-link"]],
+    ["ai-runtime","AI runtime",["#ai-runtime"]],
     ["diagnostics","Diagnostics",["#diagnostics-admin"]],
   ];
   const nav=document.createElement("nav");nav.className="settings-category-nav";nav.setAttribute("aria-label","Settings categories");
@@ -202,8 +311,13 @@ function setupSettingsCategories() {
   }
   root.prepend(nav);
   root.querySelectorAll("[data-open-camera-admin]").forEach(button=>button.addEventListener("click",()=>{
-    const target=button.dataset.openCameraAdmin==="ai"?"#ai-provider":"#bulk-admin";
-    setScreen("camera-settings");requestAnimationFrame(()=>{document.querySelector(target)?.scrollIntoView({behavior:"smooth",block:"start"});document.querySelector(target)?.focus?.();});
+    if(button.dataset.openCameraAdmin==="ai"){
+      setScreen("app-settings");setSettingsCategory("ai-runtime",true);
+      requestAnimationFrame(()=>document.querySelector("#ai-runtime")?.scrollIntoView({behavior:"smooth",block:"start"}));
+      return;
+    }
+    if(!setScreen("camera-settings"))return;
+    setCameraWorkspace("cameras");requestAnimationFrame(()=>{document.querySelector('[data-config-section="bulk-update"]')?.scrollIntoView({behavior:"smooth",block:"start"});});
   }));
   window.addEventListener("hashchange",()=>{const match=/^#settings\/([a-z-]+)$/.exec(location.hash);if(match&&panels.has(match[1]))setSettingsCategory(match[1],false);});
   const match=/^#settings\/([a-z-]+)$/.exec(location.hash);
@@ -243,6 +357,7 @@ function setupConsoleShell() {
   }
   const recordedHeading = [...document.querySelectorAll("h3")].find(item => item.textContent.trim() === "Recorded footage");
   if (recordedHeading) cameraSettings.append(recordedHeading);
+  setupCameraAdminWorkspaces();
   moveInto("#status > .badge", "#app-settings-content");
   for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#display-settings-admin", "#branding-admin", "#identity-settings", "#settings-recording-link", "#settings-integrations-link", "#logout"]) moveInto(selector, "#app-settings-content");
   setupSettingsCategories();
@@ -265,7 +380,7 @@ function setupConsoleShell() {
   });
   document.querySelector("#sidebar-search").addEventListener("input", filterSidebar);
   const inventorySearch=document.querySelector("#camera-inventory-search");let lastInventoryQuery=inventorySearch.value;
-  inventorySearch.addEventListener("input",()=>{if(!guardDraftsIn(document.querySelector("#camera-settings-content"))){inventorySearch.value=lastInventoryQuery;return;}lastInventoryQuery=inventorySearch.value;renderCameras(latestCameras);});
+  inventorySearch.addEventListener("input",()=>{lastInventoryQuery=inventorySearch.value;cameraInventoryFilters.query=lastInventoryQuery;renderCameras(latestCameras);});
   document.querySelector("#live-quality").addEventListener("change",()=>startLiveViews(activeLiveCameraIds,latestCameras,focusedLiveCameraId,activeLiveGridSize,activeLiveTileCameraIds,activeLiveLayoutMode));
   const theme = document.querySelector("#theme-choice"), savedTheme = localStorage.getItem("nvr-theme") || "system";
   theme.value = savedTheme; document.documentElement.dataset.theme = savedTheme === "system" ? "" : savedTheme;
@@ -517,10 +632,10 @@ function renderSidebar() {
     const selected = ["camera-settings","app-settings"].includes(activeScreen)?selectedCameraId===camera.id:currentWorkspaceCameraIds().includes(camera.id);
     const row=sidebarItem(cameraList, camera.name, `${camera.name} ${address}`, () => {
       if(activeScreen==="camera-settings"||activeScreen==="app-settings"){
-        if(selectedCameraId===camera.id)return;
+        if(selectedCameraId===camera.id){if(activeScreen==="app-settings"&&!setScreen("camera-settings"))return;if(activeScreen==="camera-settings")setCameraWorkspace("cameras");mobileCameraEditorOpen=true;renderCameras(latestCameras);return;}
         if(selectedCameraId!==camera.id&&!guardDraftsIn(document.querySelector("#camera-settings-content")))return;
         if(activeScreen==="app-settings"&&!setScreen("camera-settings"))return;
-        selectedCameraId=camera.id;renderCameras(latestCameras);return;
+        setCameraWorkspace("cameras");selectedCameraId=camera.id;mobileCameraEditorOpen=true;renderCameras(latestCameras);renderSidebar();return;
       }
       const current = currentWorkspaceCameraIds();
       applySidebarCameraSelection(current.includes(camera.id) ? current.filter(id => id !== camera.id) : [...current, camera.id]);
@@ -792,12 +907,13 @@ function inspectCameraFromStatus(cameraId){
     if(activeScreen==="footage"&&!playbackTimeline)loadSynchronizedPlayback();
     return;
   }
-  if(activeScreen==="camera-settings"&&selectedCameraId===cameraId)return;
+  if(activeScreen==="camera-settings"&&selectedCameraId===cameraId){setCameraWorkspace("cameras");mobileCameraEditorOpen=true;renderCameras(latestCameras);return;}
   if(activeScreen==="camera-settings"&&!guardDraftsIn(document.querySelector("#camera-settings-content")))return;
   selectedCameraId=cameraId;
   if(currentRole==="administrator"&&setScreen("camera-settings")){
+    setCameraWorkspace("cameras");mobileCameraEditorOpen=true;
     renderCameras(latestCameras);
-    requestAnimationFrame(()=>[...document.querySelectorAll("#camera-list [data-camera-id]")].find(item=>item.dataset.cameraId===cameraId)?.querySelector("button")?.focus());
+    requestAnimationFrame(()=>document.querySelector(`#camera-inventory-table button[data-camera-id="${CSS.escape(cameraId)}"]`)?.focus());
   }
 }
 async function refreshOperationalStorage(){
@@ -2058,23 +2174,94 @@ async function refreshSessions() {
   }));
   if (!sessions.length) target.textContent="No active sessions.";
 }
+function renderCameraInventoryTable(cameras) {
+  const target=document.querySelector("#camera-inventory-table");
+  if(!target)return;
+  target.replaceChildren();
+  if(!cameras.length){const empty=document.createElement("p");empty.textContent=latestCameras.length?"No cameras match these filters.":"No cameras have been added.";target.append(empty);return;}
+
+  const table=document.createElement("table");table.className="camera-inventory-table";table.setAttribute("aria-label","Camera inventory");
+  const head=document.createElement("thead"),headRow=document.createElement("tr");
+    if(currentRole==="administrator"){const selectHeading=document.createElement("th");selectHeading.className="camera-select-column";selectHeading.scope="col";selectHeading.textContent="Select";headRow.append(selectHeading);}
+  for(const [key,label] of [["name","Name"],["ip","IP address"],["group","Group"],["connection","Connection"],["health","Recording health"],["mode","Recording mode"]]){
+    const cell=document.createElement("th");cell.scope="col";cell.setAttribute("aria-sort",cameraInventoryFilters.sortKey===key?(cameraInventoryFilters.sortDirection===1?"ascending":"descending"):"none");
+    const sort=document.createElement("button");sort.type="button";sort.textContent=label;sort.dataset.sortKey=key;sort.addEventListener("click",()=>{
+      if(cameraInventoryFilters.sortKey===key)cameraInventoryFilters.sortDirection*=-1;
+      else{cameraInventoryFilters.sortKey=key;cameraInventoryFilters.sortDirection=1;}
+      renderCameras(latestCameras);
+    });cell.append(sort);headRow.append(cell);
+  }
+  head.append(headRow);table.append(head);
+  const body=document.createElement("tbody");
+  const selectCamera=id=>{
+    if(id!==selectedCameraId&&!guardDraftsIn(document.querySelector("#camera-list")))return;
+    selectedCameraId=id;mobileCameraEditorOpen=true;
+    renderCameras(latestCameras);renderSidebar();
+  };
+  for(const camera of cameras){
+    const row=document.createElement("tr");row.dataset.cameraId=camera.id;row.classList.toggle("selected-camera",camera.id===selectedCameraId);row.tabIndex=0;
+    if(currentRole==="administrator"){
+      const selectCell=document.createElement("td"),checkbox=document.createElement("input");selectCell.className="camera-select-column";checkbox.type="checkbox";checkbox.dataset.cameraSelect="true";checkbox.value=camera.id;checkbox.checked=cameraBulkSelection.has(camera.id);checkbox.setAttribute("aria-label",`Select ${camera.name} for bulk changes`);checkbox.addEventListener("change",()=>{if(checkbox.checked)cameraBulkSelection.add(camera.id);else cameraBulkSelection.delete(camera.id);});selectCell.append(checkbox);row.append(selectCell);
+    }
+    const nameCell=document.createElement("td"),name=document.createElement("button");name.type="button";name.textContent=camera.archived_at?`${camera.name} · Archived`:camera.name;name.dataset.cameraId=camera.id;name.setAttribute("aria-pressed",String(camera.id===selectedCameraId));name.addEventListener("click",()=>selectCamera(camera.id));nameCell.append(name);row.append(nameCell);
+    const addCell=value=>{const cell=document.createElement("td");cell.textContent=value;row.append(cell);};
+    addCell(camera.camera_ip||"Not reported");
+    addCell(camera.group_name||"No group");
+    addCell(window.NvrCameraInventory.stateLabel(camera.connection_status));
+    addCell(window.NvrCameraInventory.stateLabel(camera.recording_health?.state));
+    addCell(window.NvrCameraInventory.stateLabel(camera.effective_recording_mode||camera.recording_mode));
+    row.addEventListener("click",event=>{if(event.target.closest("button,input,a"))return;selectCamera(camera.id);});
+    row.addEventListener("keydown",event=>{if(event.target===row&&(event.key==="Enter"||event.key===" ")){event.preventDefault();selectCamera(camera.id);}});
+    body.append(row);
+  }
+  table.append(body);target.append(table);
+}
 function renderCameras(cameras) {
   const list = document.querySelector("#camera-list");
-  if (!cameras.length) { list.textContent = "No cameras have been added."; return; }
-  const query=(document.querySelector("#camera-inventory-search")?.value||"").trim().toLocaleLowerCase();
-  const filtered=cameras.filter(camera=>!query||`${camera.name} ${camera.group_name||""} ${camera.camera_ip||""}`.toLocaleLowerCase().includes(query));
-  if (!filtered.length) { list.textContent = "No cameras match this search."; return; }
-  if(!selectedCameraId||!cameras.some(camera=>camera.id===selectedCameraId))selectedCameraId=filtered[0]?.id||null;
-  list.replaceChildren(...filtered.map(camera => {
+  if(selectedCameraId&&!cameras.some(camera=>camera.id===selectedCameraId)){selectedCameraId=null;mobileCameraEditorOpen=false;}
+  const filters={...cameraInventoryFilters,query:document.querySelector("#camera-inventory-search")?.value||""};
+  const stateValue=value=>typeof value==="string"&&value.trim()?value.trim().toLocaleLowerCase():"unknown";
+  for(const [id,values] of [
+    ["camera-filter-group",[...(cameras.some(camera=>!camera.group_name)?["__none__"]:[]),...new Set(cameras.map(camera=>camera.group_name).filter(Boolean))].sort((a,b)=>a.localeCompare(b))],
+    ["camera-filter-connection",[...new Set(cameras.map(camera=>stateValue(camera.connection_status)))].sort()],
+    ["camera-filter-health",[...new Set(cameras.map(camera=>stateValue(camera.recording_health?.state)))].sort()],
+  ]){
+    const select=document.querySelector(`#${id}`);if(!select)continue;
+    const prior=select.value;select.replaceChildren(new Option("All","all"),...values.map(value=>new Option(value==="__none__"?"No group":window.NvrCameraInventory.stateLabel(value),value)));
+    select.value=[...select.options].some(option=>option.value===prior)?prior:"all";
+    if(id==="camera-filter-group")cameraInventoryFilters.group=select.value;
+    if(id==="camera-filter-connection")cameraInventoryFilters.connection=select.value;
+    if(id==="camera-filter-health")cameraInventoryFilters.health=select.value;
+  }
+  Object.assign(filters,{group:cameraInventoryFilters.group,connection:cameraInventoryFilters.connection,health:cameraInventoryFilters.health,archive:cameraInventoryFilters.archive});
+  const filtered=window.NvrCameraInventory.filterAndSortCameras(cameras,filters);
+  renderCameraInventoryTable(filtered);
+  const layout=document.querySelector("#camera-admin-layout");
+  if(layout)layout.dataset.mobileEditor=String(mobileCameraEditorOpen&&Boolean(selectedCameraId));
+  const selectedCamera=window.NvrCameraInventory.selectedCamera(cameras,selectedCameraId);
+  const existingEditor=list.querySelector(':scope > article[data-camera-id]');
+  const preserveDirtyEditor=Boolean(selectedCamera&&existingEditor?.dataset.cameraId===selectedCamera.id&&list.querySelector('[data-config-dirty="true"]'));
+  if(!preserveDirtyEditor)list.replaceChildren();
+  if(!cameras.length){const empty=document.createElement("p");empty.className="camera-editor-empty";empty.textContent="No cameras have been added. Use Add Cameras to discover or add a camera.";list.append(empty);return;}
+  if(!selectedCamera){const empty=document.createElement("p");empty.className="camera-editor-empty";empty.textContent="Select a camera to view its settings and operational details.";list.append(empty);return;}
+  const selectedIsFilteredOut=!filtered.some(camera=>camera.id===selectedCamera.id);
+  if(selectedIsFilteredOut){
+    let hiddenNotice=list.querySelector(".filtered-camera-notice");
+    if(!hiddenNotice){hiddenNotice=document.createElement("p");hiddenNotice.className="filtered-camera-notice";hiddenNotice.setAttribute("role","status");hiddenNotice.append(document.createTextNode("The selected camera is hidden by the current table filters. Its settings remain open. "));
+    const showInTable=document.createElement("button");showInTable.type="button";showInTable.textContent="Show in table";showInTable.addEventListener("click",()=>{
+      const search=document.querySelector("#camera-inventory-search");if(search)search.value="";
+      for(const id of ["camera-filter-archive","camera-filter-group","camera-filter-connection","camera-filter-health"]){const select=document.querySelector(`#${id}`);if(select)select.value="all";}
+      Object.assign(cameraInventoryFilters,{archive:"all",group:"all",connection:"all",health:"all"});renderCameras(latestCameras);
+    });
+      hiddenNotice.append(showInTable);list.prepend(hiddenNotice);
+    }
+  }else list.querySelector(".filtered-camera-notice")?.remove();
+  if(preserveDirtyEditor)return;
+  list.append(...[selectedCamera].map(camera => {
     const card = document.createElement("article");
     card.classList.toggle("selected-camera",camera.id===selectedCameraId);
     const title = document.createElement("h3"); title.textContent = camera.name;
     if(camera.archived_at)title.textContent+=` · Archived ${formatDateTime(camera.archived_at)}`;
-    if (currentRole === "administrator") {
-      const pickLabel=document.createElement("label"); pickLabel.textContent="Select for bulk changes ";
-      const pick=document.createElement("input"); pick.type="checkbox"; pick.dataset.cameraSelect="true"; pick.value=camera.id;
-      pickLabel.append(pick); card.append(pickLabel);
-    }
     const summary = document.createElement("p");
     const video = camera.video || {};
     const effectiveMode=camera.effective_recording_mode || camera.recording_mode;
@@ -2084,10 +2271,7 @@ function renderCameras(cameras) {
     const retentionSummary=camera.retention_coverage||{};
     summary.textContent += ` · retention ${camera.retention_days} days (${camera.retention_policy_source||"default"}; ${retentionSummary.achieved_days||0} days achieved` + (retentionSummary.projected_days_at_current_activity == null ? ")" : `; ${retentionSummary.projected_days_at_current_activity} days projected at current activity)`);
     card.append(title, summary);
-    const openDetails=document.createElement("button");openDetails.type="button";openDetails.textContent=camera.id===selectedCameraId?"Selected camera":"Open camera details";openDetails.setAttribute("aria-pressed",String(camera.id===selectedCameraId));
-    openDetails.addEventListener("click",()=>{if(selectedCameraId===camera.id)return;if(!guardDraftsIn(document.querySelector("#camera-settings-content")))return;selectedCameraId=camera.id;renderCameras(latestCameras);requestAnimationFrame(()=>[...list.querySelectorAll("[data-camera-id]")].find(item=>item.dataset.cameraId===camera.id)?.querySelector("button")?.focus());});
     card.dataset.cameraId=camera.id;
-    card.append(openDetails);
     if(currentRole === "administrator"&&camera.id===selectedCameraId) {
       const editor=document.createElement("details"),editorHeading=document.createElement("summary");
       editor.dataset.configSection="camera-details";
@@ -2545,7 +2729,7 @@ document.querySelector("#save-storage-volume").addEventListener("click",async()=
   catch(error){document.querySelector("#schedule-message").textContent=error.message;}
 });
 document.querySelector("#apply-bulk").addEventListener("click",async()=>{
-  const camera_ids=[...document.querySelectorAll("[data-camera-select]:checked")].map(input=>input.value);
+  const camera_ids=[...cameraBulkSelection];
   const payload={camera_ids};
   const group=document.querySelector("#bulk-group").value;
   const mode=document.querySelector("#bulk-recording-mode").value;
@@ -2556,6 +2740,7 @@ document.querySelector("#apply-bulk").addEventListener("click",async()=>{
   try {
     const result=await api("/api/cameras/bulk-update",{method:"POST",body:JSON.stringify(payload)});
     document.querySelector("#bulk-message").textContent=`Updated ${result.cameras.length} camera(s).`;
+    cameraBulkSelection.clear();
     await refresh();
   } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
 });
@@ -2779,7 +2964,7 @@ if(incidentPollTimer) clearInterval(incidentPollTimer);
 incidentPollTimer=setInterval(()=>{if(currentRole){refreshOperationalInventory();refreshIncidents();}},15000);
 if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
-document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();await api("/api/auth/logout", { method:"POST" });currentRole=null;currentUsername="";latestSystemStatus=null;latestStorageStatus=null;document.querySelector("#ops-status-drawer").classList.add("hidden");document.querySelector("#ops-status-toggle").setAttribute("aria-expanded","false");document.querySelector("#ops-storage-section").classList.add("hidden");document.querySelector("#incidents-list").replaceChildren();document.querySelector("#webhook-list").replaceChildren();document.querySelector("#webhook-deliveries").replaceChildren();show("login"); });
+document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();await api("/api/auth/logout", { method:"POST" });currentRole=null;currentUsername="";selectedCameraId=null;cameraBulkSelection.clear();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;Object.assign(cameraInventoryFilters,{archive:"active",group:"all",connection:"all",health:"all",sortKey:"name",sortDirection:1,query:""});document.querySelector("#camera-inventory-search").value="";document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section.dataset.cameraWorkspace!=="cameras"));document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{if(button.dataset.cameraWorkspaceButton==="cameras")button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");});document.querySelector("#camera-admin-layout").dataset.mobileEditor="false";latestSystemStatus=null;latestStorageStatus=null;document.querySelector("#ops-status-drawer").classList.add("hidden");document.querySelector("#ops-status-toggle").setAttribute("aria-expanded","false");document.querySelector("#ops-storage-section").classList.add("hidden");document.querySelector("#incidents-list").replaceChildren();document.querySelector("#webhook-list").replaceChildren();document.querySelector("#webhook-deliveries").replaceChildren();show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {
