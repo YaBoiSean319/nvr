@@ -6,11 +6,24 @@ let lastPreviewCsv = "";
 let liveViews = [];
 let liveStatusTimer = null;
 const LIVE_GRID_SIZES = [1, 4, 9, 16];
+const {autoLayoutForCount, reconcileCameraOrder} = window.NvrWorkspaceLayout;
 let activeLiveCameraIds = [];
 let activeLiveTileCameraIds = [];
 let activeLiveGridSize = 4;
+let activeLiveLayoutMode = "auto";
+let activeLiveTileCameraId = null;
 let focusedLiveCameraId = null;
 let latestCameras = [];
+let latestSystemStatus = null;
+let latestStorageStatus = null;
+let latestExportProblemCount = 0;
+let latestActiveIncidentCount = 0;
+let operationalStatusError = false;
+let latestOperationalRefreshAt = null;
+let currentUsername = "";
+let playbackWorkspaceRestored = false;
+let pendingPlaybackRestoreState = null;
+let playbackWorkspaceSaveTimer = null;
 let playbackTimeline = null;
 let playbackViews = [];
 let playbackMaster = null;
@@ -34,7 +47,10 @@ let workspaceRestored = false;
 let workspaceSaveTimer = null;
 let liveViewDirty = false;
 let cachedLiveArrangement = null;
+let selectedCameraId = null;
 let displaySettings = {time_zone:"UTC",date_format:"friendly",clock_format:"12"};
+let currentBranding = {app_name:"Workplace NVR",primary_color:"#17212b",accent_color:"#69a1ff",assets:{}};
+let brandingPreviewUrl = null;
 function formatDateTime(value, compact=false, settings=displaySettings) {
   const date=new Date(value);
   const common={timeZone:settings.time_zone};
@@ -94,6 +110,12 @@ function resolveExportLocalTime(field) {
   if(candidates.length>1){const chosen=Number(fold.value);if(!candidates.includes(chosen))throw new Error(`Choose which repeated export ${field} time to use.`);return chosen;}
   return candidates[0];
 }
+function storedLocalInstant(value,foldValue) {
+  const candidates=localTimeCandidates(value||"");
+  if(candidates.length===1)return candidates[0];
+  const chosen=Number(foldValue);
+  return candidates.includes(chosen)?chosen:null;
+}
 function selectedExportRange() {
   if(!playbackTimeline)throw new Error("Search footage before preparing an export.");
   if(playbackResultsStale)throw new Error("Search inputs changed. Load the timeline again before exporting.");
@@ -132,16 +154,18 @@ function updatePlaybackExportPreview() {
     renderPlaybackTracks();
   }catch(error){button.disabled=true;message.textContent=error.message;renderPlaybackTracks();}
 }
-function initializeExportSelection() {
+function initializeExportSelection(selectedIds=null) {
   const target=document.querySelector("#export-camera-selection"),legend=target.querySelector("legend");
   target.replaceChildren(legend);
   if(!playbackViews.length){const note=document.createElement("p");note.textContent="Search footage to choose cameras.";target.append(note);return;}
-  for(const view of playbackViews){const label=document.createElement("label"),input=document.createElement("input");input.type="checkbox";input.checked=true;input.value=view.cameraId;input.dataset.exportCamera="";input.addEventListener("change",updatePlaybackExportPreview);label.append(input,document.createTextNode(` ${view.name}`));target.append(label);}
+  const selected=selectedIds?new Set(selectedIds):null;
+  for(const view of playbackViews){const label=document.createElement("label"),input=document.createElement("input");input.type="checkbox";input.checked=selected?selected.has(view.cameraId):true;input.value=view.cameraId;input.dataset.exportCamera="";input.addEventListener("change",updatePlaybackExportPreview);label.append(input,document.createTextNode(` ${view.name}`));target.append(label);}
 }
 function setExportBoundary(field,instant) {
   document.querySelector(`#export-${field}`).value=localInputForInstant(new Date(instant));
   updateExportFoldChoices(field);
   updatePlaybackExportPreview();
+  savePlaybackWorkspace();
 }
 function updateExportSelectionOverlay(track) {
   track.querySelector(".playback-export-selection")?.remove();
@@ -155,14 +179,58 @@ function moveInto(selector, targetSelector) {
   const element = document.querySelector(selector), target = document.querySelector(targetSelector);
   if (element && target) target.append(element);
 }
+function setupSettingsCategories() {
+  const root=document.querySelector("#app-settings-content");
+  if(root.querySelector(".settings-category-nav"))return;
+  const categories=[
+    ["general","General",["#status-heading","#status-list",".badge","#display-settings-admin"]],
+    ["appearance","Appearance",["#branding-admin"]],
+    ["users","Users & access",["#identity-settings","#session-admin","#logout"]],
+    ["recording","Recording & storage",["#settings-recording-link"]],
+    ["notifications","Notifications",["#webhooks-admin","#heartbeat-admin"]],
+    ["integrations","Integrations",["#settings-integrations-link"]],
+    ["diagnostics","Diagnostics",["#diagnostics-admin"]],
+  ];
+  const nav=document.createElement("nav");nav.className="settings-category-nav";nav.setAttribute("aria-label","Settings categories");
+  const panels=new Map();
+  for(const [id,label,selectors] of categories){
+    const button=document.createElement("button");button.type="button";button.textContent=label;button.dataset.settingsCategory=id;
+    const panel=document.createElement("div");panel.className="settings-panel";panel.dataset.settingsPanel=id;panel.dataset.configSection=`settings-${id}`;panel.setAttribute("aria-label",label);
+    panels.set(id,panel);nav.append(button);root.append(panel);
+    for(const selector of selectors){const element=document.querySelector(selector);if(element)panel.append(element);}
+    button.addEventListener("click",()=>setSettingsCategory(id,true));
+  }
+  root.prepend(nav);
+  root.querySelectorAll("[data-open-camera-admin]").forEach(button=>button.addEventListener("click",()=>{
+    const target=button.dataset.openCameraAdmin==="ai"?"#ai-provider":"#bulk-admin";
+    setScreen("camera-settings");requestAnimationFrame(()=>{document.querySelector(target)?.scrollIntoView({behavior:"smooth",block:"start"});document.querySelector(target)?.focus?.();});
+  }));
+  window.addEventListener("hashchange",()=>{const match=/^#settings\/([a-z-]+)$/.exec(location.hash);if(match&&panels.has(match[1]))setSettingsCategory(match[1],false);});
+  const match=/^#settings\/([a-z-]+)$/.exec(location.hash);
+  setSettingsCategory(match&&panels.has(match[1])?match[1]:"general",false);
+  if(match&&panels.has(match[1]))setScreen("app-settings");
+}
+function setSettingsCategory(id,updateHash=false){
+  const current=document.querySelector("[data-settings-panel]:not(.hidden)");
+  if(current&&current.dataset.settingsPanel!==id&&!guardDraftsIn(current)){
+    if(!updateHash&&/^#settings\//.test(location.hash))history.replaceState(null,"",`#settings/${current.dataset.settingsPanel}`);
+    return false;
+  }
+  document.querySelectorAll("[data-settings-panel]").forEach(panel=>panel.classList.toggle("hidden",panel.dataset.settingsPanel!==id));
+  document.querySelectorAll("[data-settings-category]").forEach(button=>button.setAttribute("aria-current",String(button.dataset.settingsCategory===id)));
+  if(updateHash)history.replaceState(null,"",`#settings/${id}`);
+  return true;
+}
 function setupConsoleShell() {
   if (consoleShellReady) return;
   const live = document.querySelector("#live-page-content"), footage = document.querySelector("#footage-page-content");
   const cameraSettings = document.querySelector("#camera-settings-content"), appSettings = document.querySelector("#app-settings-content");
-  for (const selector of ["#live-heading", "#incidents-heading"]) {
+  for (const selector of ["#live-heading"]) {
     const heading = document.querySelector(selector);
     if (heading) live.append(heading.closest("section"));
   }
+  const incidentsHeading=document.querySelector("#incidents-heading");
+  if(incidentsHeading)document.querySelector("#ops-incident-content").append(incidentsHeading.closest("section"));
   for (const selector of ["#playback-heading"]) {
     const heading = document.querySelector(selector);
     if (heading) footage.append(heading.closest("section"));
@@ -176,8 +244,18 @@ function setupConsoleShell() {
   const recordedHeading = [...document.querySelectorAll("h3")].find(item => item.textContent.trim() === "Recorded footage");
   if (recordedHeading) cameraSettings.append(recordedHeading);
   moveInto("#status > .badge", "#app-settings-content");
-  for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#display-settings-admin", "#logout"]) moveInto(selector, "#app-settings-content");
+  for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#display-settings-admin", "#branding-admin", "#identity-settings", "#settings-recording-link", "#settings-integrations-link", "#logout"]) moveInto(selector, "#app-settings-content");
+  setupSettingsCategories();
+  for(const selector of ["#discovery-admin","#camera-form","#group-form","#display-settings-admin","#branding-admin","#diagnostics-admin"]){const element=document.querySelector(selector);if(element)element.dataset.configSection=selector.slice(1);}
+  for(const [selector,sections] of Object.entries({"#brand-save":"branding-admin","#brand-reset":"branding-admin","#display-settings-save":"display-settings-admin","#diagnostics-toggle":"diagnostics-admin","#webhook-create":"webhook-create","#heartbeat-save":"heartbeat-config","#save-group-schedule":"group-schedule","#clear-group-schedule":"group-schedule","#save-group-retention":"group-retention","#clear-group-retention":"group-retention","#save-storage-volume":"group-storage","#save-group-ai":"group-ai","#save-ai-runtime":"ai-runtime","#apply-bulk":"bulk-update","#apply-import":"camera-import"})){const button=document.querySelector(selector);if(button)button.dataset.configSaves=sections;}
+  document.addEventListener("input",markConfigDraft,true);
+  document.addEventListener("change",markConfigDraft,true);
+  window.addEventListener("beforeunload",event=>{if(document.querySelector('[data-config-dirty="true"]')){event.preventDefault();event.returnValue="";}});
   document.querySelectorAll("[data-screen]").forEach(button => button.addEventListener("click", () => setScreen(button.dataset.screen)));
+  const statusToggle=document.querySelector("#ops-status-toggle"),statusDrawer=document.querySelector("#ops-status-drawer");
+  statusToggle.addEventListener("click",()=>{const opening=statusDrawer.classList.contains("hidden");statusDrawer.classList.toggle("hidden",!opening);statusToggle.setAttribute("aria-expanded",String(opening));if(opening){refreshExports();if(currentRole==="administrator")refreshOperationalStorage();document.querySelector("#ops-status-close").focus();}});
+  document.querySelector("#ops-status-close").addEventListener("click",()=>{statusDrawer.classList.add("hidden");statusToggle.setAttribute("aria-expanded","false");statusToggle.focus();});
+  document.querySelector("#ops-storage-settings").addEventListener("click",()=>{if(setScreen("app-settings"))setSettingsCategory("recording",true);});
   document.querySelector("#sidebar-toggle").addEventListener("click", () => {
     const layout = document.querySelector("#console-layout"), button = document.querySelector("#sidebar-toggle");
     const collapsed = layout.classList.toggle("sidebar-collapsed");
@@ -186,16 +264,30 @@ function setupConsoleShell() {
     saveLiveWorkspace();
   });
   document.querySelector("#sidebar-search").addEventListener("input", filterSidebar);
-  document.querySelector("#camera-inventory-search").addEventListener("input",()=>renderCameras(latestCameras));
+  const inventorySearch=document.querySelector("#camera-inventory-search");let lastInventoryQuery=inventorySearch.value;
+  inventorySearch.addEventListener("input",()=>{if(!guardDraftsIn(document.querySelector("#camera-settings-content"))){inventorySearch.value=lastInventoryQuery;return;}lastInventoryQuery=inventorySearch.value;renderCameras(latestCameras);});
+  document.querySelector("#live-quality").addEventListener("change",()=>startLiveViews(activeLiveCameraIds,latestCameras,focusedLiveCameraId,activeLiveGridSize,activeLiveTileCameraIds,activeLiveLayoutMode));
   const theme = document.querySelector("#theme-choice"), savedTheme = localStorage.getItem("nvr-theme") || "system";
   theme.value = savedTheme; document.documentElement.dataset.theme = savedTheme === "system" ? "" : savedTheme;
-  theme.addEventListener("change", () => { localStorage.setItem("nvr-theme", theme.value); document.documentElement.dataset.theme = theme.value === "system" ? "" : theme.value; });
+  theme.addEventListener("change", () => { localStorage.setItem("nvr-theme", theme.value); document.documentElement.dataset.theme = theme.value === "system" ? "" : theme.value; applyBranding(currentBranding);updateBrandingDraftPreview(); });
+  for(const selector of ["#brand-app-name","#brand-primary-color","#brand-accent-color"])document.querySelector(selector).addEventListener("input",updateBrandingDraftPreview);
+  document.querySelectorAll("[data-brand-asset]").forEach(input=>input.addEventListener("change",()=>{delete document.querySelector(`[data-remove-brand-asset='${input.dataset.brandAsset}']`).dataset.removed;updateBrandingDraftPreview();}));
+  document.querySelectorAll("[data-remove-brand-asset]").forEach(button=>button.addEventListener("click",()=>{button.dataset.removed="true";document.querySelector(`[data-brand-asset='${button.dataset.removeBrandAsset}']`).value="";updateBrandingDraftPreview();}));
+  document.querySelector("#brand-save").addEventListener("click",()=>saveBrandingSettings());
+  document.querySelector("#brand-reset").addEventListener("click",()=>saveBrandingSettings(true));
   for(const selector of ["#display-time-zone","#display-date-format","#display-clock-format"])document.querySelector(selector).addEventListener("input",previewDisplaySettings);
   document.querySelector("#display-settings-save").addEventListener("click",saveDisplaySettings);
-  for(const field of ["start","end"])document.querySelector(`#playback-${field}`).addEventListener("change",()=>updateFoldChoices(field));
-  for(const field of ["start","end"])document.querySelector(`#playback-${field}-fold`).addEventListener("change",markPlaybackResultsStale);
-  for(const selector of ["#playback-start","#playback-end"])document.querySelector(selector).addEventListener("input",markPlaybackResultsStale);
+  for(const field of ["start","end"])document.querySelector(`#playback-${field}`).addEventListener("change",()=>{updateFoldChoices(field);markPlaybackResultsStale();savePlaybackWorkspace();});
+  for(const field of ["start","end"])document.querySelector(`#playback-${field}-fold`).addEventListener("change",()=>{markPlaybackResultsStale();savePlaybackWorkspace();});
+  for(const selector of ["#playback-start","#playback-end"])document.querySelector(selector).addEventListener("input",()=>{markPlaybackResultsStale();savePlaybackWorkspace();});
   document.querySelector("#playback-camera-picker").addEventListener("change",event=>{
+    const selected=[...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value);
+    if(selected.length>16){
+      requestCameraSubset(selected,selected.slice(0,16),chosen=>{
+        const keep=new Set(chosen);for(const input of document.querySelectorAll("[data-playback-camera]")){input.checked=keep.has(input.value);playbackManualChoices.set(input.value,input.checked);}
+        syncPlaybackGroupChecks();markPlaybackResultsStale();savePlaybackWorkspace();renderSidebar();if(playbackTimeline)loadSynchronizedPlayback({preserve:true});
+      });return;
+    }
     if(event.target.matches("[data-playback-camera]")){
       playbackManualChoices.set(event.target.value,event.target.checked);
       syncPlaybackGroupChecks();markPlaybackResultsStale();
@@ -204,8 +296,10 @@ function setupConsoleShell() {
       for(const cameraId of members)playbackManualChoices.delete(cameraId);
       syncPlaybackCameraChecks();markPlaybackResultsStale();
     }
+    savePlaybackWorkspace();renderSidebar();
+    if(playbackTimeline)loadSynchronizedPlayback({preserve:true});
   });
-  document.querySelector("#playback-grid-size").addEventListener("change",markPlaybackResultsStale);
+  document.querySelector("#playback-grid-size").addEventListener("change",()=>{markPlaybackResultsStale();updatePlaybackGridLayout();savePlaybackWorkspace();});
   document.querySelector("#playback-zoom-in").addEventListener("click",()=>zoomPlaybackTimeline(.5));
   document.querySelector("#playback-zoom-out").addEventListener("click",()=>zoomPlaybackTimeline(2));
   document.querySelector("#playback-fit-range").addEventListener("click",fitPlaybackTimeline);
@@ -218,6 +312,98 @@ function readDisplaySettingsForm() {
 function updateSiteTimeContext() {
   const target=document.querySelector("#site-time-context");
   if(target)target.textContent=`Search times use ${displaySettings.time_zone}. Repeated fall-back times require choosing an occurrence; nonexistent spring-forward times are rejected.`;
+}
+function effectiveTheme(){
+  const chosen=document.documentElement.dataset.theme;
+  return chosen==="light"||chosen==="dark"?chosen:(window.matchMedia?.("(prefers-color-scheme: light)").matches?"light":"dark");
+}
+function contrastInk(hex){
+  const rgb=hex.slice(1).match(/.{2}/g).map(value=>parseInt(value,16)/255).map(value=>value<=.04045?value/12.92:((value+.055)/1.055)**2.4);
+  const luminance=.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];
+  return (1.05/(luminance+.05))>((luminance+.05)/.05)?"#fff":"#000";
+}
+function applyBranding(branding){
+  currentBranding=branding||currentBranding;
+  const appName=currentBranding.app_name||"Workplace NVR";
+  document.title=appName;
+  document.querySelector("#brand-header-name").textContent=appName;
+  document.querySelector("#brand-signin-name").textContent=appName;
+  document.documentElement.style.setProperty("--brand-primary",currentBranding.primary_color||"#17212b");
+  document.documentElement.style.setProperty("--accent",currentBranding.accent_color||"#69a1ff");
+  document.documentElement.style.setProperty("--accent-ink",contrastInk(currentBranding.accent_color||"#69a1ff"));
+  const variant=effectiveTheme()==="dark"?"dark":"light",assets=currentBranding.assets||{};
+  const logo=assets[variant]?.url||assets.primary?.url||"";
+  for(const image of [document.querySelector("#brand-header-logo"),document.querySelector("#brand-signin-logo")]){
+    if(logo){image.src=logo;image.classList.remove("hidden");image.onerror=()=>image.classList.add("hidden");}
+    else {image.removeAttribute("src");image.classList.add("hidden");}
+  }
+  const favicon=document.querySelector("#brand-favicon");
+  if(assets.icon?.url){favicon.href=assets.icon.url;favicon.type=assets.icon.media_type;}
+  else{favicon.removeAttribute("href");favicon.removeAttribute("type");}
+}
+async function refreshPublicBranding(){
+  try{applyBranding(await api("/api/public/branding"));}
+  catch{applyBranding(currentBranding);}
+}
+function sniffBrandingType(bytes){
+  if(bytes.length>8&&bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71)return "image/png";
+  if(bytes.length>3&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255)return "image/jpeg";
+  if(bytes.length>12&&String.fromCharCode(...bytes.slice(0,4))==="RIFF"&&String.fromCharCode(...bytes.slice(8,12))==="WEBP")return "image/webp";
+  return "";
+}
+async function fileAsBrandingAsset(file){
+  if(file.size>2*1024*1024)throw new Error(`${file.name} is larger than 2 MiB.`);
+  const bytes=new Uint8Array(await file.arrayBuffer()),media_type=sniffBrandingType(bytes);
+  if(!media_type||file.type&&file.type!==media_type)throw new Error(`${file.name} is not a valid PNG, WebP, or JPEG file.`);
+  let binary="";for(let offset=0;offset<bytes.length;offset+=0x8000)binary+=String.fromCharCode(...bytes.subarray(offset,offset+0x8000));
+  return {media_type,data_base64:btoa(binary)};
+}
+function updateBrandingDraftPreview(){
+  const preview=document.querySelector("#branding-preview"),image=preview.querySelector("img"),name=document.querySelector("#brand-app-name").value.trim()||"Application preview";
+  const primary=document.querySelector("#brand-primary-color").value,accent=document.querySelector("#brand-accent-color").value;
+  preview.style.setProperty("--preview-primary",primary);preview.style.setProperty("--preview-accent",accent);preview.style.borderTop=`3px solid ${primary}`;
+  preview.style.backgroundColor=effectiveTheme()==="dark"?"#121922":"#fff";preview.style.color=effectiveTheme()==="dark"?"#eef3f8":"#15202b";
+  preview.querySelector("strong").textContent=name;
+  const variant=effectiveTheme(),saved=currentBranding.assets?.[variant]||currentBranding.assets?.primary;
+  const file=document.querySelector("[data-brand-asset='primary']").files[0]||document.querySelector(`[data-brand-asset='${variant}']`).files[0];
+  const removal=[...document.querySelectorAll("[data-remove-brand-asset]")].some(button=>button.dataset.removed==="true"&&["primary",variant].includes(button.dataset.removeBrandAsset));
+  let source=file?URL.createObjectURL(file):removal?"":saved?.url||"";
+  if(brandingPreviewUrl){URL.revokeObjectURL(brandingPreviewUrl);brandingPreviewUrl=null;}
+  if(file)brandingPreviewUrl=source;
+  if(source){image.src=source;image.classList.remove("hidden");image.alt=`${name} logo preview`;image.onerror=()=>image.classList.add("hidden");}
+  else{image.removeAttribute("src");image.classList.add("hidden");}
+}
+async function loadBrandingSettings(){
+  try{
+    currentBranding=await api("/api/settings/branding");
+    document.querySelector("#brand-app-name").value=currentBranding.app_name;
+    document.querySelector("#brand-primary-color").value=currentBranding.primary_color;
+    document.querySelector("#brand-accent-color").value=currentBranding.accent_color;
+    document.querySelectorAll("[data-brand-asset]").forEach(input=>input.value="");
+    document.querySelectorAll("[data-remove-brand-asset]").forEach(button=>delete button.dataset.removed);
+    document.querySelector("#branding-message").textContent="Saved branding loaded. Draft changes stay in this editor until saved.";
+    updateBrandingDraftPreview();
+  }catch(error){document.querySelector("#branding-message").textContent="Branding settings could not be loaded: "+error.message;}
+}
+async function saveBrandingSettings(resetDefaults=false){
+  const button=document.querySelector("#brand-save"),message=document.querySelector("#branding-message");
+  button.disabled=true;message.textContent=resetDefaults?"Resetting branding…":"Saving branding…";
+  try{
+    const payload={app_name:document.querySelector("#brand-app-name").value,primary_color:document.querySelector("#brand-primary-color").value,accent_color:document.querySelector("#brand-accent-color").value,assets:{},reset_defaults:resetDefaults};
+    if(!resetDefaults){
+      for(const input of document.querySelectorAll("[data-brand-asset]")){
+        const key=input.dataset.brandAsset,file=input.files[0],remove=document.querySelector(`[data-remove-brand-asset='${key}']`).dataset.removed==="true";
+        if(remove)payload.assets[key]=null;else if(file)payload.assets[key]=await fileAsBrandingAsset(file);
+      }
+    }
+    const result=await api("/api/settings/branding",{method:"PUT",body:JSON.stringify(payload)});
+    applyBranding(result);currentBranding=result;
+    document.querySelectorAll("[data-brand-asset]").forEach(input=>input.value="");
+    document.querySelectorAll("[data-remove-brand-asset]").forEach(item=>delete item.dataset.removed);
+    document.querySelector("#brand-app-name").value=result.app_name;document.querySelector("#brand-primary-color").value=result.primary_color;document.querySelector("#brand-accent-color").value=result.accent_color;
+    message.textContent="Branding saved and published.";updateBrandingDraftPreview();
+  }catch(error){message.textContent="Branding was not saved: "+error.message;}
+  finally{button.disabled=false;}
 }
 async function previewDisplaySettings() {
   const target=document.querySelector("#display-settings-preview"),draft=readDisplaySettingsForm();
@@ -251,13 +437,19 @@ async function refreshDisplaySettings() {
   if(currentRole==="administrator")await previewDisplaySettings();
 }
 function setScreen(screen) {
-  if (!document.querySelector(`[data-page="${screen}"]`)) return;
+  if (!document.querySelector(`[data-page="${screen}"]`)) return false;
+  const changing=screen!==activeScreen;
+  if(changing&&!guardScreenDrafts(activeScreen))return false;
   if (activeScreen === "live" && screen !== "live") {
-    if(activeLiveCameraIds.length)cachedLiveArrangement={camera_ids:[...activeLiveCameraIds],tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize};
+    if(activeLiveCameraIds.length)cachedLiveArrangement={camera_ids:[...activeLiveCameraIds],tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize,layout_mode:activeLiveLayoutMode};
     stopLiveViews();
   }
+  if (activeScreen === "footage" && screen !== "footage") savePlaybackWorkspace();
   if (screen !== "footage") stopSynchronizedPlayback();
   activeScreen = screen;
+  if(changing&&screen==="camera-settings"&&!document.querySelector('#camera-settings-content [data-config-dirty="true"]')){
+    renderCameras(latestCameras);renderGroupManagement(sidebarGroups);
+  }
   document.querySelectorAll("[data-page]").forEach(page => page.classList.toggle("hidden", page.dataset.page !== screen));
   document.querySelectorAll("#console-nav [data-screen]").forEach(button => {
     if (button.classList.contains("hidden")) return;
@@ -267,9 +459,11 @@ function setScreen(screen) {
   if(screen==="live"&&cachedLiveArrangement&&!activeLiveCameraIds.length){
     const prior=cachedLiveArrangement;cachedLiveArrangement=null;
     for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=prior.camera_ids.includes(input.value);
-    startLiveViews(prior.camera_ids,latestCameras,null,prior.grid_size,prior.tile_camera_ids);
+    startLiveViews(prior.camera_ids,latestCameras,null,prior.grid_size,prior.tile_camera_ids,prior.layout_mode||"auto");
     clearLiveViewDirty();
   }
+  if(sidebarCameras.length)renderSidebar();
+  return true;
 }
 function filterSidebar() {
   const query = document.querySelector("#sidebar-search").value.trim().toLocaleLowerCase();
@@ -281,29 +475,84 @@ function sidebarItem(target, label, searchText, activate, health = null) {
   if (health) { const dot = document.createElement("span"); dot.className = "health-dot"; dot.dataset.health = health; dot.setAttribute("aria-label", `Health: ${health.replaceAll("_", " ")}`); button.append(dot); }
   button.addEventListener("click", activate); row.append(button); target.append(row); return row;
 }
+function currentWorkspaceCameraIds() {
+  return activeScreen === "footage"
+    ? [...document.querySelectorAll("[data-playback-camera]:checked")].map(input => input.value)
+    : [...activeLiveCameraIds];
+}
+function applySidebarCameraSelection(nextIds) {
+  if (activeScreen === "footage") {
+    const chosen = new Set(nextIds);
+    for (const input of document.querySelectorAll("[data-playback-camera]")) {
+      input.checked = chosen.has(input.value);
+      playbackManualChoices.set(input.value, input.checked);
+    }
+    syncPlaybackGroupChecks();
+    markPlaybackResultsStale();
+    savePlaybackWorkspace();
+    renderSidebar();
+    if(playbackTimeline)loadSynchronizedPlayback({preserve:true});
+    return;
+  }
+  const mode = document.querySelector("#live-grid-size").value === "auto" ? "auto" : "manual";
+  const ordered = reconcileCameraOrder(activeLiveCameraIds, nextIds);
+  if (ordered.length > 16) {
+    requestCameraSubset(ordered, activeLiveCameraIds, chosen => applySidebarCameraSelection(chosen));
+    return;
+  }
+  if (mode === "manual" && ordered.length > Number(document.querySelector("#live-grid-size").value)) {
+    document.querySelector("#live-grid-size").value = "auto";
+    startLiveViews(ordered, latestCameras, null, null, null, "auto");
+    document.querySelector("#live-message").textContent = "Auto layout restored to keep every selected camera visible.";
+  } else {
+    startLiveViews(ordered, latestCameras, focusedLiveCameraId, null, activeLiveTileCameraIds, mode);
+  }
+  renderSidebar();
+}
 function renderSidebar() {
   const cameraList = document.querySelector("#sidebar-cameras"), groupList = document.querySelector("#sidebar-groups"), viewList = document.querySelector("#sidebar-views");
   cameraList.replaceChildren(); groupList.replaceChildren(); viewList.replaceChildren();
   for (const camera of [...sidebarCameras].filter(camera=>!camera.archived_at).sort((a, b) => a.name.localeCompare(b.name))) {
-    let address = "";
-    try { address = new URL(camera.stream_url).hostname; } catch {}
+    const address=camera.camera_ip||"";
+    const selected = ["camera-settings","app-settings"].includes(activeScreen)?selectedCameraId===camera.id:currentWorkspaceCameraIds().includes(camera.id);
     const row=sidebarItem(cameraList, camera.name, `${camera.name} ${address}`, () => {
-    setScreen("live"); const choice = [...document.querySelectorAll("[data-live-camera]")].find(input => input.value === camera.id);
-    if (choice) choice.checked = true;
+      if(activeScreen==="camera-settings"||activeScreen==="app-settings"){
+        if(selectedCameraId===camera.id)return;
+        if(selectedCameraId!==camera.id&&!guardDraftsIn(document.querySelector("#camera-settings-content")))return;
+        if(activeScreen==="app-settings"&&!setScreen("camera-settings"))return;
+        selectedCameraId=camera.id;renderCameras(latestCameras);return;
+      }
+      const current = currentWorkspaceCameraIds();
+      applySidebarCameraSelection(current.includes(camera.id) ? current.filter(id => id !== camera.id) : [...current, camera.id]);
     }, camera.recording_health?.state || camera.recording_status || "unknown");
+    const button=row.querySelector("button");
+    button.setAttribute("aria-pressed",String(selected));
+    button.setAttribute("aria-label",["camera-settings","app-settings"].includes(activeScreen)?`Open settings for ${camera.name}`:`${selected?"Remove":"Add"} ${camera.name} ${activeScreen==="footage"?"from":"in"} ${activeScreen==="footage"?"Playback":"Live"}`);
+    if(selected){const marker=document.createElement("span");marker.className="camera-selected-marker";marker.textContent="✓";marker.setAttribute("aria-hidden","true");button.append(marker);}
     row.draggable=true;
     row.addEventListener("dragstart",event=>event.dataTransfer.setData("text/plain",camera.id));
-    row.addEventListener("dblclick",()=>{setScreen("live");const choice=[...document.querySelectorAll("[data-live-camera]")].find(input=>input.value===camera.id);if(choice)choice.checked=true;addCameraToLiveGrid(camera.id,latestCameras);});
   }
   for (const group of sidebarGroups) sidebarItem(groupList, group.name, group.name, () => {
-    setScreen("live"); const members = new Set(group.camera_ids || []);
-    document.querySelectorAll("[data-live-camera]").forEach(input => { input.checked = members.has(input.value); });
-    if (!members.size) document.querySelector("#live-message").textContent = "This group has no available cameras.";
+    const available=new Set(latestCameras.filter(camera=>!camera.archived_at).map(camera=>camera.id));
+    const members=[...new Set(group.camera_ids||[])].filter(id=>available.has(id));
+    if(members.length>16){requestCameraSubset(members,currentWorkspaceCameraIds(),applySidebarCameraSelection);return;}
+    applySidebarCameraSelection(members);
+    if (!members.length) document.querySelector(activeScreen==="footage"?"#playback-status":"#live-message").textContent = "This group has no available cameras.";
   });
   for (const view of sidebarViews) sidebarItem(viewList, `${view.name} · ${view.scope}`, `${view.name} ${view.scope}`, () => applySavedView(view));
   filterSidebar();
 }
+function updatePlaybackGridLayout(cameraCount=playbackViews.length) {
+  const grid=document.querySelector("#playback-grid");
+  if(!grid)return;
+  const layout=document.querySelector("#playback-grid-size").value;
+  const columns=layout==="auto"
+    ? autoLayoutForCount(Math.min(16,Math.max(0,cameraCount)),grid.clientWidth||window.innerWidth).columns
+    : Math.ceil(Math.sqrt(Number(layout)||4));
+  grid.style.setProperty("--playback-grid-columns",String(columns));
+}
 async function showLogin() {
+  await refreshPublicBranding();
   const state = await api("/api/setup/status");
   show(state.setup_required ? "setup" : "login");
   if (!state.setup_required) {
@@ -311,11 +560,58 @@ async function showLogin() {
     catch { document.querySelector("#entra-login").classList.add("hidden"); }
   }
 }
+function markConfigDraft(event){
+  if(!(event.target instanceof HTMLElement)||event.target.type==="search"||event.target.id==="schedule-group")return;
+  markConfigDraftElement(event.target);
+}
+function markConfigDraftElement(target){
+  const scope=target?.closest?.("[data-config-section]");
+  if(!scope)return;
+  scope.dataset.configDirty="true";
+  if(!scope.querySelector(":scope > .unsaved-draft-notice")){
+    const notice=document.createElement("p");notice.className="unsaved-draft-notice";notice.dataset.unsavedDraftNotice="";notice.setAttribute("role","status");notice.textContent="Unsaved changes";
+    const label=scope.matches("details,fieldset")?scope.querySelector(":scope > summary, :scope > legend"):null;
+    if(label)label.after(notice);else scope.prepend(notice);
+  }
+}
+function clearConfigDraft(scope){
+  if(!scope)return;
+  delete scope.dataset.configDirty;
+  scope.querySelector(":scope > .unsaved-draft-notice")?.remove();
+}
+function guardDraftsIn(root){
+  const candidates=[...(root?.matches?.('[data-config-dirty="true"]')?[root]:[]),...(root?.querySelectorAll?.('[data-config-dirty="true"]')||[])];
+  const dirty=candidates.filter(scope=>!scope.closest("[data-settings-panel].hidden"));
+  if(!dirty.length)return true;
+  if(!window.confirm("Discard unsaved configuration changes?"))return false;
+  dirty.forEach(clearConfigDraft);return true;
+}
+function guardScreenDrafts(screen){
+  if(screen==="app-settings")return guardDraftsIn(document.querySelector("#app-settings-content"));
+  if(screen==="camera-settings")return guardDraftsIn(document.querySelector("#camera-settings-content"));
+  return true;
+}
+function clearSavedConfigDraft(path,options,button){
+  const method=(options.method||"GET").toUpperCase();
+  if(!["POST","PUT","PATCH","DELETE"].includes(method))return;
+  if(!button)return;
+  const names=(button.dataset.configSaves||"").split(/\s+/).filter(Boolean);
+  if(names.length){
+    const camera=button.closest("[data-camera-id]");
+    for(const name of names){
+      const scope=button.closest(`[data-config-section="${name}"]`)||camera?.querySelector(`[data-config-section="${name}"]`)||document.querySelector(`[data-config-section="${name}"]`);
+      clearConfigDraft(scope);
+    }
+    return;
+  }
+}
 async function api(path, options = {}) {
+  const actionButton=document.activeElement?.closest?.("button");
   const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...options.headers }, credentials: "same-origin" });
-  if (response.status === 204) return null;
+  if (response.status === 204) {clearSavedConfigDraft(path,options,actionButton);return null;}
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || "Request failed");
+  clearSavedConfigDraft(path,options,actionButton);
   return data;
 }
 function cameraSourcePayload() {
@@ -346,8 +642,10 @@ async function loadCameraProfiles() {
 async function refresh() {
   message.textContent = "";
   try {
+    await refreshPublicBranding();
     const who = await api("/api/auth/me");
     currentRole = who.role;
+    currentUsername = who.username;
     const admin = currentRole === "administrator";
     document.querySelector("#live-layout-scope option[value=shared]").classList.toggle("hidden", !admin);
     setupConsoleShell();
@@ -355,7 +653,11 @@ async function refresh() {
     if (!admin && ["camera-settings", "app-settings"].includes(activeScreen)) setScreen("live");
     document.querySelector("#status-heading").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
     document.querySelector("#status-list").classList.toggle("hidden", !admin);
+    document.querySelector("#ops-storage-section").classList.toggle("hidden", !admin);
+    if(!admin)latestStorageStatus=null;
     document.querySelector("#display-settings-admin").classList.toggle("hidden", !admin);
+    document.querySelector("#branding-admin").classList.toggle("hidden", !admin);
+    for(const selector of ["#identity-settings","#settings-recording-link","#settings-integrations-link"])document.querySelector(selector).classList.toggle("hidden",!admin);
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#diagnostics-admin").classList.toggle("hidden", !admin);
     document.querySelector("#webhooks-admin").classList.toggle("hidden", !admin);
@@ -366,6 +668,7 @@ async function refresh() {
     await refreshDisplaySettings();
     if (admin) {
       const data = await api("/api/system/status");
+      latestSystemStatus=data;
       const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
       document.querySelector("#status-list").replaceChildren(...rows.flatMap(([k,v]) => { const dt=document.createElement("dt"), dd=document.createElement("dd"); dt.textContent=k; dd.textContent=v; return [dt,dd]; }));
       await refreshSessions();
@@ -373,6 +676,8 @@ async function refresh() {
       await refreshWebhooks();
       await refreshHeartbeatStatus();
       await loadAiRuntimeSettings();
+      await loadBrandingSettings();
+      try{const identity=await api("/api/auth/oidc/status");document.querySelector("#identity-provider-state").textContent=identity.enabled?"Microsoft Entra sign-in is enabled by deployment configuration.":"Microsoft Entra sign-in is not configured; local emergency sign-in remains available.";}catch(error){document.querySelector("#identity-provider-state").textContent="Identity provider status is unavailable: "+error.message;}
     }
     const inventory = await api("/api/cameras");
     latestCameras = inventory.cameras;
@@ -381,15 +686,16 @@ async function refresh() {
     sidebarGroups = groups;
     if (admin) await refreshGroups();
     await refreshIncidents();
-    renderCameras(inventory.cameras);
+    if(!document.querySelector('#camera-settings-content [data-config-dirty="true"]'))renderCameras(inventory.cameras);
     renderLiveCameraPicker(inventory.cameras);
     renderPlaybackCameraPicker(inventory.cameras,sidebarGroups);
+    if(!playbackWorkspaceRestored){restorePlaybackWorkspace();playbackWorkspaceRestored=true;}
     await refreshLiveLayouts();
     if (!workspaceRestored) { await restoreLiveWorkspace(); workspaceRestored = true; }
     renderSidebar();
     await refreshExports();
     if (admin) await refreshDiscovery();
-    setScreen(activeScreen === "footage" ? "footage" : "live");
+    setScreen(["live","footage","camera-settings","app-settings"].includes(activeScreen)?activeScreen:"live");
     show("status");
   } catch (error) {
     if (error.message === "Authentication required" || error.message === "Session expired") {
@@ -402,6 +708,8 @@ function renderLiveCameraPicker(cameras) {
   target.replaceChildren(...cameras.filter(camera=>!camera.archived_at).map(camera=>{
     const label=document.createElement("label"); label.textContent=`${camera.name}${camera.live_substream_available?" · low-resolution profile":""} `;
     const input=document.createElement("input"); input.type="checkbox"; input.dataset.liveCamera="true"; input.value=camera.id;
+    input.checked=activeLiveCameraIds.includes(camera.id);
+    input.addEventListener("change",updateLiveCameraSelection);
     label.append(input); return label;
   }));
 }
@@ -440,7 +748,74 @@ async function refreshIncidents() {
       return item;
     }));
     if(!result.incidents.length) { const item=document.createElement("li"); item.textContent="No incidents recorded."; target.append(item); }
+    updateOperationalSummary(result.incidents);
   } catch(error) { message.textContent=error.message; }
+}
+async function updateOperationalSummary(incidents=null){
+  const summary=document.querySelector("#ops-status-summary"),count=document.querySelector("#ops-status-count");
+  if(!summary||!count)return;
+  if(incidents)latestActiveIncidentCount=incidents.filter(item=>item.state==="active").length;
+  const warningList=document.querySelector("#ops-camera-warnings");
+  const cameraProblems=latestCameras.filter(camera=>!camera.archived_at&&!(["recording","expected_idle"].includes(camera.recording_health?.state)));
+  const storage=latestSystemStatus?.storage?.available_bytes;
+  const storageText=currentRole==="administrator"&&Number.isFinite(storage)?` · ${(storage/1073741824).toFixed(1)} GiB database volume available`:"";
+  const refreshText=latestOperationalRefreshAt?` Updated ${formatDateTime(latestOperationalRefreshAt)}.`:"";
+  const errorText=operationalStatusError?" Camera status could not be refreshed; values shown are from the last successful check.":"";
+  summary.textContent=`${latestCameras.filter(camera=>!camera.archived_at).length} active cameras · ${cameraProblems.length} recording or coverage warning(s) · ${latestActiveIncidentCount} active incident(s)${storageText}. Live video freshness and recording writes are tracked separately.${refreshText}${errorText}`;
+  if(warningList){
+    const rows=cameraProblems.slice(0,20).map(camera=>{
+      const item=document.createElement("li"),detail=document.createElement("span"),button=document.createElement("button");
+      const health=camera.recording_health||{};
+      detail.textContent=`${camera.name} · ${health.state||"unknown"}${health.detail?` · ${health.detail}`:""}`;
+      button.type="button";button.textContent="Inspect";button.setAttribute("aria-label",`Inspect ${camera.name} in the current workspace`);button.addEventListener("click",()=>inspectCameraFromStatus(camera.id));
+      item.append(detail,button);return item;
+    });
+    if(cameraProblems.length>rows.length){const more=document.createElement("li");more.textContent=`${cameraProblems.length-rows.length} more warning(s). Search the camera inventory for a specific camera.`;rows.push(more);}
+    if(!rows.length){const empty=document.createElement("li");empty.textContent="No camera recording or coverage warnings.";rows.push(empty);}
+    warningList.replaceChildren(...rows);
+  }
+  const storageIssues=currentRole==="administrator"?(latestStorageStatus?.volumes||[]).filter(volume=>volume.state!=="healthy").length:0;
+  const total=cameraProblems.length+latestActiveIncidentCount+latestExportProblemCount+storageIssues;
+  count.textContent=String(Math.min(99,total));count.setAttribute("aria-label",`${total} open operational warning${total===1?"":"s"}`);
+}
+function inspectCameraFromStatus(cameraId){
+  if(activeScreen==="live"||activeScreen==="footage"){
+    const current=currentWorkspaceCameraIds();
+    if(current.includes(cameraId)){
+      if(activeScreen==="live")startLiveViews(activeLiveCameraIds,latestCameras,cameraId,activeLiveGridSize,[...activeLiveTileCameraIds],activeLiveLayoutMode);
+      else{const view=playbackViews.find(item=>item.cameraId===cameraId);if(view){playbackMaster=view;playbackViews.forEach(item=>{item.video.muted=item!==view;item.tile.classList.toggle("selected",item===view);});view.video.focus();}else if(!playbackTimeline)loadSynchronizedPlayback();}
+      return;
+    }
+    const next=[...current,cameraId];
+    if(next.length>16){const preferred=[...current.slice(Math.max(0,current.length-15)),cameraId];requestCameraSubset(next,preferred,chosen=>applySidebarCameraSelection(chosen));return;}
+    applySidebarCameraSelection(next);
+    if(activeScreen==="footage"&&!playbackTimeline)loadSynchronizedPlayback();
+    return;
+  }
+  if(activeScreen==="camera-settings"&&selectedCameraId===cameraId)return;
+  if(activeScreen==="camera-settings"&&!guardDraftsIn(document.querySelector("#camera-settings-content")))return;
+  selectedCameraId=cameraId;
+  if(currentRole==="administrator"&&setScreen("camera-settings")){
+    renderCameras(latestCameras);
+    requestAnimationFrame(()=>[...document.querySelectorAll("#camera-list [data-camera-id]")].find(item=>item.dataset.cameraId===cameraId)?.querySelector("button")?.focus());
+  }
+}
+async function refreshOperationalStorage(){
+  const section=document.querySelector("#ops-storage-section"),summary=document.querySelector("#ops-storage-summary"),target=document.querySelector("#ops-storage-list");
+  if(currentRole!=="administrator"){section.classList.add("hidden");latestStorageStatus=null;return;}
+  section.classList.remove("hidden");
+  try{
+    latestStorageStatus=await api("/api/storage");
+    const volumes=latestStorageStatus.volumes||[];
+    summary.textContent=volumes.length?`${volumes.filter(volume=>volume.state==="healthy").length} of ${volumes.length} recording volume(s) healthy.`:"No recording volumes are configured.";
+    target.replaceChildren(...volumes.map(volume=>{const item=document.createElement("li"),free=Number.isFinite(volume.free_bytes)?` · ${(volume.free_bytes/1073741824).toFixed(1)} GiB free`:"";item.textContent=`${volume.id} · ${volume.state}${free}${volume.retention_at_risk?" · retention at risk":""}`;return item;}));
+    if(!volumes.length){const item=document.createElement("li");item.textContent="No volumes reported.";target.append(item);}
+    updateOperationalSummary();
+  }catch(error){summary.textContent=`Storage status could not be refreshed: ${error.message}`;}
+}
+async function refreshOperationalInventory(){
+  try{const result=await api("/api/cameras");latestCameras=result.cameras;sidebarCameras=result.cameras;operationalStatusError=false;latestOperationalRefreshAt=new Date();await updateOperationalSummary();if(currentRole==="administrator"&&!document.querySelector("#ops-status-drawer").classList.contains("hidden"))await refreshOperationalStorage();}
+  catch{operationalStatusError=true;await updateOperationalSummary();}
 }
 async function refreshWebhooks() {
   const list=document.querySelector("#webhook-list"), deliveries=document.querySelector("#webhook-deliveries"), options=document.querySelector("#webhook-event-options");
@@ -510,186 +885,413 @@ document.querySelector("#webhook-create").addEventListener("click",async()=>{
     await refreshWebhooks();
   } catch(error) { message.textContent=error.message; }
 });
+function releaseLiveView(view) {
+  view.controller.abort();
+  if (view.url) URL.revokeObjectURL(view.url);
+  const audio = view.tile && view.tile.querySelector("audio");
+  if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
+  if (view.tile) view.tile.remove();
+}
 function stopLiveViews() {
-  if(liveStatusTimer) clearInterval(liveStatusTimer);
-  liveStatusTimer=null;
-  for(const view of liveViews) {
-    view.controller.abort();
-    if(view.url) URL.revokeObjectURL(view.url);
-    const audio=view.tile?.querySelector("audio");
-    if(audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
-  }
-  liveViews=[];
-  activeLiveCameraIds=[];
-  activeLiveTileCameraIds=[];
-  focusedLiveCameraId=null;
+  if (liveStatusTimer) clearInterval(liveStatusTimer);
+  liveStatusTimer = null;
+  for (const view of liveViews) releaseLiveView(view);
+  liveViews = [];
+  activeLiveCameraIds = [];
+  activeLiveTileCameraIds = [];
+  activeLiveTileCameraId = null;
+  focusedLiveCameraId = null;
   document.querySelector("#live-grid").replaceChildren();
 }
-function selectedLiveCameras() { return [...document.querySelectorAll("[data-live-camera]:checked")].map(input=>input.value); }
-function liveGridSizeFor(cameraCount) { return LIVE_GRID_SIZES.find(size=>size>=cameraCount)||16; }
-function currentLiveTiles(size=activeLiveGridSize) {
-  const tiles=[...document.querySelectorAll("#live-grid .live-tile")].map(tile=>tile.dataset.cameraId||null);
-  if(tiles.length===size)return tiles;
-  const ids=activeLiveCameraIds;
-  return [...ids,...Array(Math.max(0,size-ids.length)).fill(null)].slice(0,size);
+function selectedLiveCameras() { return [...document.querySelectorAll("[data-live-camera]:checked")].map(input => input.value); }
+function liveGridSizeFor(cameraCount) { return LIVE_GRID_SIZES.find(size => size >= cameraCount) || 16; }
+function currentLiveTiles(size = activeLiveGridSize) {
+  const tiles = [...document.querySelectorAll("#live-grid .live-tile")].map(tile => tile.dataset.cameraId || null);
+  if (tiles.length === size) return tiles;
+  return [...activeLiveCameraIds, ...Array(Math.max(0, size - activeLiveCameraIds.length)).fill(null)].slice(0, size);
 }
 function markLiveViewDirty() {
-  liveViewDirty=true;
+  liveViewDirty = true;
   document.querySelector("#live-unsaved").classList.remove("hidden");
-  document.querySelector("#live-message").textContent="Unsaved changes to this view.";
+  document.querySelector("#live-message").textContent = "Unsaved changes to this view.";
 }
-function clearLiveViewDirty() { liveViewDirty=false;document.querySelector("#live-unsaved").classList.add("hidden"); }
+function clearLiveViewDirty() { liveViewDirty = false; document.querySelector("#live-unsaved").classList.add("hidden"); }
+function requestCameraSubset(cameraIds, preferredIds, onApply) {
+  const dialog = document.querySelector("#camera-subset-dialog");
+  const list = dialog.querySelector("[data-subset-list]");
+  const count = dialog.querySelector("[data-subset-count]");
+  const chosen = new Set((preferredIds || []).slice(0, 16));
+  list.replaceChildren();
+  count.textContent = "Choose up to 16 cameras. Nothing is removed until you apply this selection.";
+  for (const id of cameraIds) {
+    const camera = latestCameras.find(item => item.id === id);
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = id;
+    input.checked = chosen.has(id);
+    input.dataset.subsetCamera = "";
+    label.append(input, document.createTextNode(" " + (camera?.name || "Unavailable camera")));
+    list.append(label);
+  }
+  dialog.querySelector("[data-subset-apply]").onclick = () => {
+    const selected = [...dialog.querySelectorAll("[data-subset-camera]:checked")].map(input => input.value);
+    if (selected.length > 16) { count.textContent = "Choose no more than 16 cameras."; return; }
+    if (!selected.length) { count.textContent = "Choose at least one camera."; return; }
+    dialog.close();
+    onApply(selected);
+  };
+  dialog.querySelector("[data-subset-cancel]").onclick = () => dialog.close();
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
 async function saveLiveWorkspace() {
-  if(!currentRole)return;
-  const arrangement=activeLiveTileCameraIds.length?{tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize}:
-    cachedLiveArrangement||{tile_camera_ids:[...Array(activeLiveGridSize).fill(null)],grid_size:activeLiveGridSize};
-  const state={camera_ids:arrangement.tile_camera_ids.filter(Boolean),tile_camera_ids:arrangement.tile_camera_ids,
-    grid_size:arrangement.grid_size,sidebar_collapsed:document.querySelector("#console-layout").classList.contains("sidebar-collapsed")};
+  if (!currentRole) return;
+  const arrangement = activeLiveTileCameraIds.length
+    ? { tile_camera_ids: [...activeLiveTileCameraIds], grid_size: activeLiveGridSize, layout_mode: activeLiveLayoutMode }
+    : cachedLiveArrangement || { tile_camera_ids: Array(activeLiveGridSize).fill(null), grid_size: activeLiveGridSize, layout_mode: activeLiveLayoutMode };
+  const state = {
+    camera_ids: arrangement.tile_camera_ids.filter(Boolean),
+    tile_camera_ids: arrangement.tile_camera_ids,
+    grid_size: arrangement.grid_size,
+    layout_mode: arrangement.layout_mode || "auto",
+    sidebar_collapsed: document.querySelector("#console-layout").classList.contains("sidebar-collapsed"),
+  };
   clearTimeout(workspaceSaveTimer);
-  workspaceSaveTimer=setTimeout(async()=>{
-    try { await api("/api/live/workspace",{method:"PUT",body:JSON.stringify(state)}); }
-    catch(error) { document.querySelector("#live-message").textContent=`Workspace could not be saved: ${error.message}`; }
-  },250);
+  workspaceSaveTimer = setTimeout(async () => {
+    try { await api("/api/live/workspace", { method: "PUT", body: JSON.stringify(state) }); }
+    catch (error) { document.querySelector("#live-message").textContent = "Workspace could not be saved: " + error.message; }
+  }, 250);
 }
 async function restoreLiveWorkspace() {
   try {
-    const state=await api("/api/live/workspace");
-    const layout=document.querySelector("#console-layout"), button=document.querySelector("#sidebar-toggle");
-    layout.classList.toggle("sidebar-collapsed",!!state.sidebar_collapsed);
-    button.setAttribute("aria-expanded",String(!state.sidebar_collapsed));
-    button.setAttribute("aria-label",state.sidebar_collapsed?"Expand camera sidebar":"Collapse camera sidebar");
-    if(!state.camera_ids?.length)return;
-    for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=state.camera_ids.includes(input.value);
-    startLiveViews(state.camera_ids,latestCameras,null,state.grid_size,state.tile_camera_ids);
+    const state = await api("/api/live/workspace");
+    const layout = document.querySelector("#console-layout");
+    const button = document.querySelector("#sidebar-toggle");
+    layout.classList.toggle("sidebar-collapsed", !!state.sidebar_collapsed);
+    button.setAttribute("aria-expanded", String(!state.sidebar_collapsed));
+    button.setAttribute("aria-label", state.sidebar_collapsed ? "Expand camera sidebar" : "Collapse camera sidebar");
+    if (!state.camera_ids?.length) return;
+    for (const input of document.querySelectorAll("[data-live-camera]")) input.checked = state.camera_ids.includes(input.value);
+    document.querySelector("#live-grid-size").value = state.layout_mode === "auto" ? "auto" : String(state.grid_size);
+    startLiveViews(state.camera_ids, latestCameras, null, state.grid_size, state.tile_camera_ids, state.layout_mode || "auto");
     clearLiveViewDirty();
-  } catch(error) { document.querySelector("#live-message").textContent=`Previous workspace could not be restored: ${error.message}`; }
+  } catch (error) {
+    document.querySelector("#live-message").textContent = "Previous workspace could not be restored: " + error.message;
+  }
 }
 function applySavedView(view) {
-  if(activeScreen==="footage") {
-    playbackViews.forEach(view=>view.video.pause());
-    const playbackPicker=document.querySelector("#playback-camera-picker");
-    const cameraLabels=new Map([...playbackPicker.querySelectorAll("[data-playback-camera]")].map(input=>[input.value,input.closest("label")]));
-    const labels=cameraLabels;
-    const ordered=view.tile_camera_ids.map(id=>id&&labels.get(id)).filter(Boolean);
-    playbackPicker.querySelectorAll("fieldset")[1]?.prepend(...ordered);
-    for(const input of playbackPicker.querySelectorAll("[data-playback-group]"))input.checked=false;
-    playbackManualChoices.clear();
-    for(const input of playbackPicker.querySelectorAll("[data-playback-camera]")){
-      input.checked=view.camera_ids.includes(input.value);playbackManualChoices.set(input.value,input.checked);
-    }
-    syncPlaybackGroupChecks();
-    document.querySelector("#playback-grid-size").value=String(view.grid_size);
-    const unavailable=view.camera_ids.filter(id=>!labels.has(id)).length;
-    markPlaybackResultsStale();
-    document.querySelector("#playback-status").textContent=`Applied ${view.scope} view “${view.name}”. Camera selection and layout changed; date inputs were kept.${unavailable?` ${unavailable} saved camera(s) are unavailable.`:""}`;
+  if (activeScreen === "footage") {
+    applySavedPlaybackView(view, view.camera_ids.filter(id => latestCameras.some(camera => camera.id === id && !camera.archived_at)));
     return;
   }
   setScreen("live");
-  document.querySelector("#live-layouts").value=`${view.scope}:${view.name}`;
-  document.querySelector("#live-layout-name").value=view.name;
-  for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=view.camera_ids.includes(input.value);
-  document.querySelector("#live-grid-size").value=String(view.grid_size);
-  startLiveViews(view.camera_ids,latestCameras,null,view.grid_size,view.tile_camera_ids);
+  document.querySelector("#live-layouts").value = view.scope + ":" + view.name;
+  document.querySelector("#live-layout-name").value = view.name;
+  for (const input of document.querySelectorAll("[data-live-camera]")) input.checked = view.camera_ids.includes(input.value);
+  const mode = view.layout_mode || "auto";
+  document.querySelector("#live-grid-size").value = mode === "auto" ? "auto" : String(view.grid_size);
+  startLiveViews(view.camera_ids, latestCameras, null, view.grid_size, view.tile_camera_ids, mode);
   clearLiveViewDirty();
-  document.querySelector("#live-message").textContent=`Applied ${view.scope} view “${view.name}”.`;
+  document.querySelector("#live-message").textContent = "Applied " + view.scope + " view “" + view.name + "”.";
 }
-function startLiveViews(cameraIds,cameras,focusedCameraId=null,gridSize=null,tileCameraIds=null) {
-  const selectedSize=gridSize||Number(document.querySelector("#live-grid-size").value)||4;
-  let tiles=tileCameraIds?[...tileCameraIds]:[...cameraIds,...Array(Math.max(0,selectedSize-cameraIds.length)).fill(null)];
-  tiles=tiles.slice(0,selectedSize);
-  while(tiles.length<selectedSize)tiles.push(null);
-  cameraIds=[...new Set(tiles.filter(Boolean))];
-  if(!cameraIds.length) { document.querySelector("#live-message").textContent="Choose at least one camera."; return; }
-  if(cameraIds.length>16 || cameraIds.length>selectedSize) {
-    document.querySelector("#live-message").textContent=`The ${selectedSize}-feed grid cannot show ${cameraIds.length} selected cameras. Choose a larger grid or remove cameras; selections are never dropped.`;
+function applySavedPlaybackView(view, cameraIds) {
+  const picker = document.querySelector("#playback-camera-picker");
+  const labels = new Map([...picker.querySelectorAll("[data-playback-camera]")].map(input => [input.value, input.closest("label")]));
+  const ordered = (view.tile_camera_ids || []).map(id => id && labels.get(id)).filter(Boolean);
+  picker.querySelectorAll("fieldset")[1]?.prepend(...ordered);
+  for (const input of picker.querySelectorAll("[data-playback-group]")) input.checked = false;
+  playbackManualChoices.clear();
+  for (const input of picker.querySelectorAll("[data-playback-camera]")) {
+    input.checked = cameraIds.includes(input.value);
+    playbackManualChoices.set(input.value, input.checked);
+  }
+  syncPlaybackGroupChecks();
+  document.querySelector("#playback-grid-size").value = view.layout_mode === "auto" ? "auto" : String(view.grid_size);
+  const unavailable = view.camera_ids.length - cameraIds.length;
+  markPlaybackResultsStale();
+  document.querySelector("#playback-status").textContent = "Applied " + view.scope + " view “" + view.name + "”. Camera selection and layout changed; date inputs were kept." + (unavailable ? " " + unavailable + " saved camera(s) are unavailable." : "");
+  savePlaybackWorkspace();
+  if(playbackTimeline)loadSynchronizedPlayback({preserve:true});
+}
+function desiredLiveQuality(focusedCameraId) {
+  const choice = document.querySelector("#live-quality").value;
+  return choice === "auto" ? (focusedCameraId ? "high" : "low") : choice;
+}
+function createLiveTile(cameraId, index, cameras, existingView) {
+  const liveMessage = document.querySelector("#live-message");
+  const camera = cameras.find(item => item.id === cameraId && !item.archived_at);
+  const archived = cameras.find(item => item.id === cameraId && item.archived_at);
+  const tile = document.createElement("article");
+  tile.className = "live-tile";
+  tile.tabIndex = 0;
+  tile.dataset.tileIndex = String(index);
+  tile.dataset.cameraId = cameraId;
+  tile.draggable = Boolean(camera);
+  tile.addEventListener("dragover", event => event.preventDefault());
+  tile.addEventListener("drop", event => dropCameraOnTile(event, index, cameras));
+  if (camera) tile.addEventListener("dragstart", event => event.dataTransfer.setData("text/plain", cameraId));
+  tile.addEventListener("click", event => {
+    if (event.target.closest("button,audio,select")) return;
+    activeLiveTileCameraId = cameraId;
+    document.querySelectorAll("#live-grid .live-tile").forEach(item => item.classList.toggle("active", item.dataset.cameraId === cameraId));
+  });
+  tile.addEventListener("dblclick", event => {
+    if (event.target.closest("button,audio,select")) return;
+    startLiveViews(activeLiveCameraIds, cameras, focusedLiveCameraId ? null : cameraId, activeLiveGridSize, [...activeLiveTileCameraIds], activeLiveLayoutMode);
+  });
+  const title = document.createElement("strong");
+  title.textContent = camera?.name || (archived ? "Archived · " + archived.name : "Unavailable camera");
+  const state = existingView?.state || document.createElement("span");
+  state.className = "live-state";
+  if (!existingView) state.textContent = camera ? "Loading" : archived ? "Archived" : "Unavailable";
+  state.setAttribute("role", "status");
+  state.setAttribute("aria-live", "polite");
+  tile.append(title, state);
+  if (!camera) return { tile, view: null };
+  const image = existingView?.image || document.createElement("img");
+  image.alt = "Live video from " + camera.name;
+  image.dataset.cameraId=cameraId;
+  const focus = document.createElement("button");
+  focus.type = "button";
+  focus.dataset.liveFocus = "";
+  focus.textContent = focusedLiveCameraId ? "Restore grid" : "Focus";
+  focus.setAttribute("aria-label", focusedLiveCameraId ? "Restore camera grid" : "Focus " + camera.name);
+  focus.addEventListener("click", () => {
+    activeLiveTileCameraId = cameraId;
+    startLiveViews(activeLiveCameraIds, cameras, focusedLiveCameraId ? null : cameraId, activeLiveGridSize, [...activeLiveTileCameraIds], activeLiveLayoutMode);
+  });
+  const playback = document.createElement("button");
+  playback.type = "button";
+  playback.textContent = "Open in Playback";
+  playback.addEventListener("click", () => openCameraInPlayback(cameraId));
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "Remove";
+  remove.setAttribute("aria-label", "Remove " + camera.name + " from Live");
+  remove.addEventListener("click", () => {
+    const input = [...document.querySelectorAll("[data-live-camera]")].find(item => item.value === cameraId);
+    if (input) input.checked = false;
+    updateLiveCameraSelection();
+  });
+  const snapshot = document.createElement("button");
+  snapshot.type = "button";
+  snapshot.textContent = "Snapshot";
+  snapshot.addEventListener("click", () => downloadLiveSnapshot(image, camera.name));
+  tile.append(focus, snapshot, playback, remove, image);
+  if (focusedLiveCameraId) {
+    const fullscreen = document.createElement("button");
+    fullscreen.type = "button";
+    fullscreen.textContent = "Fullscreen";
+    fullscreen.addEventListener("click", async () => {
+      if (typeof tile.requestFullscreen !== "function") { liveMessage.textContent = "Fullscreen is not supported by this browser."; return; }
+      try { await tile.requestFullscreen(); } catch { liveMessage.textContent = "The browser could not enter fullscreen."; }
+    });
+    tile.insertBefore(fullscreen, image);
+  }
+  const audio = existingView?.tile?.querySelector("audio") || null;
+  const view = existingView || {
+    cameraId, controller: new AbortController(), image, state, url: null, lastFrame: 0,
+    startedAt: Date.now(), tile, quality: desiredLiveQuality(focusedLiveCameraId), retrying: false,
+  };
+  view.tile = tile;
+  view.image = image;
+  view.state = state;
+  const retry=document.createElement("button");retry.type="button";retry.textContent="Retry";retry.setAttribute("aria-label","Retry live video for "+camera.name);
+  retry.addEventListener("click",()=>{
+    view.controller.abort();view.controller=new AbortController();view.startedAt=Date.now();view.retrying=true;
+    view.state.textContent=view.lastFrame?`Stale · last frame ${new Date(view.lastFrame).toLocaleTimeString()}`:"Reconnecting";
+    consumeLiveStream(view).finally(()=>{view.retrying=false;});
+  });
+  tile.insertBefore(retry,image);
+  if (camera.audio_enabled) {
+    const listening = audio || document.createElement("audio");
+    listening.controls = true;
+    listening.preload = "none";
+    listening.setAttribute("aria-label", "Live audio from " + camera.name);
+    listening.muted = audio ? audio.muted : true;
+    listening.title = "Audio is muted. Only one camera can play audio at a time.";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = listening.muted ? "Listen" : "Mute audio";
+    toggle.setAttribute("aria-label", (listening.muted ? "Listen to " : "Mute audio from ") + camera.name);
+    toggle.addEventListener("click", async () => {
+      listening.muted = !listening.muted;
+      if (listening.muted) listening.pause();
+      else {
+        for (const other of document.querySelectorAll("#live-grid audio")) if (other !== listening) { other.pause(); other.muted = true; }
+        try { await listening.play(); } catch { listening.muted = true; liveMessage.textContent = "Audio could not start for " + camera.name + "."; }
+      }
+      toggle.textContent = listening.muted ? "Listen" : "Mute audio";
+    });
+    if (!audio) listening.src = "/api/cameras/" + encodeURIComponent(camera.id) + "/audio/live";
+    tile.insertBefore(toggle, image);
+    tile.append(listening);
+  }
+  return { tile, view };
+}
+function downloadLiveSnapshot(image, cameraName) {
+  if (!image.naturalWidth) { document.querySelector("#live-message").textContent = "Wait for a live frame before taking a snapshot."; return; }
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  canvas.getContext("2d").drawImage(image, 0, 0);
+  canvas.toBlob(blob => {
+    if (!blob) return;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = cameraName.replace(/[^a-z0-9_-]+/gi, "-") + "-snapshot.jpg";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }, "image/jpeg", 0.92);
+}
+function updateLiveGridLayout() {
+  const grid = document.querySelector("#live-grid");
+  if (!grid) return;
+  const width = grid.clientWidth || window.innerWidth;
+  const columns = focusedLiveCameraId ? 1 : activeLiveLayoutMode === "auto"
+    ? autoLayoutForCount(activeLiveCameraIds.length, width).columns
+    : Math.ceil(Math.sqrt(activeLiveGridSize));
+  grid.style.setProperty("--live-grid-columns", String(columns));
+  grid.querySelectorAll(".live-tile").forEach(tile => {
+    tile.hidden = Boolean(focusedLiveCameraId && tile.dataset.cameraId !== focusedLiveCameraId);
+    tile.classList.toggle("active", tile.dataset.cameraId === activeLiveTileCameraId);
+  });
+}
+function startLiveViews(cameraIds, cameras, focusedCameraId = null, gridSize = null, tileCameraIds = null, layoutMode = null) {
+  const mode = layoutMode || (document.querySelector("#live-grid-size").value === "auto" ? "auto" : "manual");
+  const requested = new Set(cameraIds);
+  const ordered = tileCameraIds ? [...new Set(tileCameraIds.filter(Boolean).filter(id => requested.has(id)))] : [];
+  for (const id of cameraIds) if (!ordered.includes(id)) ordered.push(id);
+  if (ordered.length > 16) {
+    requestCameraSubset(ordered, activeLiveCameraIds, chosen => startLiveViews(chosen, cameras, null, null, chosen, mode));
     return;
   }
-  stopLiveViews();
-  const grid=document.querySelector("#live-grid"), liveMessage=document.querySelector("#live-message");
-  activeLiveCameraIds=cameraIds;
-  activeLiveTileCameraIds=tiles;
-  cachedLiveArrangement={camera_ids:[...cameraIds],tile_camera_ids:[...tiles],grid_size:selectedSize};
-  activeLiveGridSize=selectedSize;
-  focusedLiveCameraId=focusedCameraId;
-  document.querySelector("#live-grid-size").value=String(selectedSize);
-  grid.style.setProperty("--live-grid-columns",String(focusedCameraId?1:Math.ceil(Math.sqrt(selectedSize))));
-  const displayed=focusedCameraId?[focusedCameraId]:tiles;
-  const slots=focusedCameraId?1:selectedSize;
-  for(let index=0;index<slots;index++) {
-    const cameraId=displayed[index]||null;
-    const tile=document.createElement("article"); tile.className="live-tile";tile.tabIndex=0;tile.dataset.tileIndex=String(index);
-    tile.addEventListener("dragover",event=>event.preventDefault());
-    tile.addEventListener("drop",event=>dropCameraOnTile(event,index,cameras));
-    if(!cameraId) {
-      const placeholder=document.createElement("div");placeholder.className="live-placeholder";placeholder.textContent="Empty tile · drop a camera here";
-      tile.append(placeholder);grid.append(tile);continue;
-    }
-    tile.dataset.cameraId=cameraId;
-    const camera=cameras.find(item=>item.id===cameraId&&!item.archived_at);
-    const archivedCamera=cameras.find(item=>item.id===cameraId&&item.archived_at);
-    const title=document.createElement("strong"); title.textContent=camera?.name||(archivedCamera?`Archived camera · ${archivedCamera.name}`:`Unavailable camera · ${cameraId}`);
-    const state=document.createElement("span"); state.className="live-state"; state.textContent=camera?"Loading":archivedCamera?"Archived":"Unavailable";state.setAttribute("role","status");state.setAttribute("aria-live","polite");
-    if(!camera){tile.append(title,state);grid.append(tile);continue;}
-    const image=document.createElement("img"); image.alt=`Live video from ${camera.name}`;
-    const focus=document.createElement("button"); focus.type="button"; focus.textContent=focusedCameraId?"Restore grid":"Expand feed";focus.setAttribute("aria-label",focusedCameraId?"Restore camera grid":`Expand ${camera.name}`);
-    focus.addEventListener("click",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]));
-    tile.draggable=true;
-    tile.addEventListener("dragstart",event=>event.dataTransfer.setData("text/plain",cameraId));
-    tile.addEventListener("dblclick",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]));
-    tile.addEventListener("keydown",event=>{if(event.key==="Enter"&&event.altKey){event.preventDefault();startLiveViews(activeLiveCameraIds,cameras,focusedLiveCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]);}});
-    tile.append(title,state,focus);
-    if(focusedCameraId) {
-      const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Enter fullscreen";
-      fullscreen.addEventListener("click",async()=>{
-        if(typeof tile.requestFullscreen!=="function") { liveMessage.textContent="Fullscreen is not supported by this browser."; return; }
-        try { await tile.requestFullscreen(); liveMessage.textContent="Focused camera is in fullscreen. Press Escape to return."; }
-        catch { liveMessage.textContent="The browser could not enter fullscreen. Check browser permissions and try again."; }
-      });
-      tile.append(fullscreen);
-    }
-    tile.append(image);
-    if(camera.audio_enabled) {
-      const listening=document.createElement("audio");listening.controls=true;listening.preload="none";
-      listening.setAttribute("aria-label",`Live audio from ${camera.name}`);
-      listening.muted=true;
-      listening.title="Audio is muted. Unmute to listen; only one camera can play audio at a time.";
-      const audioToggle=document.createElement("button");audioToggle.type="button";audioToggle.textContent="Listen";audioToggle.setAttribute("aria-label",`Listen to ${camera.name}`);
-      audioToggle.addEventListener("click",async()=>{
-        if(listening.muted){for(const other of document.querySelectorAll("#live-grid audio"))if(other!==listening){other.pause();other.muted=true;}listening.muted=false;try{await listening.play();}catch{listening.muted=true;liveMessage.textContent=`Audio could not start for ${camera.name}.`;}}
-        else{listening.pause();listening.muted=true;}
-      });
-      listening.addEventListener("volumechange",()=>{
-        audioToggle.textContent=listening.muted?"Listen":"Mute audio";
-        audioToggle.setAttribute("aria-label",listening.muted?`Listen to ${camera.name}`:`Mute audio from ${camera.name}`);
-        if(listening.muted)return;
-        for(const other of document.querySelectorAll("#live-grid audio")) if(other!==listening){other.pause();other.muted=true;}
-      });
-      listening.src=`/api/cameras/${encodeURIComponent(camera.id)}/audio/live`;
-      tile.append(audioToggle,listening);
-    }
-    grid.append(tile);
-    const view={cameraId,controller:new AbortController(),image,state,url:null,lastFrame:0,startedAt:Date.now(),tile,quality:focusedCameraId?document.querySelector("#live-quality").value:"low",retrying:false}; liveViews.push(view);
-    consumeLiveStream(view).catch(error=>{if(!view.controller.signal.aborted){state.textContent="Lost";liveMessage.textContent=`${camera.name}: ${error.message}`;}});
+  if (!ordered.length) {
+    stopLiveViews();
+    activeLiveLayoutMode = mode;
+    activeLiveGridSize = mode === "auto" ? 1 : Number(gridSize) || 4;
+    cachedLiveArrangement = { camera_ids: [], tile_camera_ids: [], grid_size: activeLiveGridSize, layout_mode: mode };
+    document.querySelector("#live-message").textContent = "Select a camera to start Live viewing.";
+    saveLiveWorkspace();
+    return;
   }
-  liveStatusTimer=setInterval(async()=>{
-    for(const view of liveViews) {
-      if(view.controller.signal.aborted)continue;
-      if(Date.now()-(view.lastFrame||view.startedAt)>12000&&!view.retrying){
-        view.retrying=true;view.state.textContent="Stale";view.controller.abort();
-        if(view.url){URL.revokeObjectURL(view.url);view.url=null;}view.image.removeAttribute("src");
-        view.controller=new AbortController();view.lastFrame=0;view.startedAt=Date.now();
-        view.state.textContent="Reconnecting";
-        consumeLiveStream(view).finally(()=>{view.retrying=false;});
+  const selectedSize = mode === "auto" ? liveGridSizeFor(ordered.length) : Number(gridSize) || Number(document.querySelector("#live-grid-size").value) || 4;
+  if (ordered.length > selectedSize) {
+    document.querySelector("#live-grid-size").value = "auto";
+    document.querySelector("#live-message").textContent = "Auto layout restored to keep every selected camera visible.";
+    return startLiveViews(ordered, cameras, focusedCameraId, null, null, "auto");
+  }
+  const tiles = [...ordered, ...Array(Math.max(0, selectedSize - ordered.length)).fill(null)].slice(0, selectedSize);
+  const previous = new Map(liveViews.map(view => [view.cameraId, view]));
+  for (const view of liveViews) if (!ordered.includes(view.cameraId)) releaseLiveView(view);
+  activeLiveCameraIds = [...ordered];
+  activeLiveTileCameraIds = tiles;
+  activeLiveGridSize = selectedSize;
+  activeLiveLayoutMode = mode;
+  focusedLiveCameraId = focusedCameraId && ordered.includes(focusedCameraId) ? focusedCameraId : null;
+  if (!activeLiveTileCameraId || !ordered.includes(activeLiveTileCameraId)) activeLiveTileCameraId = focusedLiveCameraId || ordered[0];
+  cachedLiveArrangement = { camera_ids: [...ordered], tile_camera_ids: [...tiles], grid_size: selectedSize, layout_mode: mode };
+  document.querySelector("#live-grid-size").value = mode === "auto" ? "auto" : String(selectedSize);
+  for (const input of document.querySelectorAll("[data-live-camera]")) input.checked = ordered.includes(input.value);
+  const grid = document.querySelector("#live-grid");
+  grid.replaceChildren();
+  const slots = mode === "auto" ? ordered.length : selectedSize;
+  const nextViews = [];
+  for (let index = 0; index < slots; index++) {
+    const cameraId = tiles[index] || null;
+    if (!cameraId) {
+      const tile = document.createElement("article");
+      tile.className = "live-tile live-placeholder";
+      tile.dataset.tileIndex = String(index);
+      tile.textContent = "Empty tile · drop a camera here";
+      tile.addEventListener("dragover", event => event.preventDefault());
+      tile.addEventListener("drop", event => dropCameraOnTile(event, index, cameras));
+      grid.append(tile);
+      continue;
+    }
+    const { tile, view } = createLiveTile(cameraId, index, cameras, previous.get(cameraId));
+    grid.append(tile);
+    if (view) {
+      const quality = desiredLiveQuality(focusedLiveCameraId);
+      if (view.quality !== quality) {
+        view.controller.abort();
+        view.controller = new AbortController();
+        view.quality = quality;
+        view.startedAt = Date.now();
+        consumeLiveStream(view).catch(error => {
+          if (!view.controller.signal.aborted) { view.state.textContent = "Lost"; document.querySelector("#live-message").textContent = error.message; }
+        });
+      } else if (!previous.has(cameraId)) {
+        consumeLiveStream(view).catch(error => {
+          if (!view.controller.signal.aborted) { view.state.textContent = "Lost"; document.querySelector("#live-message").textContent = error.message; }
+        });
+      }
+      nextViews.push(view);
+    }
+  }
+  liveViews = nextViews;
+  if (liveStatusTimer) clearInterval(liveStatusTimer);
+  liveStatusTimer = setInterval(async () => {
+    for (const view of liveViews) {
+      if (view.controller.signal.aborted) continue;
+      if (Date.now() - (view.lastFrame || view.startedAt) > 12000 && !view.retrying) {
+        view.retrying = true;
+        view.state.textContent = view.lastFrame ? `Stale · last frame ${new Date(view.lastFrame).toLocaleTimeString()}` : "Reconnecting";
+        view.tile.classList.toggle("stale",Boolean(view.lastFrame));
+        view.controller.abort();
+        view.controller = new AbortController();
+        view.lastFrame = 0;
+        view.startedAt = Date.now();
+        consumeLiveStream(view).finally(() => { view.retrying = false; });
         continue;
       }
       try {
-        const status=await api(`/api/cameras/${encodeURIComponent(view.cameraId)}/live/status`);
-        if(!view.controller.signal.aborted) view.state.textContent=view.lastFrame?(Date.now()-view.lastFrame>12000?"Stale":status.state==="live"?"Live":status.active_viewers?"Stale":"Reconnecting"):status.state==="stale"?"Stale":"Loading";
-      } catch { if(!view.controller.signal.aborted) view.state.textContent="Lost"; }
+        const status = await api("/api/cameras/" + encodeURIComponent(view.cameraId) + "/live/status");
+        if (!view.controller.signal.aborted) view.state.textContent = view.lastFrame
+          ? Date.now() - view.lastFrame > 12000 ? "Stale · reconnecting" : status.state === "live" ? "Live" : status.active_viewers ? "Stale · reconnecting" : "Reconnecting"
+          : status.state === "stale" ? "Stale · reconnecting" : "Loading";
+      } catch { if (!view.controller.signal.aborted) view.state.textContent = view.lastFrame ? "Stale · reconnecting" : "Lost"; }
     }
-  },5000);
+  }, 5000);
+  updateLiveGridLayout();
   markLiveViewDirty();
   saveLiveWorkspace();
+  updateOperationalSummary();
+}
+function updateLiveCameraSelection() {
+  const selected = selectedLiveCameras();
+  if (selected.length > 16) {
+    requestCameraSubset(selected, activeLiveCameraIds, chosen => {
+      for (const input of document.querySelectorAll("[data-live-camera]")) input.checked = chosen.includes(input.value);
+      const ordered = reconcileCameraOrder(activeLiveCameraIds, chosen);
+      const mode = document.querySelector("#live-grid-size").value === "auto" ? "auto" : "manual";
+      startLiveViews(ordered, latestCameras, null, null, null, mode);
+    });
+    return;
+  }
+  const order = reconcileCameraOrder(activeLiveCameraIds, selected);
+  const mode = document.querySelector("#live-grid-size").value === "auto" ? "auto" : "manual";
+  const capacity = mode === "auto" ? liveGridSizeFor(order.length) : Number(document.querySelector("#live-grid-size").value);
+  startLiveViews(order, latestCameras, focusedLiveCameraId, capacity, activeLiveTileCameraIds, mode);
+  renderSidebar();
+}
+function openCameraInPlayback(cameraId) {
+  const input = [...document.querySelectorAll("[data-playback-camera]")].find(item => item.value === cameraId);
+  if (!input) return;
+  const chosen = new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(item => item.value));
+  chosen.add(cameraId);
+  const apply = ids => {
+    for (const item of document.querySelectorAll("[data-playback-camera]")) item.checked = ids.includes(item.value);
+    for (const id of ids) playbackManualChoices.set(id, true);
+    syncPlaybackGroupChecks();
+    markPlaybackResultsStale();
+    savePlaybackWorkspace();
+    setScreen("footage");
+    document.querySelector("#playback-search").focus();
+  };
+  if (chosen.size > 16) requestCameraSubset([...chosen], [...chosen].slice(0, 16), apply);
+  else apply([...chosen]);
 }
 function waitForLiveRetry(delay,signal){return new Promise(resolve=>{const finish=()=>{clearTimeout(timer);signal.removeEventListener("abort",finish);resolve();};const timer=setTimeout(finish,delay);signal.addEventListener("abort",finish,{once:true});});}
 async function consumeLiveStream(view) {
@@ -697,7 +1299,8 @@ async function consumeLiveStream(view) {
   while(!view.controller.signal.aborted){
     let retryable=true;
     try{
-      view.state.textContent=view.lastFrame?"Reconnecting":"Loading";
+      view.state.textContent=view.lastFrame?`Stale · last frame ${new Date(view.lastFrame).toLocaleTimeString()}`:"Loading";
+      view.tile.classList.toggle("stale",Boolean(view.lastFrame));
       const response=await fetch(`/api/cameras/${encodeURIComponent(view.cameraId)}/live?quality=${view.quality}`,{credentials:"same-origin",signal:view.controller.signal});
       if(!response.ok){const body=await response.json().catch(()=>({}));const error=new Error(body.detail||"Live view could not start");retryable=response.status>=500;throw error;}
       if(!response.body)throw new Error("This browser cannot read the live stream");
@@ -714,7 +1317,7 @@ async function consumeLiveStream(view) {
           if(end<0){buffer=buffer.slice(start);if(buffer.length>4*1024*1024)throw new Error("Video frame exceeded size limit");break;}
           const frame=buffer.slice(start,end);buffer=buffer.slice(end);
           const url=URL.createObjectURL(new Blob([frame],{type:"image/jpeg"}));
-          if(view.url)URL.revokeObjectURL(view.url);view.url=url;view.image.src=url;view.lastFrame=Date.now();view.startedAt=view.lastFrame;view.retrying=false;view.state.textContent="Live";
+          if(view.url)URL.revokeObjectURL(view.url);view.url=url;view.image.src=url;view.lastFrame=Date.now();view.startedAt=view.lastFrame;view.retrying=false;view.state.textContent="Live";view.tile.classList.remove("stale");
         }
         if(buffer.length>4*1024*1024)throw new Error("Live stream exceeded the frame buffer limit");
       }
@@ -723,7 +1326,8 @@ async function consumeLiveStream(view) {
       if(view.controller.signal.aborted)return;
       if(!retryable){view.retrying=false;view.state.textContent="Lost";return;}
       view.state.textContent="Reconnecting";
-      if(view.url){URL.revokeObjectURL(view.url);view.url=null;view.image.removeAttribute("src");}
+      if(view.url)view.state.textContent=`Stale · last frame ${new Date(view.lastFrame).toLocaleTimeString()}`;
+      view.tile.classList.toggle("stale",Boolean(view.url));
       await waitForLiveRetry(Math.min(1000*2**attempt,8000),view.controller.signal);
       attempt=Math.min(attempt+1,4);
     }
@@ -732,13 +1336,24 @@ async function consumeLiveStream(view) {
 function dropCameraOnTile(event,index,cameras){
   event.preventDefault();const cameraId=event.dataTransfer.getData("text/plain");if(!cameraId)return;
   const next=[...activeLiveCameraIds],current=next.indexOf(cameraId);
-  if(current>=0){if(index>=next.length)return;[next[current],next[index]]=[next[index],next[current]];startLiveViews(next,cameras,focusedLiveCameraId,activeLiveGridSize);return;}
-  if(next.length>=activeLiveGridSize){document.querySelector("#live-message").textContent="This grid is full. Choose a larger grid or remove a camera first.";return;}
-  next.splice(Math.min(index,next.length),0,cameraId);startLiveViews(next,cameras,null,activeLiveGridSize);
+  if(current>=0){if(index>=next.length)return;[next[current],next[index]]=[next[index],next[current]];startLiveViews(next,cameras,focusedLiveCameraId,activeLiveGridSize,[...next],activeLiveLayoutMode);return;}
+  if(activeLiveLayoutMode==="auto")next.splice(Math.min(index,next.length),0,cameraId);
+  else if(next.length>=activeLiveGridSize){
+    const replaced=next[index];if(!replaced){document.querySelector("#live-message").textContent="This manual grid has no empty tile to replace.";return;}
+    next[index]=cameraId;
+    const oldInput=[...document.querySelectorAll("[data-live-camera]")].find(item=>item.value===replaced);if(oldInput)oldInput.checked=false;
+  } else next.splice(Math.min(index,next.length),0,cameraId);
   const input=[...document.querySelectorAll("[data-live-camera]")].find(item=>item.value===cameraId);if(input)input.checked=true;
+  startLiveViews(next,cameras,null,activeLiveGridSize,[...next],activeLiveLayoutMode);
+  renderSidebar();
 }
 function addCameraToLiveGrid(cameraId,cameras){
   if(activeLiveCameraIds.includes(cameraId))return;
+  if(document.querySelector("#live-grid-size").value==="auto"){
+    const next=[...activeLiveCameraIds,cameraId];
+    const choice=[...document.querySelectorAll("[data-live-camera]")].find(item=>item.value===cameraId);if(choice)choice.checked=true;
+    startLiveViews(next,cameras,null,null,null,"auto");return;
+  }
   let size=activeLiveGridSize||Number(document.querySelector("#live-grid-size").value)||4;
   if(activeLiveCameraIds.length>=size){size=LIVE_GRID_SIZES.find(item=>item>size)||size;}
   if(activeLiveCameraIds.length>=size){document.querySelector("#live-message").textContent="The 16-feed grid is full. Remove a camera before adding another.";return;}
@@ -763,6 +1378,49 @@ function renderPlaybackCameraPicker(cameras,groups=[]) {
   }));
   target.replaceChildren(groupFieldset,cameraFieldset);
   syncPlaybackCameraChecks();
+}
+function playbackWorkspaceKey(){return `nvr-playback-workspace:${currentUsername}`;}
+function savePlaybackWorkspace(){
+  if(!currentUsername)return;
+  try{
+    localStorage.setItem(playbackWorkspaceKey(),JSON.stringify({
+      camera_ids:[...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value),
+      start:document.querySelector("#playback-start").value,end:document.querySelector("#playback-end").value,
+      start_fold:document.querySelector("#playback-start-fold").value,end_fold:document.querySelector("#playback-end-fold").value,
+      grid_size:document.querySelector("#playback-grid-size").value,
+      export_start:document.querySelector("#export-start").value,export_end:document.querySelector("#export-end").value,
+      export_start_fold:document.querySelector("#export-start-fold").value,export_end_fold:document.querySelector("#export-end-fold").value,
+      export_camera_ids:[...document.querySelectorAll("[data-export-camera]:checked")].map(input=>input.value),
+      time:playbackTimeline?document.querySelector("#playback-cursor").dataset.time:null,
+      playing:playbackIsPlaying,
+    }));
+  }catch{}
+}
+function schedulePlaybackWorkspaceSave(){
+  if(playbackWorkspaceSaveTimer)clearTimeout(playbackWorkspaceSaveTimer);
+  playbackWorkspaceSaveTimer=setTimeout(()=>{playbackWorkspaceSaveTimer=null;savePlaybackWorkspace();},750);
+}
+function restorePlaybackWorkspace(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(playbackWorkspaceKey())||"null");
+    if(!saved||typeof saved!=="object")return;
+    const available=new Set([...document.querySelectorAll("[data-playback-camera]")].map(input=>input.value));
+    const chosen=new Set((saved.camera_ids||[]).filter(id=>available.has(id)));
+    for(const input of document.querySelectorAll("[data-playback-camera]")){input.checked=chosen.has(input.value);playbackManualChoices.set(input.value,input.checked);}
+    if(saved.start)document.querySelector("#playback-start").value=saved.start;
+    if(saved.end)document.querySelector("#playback-end").value=saved.end;
+    updateFoldChoices("start");updateFoldChoices("end");
+    if(saved.start_fold)document.querySelector("#playback-start-fold").value=saved.start_fold;
+    if(saved.end_fold)document.querySelector("#playback-end-fold").value=saved.end_fold;
+    if(["auto","1","4","9","16"].includes(saved.grid_size))document.querySelector("#playback-grid-size").value=saved.grid_size;
+    if(saved.export_start)document.querySelector("#export-start").value=saved.export_start;
+    if(saved.export_end)document.querySelector("#export-end").value=saved.export_end;
+    updateExportFoldChoices("start");updateExportFoldChoices("end");
+    if(saved.export_start_fold)document.querySelector("#export-start-fold").value=saved.export_start_fold;
+    if(saved.export_end_fold)document.querySelector("#export-end-fold").value=saved.export_end_fold;
+    pendingPlaybackRestoreState=saved;
+    syncPlaybackGroupChecks();updatePlaybackGridLayout(chosen.size);
+  }catch{}
 }
 function syncPlaybackCameraChecks() {
   const selectedByGroups=new Set([...document.querySelectorAll("[data-playback-group]:checked")].flatMap(input=>sidebarGroups.find(group=>group.id===input.value)?.camera_ids||[]));
@@ -974,6 +1632,7 @@ function seekSynchronizedPlayback(timeMs,playing=false,master=null) {
   playbackViews.forEach(view=>playbackSetSegment(view,bounded,playing));
   playbackSyncGuard=false;
   updatePlaybackDrift();
+  schedulePlaybackWorkspaceSave();
 }
 function playbackHasFootageAt(timeMs) { return playbackViews.some(view=>Boolean(playbackSegmentAt(view,timeMs))); }
 function nextPlaybackFootage(timeMs) {
@@ -1005,7 +1664,7 @@ function startPlaybackClock() {
 }
 function pausePlaybackClock() {
   if(playbackClockAnchor&&playbackIsPlaying){const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackClockAnchor.at);playbackClockAnchor={at,wall:performance.now()};}
-  stopPlaybackClock();playbackViews.forEach(playbackPauseVideo);
+  stopPlaybackClock();playbackViews.forEach(playbackPauseVideo);savePlaybackWorkspace();
 }
 function selectedPlaybackView() { return playbackMaster&&playbackViews.includes(playbackMaster)?playbackMaster:playbackViews[0]||null; }
 async function stepPlaybackFrame(direction) {
@@ -1088,12 +1747,21 @@ function renderPlaybackCamera(view) {
   video.addEventListener("timeupdate",()=>{if(playbackSyncGuard||playbackMaster!==view||!playbackIsPlaying)return;updatePlaybackDrift();});
   return tile;
 }
-async function loadSynchronizedPlayback() {
+async function loadSynchronizedPlayback(options={}) {
   const camera_ids=[...new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value))];
+  const restoring=options.preserve?null:pendingPlaybackRestoreState;
+  const savedTime=Number(restoring?.time);
+  const previousTime=options.preserve&&playbackTimeline?Number(document.querySelector("#playback-cursor").dataset.time):Number.isFinite(savedTime)&&savedTime>0?savedTime:null;
+  const wasPlaying=Boolean(options.preserve&&playbackIsPlaying);
+  const previousMarks=options.preserve?{start:document.querySelector("#export-start").value,end:document.querySelector("#export-end").value,
+    startFold:document.querySelector("#export-start-fold").value,endFold:document.querySelector("#export-end-fold").value,
+    cameras:[...document.querySelectorAll("[data-export-camera]:checked")].map(input=>input.value)}:restoring?{
+    start:restoring.export_start,end:restoring.export_end,startFold:restoring.export_start_fold,endFold:restoring.export_end_fold,
+    cameras:restoring.export_camera_ids||[]}:null;
   const startInput=document.querySelector("#playback-start").value,endInput=document.querySelector("#playback-end").value;
   const label=document.querySelector("#playback-status");
   try {
-    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight unique cameras.");
+    if(!camera_ids.length||camera_ids.length>16)throw new Error("Choose between one and sixteen unique cameras.");
     if(!startInput||!endInput)throw new Error("Enter both a start and end time.");
     const start=resolveSearchLocalTime("start"),end=resolveSearchLocalTime("end");
     const startMs=playbackMilliseconds(start),endMs=playbackMilliseconds(end);
@@ -1106,17 +1774,28 @@ async function loadSynchronizedPlayback() {
     playbackTimeline=result;const cursor=document.querySelector("#playback-cursor");cursor.disabled=false;cursor.value="0";cursor.dataset.time=String(playbackMilliseconds(result.start));
     playbackWindow={start:playbackMilliseconds(result.start),end:playbackMilliseconds(result.end)};
     const grid=document.querySelector("#playback-grid");
-    grid.style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(Number(document.querySelector("#playback-grid-size").value)||4))));
     playbackViews=result.cameras.map(camera=>({cameraId:camera.camera_id,name:camera.name,audio_supported:camera.audio_supported,audio_enabled:camera.audio_enabled,segments:camera.segments,gaps:camera.gaps,motion_events:camera.motion_events,coverage:camera.coverage,video:null,state:null,segment:null}));
+    updatePlaybackGridLayout(playbackViews.length);
     grid.replaceChildren(...playbackViews.map(renderPlaybackCamera));
     renderPlaybackRuler();
     const earliest=playbackViews.flatMap(view=>view.segments.map(segment=>playbackMilliseconds(segment.starts_at))).filter(Number.isFinite);
-    seekSynchronizedPlayback(earliest.length?Math.min(...earliest):playbackMilliseconds(result.start));
+    const firstAvailable=earliest.length?Math.min(...earliest):playbackMilliseconds(result.start);
+    const seekTarget=previousTime===null?firstAvailable:Math.min(playbackMilliseconds(result.end),Math.max(playbackMilliseconds(result.start),previousTime));
+    seekSynchronizedPlayback(seekTarget);
     if(playbackViews.length){playbackMaster=playbackViews[0];playbackViews[0].tile.classList.add("selected");playbackViews.forEach((view,index)=>{view.video.muted=index>0;});}
     ["#playback-play","#playback-pause","#playback-prev-frame","#playback-next-frame","#playback-prev-event","#playback-next-event"].forEach(selector=>{document.querySelector(selector).disabled=false;});
     playbackResultsStale=false;document.querySelector("#playback-stale").classList.add("hidden");
-    initializeExportSelection();setExportBoundary("start",playbackMilliseconds(result.start));setExportBoundary("end",playbackMilliseconds(result.end));updatePlaybackExportPreview();
-    label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Playback is paused at the earliest indexed recording; events and gaps are aligned to the same search range.`;
+    initializeExportSelection(previousMarks?.cameras);
+    const markStart=previousMarks?.start?storedLocalInstant(previousMarks.start,previousMarks.startFold):null;
+    const markEnd=previousMarks?.end?storedLocalInstant(previousMarks.end,previousMarks.endFold):null;
+    setExportBoundary("start",markStart??playbackMilliseconds(result.start));
+    setExportBoundary("end",markEnd??playbackMilliseconds(result.end));
+    if(previousMarks?.startFold)document.querySelector("#export-start-fold").value=previousMarks.startFold;
+    if(previousMarks?.endFold)document.querySelector("#export-end-fold").value=previousMarks.endFold;
+    pendingPlaybackRestoreState=null;
+    updatePlaybackExportPreview();savePlaybackWorkspace();
+    label.textContent=`Loaded ${result.cameras.length} camera timeline(s) at ${formatDateTime(seekTarget)}. Events and gaps are aligned to the same search range.`;
+    if(wasPlaying)startPlaybackClock();
   }catch(error){label.textContent=error.message;}
 }
 async function refreshExports() {
@@ -1124,6 +1803,12 @@ async function refreshExports() {
   if(!target)return;
   try {
     const {exports}=await api("/api/exports");
+    const activeJobs=exports.filter(job=>job.status==="queued"||job.status==="running").length;
+    const failedJobs=exports.filter(job=>job.status==="failed").length;
+    latestExportProblemCount=failedJobs;
+    const completedJobs=exports.filter(job=>job.status==="completed").length;
+    document.querySelector("#ops-job-summary").textContent=`Exports: ${activeJobs} active · ${failedJobs} failed · ${completedJobs} completed.`;
+    updateOperationalSummary();
     target.replaceChildren(...exports.map(job=>{
       const row=document.createElement("li");
       const state=document.createElement("span");
@@ -1142,20 +1827,72 @@ async function refreshExports() {
     }else if(exportPollTimer){clearInterval(exportPollTimer);exportPollTimer=null;}
   }catch(error){document.querySelector("#export-message").textContent=error.message;}
 }
+const WEEKDAY_LABELS=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+function addScheduleInterval(editor,interval={days:[0,1,2,3,4],start:"08:00",end:"17:00",mode:"continuous"}){
+  const row=document.createElement("fieldset");row.className="schedule-interval";
+  const legend=document.createElement("legend");legend.textContent=`Interval ${editor.querySelectorAll(".schedule-interval").length+1}`;row.append(legend);
+  const days=document.createElement("div");days.className="schedule-days";days.setAttribute("aria-label","Days this interval applies");
+  WEEKDAY_LABELS.forEach((label,index)=>{const dayLabel=document.createElement("label"),input=document.createElement("input");input.type="checkbox";input.value=String(index);input.checked=(interval.days||[]).includes(index);dayLabel.append(input,document.createTextNode(label));days.append(dayLabel);});
+  const timeRow=document.createElement("div");timeRow.className="schedule-times";
+  for(const [field,label] of [["start","From"],["end","To"]]){const item=document.createElement("label");item.textContent=label;const input=document.createElement("input");input.type="time";input.required=true;input.value=interval[field]||"08:00";input.dataset.scheduleField=field;item.append(input);timeRow.append(item);}
+  const modeLabel=document.createElement("label");modeLabel.textContent="Recording mode";const mode=document.createElement("select");mode.dataset.scheduleField="mode";for(const [value,name] of [["continuous","Continuous"],["motion","Motion"],["disabled","Disabled"]])mode.add(new Option(name,value));mode.value=interval.mode||"continuous";modeLabel.append(mode);
+  const remove=document.createElement("button");remove.type="button";remove.textContent="Remove interval";remove.addEventListener("click",()=>{markConfigDraftElement(editor);row.remove();[...editor.querySelectorAll(".schedule-interval legend")].forEach((item,index)=>item.textContent=`Interval ${index+1}`);});
+  row.append(days,timeRow,modeLabel,remove);editor.append(row);return row;
+}
+function renderScheduleEditor(editor,intervals=[]){editor.replaceChildren();for(const interval of intervals)addScheduleInterval(editor,interval);}
+function readScheduleEditor(editor){
+  return [...editor.querySelectorAll(".schedule-interval")].map(row=>({
+    days:[...row.querySelectorAll(".schedule-days input:checked")].map(input=>Number(input.value)),
+    start:row.querySelector('[data-schedule-field="start"]').value,
+    end:row.querySelector('[data-schedule-field="end"]').value,
+    mode:row.querySelector('[data-schedule-field="mode"]').value,
+  }));
+}
+function renderZoneEditor(container,zones=[]){
+  const values=structuredClone(zones||[]);container.replaceChildren();container._zoneValues=values;
+  const help=document.createElement("p");help.className="zone-help";help.textContent=values.length?"Drag on the frame to add a rectangle. Move or resize existing zones with the normalized coordinate fields.":"No zones use the full frame. Drag on the frame to add a zone, or add one with coordinates.";
+  const stage=document.createElement("div");stage.className="zone-stage";stage.setAttribute("role","application");stage.setAttribute("aria-label","Normalized camera frame. Drag to draw a motion or AI zone.");
+  const placeholder=document.createElement("span");placeholder.className="zone-stage-placeholder";placeholder.textContent="Representative frame loads when recent footage is available";stage.append(placeholder);
+  for(const [index,zone] of values.entries()){
+    const rect=document.createElement("div");rect.className="zone-rectangle";rect.setAttribute("aria-hidden","true");rect.style.left=`${zone.x*100}%`;rect.style.top=`${zone.y*100}%`;rect.style.width=`${zone.width*100}%`;rect.style.height=`${zone.height*100}%`;stage.append(rect);
+  }
+  let draw=null;
+  const point=event=>{const box=stage.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(event.clientX-box.left)/box.width)),y:Math.max(0,Math.min(1,(event.clientY-box.top)/box.height))};};
+  stage.addEventListener("pointerdown",event=>{if(event.target!==stage&&event.target!==placeholder)return;const start=point(event);draw={start,preview:document.createElement("div")};draw.preview.className="zone-rectangle zone-draft";stage.append(draw.preview);stage.setPointerCapture(event.pointerId);event.preventDefault();});
+  stage.addEventListener("pointermove",event=>{if(!draw)return;const end=point(event),x=Math.min(draw.start.x,end.x),y=Math.min(draw.start.y,end.y),width=Math.abs(end.x-draw.start.x),height=Math.abs(end.y-draw.start.y);Object.assign(draw.preview.style,{left:`${x*100}%`,top:`${y*100}%`,width:`${width*100}%`,height:`${height*100}%`});});
+  stage.addEventListener("pointerup",event=>{if(!draw)return;const end=point(event),x=Math.min(draw.start.x,end.x),y=Math.min(draw.start.y,end.y),width=Math.abs(end.x-draw.start.x),height=Math.abs(end.y-draw.start.y);draw.preview.remove();if(width>=.01&&height>=.01){markConfigDraftElement(container);values.push({x,y,width,height});renderZoneEditor(container,values);}draw=null;});
+  const list=document.createElement("div");list.className="zone-list";
+  values.forEach((zone,index)=>{
+    const row=document.createElement("fieldset"),legend=document.createElement("legend");legend.textContent=`Zone ${index+1} coordinates`;row.append(legend);
+    for(const field of ["x","y","width","height"]){const label=document.createElement("label");label.textContent=field.toUpperCase();const input=document.createElement("input");input.type="number";input.min=field==="width"||field==="height"?"0.001":"0";input.max="1";input.step="0.001";input.value=zone[field];input.dataset.zoneIndex=String(index);input.dataset.zoneField=field;input.addEventListener("input",()=>{const value=Number(input.value);if(Number.isFinite(value)){values[index][field]=value;const rect=stage.querySelectorAll(".zone-rectangle:not(.zone-draft)")[index];Object.assign(rect.style,{left:`${values[index].x*100}%`,top:`${values[index].y*100}%`,width:`${values[index].width*100}%`,height:`${values[index].height*100}%`});}});label.append(input);row.append(label);}
+    const remove=document.createElement("button");remove.type="button";remove.textContent=`Remove zone ${index+1}`;remove.addEventListener("click",()=>{markConfigDraftElement(container);renderZoneEditor(container,values.filter((_,i)=>i!==index));});row.append(remove);list.append(row);
+  });
+  const add=document.createElement("button");add.type="button";add.textContent="Add zone by coordinates";add.addEventListener("click",()=>{markConfigDraftElement(container);values.push({x:.1,y:.1,width:.25,height:.25});renderZoneEditor(container,values);});
+  container.append(help,stage,list,add);
+}
+function readZoneEditor(container){return (container._zoneValues||[]).map(zone=>({x:Number(zone.x),y:Number(zone.y),width:Number(zone.width),height:Number(zone.height)}));}
+async function loadRepresentativeZoneFrame(cameraId,editor){
+  try{
+    const result=await api(`/api/cameras/${encodeURIComponent(cameraId)}/segments`),segment=result.segments?.at(-1);
+    if(!segment)return;
+    const at=segment.starts_at,url=`/api/cameras/${encodeURIComponent(cameraId)}/segments/${encodeURIComponent(segment.id)}/snapshot?at=${encodeURIComponent(at)}`;
+    const image=new Image();image.alt="Representative recorded frame for zone placement";image.onload=()=>{const stage=editor.querySelector(".zone-stage");if(stage&&image.naturalWidth&&image.naturalHeight){stage.style.aspectRatio=`${image.naturalWidth} / ${image.naturalHeight}`;stage.setAttribute("aria-label",`Camera frame ${image.naturalWidth} by ${image.naturalHeight} pixels. Zones use normalized coordinates.`);stage.style.backgroundImage=`url("${url}")`;stage.classList.add("has-zone-frame");stage.querySelector(".zone-stage-placeholder")?.classList.add("hidden");}};image.src=url;
+  }catch{}
+}
 async function requestPlaybackExport() {
   const message=document.querySelector("#export-message"),button=document.querySelector("#playback-export");
   try {
     const range=selectedExportRange();
     const camera_ids=[...new Set([...document.querySelectorAll("[data-export-camera]:checked")].map(input=>input.value))];
     const output_modes=[...document.querySelectorAll("[data-export-mode]:checked")].map(input=>input.dataset.exportMode);
-    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight searched cameras.");
+    if(!camera_ids.length||camera_ids.length>16)throw new Error("Choose between one and sixteen searched cameras.");
     if(!output_modes.length)throw new Error("Choose individual camera videos, a synchronized grid, or both.");
     const eligible=playbackViews.filter(view=>camera_ids.includes(view.cameraId)&&view.segments.some(segment=>Math.min(range.end,playbackMilliseconds(segment.ends_at))>Math.max(range.start,playbackMilliseconds(segment.starts_at))));
     if(!eligible.length)throw new Error("No indexed footage overlaps this export selection.");
     const omitted=playbackViews.filter(view=>camera_ids.includes(view.cameraId)&&!eligible.includes(view)).map(view=>view.name);
     const jobCameraIds=output_modes.includes("grid")?camera_ids:eligible.map(view=>view.cameraId);
     const tileIds=playbackViews.filter(view=>jobCameraIds.includes(view.cameraId)).map(view=>view.cameraId);
-    const requestedGridSize=Number(document.querySelector("#playback-grid-size").value)||4;
+    const requestedGridSize=document.querySelector("#playback-grid-size").value==="auto"?liveGridSizeFor(tileIds.length):Number(document.querySelector("#playback-grid-size").value)||4;
     const gridSize=[1,4,9,16].find(size=>size>=Math.max(requestedGridSize,tileIds.length))||16;
     const tile_camera_ids=[...tileIds,...Array(Math.max(0,gridSize-tileIds.length)).fill(null)];
     button.disabled=true;message.textContent="Submitting export…";
@@ -1178,7 +1915,7 @@ async function refreshDiagnostics() {
 }
 async function refreshGroups() {
   const {groups}=await api("/api/camera-groups");
-  renderGroupManagement(groups);
+  if(!document.querySelector('#group-management-list [data-config-dirty="true"]'))renderGroupManagement(groups);
   const select=document.querySelector("#bulk-group");
   const options=[new Option("Leave groups unchanged","__unchanged__"),new Option("Remove from group","")];
   for (const group of groups) options.push(new Option(group.name,group.name));
@@ -1192,15 +1929,17 @@ function renderGroupManagement(groups) {
   target.replaceChildren(...groups.map(group=>{
     const card=document.createElement("article"),heading=document.createElement("h4");
     heading.textContent=group.name+" · "+group.camera_count+" camera(s)";
+    const namePanel=document.createElement("fieldset"),nameLegend=document.createElement("legend");namePanel.dataset.configSection="group-name";nameLegend.textContent="Group name";namePanel.append(nameLegend);
     const nameLabel=document.createElement("label"),name=document.createElement("input");
     nameLabel.textContent="Group name ";name.value=group.name;name.maxLength=80;nameLabel.append(name);
     const rename=document.createElement("button");rename.type="button";rename.textContent="Save group name";
+    rename.dataset.configSaves="group-name";
     rename.addEventListener("click",async()=>{
       try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"PATCH",body:JSON.stringify({name:name.value})});await refresh();}
       catch(error){document.querySelector("#schedule-message").textContent=error.message;}
     });
     const members=new Set(group.camera_ids||[]),fieldset=document.createElement("fieldset"),legend=document.createElement("legend");
-    legend.textContent="Browsing members";fieldset.append(legend);
+    fieldset.dataset.configSection="group-members";legend.textContent="Browsing members";fieldset.append(legend);
     for(const camera of [...latestCameras].sort((a,b)=>a.name.localeCompare(b.name))){
       const label=document.createElement("label"),checkbox=document.createElement("input");
       checkbox.type="checkbox";checkbox.value=camera.id;checkbox.checked=members.has(camera.id);
@@ -1208,6 +1947,7 @@ function renderGroupManagement(groups) {
       label.append(checkbox,document.createTextNode(" "+camera.name));fieldset.append(label);
     }
     const saveMembers=document.createElement("button");saveMembers.type="button";saveMembers.textContent="Save browsing members";
+    saveMembers.dataset.configSaves="group-members";
     saveMembers.addEventListener("click",async()=>{
       const camera_ids=[...fieldset.querySelectorAll('input[type="checkbox"]:checked')].map(input=>input.value);
       try{await api("/api/camera-groups/"+encodeURIComponent(group.id)+"/members",{method:"PUT",body:JSON.stringify({camera_ids})});await refresh();}
@@ -1216,10 +1956,11 @@ function renderGroupManagement(groups) {
     const remove=document.createElement("button");remove.type="button";remove.textContent="Delete group";
     remove.addEventListener("click",async()=>{
       if(!window.confirm("Delete browsing group “"+group.name+"”? Groups that still own camera policies must be reassigned first."))return;
+      if(!guardDraftsIn(card))return;
       try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"DELETE"});await refresh();}
       catch(error){document.querySelector("#schedule-message").textContent=error.message;}
     });
-    card.append(heading,nameLabel,rename,fieldset,saveMembers,remove);return card;
+    namePanel.append(nameLabel,rename);card.append(heading,namePanel,fieldset,saveMembers,remove);return card;
   }));
   if(!groups.length)target.textContent="No camera groups yet.";
 }
@@ -1321,10 +2062,12 @@ function renderCameras(cameras) {
   const list = document.querySelector("#camera-list");
   if (!cameras.length) { list.textContent = "No cameras have been added."; return; }
   const query=(document.querySelector("#camera-inventory-search")?.value||"").trim().toLocaleLowerCase();
-  const filtered=cameras.filter(camera=>!query||`${camera.name} ${camera.group_name||""}`.toLocaleLowerCase().includes(query));
+  const filtered=cameras.filter(camera=>!query||`${camera.name} ${camera.group_name||""} ${camera.camera_ip||""}`.toLocaleLowerCase().includes(query));
   if (!filtered.length) { list.textContent = "No cameras match this search."; return; }
+  if(!selectedCameraId||!cameras.some(camera=>camera.id===selectedCameraId))selectedCameraId=filtered[0]?.id||null;
   list.replaceChildren(...filtered.map(camera => {
     const card = document.createElement("article");
+    card.classList.toggle("selected-camera",camera.id===selectedCameraId);
     const title = document.createElement("h3"); title.textContent = camera.name;
     if(camera.archived_at)title.textContent+=` · Archived ${formatDateTime(camera.archived_at)}`;
     if (currentRole === "administrator") {
@@ -1341,18 +2084,24 @@ function renderCameras(cameras) {
     const retentionSummary=camera.retention_coverage||{};
     summary.textContent += ` · retention ${camera.retention_days} days (${camera.retention_policy_source||"default"}; ${retentionSummary.achieved_days||0} days achieved` + (retentionSummary.projected_days_at_current_activity == null ? ")" : `; ${retentionSummary.projected_days_at_current_activity} days projected at current activity)`);
     card.append(title, summary);
-    if(currentRole === "administrator") {
+    const openDetails=document.createElement("button");openDetails.type="button";openDetails.textContent=camera.id===selectedCameraId?"Selected camera":"Open camera details";openDetails.setAttribute("aria-pressed",String(camera.id===selectedCameraId));
+    openDetails.addEventListener("click",()=>{if(selectedCameraId===camera.id)return;if(!guardDraftsIn(document.querySelector("#camera-settings-content")))return;selectedCameraId=camera.id;renderCameras(latestCameras);requestAnimationFrame(()=>[...list.querySelectorAll("[data-camera-id]")].find(item=>item.dataset.cameraId===camera.id)?.querySelector("button")?.focus());});
+    card.dataset.cameraId=camera.id;
+    card.append(openDetails);
+    if(currentRole === "administrator"&&camera.id===selectedCameraId) {
       const editor=document.createElement("details"),editorHeading=document.createElement("summary");
+      editor.dataset.configSection="camera-details";
       editorHeading.textContent="Edit camera details";
       const nameLabel=document.createElement("label"),nameInput=document.createElement("input");
       nameLabel.textContent="Camera name ";nameInput.type="text";nameInput.maxLength=120;nameInput.required=true;nameInput.value=camera.name;nameLabel.append(nameInput);
       const saveDetails=document.createElement("button");saveDetails.type="button";saveDetails.textContent="Save camera details";
+      saveDetails.dataset.configSaves="camera-details";
       saveDetails.addEventListener("click",async()=>{
         try{await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PATCH",body:JSON.stringify({name:nameInput.value})});document.querySelector("#camera-message").textContent="Camera details saved.";await refresh();}
         catch(error){document.querySelector("#camera-message").textContent=error.message;}
       });
       editor.append(editorHeading,nameLabel,saveDetails);card.append(editor);
-      const sourcePanel=document.createElement("fieldset"),sourceLegend=document.createElement("legend");sourceLegend.textContent="Video source and advertised ONVIF profiles";sourcePanel.append(sourceLegend);
+      const sourcePanel=document.createElement("fieldset"),sourceLegend=document.createElement("legend");sourcePanel.dataset.configSection="camera-source";sourceLegend.textContent="Video source and advertised ONVIF profiles";sourcePanel.append(sourceLegend);
       const addressLabel=document.createElement("label"),address=document.createElement("input");addressLabel.textContent="Camera IP address ";address.inputMode="numeric";address.autocomplete="off";address.value=camera.camera_ip||"";addressLabel.append(address);
       const directLabel=document.createElement("label"),directUrl=document.createElement("input");directLabel.textContent="Direct RTSP URL (use when not selecting by IP) ";directUrl.type="url";directUrl.autocomplete="off";directUrl.placeholder="rtsp://camera.example/stream";directLabel.append(directUrl);
       const usernameLabel=document.createElement("label"),username=document.createElement("input");usernameLabel.textContent="Camera username (leave blank to keep current credentials) ";username.autocomplete="off";usernameLabel.append(username);
@@ -1394,17 +2143,20 @@ function renderCameras(cameras) {
         catch(error){sourceMessage.textContent=error.message;}
       });
       const saveSource=document.createElement("button");saveSource.type="button";saveSource.textContent="Save tested source";
+      saveSource.dataset.configSaves="camera-source";
       saveSource.addEventListener("click",async()=>{
         try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source`,{method:"PUT",body:JSON.stringify(buildSourcePayload())});sourceMessage.textContent=`Source saved · ${result.video.codec} ${result.video.width||"?"}×${result.video.height||"?"}`;await refresh();}
         catch(error){sourceMessage.textContent=error.message;}
       });
       sourcePanel.append(addressLabel,directLabel,usernameLabel,passwordLabel,confirmLabel,clearLabel,brandLabel,serviceLabel,loadProfiles,mainLabel,subLabel,testSource,saveSource,sourceMessage);editor.append(sourcePanel);
+      const audioPanel=document.createElement("fieldset"),audioLegend=document.createElement("legend");audioPanel.dataset.configSection="camera-audio";audioLegend.textContent="Audio";audioPanel.append(audioLegend);
       const audioLabel=document.createElement("label");audioLabel.textContent="Enable audio recording and operator listening ";
       const audioEnabled=document.createElement("input");audioEnabled.type="checkbox";audioEnabled.checked=Boolean(camera.audio_enabled);audioEnabled.disabled=camera.audio_supported!==true;
       audioLabel.append(audioEnabled);
       const saveAudio=document.createElement("button");saveAudio.type="button";saveAudio.textContent="Apply audio setting";
+      saveAudio.dataset.configSaves="camera-audio";
       saveAudio.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PATCH",body:JSON.stringify({audio_enabled:audioEnabled.checked})});await refresh();}catch(error){document.querySelector("#camera-message").textContent=error.message;}});
-      card.append(audioLabel,saveAudio);
+      audioPanel.append(audioLabel,saveAudio);card.append(audioPanel);
       if(camera.audio_supported==null) {
         const probeAudio=document.createElement("button");probeAudio.type="button";probeAudio.textContent="Probe camera audio";
         probeAudio.addEventListener("click",async()=>{try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/audio/probe`,{method:"POST"});document.querySelector("#camera-message").textContent=result.detail;await refresh();}catch(error){document.querySelector("#camera-message").textContent=error.message;}});
@@ -1412,19 +2164,24 @@ function renderCameras(cameras) {
       }
     }
     if(currentRole === "administrator") {
+      const retentionPanel=document.createElement("fieldset"),retentionLegend=document.createElement("legend");retentionPanel.dataset.configSection="camera-retention";retentionLegend.textContent="Retention";retentionPanel.append(retentionLegend);
       const retentionLabel=document.createElement("label"); retentionLabel.textContent="Camera retention override (days)";
       const retentionDays=document.createElement("input"); retentionDays.type="number"; retentionDays.min="1"; retentionDays.max="3650"; retentionDays.value=String(camera.retention_days||30);
       const saveRetention=document.createElement("button"); saveRetention.type="button"; saveRetention.textContent="Save camera retention";
+      saveRetention.dataset.configSaves="camera-retention";
       saveRetention.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/retention`,{method:"PUT",body:JSON.stringify({retention_days:Number(retentionDays.value)})});await refresh();}catch(error){document.querySelector("#camera-message").textContent=error.message;}});
       const inheritRetention=document.createElement("button"); inheritRetention.type="button"; inheritRetention.textContent="Inherit group retention";
+      inheritRetention.dataset.configSaves="camera-retention";
       inheritRetention.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/retention`,{method:"DELETE"});await refresh();}catch(error){document.querySelector("#camera-message").textContent=error.message;}});
-      card.append(retentionLabel,retentionDays,saveRetention,inheritRetention);
+      retentionPanel.append(retentionLabel,retentionDays,saveRetention,inheritRetention);card.append(retentionPanel);
     }
     if (camera.last_error) { const note=document.createElement("p"); note.textContent=camera.last_error; card.append(note); }
     const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
     button.addEventListener("click", () => loadSegments(camera)); card.append(button);
     if (currentRole !== "administrator") return card;
     const mode=document.createElement("select"); mode.setAttribute("aria-label",`Recording mode for ${camera.name}`);
+    const recordingPanel=document.createElement("fieldset"),recordingLegend=document.createElement("legend");recordingPanel.dataset.configSection="camera-recording-policy";recordingLegend.textContent="Recording policy";recordingPanel.append(recordingLegend);
+    const motionRollPanel=document.createElement("fieldset"),motionRollLegend=document.createElement("legend");motionRollPanel.dataset.configSection="camera-motion-roll";motionRollLegend.textContent="Motion clip timing";motionRollPanel.append(motionRollLegend);
     for (const [value,label] of [["motion","Motion (ONVIF events)"],["continuous","Continuous"],["disabled","Disabled"]]) {
       const option=document.createElement("option"); option.value=value; option.textContent=label; mode.append(option);
     }
@@ -1435,6 +2192,7 @@ function renderCameras(cameras) {
     const pre=document.createElement("input"); pre.type="number"; pre.min="0"; pre.max="120"; pre.value=camera.motion_pre_roll_seconds; pre.setAttribute("aria-label","Motion pre-roll seconds");
     const post=document.createElement("input"); post.type="number"; post.min="1"; post.max="600"; post.value=camera.motion_post_roll_seconds; post.setAttribute("aria-label","Motion post-roll seconds");
     const save=document.createElement("button"); save.type="button"; save.textContent="Apply recording policy";
+    save.dataset.configSaves="camera-recording-policy camera-motion-roll";
     save.addEventListener("click", async () => {
       try {
         await api(`/api/cameras/${encodeURIComponent(camera.id)}`, { method:"PATCH", body:JSON.stringify({recording_mode:mode.value,recording_enabled:enabled.checked,motion_pre_roll_seconds:Number(pre.value),motion_post_roll_seconds:Number(post.value)}) });
@@ -1453,12 +2211,16 @@ function renderCameras(cameras) {
     fallbackLabel.append(fallback);
     const zonesLabel=document.createElement("label"); zonesLabel.textContent="Server motion zones (normalized rectangles; empty uses full frame)";
     const zones=document.createElement("textarea"); zones.spellcheck=false; zones.value=JSON.stringify(camera.motion_zones||[]); zones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';
+    const zoneEditor=document.createElement("div");zoneEditor.setAttribute("aria-label","Visual server motion zones");renderZoneEditor(zoneEditor,camera.motion_zones||[]);loadRepresentativeZoneFrame(camera.id,zoneEditor);
+    const zonesAdvanced=document.createElement("details"),zonesSummary=document.createElement("summary");zonesSummary.textContent="Advanced motion zone JSON";zonesAdvanced.append(zonesSummary,zonesLabel,zones);
     const sensitivityLabel=document.createElement("label"); sensitivityLabel.textContent="Server motion sensitivity (1–100)";
     const sensitivity=document.createElement("input"); sensitivity.type="number"; sensitivity.min="1"; sensitivity.max="100"; sensitivity.value=camera.motion_sensitivity||50;
     const configureMotion=document.createElement("button"); configureMotion.type="button"; configureMotion.textContent="Save motion event source";
+    const motionSourcePanel=document.createElement("fieldset"),motionSourceLegend=document.createElement("legend");motionSourcePanel.dataset.configSection="camera-motion-source";motionSourceLegend.textContent="Motion event source and detection";motionSourcePanel.append(motionSourceLegend);
+    configureMotion.dataset.configSaves="camera-motion-roll camera-motion-source";
     configureMotion.addEventListener("click",async()=>{
       try {
-        const payload={pre_roll_seconds:Number(pre.value),post_roll_seconds:Number(post.value),fallback_enabled:fallback.checked,zones:JSON.parse(zones.value||"[]"),sensitivity:Number(sensitivity.value)};
+        const payload={pre_roll_seconds:Number(pre.value),post_roll_seconds:Number(post.value),fallback_enabled:fallback.checked,zones:readZoneEditor(zoneEditor),sensitivity:Number(sensitivity.value)};
         if(motionUrl.value) payload.service_url=motionUrl.value;
         if(motionUser.value||motionPass.value){payload.username=motionUser.value;payload.password=motionPass.value;}
         await api(`/api/cameras/${encodeURIComponent(camera.id)}/motion-source`,{method:"POST",body:JSON.stringify(payload)});
@@ -1515,7 +2277,7 @@ function renderCameras(cameras) {
     aiConfigure.addEventListener("click",async()=>{
       try{
         const config=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`);
-        if(!aiPanel){aiPanel=document.createElement("section");card.append(aiPanel);}
+        if(!aiPanel){aiPanel=document.createElement("section");aiPanel.dataset.configSection="camera-ai";card.append(aiPanel);}
         aiPanel.replaceChildren();const heading=document.createElement("h4");heading.textContent="Local CPU AI analysis";
         const availability=document.createElement("p");availability.textContent=`${config.model.id} ${config.model.version} · ${config.model.runtime} · ${config.model.available?"model ready":config.model.reason}`;
         const source=document.createElement("p");source.textContent=`Effective settings source: ${config.config_source}${config.config_source==="group"?" (inherited)":""}`;
@@ -1525,11 +2287,14 @@ function renderCameras(cameras) {
         const confidenceLabel=document.createElement("label");confidenceLabel.textContent="Minimum confidence (0.1–0.99)";const confidence=document.createElement("input");confidence.type="number";confidence.min="0.1";confidence.max="0.99";confidence.step="0.01";confidence.value=config.confidence_threshold;confidenceLabel.append(confidence);
         const substreamLabel=document.createElement("label");substreamLabel.textContent="Use validated lower-resolution stream ";const substream=document.createElement("input");substream.type="checkbox";substream.checked=config.use_substream;substreamLabel.append(substream);
         const zonesLabel=document.createElement("label");zonesLabel.textContent="AI zones (normalized rectangles; empty uses full frame)";const aiZones=document.createElement("textarea");aiZones.spellcheck=false;aiZones.value=JSON.stringify(config.zones);aiZones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';zonesLabel.append(aiZones);
+        const aiZoneEditor=document.createElement("div");aiZoneEditor.setAttribute("aria-label","Visual AI zones");renderZoneEditor(aiZoneEditor,config.zones||[]);loadRepresentativeZoneFrame(camera.id,aiZoneEditor);
+        const aiZonesAdvanced=document.createElement("details"),aiZonesSummary=document.createElement("summary");aiZonesSummary.textContent="Advanced AI zone JSON";aiZonesAdvanced.append(aiZonesSummary,zonesLabel);
         const saveAI=document.createElement("button");saveAI.type="button";saveAI.textContent="Save AI settings";
+        saveAI.dataset.configSaves="camera-ai";
         const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${formatDateTime(config.last_success_at)}`:""}${config.last_error?` · ${config.last_error}`:""}`;
-        saveAI.addEventListener("click",async()=>{try{const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:JSON.parse(aiZones.value||"[]"),inherit_group:inherit.checked})});aiStatus.textContent=`Status: ${saved.status} · settings ${saved.config_source}${saved.last_error?` · ${saved.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
+        saveAI.addEventListener("click",async()=>{try{const selectedZones=readZoneEditor(aiZoneEditor);aiZones.value=JSON.stringify(selectedZones);const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:selectedZones,inherit_group:inherit.checked})});aiStatus.textContent=`Status: ${saved.status} · settings ${saved.config_source}${saved.last_error?` · ${saved.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
         const coverageButton=document.createElement("button");coverageButton.type="button";coverageButton.textContent="Refresh analysis coverage";coverageButton.addEventListener("click",async()=>{try{const status=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai/coverage`);aiStatus.textContent=`Status: ${status.status} · ${status.intervals.length} analysis coverage intervals${status.last_error?` · ${status.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
-        aiPanel.append(heading,availability,source,inheritLabel,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,zonesLabel,saveAI,coverageButton,aiStatus);
+        aiPanel.append(heading,availability,source,inheritLabel,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,aiZoneEditor,aiZonesAdvanced,saveAI,coverageButton,aiStatus);
       }catch(error){document.querySelector("#camera-message").textContent=error.message;}
     });
     const coverage=document.createElement("button"); coverage.type="button"; coverage.textContent="View coverage history";
@@ -1547,7 +2312,12 @@ function renderCameras(cameras) {
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
     const scheduleLabel=document.createElement("label"); scheduleLabel.textContent="Camera weekly recording schedule override (JSON; blank intervals mean scheduled idle)";
+    const schedulePanel=document.createElement("fieldset"),scheduleLegend=document.createElement("legend");schedulePanel.dataset.configSection="camera-schedule";scheduleLegend.textContent="Recording schedule";schedulePanel.append(scheduleLegend);
     const scheduleText=document.createElement("textarea"); scheduleText.spellcheck=false; scheduleText.placeholder='{"timezone":"America/Indiana/Indianapolis","intervals":[{"days":[0,1,2,3,4],"start":"08:00","end":"17:00","mode":"continuous"}]}';
+    const scheduleTimezoneLabel=document.createElement("label");scheduleTimezoneLabel.textContent="Schedule time zone (IANA)";const scheduleTimezone=document.createElement("input");scheduleTimezone.maxLength=128;scheduleTimezone.value=camera.schedule_timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";scheduleTimezoneLabel.append(scheduleTimezone);
+    const scheduleEditor=document.createElement("div");scheduleEditor.setAttribute("aria-label","Visual camera weekly schedule");
+    const addSchedule=document.createElement("button");addSchedule.type="button";addSchedule.textContent="Add schedule interval";addSchedule.addEventListener("click",()=>{markConfigDraftElement(scheduleEditor);addScheduleInterval(scheduleEditor);});
+    const scheduleAdvanced=document.createElement("details"),scheduleSummary=document.createElement("summary");scheduleSummary.textContent="Advanced schedule JSON";scheduleAdvanced.append(scheduleSummary,scheduleLabel,scheduleText);
     const inheritLabel=document.createElement("label"); inheritLabel.textContent="Inherit assigned group schedule ";
     const inheritSchedule=document.createElement("input"); inheritSchedule.type="checkbox"; inheritSchedule.checked=true; inheritLabel.append(inheritSchedule);
     const loadSchedule=document.createElement("button"); loadSchedule.type="button"; loadSchedule.textContent="Load camera schedule";
@@ -1555,16 +2325,20 @@ function renderCameras(cameras) {
       try {
         const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/schedule`);
         inheritSchedule.checked=result.inherits_group;
+        scheduleTimezone.value=result.timezone||"UTC";
+        renderScheduleEditor(scheduleEditor,result.intervals||[]);
         scheduleText.value=JSON.stringify({timezone:result.timezone,intervals:result.intervals},null,2);
         document.querySelector("#camera-message").textContent=`Loaded ${result.source} schedule${result.configured ? "" : " (no schedule configured)"}.`;
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
     const saveSchedule=document.createElement("button"); saveSchedule.type="button"; saveSchedule.textContent="Save camera schedule";
+    saveSchedule.dataset.configSaves="camera-schedule";
     saveSchedule.addEventListener("click",async()=>{
       try {
-        const config=inheritSchedule.checked ? {} : JSON.parse(scheduleText.value||"{}");
-        const payload=inheritSchedule.checked ? {inherit_group:true} : {timezone:config.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC",intervals:config.intervals||[]};
+        const config=inheritSchedule.checked ? {} : {timezone:scheduleTimezone.value.trim()||"UTC",intervals:readScheduleEditor(scheduleEditor)};
+        const payload=inheritSchedule.checked ? {inherit_group:true} : config;
         const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/schedule`,{method:"PUT",body:JSON.stringify(payload)});
+        scheduleText.value=JSON.stringify({timezone:payload.timezone,intervals:payload.intervals},null,2);
         document.querySelector("#camera-message").textContent=`${camera.name}: effective scheduled mode is ${result.effective_recording_mode}.`;
         await refresh();
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
@@ -1588,8 +2362,10 @@ function renderCameras(cameras) {
       catch(error){document.querySelector("#camera-message").textContent=error.message;}
     });
     const rotateLabel=document.createElement("label"); rotateLabel.textContent="Update stream credentials or URL";
+    const rotatePanel=document.createElement("fieldset"),rotateLegend=document.createElement("legend");rotatePanel.dataset.configSection="camera-credentials";rotateLegend.textContent="Stream credentials";rotatePanel.append(rotateLegend);
     const rotateInput=document.createElement("input"); rotateInput.type="url"; rotateInput.autocomplete="off"; rotateInput.placeholder="rtsp://camera.example/stream";
     const rotate=document.createElement("button"); rotate.type="button"; rotate.textContent="Test and rotate stream";
+    rotate.dataset.configSaves="camera-credentials";
     rotate.addEventListener("click",async()=>{
       try {
         await api(`/api/cameras/${encodeURIComponent(camera.id)}/credentials`,{method:"POST",body:JSON.stringify({stream_url:rotateInput.value})});
@@ -1597,7 +2373,12 @@ function renderCameras(cameras) {
         rotateInput.value=""; await refresh();
       } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
     });
-    card.append(mode,enabledLabel,pre,post,save,scheduleLabel,inheritLabel,scheduleText,loadSchedule,saveSchedule,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,aiEvents,aiConfigure,coverage,coverageList,archive,deleteFootage,rotateLabel,rotateInput,rotate);
+    recordingPanel.append(mode,enabledLabel,save);
+    motionRollPanel.append(pre,post);
+    motionSourcePanel.append(motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zoneEditor,zonesAdvanced,sensitivityLabel,sensitivity,configureMotion);
+    schedulePanel.append(inheritLabel,scheduleTimezoneLabel,scheduleEditor,addSchedule,loadSchedule,saveSchedule,scheduleAdvanced);
+    rotatePanel.append(rotateLabel,rotateInput,rotate);
+    card.append(recordingPanel,motionRollPanel,schedulePanel,motionSourcePanel,events,aiEvents,aiConfigure,coverage,coverageList,archive,deleteFootage,rotatePanel);
     return card;
   }));
 }
@@ -1692,10 +2473,11 @@ document.querySelector("#diagnostics-download").addEventListener("click", async 
 });
 document.querySelector("#group-form").addEventListener("submit",async event=>{
   event.preventDefault();
+  const form=event.currentTarget;
   try {
     const result=await api("/api/camera-groups",{method:"POST",body:JSON.stringify({name:document.querySelector("#new-group-name").value})});
     document.querySelector("#bulk-message").textContent=`Created camera group ${result.name}.`;
-    event.currentTarget.reset(); await refreshGroups();
+    clearConfigDraft(form);form.reset();await refreshGroups();
   } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
 });
 document.querySelector("#load-group-schedule").addEventListener("click",async()=>{
@@ -1703,6 +2485,8 @@ document.querySelector("#load-group-schedule").addEventListener("click",async()=
   if(!group) { document.querySelector("#schedule-message").textContent="Create or select a camera group first."; return; }
   try {
     const schedule=await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`);
+    document.querySelector("#group-schedule-timezone").value=schedule.timezone||"UTC";
+    renderScheduleEditor(document.querySelector("#group-schedule-editor"),schedule.intervals||[]);
     document.querySelector("#group-schedule-json").value=JSON.stringify({timezone:schedule.timezone,intervals:schedule.intervals},null,2);
     document.querySelector("#schedule-message").textContent=schedule.configured ? "Group schedule loaded." : "No group schedule is configured.";
   } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
@@ -1711,8 +2495,9 @@ document.querySelector("#save-group-schedule").addEventListener("click",async()=
   const group=document.querySelector("#schedule-group").value;
   try {
     if(!group) throw new Error("Create or select a camera group first.");
-    const schedule=JSON.parse(document.querySelector("#group-schedule-json").value||"{}");
-    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"PUT",body:JSON.stringify({timezone:schedule.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC",intervals:schedule.intervals||[]})});
+    const schedule={timezone:document.querySelector("#group-schedule-timezone").value.trim()||"UTC",intervals:readScheduleEditor(document.querySelector("#group-schedule-editor"))};
+    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"PUT",body:JSON.stringify(schedule)});
+    document.querySelector("#group-schedule-json").value=JSON.stringify(schedule,null,2);
     document.querySelector("#schedule-message").textContent=`Saved ${result.intervals.length} group schedule interval(s).`;
     await refresh();
   } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
@@ -1722,10 +2507,12 @@ document.querySelector("#clear-group-schedule").addEventListener("click",async()
   try {
     if(!group) throw new Error("Create or select a camera group first.");
     await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"DELETE"});
+    document.querySelector("#group-schedule-timezone").value="";renderScheduleEditor(document.querySelector("#group-schedule-editor"),[]);document.querySelector("#group-schedule-json").value="";
     document.querySelector("#schedule-message").textContent="Group schedule removed; assigned cameras now use their camera policy or camera-level override.";
     await refresh();
   } catch(error) { document.querySelector("#schedule-message").textContent=error.message; }
 });
+document.querySelector("#add-group-schedule-interval").addEventListener("click",()=>{const editor=document.querySelector("#group-schedule-editor");markConfigDraftElement(editor);addScheduleInterval(editor);});
 document.querySelector("#load-group-retention").addEventListener("click",async()=>{
   const group=document.querySelector("#schedule-group").value;
   if(!group) { document.querySelector("#schedule-message").textContent="Create or select a camera group first."; return; }
@@ -1795,6 +2582,7 @@ document.querySelector("#apply-import").addEventListener("click",async()=>{
   const button=document.querySelector("#apply-import"); button.disabled=true;
   try {
     const result=await api("/api/cameras/import/apply",{method:"POST",body:JSON.stringify({csv_text:lastPreviewCsv})});
+    clearConfigDraft(button.closest("[data-config-section]"));
     const target=document.querySelector("#import-preview");
     target.replaceChildren(...result.rows.map(row=>{ const line=document.createElement("p"); line.textContent=`CSV row ${row.row} · ${row.name || "Unnamed"} · ${row.status}${row.errors.length ? ` · ${row.errors.join("; ")}` : ""}`; return line; }));
     document.querySelector("#bulk-message").textContent=`Imported ${result.created_count} camera(s); ${result.failed_count} row(s) need attention.`;
@@ -1811,6 +2599,8 @@ document.querySelector("#load-group-ai").addEventListener("click",async()=>{
     document.querySelector("#group-ai-confidence").value=config.confidence_threshold;
     document.querySelector("#group-ai-substream").checked=config.use_substream;
     document.querySelector("#group-ai-zones").value=JSON.stringify(config.zones);
+    const zoneEditor=document.querySelector("#group-ai-zones-editor");renderZoneEditor(zoneEditor,config.zones||[]);
+    const representative=sidebarGroups.find(item=>item.id===group)?.camera_ids?.[0];if(representative)loadRepresentativeZoneFrame(representative,zoneEditor);
     document.querySelector("#ai-group-message").textContent=`${config.group_name}: ${config.inherited_camera_count}/${config.camera_count} camera(s) inherit these settings · ${config.model.available?"model ready":config.model.reason}.`;
   }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
 });
@@ -1840,7 +2630,8 @@ document.querySelector("#save-group-ai").addEventListener("click",async()=>{
   const group=document.querySelector("#schedule-group").value;
   try{
     if(!group)throw new Error("Create or select a camera group first.");
-    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/ai`,{method:"PUT",body:JSON.stringify({enabled:document.querySelector("#group-ai-enabled").checked,analysis_fps:Number(document.querySelector("#group-ai-fps").value),confidence_threshold:Number(document.querySelector("#group-ai-confidence").value),use_substream:document.querySelector("#group-ai-substream").checked,zones:JSON.parse(document.querySelector("#group-ai-zones").value||"[]")})});
+    const zones=readZoneEditor(document.querySelector("#group-ai-zones-editor"));document.querySelector("#group-ai-zones").value=JSON.stringify(zones);
+    const result=await api(`/api/camera-groups/${encodeURIComponent(group)}/ai`,{method:"PUT",body:JSON.stringify({enabled:document.querySelector("#group-ai-enabled").checked,analysis_fps:Number(document.querySelector("#group-ai-fps").value),confidence_threshold:Number(document.querySelector("#group-ai-confidence").value),use_substream:document.querySelector("#group-ai-substream").checked,zones})});
     document.querySelector("#ai-group-message").textContent=`Saved group settings for ${result.inherited_camera_count} inherited camera(s). Cameras beyond the configured AI limit will show skipped analysis coverage.`;
   }catch(error){document.querySelector("#ai-group-message").textContent=error.message;}
 });
@@ -1853,6 +2644,7 @@ document.querySelector("#save-ai-runtime").addEventListener("click",async()=>{
 });
 document.querySelector("#camera-form").addEventListener("submit", async event => {
   event.preventDefault();
+  const form=event.currentTarget;
   const message=document.querySelector("#camera-message"); message.textContent="Testing camera and adding it…";
   try {
     const source=cameraSourcePayload();
@@ -1870,6 +2662,7 @@ document.querySelector("#camera-form").addEventListener("submit", async event =>
       motion_zones:JSON.parse(document.querySelector("#motion-zones").value||"[]"),
       motion_sensitivity:Number(document.querySelector("#motion-sensitivity").value)
     }) });
+    clearConfigDraft(form);
     document.querySelector("#camera-form").reset();
     document.querySelector("#camera-profile").replaceChildren(new Option("Load endpoints to choose a stream",""));
     document.querySelector("#camera-live-profile").replaceChildren(new Option("Use main stream for grid",""));
@@ -1890,24 +2683,29 @@ document.querySelector("#login-form").addEventListener("submit", async event => 
 document.querySelector("#live-start").addEventListener("click",()=>startLiveViews(selectedLiveCameras(),latestCameras));
 document.querySelector("#live-camera-picker").addEventListener("change",event=>{if(event.target.matches("[data-live-camera]"))markLiveViewDirty();});
 document.querySelector("#live-grid-size").addEventListener("change",event=>{
+  if(event.target.value==="auto"){
+    startLiveViews(activeLiveCameraIds,latestCameras,focusedLiveCameraId,null,activeLiveTileCameraIds,"auto");
+    return;
+  }
   const size=Number(event.target.value);
-  if(activeLiveCameraIds.length>size){document.querySelector("#live-message").textContent=`The active grid has ${activeLiveCameraIds.length} cameras. Remove cameras before switching to ${size} feeds.`;event.target.value=String(activeLiveGridSize);return;}
-  if(activeLiveCameraIds.length)startLiveViews(activeLiveCameraIds,latestCameras,null,size);
+  if(activeLiveCameraIds.length>size){event.target.value="auto";document.querySelector("#live-message").textContent=`Auto layout restored to keep all ${activeLiveCameraIds.length} selected cameras visible.`;startLiveViews(activeLiveCameraIds,latestCameras,null,null,activeLiveTileCameraIds,"auto");return;}
+  if(activeLiveCameraIds.length)startLiveViews(activeLiveCameraIds,latestCameras,null,size,activeLiveTileCameraIds,"manual");
   else markLiveViewDirty();
 });
 document.querySelector("#live-stop").addEventListener("click",()=>{stopLiveViews();cachedLiveArrangement=null;document.querySelector("#live-message").textContent="Live viewing stopped.";});
 document.querySelector("#live-save-layout").addEventListener("click",async()=>{
   const name=document.querySelector("#live-layout-name").value.trim(), scope=document.querySelector("#live-layout-scope").value;
-  const size=Number(document.querySelector("#live-grid-size").value)||4;
-  let tiles;
   const selected=new Set(selectedLiveCameras());
+  const layout_mode=document.querySelector("#live-grid-size").value==="auto"?"auto":"manual";
+  const size=layout_mode==="auto"?liveGridSizeFor(selected.size):Number(document.querySelector("#live-grid-size").value)||4;
+  let tiles;
   if(selected.size>size){document.querySelector("#live-message").textContent=`The ${size}-feed grid cannot save ${selected.size} selected cameras. Choose a larger grid or remove cameras.`;return;}
   if(activeLiveTileCameraIds.length===size){tiles=currentLiveTiles(size).map(id=>id&&selected.has(id)?id:null);for(const id of selected)if(!tiles.includes(id)){const slot=tiles.indexOf(null);if(slot>=0)tiles[slot]=id;}}
   else tiles=[...selected,...Array(size-selected.size).fill(null)];
   const camera_ids=tiles.filter(Boolean);
   try {if(!name)throw new Error("Enter a view name.");if(!camera_ids.length)throw new Error("Select at least one camera.");
     const path=scope==="shared"?"shared-layouts":"layouts";
-    const result=await api(`/api/live/${path}/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({camera_ids,tile_camera_ids:tiles,grid_size:size})});
+    const result=await api(`/api/live/${path}/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({camera_ids,tile_camera_ids:tiles,grid_size:size,layout_mode})});
     clearLiveViewDirty();document.querySelector("#live-message").textContent=`Saved ${scope} view “${result.name}”.`;await refreshLiveLayouts();document.querySelector("#live-layouts").value=`${scope}:${result.name}`;}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
@@ -1922,13 +2720,32 @@ document.querySelector("#live-delete-layout").addEventListener("click",async()=>
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
 window.addEventListener("pagehide",stopLiveViews);
+window.addEventListener("resize",()=>requestAnimationFrame(()=>{updateLiveGridLayout();updatePlaybackGridLayout();}));
 window.addEventListener("keydown",event=>{
-  if(event.key==="Escape"&&focusedLiveCameraId){event.preventDefault();startLiveViews(activeLiveCameraIds,latestCameras,null,activeLiveGridSize,[...activeLiveTileCameraIds]);}
+  const editable=event.target instanceof HTMLElement&&(event.target.isContentEditable||["INPUT","TEXTAREA","SELECT"].includes(event.target.tagName));
+  if(editable||document.querySelector("#camera-subset-dialog")?.open)return;
+  if(event.key==="Escape"&&!document.querySelector("#ops-status-drawer").classList.contains("hidden")){
+    event.preventDefault();document.querySelector("#ops-status-close").click();return;
+  }
+  if(activeScreen==="live"){
+    if(event.key==="Escape"&&focusedLiveCameraId){event.preventDefault();startLiveViews(activeLiveCameraIds,latestCameras,null,activeLiveGridSize,[...activeLiveTileCameraIds],activeLiveLayoutMode);}
+    if((event.key==="f"||event.key==="F")&&activeLiveTileCameraId){event.preventDefault();startLiveViews(activeLiveCameraIds,latestCameras,focusedLiveCameraId?null:activeLiveTileCameraId,activeLiveGridSize,[...activeLiveTileCameraIds],activeLiveLayoutMode);}
+  }
+  if(activeScreen==="footage"&&playbackTimeline){
+    if(event.code==="Space"){event.preventDefault();playbackIsPlaying?pausePlaybackClock():startPlaybackClock();}
+    else if(event.key==="ArrowLeft"||event.key==="ArrowRight"){
+      event.preventDefault();
+      if(event.shiftKey)navigatePlaybackEvent(event.key==="ArrowLeft"?"previous":"next");
+      else{const current=Number(document.querySelector("#playback-cursor").dataset.time)||playbackMilliseconds(playbackTimeline.start);seekSynchronizedPlayback(current+(event.key==="ArrowLeft"?-5000:5000),playbackIsPlaying);}
+    }else if(event.key.toLowerCase()==="i")setExportBoundary("start",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start));
+    else if(event.key.toLowerCase()==="o")setExportBoundary("end",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.end));
+  }
 });
 document.querySelector("#playback-search").addEventListener("click",loadSynchronizedPlayback);
 document.querySelector("#playback-grid-size").addEventListener("change",event=>{
-  const size=Number(event.target.value);
-  document.querySelector("#playback-grid").style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(size))));
+  updatePlaybackGridLayout();
+  markPlaybackResultsStale();
+  savePlaybackWorkspace();
 });
 document.querySelector("#playback-stop").addEventListener("click",()=>{stopSynchronizedPlayback();document.querySelector("#playback-status").textContent="Playback stopped.";});
 document.querySelector("#playback-play").addEventListener("click",startPlaybackClock);
@@ -1940,7 +2757,8 @@ document.querySelector("#playback-next-event").addEventListener("click",()=>navi
 document.querySelector("#playback-mark-in").addEventListener("click",()=>setExportBoundary("start",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline?.start)));
 document.querySelector("#playback-mark-out").addEventListener("click",()=>setExportBoundary("end",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline?.end)));
 document.querySelector("#playback-clear-marks").addEventListener("click",()=>{if(!playbackTimeline)return;setExportBoundary("start",playbackMilliseconds(playbackTimeline.start));setExportBoundary("end",playbackMilliseconds(playbackTimeline.end));});
-for(const field of ["start","end"]){document.querySelector(`#export-${field}`).addEventListener("change",()=>{updateExportFoldChoices(field);updatePlaybackExportPreview();});document.querySelector(`#export-${field}-fold`).addEventListener("change",updatePlaybackExportPreview);}
+for(const field of ["start","end"]){document.querySelector(`#export-${field}`).addEventListener("change",()=>{updateExportFoldChoices(field);updatePlaybackExportPreview();savePlaybackWorkspace();});document.querySelector(`#export-${field}-fold`).addEventListener("change",()=>{updatePlaybackExportPreview();savePlaybackWorkspace();});}
+document.querySelector("#export-camera-selection").addEventListener("change",savePlaybackWorkspace);
 document.querySelector("#playback-export").addEventListener("click",requestPlaybackExport);
 document.querySelector("#export-include-audio").addEventListener("change",updatePlaybackExportPreview);
 document.querySelector("#export-grid-audio-source").addEventListener("change",updatePlaybackExportPreview);
@@ -1951,16 +2769,17 @@ document.querySelector("#playback-cursor").addEventListener("input",event=>{
   const target=start+(end-start)*Number(event.target.value)/1000;
   const playing=playbackIsPlaying;
   seekSynchronizedPlayback(target,playing);
+  savePlaybackWorkspace();
   if(playing)startPlaybackClock();
 });
 document.querySelector("#playback-rate").addEventListener("change",event=>{playbackViews.forEach(view=>{view.video.playbackRate=Number(event.target.value);});if(playbackIsPlaying)startPlaybackClock();});
-window.addEventListener("pagehide",stopSynchronizedPlayback);
+window.addEventListener("pagehide",()=>{savePlaybackWorkspace();stopSynchronizedPlayback();});
 window.addEventListener("pagehide",()=>{if(exportPollTimer)clearInterval(exportPollTimer);exportPollTimer=null;});
 if(incidentPollTimer) clearInterval(incidentPollTimer);
-incidentPollTimer=setInterval(()=>{if(currentRole)refreshIncidents();},15000);
+incidentPollTimer=setInterval(()=>{if(currentRole){refreshOperationalInventory();refreshIncidents();}},15000);
 if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
-document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); cachedLiveArrangement=null;workspaceRestored=false;await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); document.querySelector("#webhook-list").replaceChildren(); document.querySelector("#webhook-deliveries").replaceChildren(); show("login"); });
+document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();await api("/api/auth/logout", { method:"POST" });currentRole=null;currentUsername="";latestSystemStatus=null;latestStorageStatus=null;document.querySelector("#ops-status-drawer").classList.add("hidden");document.querySelector("#ops-status-toggle").setAttribute("aria-expanded","false");document.querySelector("#ops-storage-section").classList.add("hidden");document.querySelector("#incidents-list").replaceChildren();document.querySelector("#webhook-list").replaceChildren();document.querySelector("#webhook-deliveries").replaceChildren();show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {

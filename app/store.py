@@ -74,6 +74,7 @@ def initialize() -> None:
                 camera_ids_json TEXT NOT NULL,
                 grid_size INTEGER NOT NULL DEFAULT 4,
                 tile_camera_ids_json TEXT,
+                layout_mode TEXT NOT NULL DEFAULT 'manual' CHECK (layout_mode IN ('auto','manual')),
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 PRIMARY KEY(user_id,name)
             );
@@ -82,6 +83,7 @@ def initialize() -> None:
                 camera_ids_json TEXT NOT NULL,
                 grid_size INTEGER NOT NULL,
                 tile_camera_ids_json TEXT NOT NULL,
+                layout_mode TEXT NOT NULL DEFAULT 'manual' CHECK (layout_mode IN ('auto','manual')),
                 created_by INTEGER NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -92,6 +94,7 @@ def initialize() -> None:
                 grid_size INTEGER NOT NULL,
                 tile_camera_ids_json TEXT NOT NULL,
                 sidebar_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (sidebar_collapsed IN (0,1)),
+                layout_mode TEXT NOT NULL DEFAULT 'manual' CHECK (layout_mode IN ('auto','manual')),
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
             CREATE TABLE IF NOT EXISTS site_display_settings (
@@ -103,6 +106,23 @@ def initialize() -> None:
             );
             INSERT OR IGNORE INTO site_display_settings(singleton_id,time_zone,date_format,clock_format)
                 VALUES(1,'UTC','friendly','12');
+            CREATE TABLE IF NOT EXISTS site_branding (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                app_name TEXT NOT NULL DEFAULT 'Workplace NVR',
+                primary_color TEXT NOT NULL DEFAULT '#17212b',
+                accent_color TEXT NOT NULL DEFAULT '#69a1ff',
+                updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            INSERT OR IGNORE INTO site_branding(singleton_id,app_name,primary_color,accent_color)
+                VALUES(1,'Workplace NVR','#17212b','#69a1ff');
+            CREATE TABLE IF NOT EXISTS site_branding_assets (
+                asset_key TEXT PRIMARY KEY CHECK (asset_key IN ('primary','light','dark','icon')),
+                media_type TEXT NOT NULL CHECK (media_type IN ('image/png','image/webp','image/jpeg')),
+                image_bytes BLOB NOT NULL,
+                sha256 TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
             CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
             CREATE TABLE IF NOT EXISTS cameras (
                 id TEXT PRIMARY KEY,
@@ -538,6 +558,12 @@ def initialize() -> None:
             db.execute("ALTER TABLE viewer_layouts ADD COLUMN grid_size INTEGER NOT NULL DEFAULT 4")
         if "tile_camera_ids_json" not in layout_columns:
             db.execute("ALTER TABLE viewer_layouts ADD COLUMN tile_camera_ids_json TEXT")
+        if "layout_mode" not in layout_columns:
+            db.execute("ALTER TABLE viewer_layouts ADD COLUMN layout_mode TEXT NOT NULL DEFAULT 'manual'")
+        for table in ("shared_viewer_layouts", "live_workspace_states"):
+            columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+            if "layout_mode" not in columns:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN layout_mode TEXT NOT NULL DEFAULT 'manual'")
         for layout in db.execute("SELECT user_id,name,camera_ids_json,grid_size FROM viewer_layouts WHERE tile_camera_ids_json IS NULL").fetchall():
             try:
                 camera_ids = json.loads(layout["camera_ids_json"])
