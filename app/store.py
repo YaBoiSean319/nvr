@@ -114,6 +114,7 @@ def initialize() -> None:
                 device_service_url TEXT,
                 onvif_profile_token TEXT,
                 live_substream_profile_token TEXT,
+                archived_at TEXT,
                 stream_url_ciphertext BLOB NOT NULL,
                 live_substream_url_ciphertext BLOB,
                 audio_supported INTEGER CHECK (audio_supported IN (0,1)),
@@ -186,6 +187,9 @@ def initialize() -> None:
                 requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 camera_ids_json TEXT NOT NULL,
                 output_modes_json TEXT NOT NULL DEFAULT '["individual","grid"]',
+                display_settings_json TEXT NOT NULL DEFAULT '{"time_zone":"UTC","date_format":"friendly","clock_format":"12"}',
+                tile_camera_ids_json TEXT NOT NULL DEFAULT '[]',
+                grid_resolution TEXT NOT NULL DEFAULT '1080p',
                 requested_start TEXT NOT NULL,
                 requested_end TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','cancelled')),
@@ -193,6 +197,10 @@ def initialize() -> None:
                 output_relative_path TEXT,
                 error TEXT,
                 cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+                include_audio INTEGER NOT NULL DEFAULT 0 CHECK (include_audio IN (0,1)),
+                audio_camera_id TEXT,
+                progress INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+                expires_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 completed_at TEXT
@@ -400,6 +408,20 @@ def initialize() -> None:
         export_columns = {row[1] for row in db.execute("PRAGMA table_info(exports)")}
         if "output_modes_json" not in export_columns:
             db.execute("ALTER TABLE exports ADD COLUMN output_modes_json TEXT NOT NULL DEFAULT '[\"individual\",\"grid\"]'")
+        if "display_settings_json" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN display_settings_json TEXT NOT NULL DEFAULT '{\"time_zone\":\"UTC\",\"date_format\":\"friendly\",\"clock_format\":\"12\"}'")
+        if "tile_camera_ids_json" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN tile_camera_ids_json TEXT NOT NULL DEFAULT '[]'")
+        if "grid_resolution" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN grid_resolution TEXT NOT NULL DEFAULT '1080p'")
+        for name, definition in (
+            ("include_audio", "INTEGER NOT NULL DEFAULT 0 CHECK (include_audio IN (0,1))"),
+            ("audio_camera_id", "TEXT"),
+            ("progress", "INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100)"),
+            ("expires_at", "TEXT"),
+        ):
+            if name not in export_columns:
+                db.execute(f"ALTER TABLE exports ADD COLUMN {name} {definition}")
         ai_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_camera_settings)")}
         if ai_columns and "config_override" not in ai_columns:
             db.execute("ALTER TABLE ai_camera_settings ADD COLUMN config_override INTEGER NOT NULL DEFAULT 0 CHECK (config_override IN (0,1))")
@@ -438,6 +460,7 @@ def initialize() -> None:
             ("device_service_url", "TEXT"),
             ("onvif_profile_token", "TEXT"),
             ("live_substream_profile_token", "TEXT"),
+            ("archived_at", "TEXT"),
         ):
             if name not in camera_columns:
                 db.execute(f"ALTER TABLE cameras ADD COLUMN {name} {definition}")

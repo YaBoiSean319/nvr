@@ -169,8 +169,8 @@ class RecordingManager:
     async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
         with connect() as db:
             policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
-            row = db.execute("SELECT enabled,recording_enabled,recording_status FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] else "disabled"
+            row = db.execute("SELECT enabled,recording_enabled,recording_status,archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] and not row["archived_at"] else "disabled"
         task = self.tasks.get(camera_id)
         if task is not None and self.task_modes.get(camera_id) == desired:
             if not task.done() or not force_restart:
@@ -182,7 +182,7 @@ class RecordingManager:
         elif row and row["enabled"] and row["recording_enabled"] and policy["scheduled"]:
             if row["recording_status"] != "scheduled_idle":
                 self._set_status(camera_id, "scheduled_idle")
-        elif row and row["recording_status"] != "stopped":
+        elif row and not row["archived_at"] and row["recording_status"] != "stopped":
             self._set_status(camera_id, "stopped")
 
     async def _schedule_loop(self) -> None:

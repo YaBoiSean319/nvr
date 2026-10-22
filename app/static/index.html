@@ -228,10 +228,13 @@
             <label for="export-end">Export to</label><input id="export-end" type="datetime-local" disabled><select id="export-end-fold" class="hidden" disabled><option value="">Choose occurrence</option></select>
             <fieldset id="export-camera-selection"><legend>Cameras to export</legend><p>Search footage to choose cameras.</p></fieldset>
             <fieldset><legend>Include output</legend><label><input type="checkbox" data-export-mode="individual" checked>Individual camera videos</label><label><input type="checkbox" data-export-mode="grid" checked>Synchronized grid video</label></fieldset>
+            <label for="export-grid-resolution">Grid video resolution</label><select id="export-grid-resolution"><option value="1080p" selected>1080p</option><option value="4k">4K</option></select>
+            <label><input id="export-include-audio" type="checkbox">Include recorded audio (off by default)</label>
+            <label for="export-grid-audio-source">Grid audio source</label><select id="export-grid-audio-source" disabled></select>
             <p id="export-preflight" role="status">Search footage to preview recording coverage and gaps.</p>
           </fieldset>
           <button id="playback-export" type="button" disabled>Export selected footage</button>
-          <p>Exports run as bounded background jobs. Completed downloads contain one playable video per selected camera and metadata listing actual recorded intervals and missing time. Audio is omitted.</p>
+          <p>Exports run as bounded background jobs. Completed downloads contain the selected videos, metadata, and integrity checks. Audio is off by default and can only use administrator-enabled camera audio. Downloads expire after seven days.</p>
           <p id="export-message" role="status" aria-live="polite"></p>
           <ul id="export-jobs" aria-live="polite"></ul>
           <p id="playback-stale" class="hidden" role="alert">Search inputs changed. Existing results are stale until you search again.</p>
@@ -299,7 +302,7 @@
           <button id="apply-bulk" type="button">Apply to selected cameras</button>
           <p id="bulk-message" role="status" aria-live="polite"></p>
           <label for="camera-import-csv">Import CSV (columns: name, stream_url; optional: recording_mode, group_name, onvif_uuid)</label>
-          <textarea id="camera-import-csv" spellcheck="false" autocomplete="off" placeholder="name,stream_url,recording_mode,group_name,onvif_uuid&#10;Loading Dock,rtsp://username:password@camera.example/stream,motion,East,&#10;"></textarea>
+          <textarea id="camera-import-csv" spellcheck="false" autocomplete="off" placeholder="name,stream_url,recording_mode,group_name,onvif_uuid&#10;Loading Dock,rtsp://camera.example/stream,motion,East,&#10;"></textarea>
           <button id="preview-import" type="button">Preview import</button><button id="apply-import" type="button" disabled>Test streams and import accepted rows</button>
           <div id="import-preview" aria-live="polite"></div>
         </section>
