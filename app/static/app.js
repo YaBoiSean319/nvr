@@ -49,6 +49,7 @@ let liveViewDirty = false;
 let cachedLiveArrangement = null;
 let selectedCameraId = null;
 const cameraEditorState=window.NvrCameraEditor.createCameraEditorState();
+const cameraPreviewWorkspace=window.NvrCameraPreviewWorkspace.createCameraPreviewWorkspace();
 let cameraEditorSaveInProgress=false;
 let cameraDirtyDecisionDialog=null;
 let cameraDirtyDecisionResolve=null;
@@ -204,6 +205,7 @@ async function setCameraWorkspace(id) {
     const allowed=activeCameraWorkspace==="cameras"?await guardCameraDrafts():guardDraftsIn(current);
     if(!allowed)return false;
   }
+  if(activeCameraWorkspace==="cameras"&&id!=="cameras")cameraPreviewWorkspace.leave();
   activeCameraWorkspace=id;
   document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section!==target));
   document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{
@@ -566,6 +568,7 @@ async function setScreen(screen) {
   if (!document.querySelector(`[data-page="${screen}"]`)) return false;
   const changing=screen!==activeScreen;
   if(changing&&!await guardScreenDrafts(activeScreen))return false;
+  if(changing&&activeScreen==="camera-settings"&&screen!=="camera-settings")cameraPreviewWorkspace.leave();
   if (activeScreen === "live" && screen !== "live") {
     if(activeLiveCameraIds.length)cachedLiveArrangement={camera_ids:[...activeLiveCameraIds],tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize,layout_mode:activeLiveLayoutMode};
     stopLiveViews();
@@ -2434,7 +2437,7 @@ function mobileCameraOpen(cameraId){
 }
 function renderCameras(cameras) {
   const list = document.querySelector("#camera-list");
-  if(selectedCameraId&&!cameras.some(camera=>camera.id===selectedCameraId)){selectedCameraId=null;cameraEditorState.selectCamera(null);mobileCameraEditorOpen=false;clearCameraHistory();}
+  if(selectedCameraId&&!cameras.some(camera=>camera.id===selectedCameraId)){selectedCameraId=null;cameraEditorState.selectCamera(null);cameraPreviewWorkspace.clearSelection();mobileCameraEditorOpen=false;clearCameraHistory();}
   if(selectedCameraId&&cameraEditorState.selectedCameraId!==selectedCameraId)cameraEditorState.selectCamera(selectedCameraId);
   const filters={...cameraInventoryFilters,query:document.querySelector("#camera-inventory-search")?.value||""};
   const stateValue=value=>typeof value==="string"&&value.trim()?value.trim().toLocaleLowerCase():"unknown";
@@ -2459,8 +2462,8 @@ function renderCameras(cameras) {
   const existingEditor=list.querySelector(':scope > article[data-camera-id]');
   const preserveDirtyEditor=Boolean(selectedCamera&&existingEditor?.dataset.cameraId===selectedCamera.id&&list.querySelector('[data-config-dirty="true"]'));
   if(!preserveDirtyEditor)list.replaceChildren();
-  if(!cameras.length){const empty=document.createElement("p");empty.className="camera-editor-empty";empty.textContent="No cameras have been added. Use Add Cameras to discover or add a camera.";list.append(empty);return;}
-  if(!selectedCamera){document.querySelector("#camera-health-history")?.classList.add("hidden");const empty=document.createElement("p");empty.className="camera-editor-empty";empty.textContent="Select a camera to view its settings and operational details.";list.append(empty);return;}
+  if(!cameras.length){cameraPreviewWorkspace.clearSelection();const empty=document.createElement("p");empty.className="camera-editor-empty";empty.textContent="No cameras have been added. Use Add Cameras to discover or add a camera.";list.append(empty);return;}
+  if(!selectedCamera){cameraPreviewWorkspace.clearSelection();document.querySelector("#camera-health-history")?.classList.add("hidden");const empty=document.createElement("p");empty.className="camera-editor-empty";empty.textContent="Select a camera to view its settings and operational details.";list.append(empty);return;}
   const selectedIsFilteredOut=!filtered.some(camera=>camera.id===selectedCamera.id);
   if(selectedIsFilteredOut){
     let hiddenNotice=list.querySelector(".filtered-camera-notice");
@@ -2480,6 +2483,7 @@ function renderCameras(cameras) {
     const title = document.createElement("h3"); title.textContent = camera.name;
     if(camera.archived_at)title.textContent+=` · Archived ${formatDateTime(camera.archived_at)}`;
     const summary = document.createElement("p");
+    const previewSlot=document.createElement("div");previewSlot.dataset.cameraPreviewSlot="";
     const video = camera.video || {};
     const effectiveMode=camera.effective_recording_mode || camera.recording_mode;
     const policyLabel=camera.recording_policy_source === "group" ? "group schedule" : camera.schedule_timezone ? "camera schedule" : "camera policy";
@@ -2487,7 +2491,7 @@ function renderCameras(cameras) {
     summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + "storage " + (camera.storage_volume_id||"default") + " · " + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · effective " + effectiveMode + " (" + policyLabel + ") · " + camera.recording_status + " · coverage " + (healthSummary.state||"unknown") + (healthSummary.detail ? " — " + healthSummary.detail : "") + (healthSummary.last_video_at ? " · video seen " + healthSummary.last_video_at : "") + (healthSummary.last_footage_write_at ? " · footage written " + healthSummary.last_footage_write_at : "") + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status + " · server fallback " + (camera.motion_fallback_enabled ? camera.server_motion_status : "disabled") : "") + " · audio " + (camera.audio_status||"unknown") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
     const retentionSummary=camera.retention_coverage||{};
     summary.textContent += ` · retention ${camera.retention_days} days (${camera.retention_policy_source||"default"}; ${retentionSummary.achieved_days||0} days achieved` + (retentionSummary.projected_days_at_current_activity == null ? ")" : `; ${retentionSummary.projected_days_at_current_activity} days projected at current activity)`);
-    card.append(title, summary);
+    card.append(title, summary, previewSlot);
     card.dataset.cameraId=camera.id;
     if(currentRole === "administrator"&&camera.id===selectedCameraId) {
       const editor=document.createElement("details"),editorHeading=document.createElement("summary");
@@ -2591,7 +2595,7 @@ function renderCameras(cameras) {
     const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
     button.dataset.cameraTab="health-history";
     button.addEventListener("click", () => loadSegments(camera)); card.append(button);
-    if (currentRole !== "administrator") {document.querySelector("#camera-health-history")?.classList.remove("hidden");return card;}
+    if (currentRole !== "administrator") {document.querySelector("#camera-health-history")?.classList.remove("hidden");cameraPreviewWorkspace.mount(previewSlot,camera);return card;}
     const mode=document.createElement("select"); mode.setAttribute("aria-label",`Recording mode for ${camera.name}`);
     const recordingPanel=document.createElement("fieldset"),recordingLegend=document.createElement("legend");recordingPanel.dataset.configSection="camera-recording-policy";recordingLegend.textContent="Recording policy";recordingPanel.append(recordingLegend);
     const motionRollPanel=document.createElement("fieldset"),motionRollLegend=document.createElement("legend");motionRollPanel.dataset.configSection="camera-motion-roll";motionRollPanel.dataset.cameraSaveGroup="camera-motion";motionRollLegend.textContent="Motion clip timing";motionRollPanel.append(motionRollLegend);
@@ -2791,6 +2795,7 @@ function renderCameras(cameras) {
       try {
         if(camera.archived_at)await api(`/api/cameras/${encodeURIComponent(camera.id)}/restore`,{method:"POST"});
         else await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"DELETE"});
+        if(!camera.archived_at)cameraPreviewWorkspace.close();
         await refresh();
         if(ids.includes(camera.id))startLiveViews(ids,latestCameras,focused,size,tiles);
       } catch (error) { document.querySelector("#camera-message").textContent=error.message; }
@@ -2832,13 +2837,15 @@ function renderCameras(cameras) {
     }
     const sectionTab=new Map(tabs.flatMap(tab=>tab.sections.map(section=>[section,tab.id])));
     for(const child of [...card.children].slice(2)){
+      if(child===previewSlot)continue;
       const tabId=sectionTab.get(child.dataset.configSection)||child.dataset.cameraTab||"health-history";
       panels.get(tabId)?.append(child);
     }
-    card.append(tabNav,...panels.values());
+    card.append(previewSlot,tabNav,...panels.values());
     const activeTab=currentRole==="administrator"?(cameraEditorState.activeTab||"general-connection"):"health-history";
     if(currentRole==="administrator")activateCameraTab(card,activeTab);
     else document.querySelector("#camera-health-history")?.classList.remove("hidden");
+    cameraPreviewWorkspace.mount(previewSlot,camera);
     return card;
   }));
 }
@@ -3183,7 +3190,7 @@ document.querySelector("#live-delete-layout").addEventListener("click",async()=>
   try {if(!key)throw new Error("Choose a saved view.");const [scope,name]=key.split(":",2);if(scope==="shared"&&currentRole!=="administrator")throw new Error("Only administrators can delete shared views.");await api(`/api/live/${scope==="shared"?"shared-layouts":"layouts"}/${encodeURIComponent(name)}`,{method:"DELETE"});document.querySelector("#live-message").textContent=`Deleted “${name}”.`;await refreshLiveLayouts();}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
-window.addEventListener("pagehide",stopLiveViews);
+window.addEventListener("pagehide",()=>{stopLiveViews();cameraPreviewWorkspace.leave();});
 window.addEventListener("resize",()=>requestAnimationFrame(()=>{updateLiveGridLayout();updatePlaybackGridLayout();}));
 window.addEventListener("keydown",event=>{
   const editable=event.target instanceof HTMLElement&&(event.target.isContentEditable||["INPUT","TEXTAREA","SELECT"].includes(event.target.tagName));
@@ -3243,7 +3250,7 @@ if(incidentPollTimer) clearInterval(incidentPollTimer);
 incidentPollTimer=setInterval(()=>{if(currentRole){refreshOperationalInventory();refreshIncidents();}},15000);
 if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
-document.querySelector("#logout").addEventListener("click", async () => { if(!await guardCameraDrafts())return;stopLiveViews();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();await api("/api/auth/logout", { method:"POST" });currentRole=null;currentUsername="";selectedCameraId=null;cameraEditorState.selectCamera(null);clearCameraHistory();cameraBulkSelection.clear();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;Object.assign(cameraInventoryFilters,{archive:"active",group:"all",connection:"all",health:"all",sortKey:"name",sortDirection:1,query:""});document.querySelector("#camera-inventory-search").value="";document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section.dataset.cameraWorkspace!=="cameras"));document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{if(button.dataset.cameraWorkspaceButton==="cameras")button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");});document.querySelector("#camera-admin-layout").dataset.mobileEditor="false";latestSystemStatus=null;latestStorageStatus=null;document.querySelector("#ops-status-drawer").classList.add("hidden");document.querySelector("#ops-status-toggle").setAttribute("aria-expanded","false");document.querySelector("#ops-storage-section").classList.add("hidden");document.querySelector("#incidents-list").replaceChildren();document.querySelector("#webhook-list").replaceChildren();document.querySelector("#webhook-deliveries").replaceChildren();show("login"); });
+document.querySelector("#logout").addEventListener("click", async () => { if(!await guardCameraDrafts())return;stopLiveViews();cameraPreviewWorkspace.clearSelection();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();await api("/api/auth/logout", { method:"POST" });currentRole=null;currentUsername="";selectedCameraId=null;cameraEditorState.selectCamera(null);clearCameraHistory();cameraBulkSelection.clear();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;Object.assign(cameraInventoryFilters,{archive:"active",group:"all",connection:"all",health:"all",sortKey:"name",sortDirection:1,query:""});document.querySelector("#camera-inventory-search").value="";document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section.dataset.cameraWorkspace!=="cameras"));document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{if(button.dataset.cameraWorkspaceButton==="cameras")button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");});document.querySelector("#camera-admin-layout").dataset.mobileEditor="false";latestSystemStatus=null;latestStorageStatus=null;document.querySelector("#ops-status-drawer").classList.add("hidden");document.querySelector("#ops-status-toggle").setAttribute("aria-expanded","false");document.querySelector("#ops-storage-section").classList.add("hidden");document.querySelector("#incidents-list").replaceChildren();document.querySelector("#webhook-list").replaceChildren();document.querySelector("#webhook-deliveries").replaceChildren();show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {

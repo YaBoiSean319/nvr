@@ -87,6 +87,14 @@
     .camera-back-button { display:none; margin-bottom:.55rem; }
     .camera-editor-pane #camera-list > article { padding:.65rem; }
     .camera-editor-pane #camera-list > article > fieldset { margin:.55rem 0; border:1px solid var(--line); border-radius:.5rem; }
+    .camera-preview-panel { min-width:0; margin:.55rem 0; padding:.65rem; border:1px solid var(--line); border-radius:.6rem; background:var(--panel); }
+    .camera-preview-panel h4 { margin:.1rem 0 .35rem; }
+    .camera-preview-panel [data-preview-status] { min-height:1.5em; margin:.25rem 0 .5rem; color:var(--muted); }
+    .camera-preview-panel [data-state="fresh"] { color:var(--good); }
+    .camera-preview-panel [data-state="stale"],.camera-preview-panel [data-state="reconnecting"] { color:var(--warn); }
+    .camera-preview-panel [data-state="lost"],.camera-preview-panel [data-state="failed"],.camera-preview-panel [data-state="unsupported"],.camera-preview-panel [data-state="unavailable"] { color:var(--bad); }
+    .camera-preview-image { display:block; width:min(100%,34rem); max-height:clamp(10rem,32vh,22rem); margin:.35rem auto; aspect-ratio:16/9; object-fit:contain; background:#05070a; }
+    .camera-preview-actions { display:flex; flex-wrap:wrap; gap:.4rem; }
     .camera-editor-tabs { display:flex; flex-wrap:wrap; gap:.3rem; margin:.65rem 0 .5rem; border-bottom:1px solid var(--line); }
     .camera-editor-tabs [role=tab] { min-height:2.2rem; padding:.35rem .6rem; border-radius:.5rem .5rem 0 0; font-size:.82rem; }
     .camera-editor-tabs [role=tab][aria-selected=true] { border-color:var(--accent); color:var(--accent); box-shadow:inset 0 -2px var(--accent); }
@@ -484,6 +492,8 @@
   </main>
   <script src="/workspace-layout.js" defer></script>
   <script src="/camera-inventory.js" defer></script>
+  <script src="/camera-preview.js" defer></script>
+  <script src="/camera-preview-ui.js" defer></script>
   <script src="/camera-editor.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
