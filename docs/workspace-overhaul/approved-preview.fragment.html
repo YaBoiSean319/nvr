@@ -1,0 +1,298 @@
+<div id="nvr-workspace-preview" data-theme="dark">
+  <style>
+    #nvr-workspace-preview{--n-bg:light-dark(#f4f5f7,#101216);--n-panel:light-dark(#fff,#171a20);--n-raised:light-dark(#f0f2f5,#22262e);--n-text:light-dark(#19212d,#e7ebf1);--n-muted:light-dark(#5d6878,#9ba6b6);--n-line:light-dark(#dfe3e9,#2b303a);--n-accent:light-dark(#2458cc,#8baeff);--n-soft:light-dark(#e9efff,#26334d);--n-good:light-dark(#157749,#82c99b);--n-warn:light-dark(#9d5d00,#e8ba74);--n-bad:light-dark(#ac3443,#f197a1);color-scheme:dark;font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif;color:var(--n-text);background:var(--n-bg);border:1px solid var(--n-line);border-radius:12px;overflow:hidden;position:relative;isolation:isolate}
+    #nvr-workspace-preview[data-theme="light"]{color-scheme:light}
+    #nvr-workspace-preview *{box-sizing:border-box}
+    #nvr-workspace-preview button,#nvr-workspace-preview input,#nvr-workspace-preview select{font:inherit;color:inherit}
+    #nvr-workspace-preview button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;padding:6px 10px;border:1px solid transparent;border-radius:6px;background:transparent;white-space:normal}
+    #nvr-workspace-preview button:hover{background:var(--n-raised)}
+    #nvr-workspace-preview button[aria-pressed="true"],#nvr-workspace-preview button.selected{background:var(--n-soft);color:var(--n-accent)}
+    #nvr-workspace-preview button:disabled{opacity:.45}
+    #nvr-workspace-preview .n-bordered{border-color:var(--n-line);background:var(--n-panel)}
+    #nvr-workspace-preview .n-primary{background:var(--n-text);color:var(--n-bg);font-weight:500}
+    #nvr-workspace-preview .n-primary:hover{background:var(--n-muted)}
+    #nvr-workspace-preview .n-icon{padding:7px;min-width:34px}
+    #nvr-workspace-preview svg{flex-shrink:0;width:16px;height:16px}
+    #nvr-workspace-preview .n-topbar{display:flex;align-items:center;gap:20px;padding:9px 14px;border-bottom:1px solid var(--n-line);background:var(--n-panel);flex-wrap:wrap}
+    #nvr-workspace-preview .n-brand{display:flex;align-items:center;gap:9px;font-weight:500;letter-spacing:.06em;padding-right:8px}
+    #nvr-workspace-preview .n-brand svg{width:23px;height:23px;color:var(--n-accent)}
+    #nvr-workspace-preview .n-nav{display:flex;gap:3px;flex-wrap:wrap}
+    #nvr-workspace-preview .n-topright{display:flex;align-items:center;gap:3px;margin-left:auto}
+    #nvr-workspace-preview .n-avatar{width:29px;height:29px;display:grid;place-items:center;border-radius:50%;background:var(--n-raised);font-size:12px}
+    #nvr-workspace-preview .n-layout{display:grid;grid-template-columns:192px minmax(0,1fr);min-height:580px}
+    #nvr-workspace-preview .n-sidebar{background:var(--n-panel);border-right:1px solid var(--n-line);padding:14px 9px}
+    #nvr-workspace-preview .n-sidebarhead{display:flex;align-items:center;justify-content:space-between;padding:0 7px 10px;font-weight:500}
+    #nvr-workspace-preview .n-muted{color:var(--n-muted)}
+    #nvr-workspace-preview .n-small{font-size:12px}
+    #nvr-workspace-preview .n-search{display:flex;align-items:center;gap:7px;padding:7px 9px;background:var(--n-bg);border:1px solid var(--n-line);border-radius:6px;margin-bottom:12px}
+    #nvr-workspace-preview input,#nvr-workspace-preview select{min-width:0}
+    #nvr-workspace-preview .n-search input{width:100%;border:0;background:transparent;outline-offset:3px}
+    #nvr-workspace-preview .n-subtabs{display:flex;gap:2px;margin-bottom:12px}
+    #nvr-workspace-preview .n-subtabs button{font-size:12px;flex:1;padding:4px}
+    #nvr-workspace-preview .n-camera{width:100%;text-align:left;justify-content:flex-start;padding:8px;gap:8px;font-size:12px}
+    #nvr-workspace-preview .n-camera span:nth-child(2){flex:1;min-width:0;overflow-wrap:anywhere}
+    #nvr-workspace-preview .n-check{display:grid;place-items:center;width:15px;height:15px;border:1px solid var(--n-line);border-radius:4px;color:var(--n-accent);font-size:11px;flex-shrink:0}
+    #nvr-workspace-preview .n-dot{width:6px;height:6px;border-radius:50%;background:var(--n-good);display:inline-block;flex-shrink:0}
+    #nvr-workspace-preview .n-dot.warn{background:var(--n-warn)}
+    #nvr-workspace-preview .n-group{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--n-muted);padding:10px 8px 5px}
+    #nvr-workspace-preview .n-main{min-width:0;position:relative;display:flex;flex-direction:column}
+    #nvr-workspace-preview .n-workbar{display:flex;align-items:center;gap:7px;padding:10px 13px;flex-wrap:wrap;border-bottom:1px solid var(--n-line)}
+    #nvr-workspace-preview .n-worktitle{font-weight:500;margin-right:4px}
+    #nvr-workspace-preview .n-spacer{flex:1}
+    #nvr-workspace-preview .n-chip{font-size:11px;display:inline-flex;align-items:center;gap:5px;color:var(--n-muted)}
+    #nvr-workspace-preview .n-stage{position:relative;flex:1;min-width:0}
+    #nvr-workspace-preview .n-grid{display:grid;gap:5px;padding:8px;min-height:420px;grid-auto-rows:minmax(125px,1fr)}
+    #nvr-workspace-preview .n-grid.n-focused{grid-template-columns:1fr!important}
+    #nvr-workspace-preview .n-tile{position:relative;background:#222b33;overflow:hidden;border-radius:5px;min-width:0;min-height:160px;border:1px solid transparent;color:#eff4f7}
+    #nvr-workspace-preview .n-tile.active{border-color:var(--n-accent)}
+    #nvr-workspace-preview .n-tilehead{display:flex;align-items:center;gap:6px;padding:7px 9px;background:linear-gradient(#0b111bd9,#0b111b00);position:absolute;z-index:2;top:0;left:0;right:0;font-size:12px}
+    #nvr-workspace-preview .n-tilehead button{color:#eff4f7;min-height:24px;padding:2px;margin-left:auto;background:#10182070}
+    #nvr-workspace-preview .n-tilehead button svg{width:13px;height:13px}
+    #nvr-workspace-preview .n-scene{position:absolute;inset:0;background:linear-gradient(180deg,#7b8b8e,#a0aeb0 58%,#6f7b78);overflow:hidden;filter:saturate(.45)}
+    #nvr-workspace-preview .n-scene:before{content:"";position:absolute;inset:5% 0 34%;background:linear-gradient(90deg,#a4adab 0 18%,#6e7b7b 18% 19%,#c3c6bf 19% 79%,#5a6b6e 79% 80%,#9ba9a6 80%);clip-path:polygon(0 0,100% 0,87% 100%,14% 100%)}
+    #nvr-workspace-preview .n-scene:after{content:"";position:absolute;inset:66% -10% -40%;background:repeating-linear-gradient(90deg,transparent 0 26%,#35434455 26% 26.5%),repeating-linear-gradient(0deg,#8d9690 0 23%,#536260 23% 23.7%);transform:perspective(150px) rotateX(35deg)}
+    #nvr-workspace-preview .n-door{position:absolute;left:38%;top:24%;width:25%;height:43%;background:linear-gradient(90deg,#243c46 0 46%,#909e9e 46% 50%,#2f454d 50%);border:5px solid #a7b2ac;box-shadow:0 0 0 1px #5e7372}
+    #nvr-workspace-preview .n-window{position:absolute;left:7%;top:25%;width:21%;height:26%;background:repeating-linear-gradient(90deg,#4c6571 0 30%,#bdc9c2 30% 34%);border:4px solid #b0bbb3}
+    #nvr-workspace-preview .n-bench{position:absolute;right:9%;top:53%;width:18%;height:8%;background:#5e6257;box-shadow:0 12px 0 -4px #394749}
+    #nvr-workspace-preview .n-scene.parking{background:linear-gradient(#687b86 0 25%,#657b6a 25% 36%,#5b656b 36%)}
+    #nvr-workspace-preview .n-scene.parking:before{inset:37% -10% -10%;clip-path:none;transform:skewX(-20deg);background:repeating-linear-gradient(90deg,transparent 0 20%,#bac1b7 20% 20.5%)}
+    #nvr-workspace-preview .n-scene.parking:after{inset:48% auto auto 18%;width:23%;height:15%;background:#c3c3b9;transform:skewX(-12deg);box-shadow:95px 30px 0 #465d6e;border-radius:12px 12px 3px 3px}
+    #nvr-workspace-preview .n-scene.parking .n-door,#nvr-workspace-preview .n-scene.parking .n-window,#nvr-workspace-preview .n-scene.parking .n-bench{display:none}
+    #nvr-workspace-preview .n-scene.corridor:before{clip-path:polygon(0 0,100% 0,66% 100%,35% 100%);background:repeating-linear-gradient(90deg,#a7b4ac 0 17%,#596e6f 17% 23%,#b8c0b8 23% 38%)}
+    #nvr-workspace-preview .n-scene.corridor .n-door{width:13%;left:44%;height:24%;top:44%}
+    #nvr-workspace-preview .n-scene.corridor .n-window{display:none}
+    #nvr-workspace-preview .n-scene.corridor .n-bench{display:none}
+    #nvr-workspace-preview .n-tilefoot{position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;gap:6px;padding:8px 9px;background:linear-gradient(transparent,#0b111bba);font-size:11px;z-index:2;font-variant-numeric:tabular-nums}
+    #nvr-workspace-preview .n-tiletools{position:absolute;right:8px;bottom:33px;z-index:3;display:flex;gap:3px;opacity:0;transition:opacity .12s;background:#101820e8;border-radius:6px;padding:3px}
+    #nvr-workspace-preview .n-tile:hover .n-tiletools,#nvr-workspace-preview .n-tile:focus-within .n-tiletools{opacity:1}
+    #nvr-workspace-preview .n-tiletools button{min-width:29px;min-height:29px;padding:5px;color:#eff4f7}
+    #nvr-workspace-preview .n-offline .n-scene{filter:brightness(.32) saturate(.1)}
+    #nvr-workspace-preview .n-failure{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:5px;z-index:2;font-size:12px;text-align:center;padding:32px 8px}
+    #nvr-workspace-preview .n-failure button{border:1px solid #82909e80;background:#151e27;color:#eff4f7;min-height:28px;padding:3px 10px}
+    #nvr-workspace-preview .n-empty{border:1px dashed var(--n-line);border-radius:5px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:7px;color:var(--n-muted);min-height:160px}
+    #nvr-workspace-preview .n-emptyall{grid-column:1/-1;min-height:350px}
+    #nvr-workspace-preview .n-timeline{background:var(--n-panel);border-top:1px solid var(--n-line);padding:10px 13px}
+    #nvr-workspace-preview .n-transport{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:9px}
+    #nvr-workspace-preview .n-time{font-variant-numeric:tabular-nums;font-size:12px;margin-left:8px}
+    #nvr-workspace-preview .n-ruler{display:flex;justify-content:space-between;padding-left:108px;color:var(--n-muted);font-size:11px;margin:7px 0}
+    #nvr-workspace-preview .n-trackrow{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px;align-items:center;margin:9px 0;font-size:11px}
+    #nvr-workspace-preview .n-tracklabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #nvr-workspace-preview .n-track{height:13px;position:relative;background:var(--n-raised);border-radius:2px}
+    #nvr-workspace-preview .n-recorded{position:absolute;height:100%;background:var(--n-accent);opacity:.4;border-radius:2px}
+    #nvr-workspace-preview .n-motion{position:absolute;top:0;bottom:0;width:3px;background:var(--n-warn)}
+    #nvr-workspace-preview .n-playhead{position:absolute;top:-5px;bottom:-5px;width:2px;background:var(--n-text);z-index:2}
+    #nvr-workspace-preview .n-scrub{width:100%;accent-color:var(--n-accent);height:16px;margin:7px 0 0}
+    #nvr-workspace-preview .n-footer{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:7px 13px;border-top:1px solid var(--n-line);font-size:11px;color:var(--n-muted);background:var(--n-panel)}
+    #nvr-workspace-preview .n-footer button{font-size:11px;min-height:23px;padding:0;color:var(--n-warn)}
+    #nvr-workspace-preview .n-drawer{position:absolute;right:8px;top:8px;width:300px;max-width:calc(100% - 16px);z-index:5;background:var(--n-panel);border:1px solid var(--n-line);border-radius:9px;box-shadow:0 14px 35px #0005;padding:16px}
+    #nvr-workspace-preview .n-drawerhead{display:flex;align-items:center;justify-content:space-between;font-weight:500;margin-bottom:14px}
+    #nvr-workspace-preview .n-field{display:flex;flex-direction:column;gap:5px;margin-bottom:13px;font-size:12px}
+    #nvr-workspace-preview .n-field input,#nvr-workspace-preview .n-field select{width:100%;padding:8px 9px;background:var(--n-bg);border:1px solid var(--n-line);border-radius:5px}
+    #nvr-workspace-preview .n-detailrow{display:flex;justify-content:space-between;gap:12px;padding:9px 0;font-size:12px;border-bottom:1px solid var(--n-line)}
+    #nvr-workspace-preview .n-job{padding:12px 0;border-top:1px solid var(--n-line)}
+    #nvr-workspace-preview .n-progress{height:4px;background:var(--n-raised);border-radius:4px;margin:10px 0}
+    #nvr-workspace-preview .n-progress span{display:block;height:100%;background:var(--n-accent);width:62%;border-radius:4px}
+    #nvr-workspace-preview .n-admin{padding:18px;display:grid;grid-template-columns:minmax(0,1fr) minmax(230px,.9fr);gap:20px;min-height:480px}
+    #nvr-workspace-preview .n-inventory{border:1px solid var(--n-line);border-radius:7px;align-self:start;min-width:0}
+    #nvr-workspace-preview .n-inventory button{display:flex;width:100%;justify-content:flex-start;text-align:left;gap:8px;border-bottom:1px solid var(--n-line);border-radius:0;padding:12px;font-size:12px}
+    #nvr-workspace-preview .n-inventory button:last-child{border-bottom:0}
+    #nvr-workspace-preview .n-inventory button span:nth-child(2){flex:1}
+    #nvr-workspace-preview .n-sectiontitle{font-weight:500;margin:0 0 3px}
+    #nvr-workspace-preview .n-editnav{display:flex;gap:2px;flex-wrap:wrap;border-bottom:1px solid var(--n-line);padding:9px 0;margin-bottom:16px}
+    #nvr-workspace-preview .n-editnav button{font-size:12px;padding:5px 8px}
+    #nvr-workspace-preview .n-settingsnav{display:flex;flex-direction:column;gap:3px;padding:8px}
+    #nvr-workspace-preview .n-settingsnav button{justify-content:flex-start;font-size:12px;text-align:left}
+    #nvr-workspace-preview .n-schedule{display:grid;gap:8px;margin:15px 0}
+    #nvr-workspace-preview .n-day{display:grid;grid-template-columns:32px 1fr;gap:10px;align-items:center;font-size:12px}
+    #nvr-workspace-preview .n-day button{min-height:20px;height:20px;border-radius:3px;background:var(--n-soft);color:var(--n-accent);font-size:11px;padding:1px 6px}
+    #nvr-workspace-preview .n-scheduleaxis{display:flex;justify-content:space-between;padding-left:42px;font-size:11px;color:var(--n-muted)}
+    #nvr-workspace-preview .n-zonepreview{height:165px;position:relative;border-radius:5px;overflow:hidden;margin:12px 0;background:#70817f}
+    #nvr-workspace-preview .n-zone{position:absolute;left:25%;top:40%;width:50%;height:45%;border:2px solid var(--n-accent);background:#8baeff22;z-index:3;display:grid;place-items:center;color:#eff4f7;font-size:12px}
+    #nvr-workspace-preview .n-mobiletoggle{display:none}
+    #nvr-workspace-preview .n-notice{padding:7px 13px;font-size:12px;background:var(--n-soft);color:var(--n-accent);border-bottom:1px solid var(--n-line)}
+    #nvr-workspace-preview [hidden]{display:none!important}
+    @media (prefers-reduced-motion:reduce){#nvr-workspace-preview *{transition:none!important}}
+    @media (hover:none){#nvr-workspace-preview .n-tiletools{opacity:1}}
+    @media (max-width:760px){#nvr-workspace-preview .n-layout{grid-template-columns:166px minmax(0,1fr)}#nvr-workspace-preview .n-topbar{gap:8px}#nvr-workspace-preview .n-admin{grid-template-columns:1fr}#nvr-workspace-preview .n-topright .n-joblabel{display:none}#nvr-workspace-preview .n-grid{min-height:390px}#nvr-workspace-preview .n-tilefoot .n-framelabel{display:none}}
+    @media (max-width:580px){#nvr-workspace-preview .n-layout{grid-template-columns:minmax(0,1fr)}#nvr-workspace-preview .n-sidebar{display:none;border-right:0;border-bottom:1px solid var(--n-line)}#nvr-workspace-preview.n-sidebaropen .n-sidebar{display:block}#nvr-workspace-preview .n-mobiletoggle{display:inline-flex}#nvr-workspace-preview .n-nav{order:3;width:100%;justify-content:space-between}#nvr-workspace-preview .n-nav button{flex:1;padding:5px;font-size:12px}#nvr-workspace-preview .n-nav svg{display:none}#nvr-workspace-preview .n-grid{grid-template-columns:1fr!important}#nvr-workspace-preview .n-grid .n-tile{min-height:190px}#nvr-workspace-preview .n-grid .n-empty{display:none}#nvr-workspace-preview .n-drawer{position:relative;right:auto;top:auto;width:auto;max-width:none;margin:8px}#nvr-workspace-preview .n-footer{gap:7px}#nvr-workspace-preview .n-admin{padding:13px}#nvr-workspace-preview .n-time{margin-left:0}#nvr-workspace-preview .n-ruler{padding-left:88px}#nvr-workspace-preview .n-trackrow{grid-template-columns:78px minmax(0,1fr);gap:10px}}
+    @media (pointer:coarse){#nvr-workspace-preview button{min-height:44px}#nvr-workspace-preview input,#nvr-workspace-preview select{font-size:16px}#nvr-workspace-preview .n-tiletools button{min-width:44px;min-height:44px}#nvr-workspace-preview .n-tilehead button{min-width:36px;min-height:36px}}
+  </style>
+  <header class="n-topbar">
+    <div class="n-brand"><i data-lucide="aperture" aria-hidden="true"></i>NVR</div>
+    <nav class="n-nav" aria-label="Workspace">
+      <button type="button" data-mode="live" aria-pressed="true"><i data-lucide="video" aria-hidden="true"></i>Live</button>
+      <button type="button" data-mode="playback" aria-pressed="false"><i data-lucide="history" aria-hidden="true"></i>Playback</button>
+      <button type="button" data-mode="cameras" aria-pressed="false"><i data-lucide="camera" aria-hidden="true"></i>Cameras</button>
+      <button type="button" data-mode="settings" aria-pressed="false"><i data-lucide="settings-2" aria-hidden="true"></i>Settings</button>
+    </nav>
+    <div class="n-topright">
+      <button type="button" data-action="jobs" aria-label="Export jobs"><i data-lucide="download" aria-hidden="true"></i><span class="n-joblabel">Jobs</span><span class="n-small" id="n-job-count">1</span></button>
+      <button type="button" class="n-icon" data-action="theme" aria-label="Toggle light and dark appearance"><i data-lucide="sun-moon" aria-hidden="true"></i></button>
+      <span class="n-avatar" aria-label="Administrator">A</span>
+    </div>
+  </header>
+  <div class="n-notice" id="n-notice" role="status" hidden></div>
+  <div class="n-layout">
+    <aside class="n-sidebar" aria-label="Camera browser">
+      <div class="n-sidebarhead"><span id="n-side-title">Browse</span><span class="n-small n-muted">16 cameras</span></div>
+      <label class="n-search"><i data-lucide="search" aria-hidden="true"></i><input id="n-search" type="search" placeholder="Find a camera…" aria-label="Find a camera"></label>
+      <div class="n-subtabs" id="n-browser-tabs"><button type="button" data-browse="cameras" aria-pressed="true">Cameras</button><button type="button" data-browse="groups" aria-pressed="false">Groups</button><button type="button" data-browse="views" aria-pressed="false">Views</button></div>
+      <div id="n-camera-list"></div>
+    </aside>
+    <main class="n-main">
+      <div class="n-workbar">
+        <button type="button" class="n-mobiletoggle n-icon" data-action="sidebar" aria-label="Toggle camera browser"><i data-lucide="panel-left" aria-hidden="true"></i></button>
+        <span class="n-worktitle" id="n-worktitle">Main building</span>
+        <span class="n-chip" id="n-selection-count">4 cameras</span>
+        <span class="n-spacer"></span>
+        <button type="button" class="n-small" data-action="saveview" id="n-save-view"><i data-lucide="bookmark" aria-hidden="true"></i>Save view</button>
+        <button type="button" class="n-bordered n-small" data-action="layout" id="n-layout-label"><i data-lucide="layout-grid" aria-hidden="true"></i>Auto · 2 × 2</button>
+        <button type="button" class="n-bordered n-small" data-action="quality" id="n-quality">Quality · Auto</button>
+      </div>
+      <div class="n-stage">
+        <div class="n-grid" id="n-grid" aria-label="Camera tiles"></div>
+        <div class="n-admin" id="n-admin" hidden></div>
+        <section class="n-drawer" id="n-drawer" aria-label="Workspace panel" hidden></section>
+      </div>
+      <section class="n-timeline" id="n-timeline" aria-label="Shared playback timeline" hidden>
+        <div class="n-transport">
+          <button type="button" class="n-icon" data-action="prevevent" aria-label="Previous event"><i data-lucide="skip-back" aria-hidden="true"></i></button>
+          <button type="button" class="n-bordered n-icon" data-action="play" id="n-play" aria-label="Play"><i data-lucide="play" aria-hidden="true"></i></button>
+          <button type="button" class="n-icon" data-action="nextevent" aria-label="Next event"><i data-lucide="skip-forward" aria-hidden="true"></i></button>
+          <button type="button" data-action="speed" id="n-speed">1×</button>
+          <button type="button" class="n-time" data-action="date" id="n-time">Oct 22, 2026 · 9:14:32 AM</button>
+          <span class="n-spacer"></span>
+          <button type="button" data-action="markin" id="n-mark-in">Mark in</button>
+          <button type="button" data-action="markout" id="n-mark-out">Mark out</button>
+          <button type="button" class="n-bordered" data-action="export"><i data-lucide="download" aria-hidden="true"></i>Export</button>
+        </div>
+        <div class="n-ruler"><span>9:00 AM</span><span>9:10</span><span>9:20</span><span>9:30</span></div>
+        <div id="n-tracks"></div>
+        <input type="range" class="n-scrub" id="n-scrub" min="0" max="1800" value="872" aria-label="Playback time in seconds after 9 AM">
+        <div class="n-small n-muted" style="display:flex;gap:15px;flex-wrap:wrap;margin-top:5px"><span>▰ Recorded</span><span style="color:var(--n-warn)">│ Motion</span><span>Empty track · No recording</span></div>
+      </section>
+      <footer class="n-footer"><span class="n-chip"><span class="n-dot"></span>Recorder online</span><button type="button" data-action="alerts" id="n-alert-count">1 camera offline</button><span class="n-spacer"></span><span id="n-context">Live · Auto quality</span><span>Design preview · Sample frames</span></footer>
+    </main>
+  </div>
+  <script>
+  (()=>{
+    const root=document.getElementById('nvr-workspace-preview');
+    const $=s=>root.querySelector(s),$$=s=>Array.from(root.querySelectorAll(s));
+    const cameras=[['Atrium','hall'],['East corridor','corridor'],['Front entrance','hall'],['North parking','parking'],['Delivery entrance','hall'],['Elevator lobby','hall'],['Garden entrance','hall'],['Loading area','parking'],['Reception','hall'],['South corridor','corridor'],['South parking','parking'],['Stairwell east','corridor'],['Stairwell west','corridor'],['Storage corridor','corridor'],['West entrance','hall'],['West parking','parking']].map((c,i)=>({id:i,name:c[0],scene:c[1],offline:i===3}));
+    const state={mode:'live',browse:'cameras',live:[0,1,2,3],playback:[0,1,2],active:0,focus:null,manual:false,quality:0,time:872,playing:false,speed:1,markin:null,markout:null,edit:0,editTab:'Recording',settings:'General',saved:false,jobs:1};
+    const selected=()=>state.mode==='playback'?state.playback:state.live;
+    const icons=()=>{$$('button').forEach(b=>b.classList.add('cursor-interaction'));if(typeof lucide!=='undefined')lucide.createIcons({attrs:{width:16,height:16}})};
+    const icon=name=>`<i data-lucide="${name}" aria-hidden="true"></i>`;
+    const time=()=>{const m=Math.floor(state.time/60),s=state.time%60;return `9:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')} AM`};
+    const notice=t=>{const n=$('#n-notice');n.textContent=t;n.hidden=false;clearTimeout(state.noticeTimer);state.noticeTimer=setTimeout(()=>n.hidden=true,3500)};
+    function geometry(n){if(!n)return [1,1];if(n===1)return [1,1];if(n===2)return [2,1];if(n<=4)return [2,2];if(n<=6)return [3,2];if(n<=9)return [3,3];if(n<=12)return [4,3];return [4,4]}
+    function renderBrowser(){
+      const q=$('#n-search').value.toLowerCase(),list=$('#n-camera-list');
+      $('#n-browser-tabs').hidden=state.mode==='settings';
+      if(state.mode==='settings'){list.innerHTML='<div class="n-settingsnav">'+['General','Appearance','Users & access','Recording & storage','Notifications','Integrations','Diagnostics'].map(x=>`<button type="button" data-setting="${x}" class="${state.settings===x?'selected':''}">${x}</button>`).join('')+'</div>';return}
+      $$('[data-browse]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.browse===state.browse)));
+      if(state.browse==='views'){list.innerHTML=['Main building','Entrances',...(state.saved?['My workspace']:[])].map((n,i)=>`<button type="button" class="n-camera" data-view="${i}">${icon('layout-grid')}<span>${n}</span><span class="n-muted n-small">${i?'Personal':'Shared'}</span></button>`).join('');return}
+      if(state.browse==='groups'){list.innerHTML=['Entrances','Parking','Interior'].map((n,i)=>`<button type="button" class="n-camera" data-group="${i}">${icon('folder')}<span>${n}</span><span class="n-muted">${[4,4,8][i]}</span></button>`).join('');return}
+      const filtered=cameras.filter(c=>c.name.toLowerCase().includes(q));
+      list.innerHTML='<div class="n-group">Main building</div>'+filtered.map(c=>{const on=state.mode==='cameras'?state.edit===c.id:selected().includes(c.id);return `<button type="button" class="n-camera ${on?'selected':''}" data-camera="${c.id}" aria-pressed="${on}" draggable="true"><span class="n-check">${on?'✓':''}</span><span>${c.name}</span><span class="n-dot ${c.offline?'warn':''}" aria-label="${c.offline?'Offline':'Online'}"></span></button>`}).join('')+(filtered.length?'':'<div class="n-small n-muted" style="padding:10px">No cameras found</div>');
+    }
+    const scene=c=>`<div class="n-scene ${c.scene}" aria-hidden="true"><div class="n-door"></div><div class="n-window"></div><div class="n-bench"></div></div>`;
+    function renderGrid(){
+      const ids=selected(),[cols,rows]=state.manual?[2,2]:geometry(ids.length),shown=state.focus===null?ids:ids.filter(x=>x===state.focus);
+      $('#n-grid').style.gridTemplateColumns=`repeat(${cols},minmax(0,1fr))`;$('#n-grid').classList.toggle('n-focused',state.focus!==null);
+      $('#n-selection-count').textContent=`${ids.length} camera${ids.length===1?'':'s'}`;
+      $('#n-layout-label').innerHTML=icon('layout-grid')+(state.focus!==null?'Restore view':`${state.manual?'Manual':'Auto'} · ${cols} × ${rows}`);
+      let html=shown.map(id=>{const c=cameras[id],gap=state.mode==='playback'&&id===1&&state.time>780&&state.time<990,failed=state.mode==='live'&&c.offline;
+        return `<article class="n-tile ${state.active===id?'active':''} ${failed||gap?'n-offline':''}" data-tile="${id}" aria-label="${c.name}${failed?' offline':gap?' no recording':''}">${scene(c)}<div class="n-tilehead"><span class="n-dot ${failed||gap?'warn':''}"></span><span>${c.name}</span><button type="button" data-remove="${id}" aria-label="Remove ${c.name}">${icon('x')}</button></div>${failed||gap?`<div class="n-failure">${icon(failed?'wifi-off':'film')}<span>${failed?'Camera offline':'No video available'}</span><span class="n-small">Last frame · ${failed?'9:12:08 AM':'9:12:59 AM'}</span>${failed?`<button type="button" data-retry="${id}">Retry</button>`:''}</div>`:''}<div class="n-tiletools"><button type="button" data-enlarge="${id}" aria-label="${state.focus===id?'Restore':'Enlarge'} ${c.name}">${icon(state.focus===id?'minimize-2':'maximize-2')}</button><button type="button" data-snapshot="${id}" aria-label="Snapshot ${c.name}">${icon('camera')}</button>${state.mode==='live'?`<button type="button" data-playback="${id}" aria-label="Open ${c.name} in Playback">${icon('history')}</button>`:''}<button type="button" data-audio="${id}" aria-label="Toggle audio for ${c.name}" aria-pressed="false">${icon('volume-x')}</button></div><div class="n-tilefoot"><span>${state.mode==='live'?(failed?'Last received 9:12:08 AM':'Oct 22 · 9:14:32 AM'):time()}</span><span class="n-spacer"></span><span class="n-framelabel">Sample frame</span></div></article>`}).join('');
+      if(!ids.length)html='<div class="n-empty n-emptyall">'+icon('video')+'<span>Select cameras to start viewing</span><span class="n-small">Your layout adjusts automatically</span></div>';
+      else if(state.focus===null&&ids.length<cols*rows)html+=Array.from({length:cols*rows-ids.length},(_,i)=>`<div class="n-empty">${i===0?`<button type="button" data-action="addcamera">${icon('plus')}Add camera</button>`:''}</div>`).join('');
+      $('#n-grid').innerHTML=html;renderTracks();icons();
+    }
+    function renderTracks(){
+      $('#n-time').textContent=`Oct 22, 2026 · ${time()}`;$('#n-scrub').value=state.time;
+      $('#n-tracks').innerHTML=state.playback.map((id,i)=>`<div class="n-trackrow"><span class="n-tracklabel">${cameras[id].name}</span><div class="n-track">${(i===1?[[0,43],[55,45]]:[[0,100]]).map(([a,b])=>`<span class="n-recorded" style="left:${a}%;width:${b}%"></span>`).join('')}<span class="n-motion" style="left:${24+i*8}%"></span><span class="n-motion" style="left:${69-i*5}%"></span><span class="n-playhead" style="left:${state.time/18}%"></span></div></div>`).join('');
+    }
+    function renderAdmin(){
+      const c=cameras[state.edit];
+      if(state.mode==='settings'){
+        $('#n-admin').innerHTML=`<div><div class="n-sectiontitle">${state.settings}</div><div class="n-muted n-small" style="margin-bottom:20px">System settings</div>${state.settings==='General'?'<label class="n-field">System name<input value="Workplace NVR"></label><label class="n-field">Timezone<select><option>Eastern Time — Indianapolis</option><option>UTC</option></select></label><label class="n-field">Time format<select><option>12-hour</option><option>24-hour</option></select></label>':state.settings==='Appearance'?'<label class="n-field">Appearance<select id="n-theme-select"><option value="dark">Dark</option><option value="light">Light</option></select></label><label class="n-field">Interface density<select><option>Comfortable</option><option>Compact</option></select></label>':state.settings==='Recording & storage'?'<div class="n-detailrow"><span>Recording storage</span><span>Healthy</span></div><div class="n-detailrow"><span>Retention policy</span><span>30 days</span></div><div class="n-detailrow"><span>Evidence holds</span><span>Protected</span></div>':state.settings==='Diagnostics'?'<div class="n-detailrow"><span>Recorder service</span><span>Online</span></div><div class="n-detailrow"><span>Capture window</span><span>Inactive</span></div><button type="button" class="n-bordered" data-action="diagnostics" style="margin-top:15px">Download sanitized diagnostics</button>':`<div class="n-detailrow"><span>${state.settings==='Users & access'?'Administrator access':state.settings==='Notifications'?'In-app alerts':'API access'}</span><span>Enabled</span></div><div class="n-detailrow"><span>${state.settings==='Users & access'?'Operator role':state.settings==='Notifications'?'Webhook delivery':'Single sign-on'}</span><span>Configured</span></div>`}<button type="button" class="n-primary" data-action="save" style="margin-top:16px">Save changes</button></div>`;return;
+      }
+      $('#n-admin').innerHTML=`<div class="n-inventory">${cameras.slice(0,8).map(x=>`<button type="button" data-edit="${x.id}" class="${state.edit===x.id?'selected':''}"><span class="n-dot ${x.offline?'warn':''}"></span><span>${x.name}</span><span class="n-muted n-small">${x.offline?'Offline':'Healthy'}</span></button>`).join('')}</div><section><div class="n-sectiontitle">${c.name}</div><span class="n-small n-muted">Camera configuration</span><div class="n-editnav">${['Recording','Schedule','Zones','Connection'].map(t=>`<button type="button" data-edit-tab="${t}" aria-pressed="${state.editTab===t}">${t}</button>`).join('')}</div>${state.editTab==='Recording'?'<label class="n-field">Recording mode<select><option>Motion only</option><option>Continuous</option><option>Scheduled</option></select></label><label class="n-field">Retention<input type="number" min="1" value="30" aria-label="Retention in days"><span class="n-muted">Days · subject to storage policy</span></label><label class="n-field">Audio<select><option>Disabled</option><option>Enabled</option></select></label><details style="font-size:12px;margin:18px 0"><summary>Advanced recording options</summary><div class="n-detailrow"><span>Pre-event buffer</span><span>5 seconds</span></div><div class="n-detailrow"><span>Post-event buffer</span><span>15 seconds</span></div></details>':state.editTab==='Schedule'?'<div class="n-small n-muted">Weekly recording schedule</div><div class="n-schedule">'+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<div class="n-day"><span>${d}</span><button type="button" data-day="${d}">Motion · all day</button></div>`).join('')+'</div><div class="n-scheduleaxis"><span>12 AM</span><span>12 PM</span><span>12 AM</span></div>':state.editTab==='Zones'?`<div class="n-small n-muted">Motion detection area</div><div class="n-zonepreview">${scene(c)}<div class="n-zone">Entrance zone</div></div><button type="button" class="n-bordered" data-action="zone">Edit zone</button><div class="n-small n-muted" style="margin:9px 0">Visual zone editor</div>`:'<label class="n-field">Camera address<input value="camera-entrance.example.invalid"></label><label class="n-field">Username<input value="camera-user" autocomplete="off"></label><label class="n-field">Password<input type="password" placeholder="Unchanged" autocomplete="new-password"></label><button type="button" class="n-bordered" data-action="testconnection">Test connection</button>'}<button type="button" class="n-primary" data-action="save" style="margin-top:12px">Save changes</button></section>`;
+    }
+    function render(){
+      const viewing=state.mode==='live'||state.mode==='playback';
+      if(viewing&&!selected().includes(state.active))state.active=selected()[0]??null;
+      $$('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===state.mode)));
+      $('#n-grid').hidden=!viewing;$('#n-admin').hidden=viewing;$('#n-timeline').hidden=state.mode!=='playback';
+      $('#n-worktitle').textContent=state.mode==='live'?'Main building':state.mode==='playback'?'Investigation':state.mode==='cameras'?'Camera inventory':'Administration';
+      ['#n-save-view','#n-layout-label','#n-quality','#n-selection-count'].forEach(s=>$(s).hidden=!viewing);
+      $('#n-context').textContent=state.mode==='live'?'Live · Auto quality':state.mode==='playback'?'Synchronized playback · Eastern Time':'Administrator';
+      $('#n-alert-count').textContent=cameras.some(c=>c.offline)?'1 camera offline':'All cameras healthy';
+      renderBrowser();if(viewing)renderGrid();else renderAdmin();icons();
+    }
+    function toggleCamera(id){if(state.mode==='cameras'){state.edit=id;render();return}if(state.mode==='settings')return;const ids=selected(),i=ids.indexOf(id);if(i>=0){ids.splice(i,1);if(state.focus===id)state.focus=null;if(state.active===id)state.active=ids[0]??null}else{if(ids.length>=16){notice('This workspace supports up to 16 cameras. Remove one to add another.');return}ids.push(id);state.active=id}render()}
+    function drawer(type){const d=$('#n-drawer');d.hidden=false;
+      const head=t=>`<div class="n-drawerhead"><span>${t}</span><button type="button" class="n-icon" data-action="closedrawer" aria-label="Close panel">${icon('x')}</button></div>`;
+      if(type==='export')d.innerHTML=head('Export footage')+`<div class="n-detailrow"><span>Cameras</span><span>${state.playback.length} selected</span></div><div class="n-detailrow"><span>Range</span><span>${state.markin===null?'9:14:00 AM':formatSeconds(state.markin)} – ${state.markout===null?'9:16:00 AM':formatSeconds(state.markout)}</span></div><label class="n-field" style="margin-top:16px">Export contents<select><option>Individual videos + shared grid</option><option>Individual videos</option><option>Shared grid</option></select></label><label class="n-field">Filename<input value="Incident-review"></label><div class="n-small n-muted" style="margin-bottom:16px">One ZIP · original timestamps · current grid arrangement</div><button type="button" class="n-primary" data-action="queueexport">Create export</button>`;
+      else if(type==='jobs')d.innerHTML=head('Export jobs')+`<div class="n-job"><div>Incident review</div><div class="n-small n-muted">${state.jobs>1?'Queued':'Preparing videos'} · ${state.playback.length} cameras</div><div class="n-progress"><span style="width:${state.jobs>1?'8':'62'}%"></span></div><div class="n-small n-muted">${state.jobs>1?'Waiting for worker':'62% · export continues in background'}</div></div><div class="n-small n-muted">Sample job status</div>`;
+      else if(type==='alerts')d.innerHTML=head('Operational status')+`<div class="n-detailrow"><span>Recorder service</span><span style="color:var(--n-good)">Online</span></div><div class="n-detailrow"><span>Recording writes</span><span style="color:var(--n-good)">Healthy</span></div><div class="n-detailrow"><span>Storage</span><span style="color:var(--n-good)">Healthy</span></div>${cameras[3].offline?'<div class="n-job"><div>North parking · Offline</div><div class="n-small n-muted" style="margin:7px 0">Video unavailable since 9:12 AM. Automatic reconnect pending.</div><button type="button" class="n-bordered" data-retry="3">Retry connection</button></div>':'<div class="n-job">All cameras connected</div>'}`;
+      else if(type==='layout')d.innerHTML=head('Layout')+`<button type="button" data-layout="auto" aria-pressed="${!state.manual}">Auto — fit selected cameras</button><button type="button" data-layout="manual" aria-pressed="${state.manual}">Manual — 2 × 2</button><div class="n-small n-muted" style="margin-top:12px">Auto grows and shrinks with your selection.</div>`;
+      else if(type==='saveview')d.innerHTML=head('Save view')+'<label class="n-field">View name<input id="n-view-name" value="My workspace"></label><label class="n-field">Visibility<select><option>Personal</option><option>Shared</option></select></label><button type="button" class="n-primary" data-action="confirmsaveview">Save view</button>';
+      else if(type==='date')d.innerHTML=head('Jump to time')+'<label class="n-field">Date<input type="date" value="2026-10-22"></label><label class="n-field">Time<input type="time" id="n-jump-time" value="09:14:32" step="1"></label><button type="button" class="n-primary" data-action="jumptime">Go to time</button>';
+      else if(type==='shortcuts')d.innerHTML=head('Keyboard shortcuts')+[['Space','Play / pause'],['← / →','Seek 10 seconds'],['I / O','Mark in / out'],['F','Enlarge active tile'],['Escape','Restore / close panel']].map(([a,b])=>`<div class="n-detailrow"><span>${b}</span><kbd>${a}</kbd></div>`).join('');
+      icons();
+    }
+    const formatSeconds=s=>`9:${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')} AM`;
+    function mark(which){state[which]=state.time;if(state.markin!==null&&state.markout!==null&&state.markout<=state.markin){notice('Mark out must be later than mark in.');state.markout=null;return}$('#n-mark-in').setAttribute('aria-pressed',String(state.markin!==null));$('#n-mark-out').setAttribute('aria-pressed',String(state.markout!==null));if(state.markin!==null&&state.markout!==null)drawer('export');else notice(which==='markin'?'In point set':'Out point set')}
+    function play(){state.playing=!state.playing;$('#n-play').setAttribute('aria-label',state.playing?'Pause':'Play');$('#n-play').innerHTML=icon(state.playing?'pause':'play');icons()}
+    root.addEventListener('click',e=>{
+      const b=e.target.closest('button');if(!b){const t=e.target.closest('[data-tile]');if(t){state.active=Number(t.dataset.tile);$$('[data-tile]').forEach(x=>x.classList.toggle('active',Number(x.dataset.tile)===state.active))}return}
+      if(b.dataset.mode){state.mode=b.dataset.mode;state.focus=null;state.active=selected()[0]??null;$('#n-drawer').hidden=true;render();return}
+      if(b.dataset.camera!==undefined){toggleCamera(Number(b.dataset.camera));return}
+      if(b.dataset.remove!==undefined){toggleCamera(Number(b.dataset.remove));return}
+      if(b.dataset.enlarge!==undefined){const id=Number(b.dataset.enlarge);state.focus=state.focus===id?null:id;renderGrid();return}
+      if(b.dataset.playback!==undefined){const id=Number(b.dataset.playback);state.mode='playback';if(!state.playback.includes(id)&&state.playback.length<16)state.playback.push(id);state.active=id;state.focus=null;render();return}
+      if(b.dataset.retry!==undefined){const id=Number(b.dataset.retry);b.textContent='Reconnecting…';b.disabled=true;setTimeout(()=>{cameras[id].offline=false;$('#n-drawer').hidden=true;render();notice('Sample camera reconnected')},650);return}
+      if(b.dataset.snapshot!==undefined){notice('Sample snapshot selected — production will download the displayed frame.');return}
+      if(b.dataset.audio!==undefined){const on=b.getAttribute('aria-pressed')!=='true';b.setAttribute('aria-pressed',String(on));b.innerHTML=icon(on?'volume-2':'volume-x');notice(on?'Audio enabled for selected tile (preview)':'Audio muted');icons();return}
+      if(b.dataset.browse){state.browse=b.dataset.browse;renderBrowser();icons();return}
+      if(b.dataset.edit!==undefined){state.edit=Number(b.dataset.edit);render();return}
+      if(b.dataset.editTab){state.editTab=b.dataset.editTab;renderAdmin();icons();return}
+      if(b.dataset.setting){state.settings=b.dataset.setting;render();return}
+      if(b.dataset.day){b.textContent=b.textContent.startsWith('Motion')?'Continuous · all day':'Motion · all day';return}
+      if(b.dataset.layout){state.manual=b.dataset.layout==='manual';if(state.manual&&selected().length>4){state.manual=false;notice('A 2 × 2 layout holds four cameras. Auto keeps all selected cameras visible.')}$('#n-drawer').hidden=true;renderGrid();return}
+      if(b.dataset.view!==undefined||b.dataset.group!==undefined){const ids=b.dataset.view!==undefined?Number(b.dataset.view)===0?[0,1,2,3]:[2,4,6,14]:Number(b.dataset.group)===0?[2,4,6,14]:Number(b.dataset.group)===1?[3,7,10,15]:[0,1,5,8,9,11,12,13];if(state.mode==='playback')state.playback=ids;else{if(state.mode!=='live')state.mode='live';state.live=ids}state.focus=null;render();return}
+      const a=b.dataset.action;
+      if(a==='layout'&&state.focus!==null){state.focus=null;renderGrid();return}
+      if(['export','jobs','alerts','layout','saveview','date','shortcuts'].includes(a)){drawer(a);return}
+      if(a==='closedrawer')$('#n-drawer').hidden=true;
+      else if(a==='theme')root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';
+      else if(a==='sidebar')root.classList.toggle('n-sidebaropen');
+      else if(a==='quality'){state.quality=(state.quality+1)%3;$('#n-quality').textContent='Quality · '+['Auto','Main','Sub'][state.quality]}
+      else if(a==='save')notice('Changes saved in this design preview.');
+      else if(a==='confirmsaveview'){state.saved=true;$('#n-drawer').hidden=true;notice('View saved in this design preview');renderBrowser();icons()}
+      else if(a==='addcamera'){$('#n-search').focus();root.classList.add('n-sidebaropen')}
+      else if(a==='play')play();
+      else if(a==='prevevent'||a==='nextevent'){state.time=Math.max(0,Math.min(1800,state.time+(a==='prevevent'?-120:120)));renderGrid()}
+      else if(a==='speed'){state.speed=state.speed===1?2:state.speed===2?4:1;b.textContent=state.speed+'×'}
+      else if(a==='markin'||a==='markout')mark(a);
+      else if(a==='queueexport'){state.jobs++;$('#n-job-count').textContent=state.jobs;$('#n-drawer').hidden=true;notice('Sample export queued. Continue reviewing footage.')}
+      else if(a==='jumptime'){const parts=$('#n-jump-time').value.split(':').map(Number);if(parts[0]!==9||parts[1]>30){notice('This preview contains 9:00–9:30 AM sample footage.');return}state.time=parts[1]*60+(parts[2]||0);$('#n-drawer').hidden=true;renderGrid()}
+      else if(a==='zone')notice('The production editor will support drawing and resizing zones directly on the frame.');
+      else if(a==='testconnection')notice('Sample connection check passed.');
+      else if(a==='diagnostics')notice('Production diagnostics will download with sensitive fields removed.');
+    });
+    root.addEventListener('dblclick',e=>{if(e.target.closest('button'))return;const t=e.target.closest('[data-tile]');if(t){const id=Number(t.dataset.tile);state.focus=state.focus===id?null:id;renderGrid()}});
+    root.addEventListener('dragstart',e=>{const c=e.target.closest('[data-camera]');if(c)e.dataTransfer.setData('text/plain',c.dataset.camera)});
+    root.addEventListener('dragover',e=>{if(e.target.closest('[data-tile]'))e.preventDefault()});
+    root.addEventListener('drop',e=>{const tile=e.target.closest('[data-tile]');if(!tile)return;e.preventDefault();const id=Number(e.dataTransfer.getData('text/plain'));if(!Number.isInteger(id)||id<0||id>=cameras.length)return;const old=Number(tile.dataset.tile),ids=selected(),at=ids.indexOf(old),exists=ids.indexOf(id);if(at<0)return;if(exists>=0){ids[exists]=old;ids[at]=id}else ids[at]=id;state.active=id;render()});
+    $('#n-search').addEventListener('input',()=>{renderBrowser();icons()});
+    $('#n-scrub').addEventListener('input',e=>{state.time=Number(e.target.value);renderGrid()});
+    root.addEventListener('change',e=>{if(e.target.id==='n-theme-select')root.dataset.theme=e.target.value});
+    root.addEventListener('keydown',e=>{if(e.target.closest('input,select,textarea'))return;if(e.key==='Escape'){state.focus=null;$('#n-drawer').hidden=true;if(state.mode==='live'||state.mode==='playback')renderGrid();return}if(e.key==='?'){drawer('shortcuts');return}if(e.key.toLowerCase()==='f'&&selected().length&&(state.mode==='live'||state.mode==='playback')){e.preventDefault();state.focus=state.focus===null?state.active:null;renderGrid()}if(state.mode!=='playback')return;if(e.key===' '){e.preventDefault();play()}if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();state.time=Math.max(0,Math.min(1800,state.time+(e.key==='ArrowLeft'?-10:10)));renderGrid()}if(e.key.toLowerCase()==='i')mark('markin');if(e.key.toLowerCase()==='o')mark('markout')});
+    setInterval(()=>{if(state.playing&&state.mode==='playback'){state.time=Math.min(1800,state.time+state.speed);if(state.time===1800){state.playing=false;$('#n-play').setAttribute('aria-label','Play');$('#n-play').innerHTML=icon('play')}renderGrid()}},1000);
+    $$('button').forEach(b=>b.classList.add('cursor-interaction'));
+    render();
+  })();
+  </script>
+</div>
