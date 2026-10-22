@@ -5,15 +5,304 @@ let importCanApply = false;
 let lastPreviewCsv = "";
 let liveViews = [];
 let liveStatusTimer = null;
+const LIVE_GRID_SIZES = [1, 4, 9, 16];
+let activeLiveCameraIds = [];
+let activeLiveTileCameraIds = [];
+let activeLiveGridSize = 4;
+let focusedLiveCameraId = null;
 let latestCameras = [];
 let playbackTimeline = null;
 let playbackViews = [];
 let playbackMaster = null;
 let playbackSyncGuard = false;
+let playbackWindow = null;
+let playbackManualChoices = new Map();
+let playbackResultsStale = false;
+let playbackClockTimer = null;
+let playbackClockAnchor = null;
+let playbackIsPlaying = false;
+let playbackExpandedView = null;
 let exportPollTimer = null;
 let incidentPollTimer = null;
 let webhookPollTimer = null;
-function show(name) { if(name!=="status") stopSynchronizedPlayback(); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
+let consoleShellReady = false;
+let activeScreen = "live";
+let sidebarCameras = [];
+let sidebarGroups = [];
+let sidebarViews = [];
+let workspaceRestored = false;
+let workspaceSaveTimer = null;
+let liveViewDirty = false;
+let cachedLiveArrangement = null;
+let displaySettings = {time_zone:"UTC",date_format:"friendly",clock_format:"12"};
+function formatDateTime(value, compact=false, settings=displaySettings) {
+  const date=new Date(value);
+  const common={timeZone:settings.time_zone};
+  const parts=Object.fromEntries(new Intl.DateTimeFormat("en-US",{...common,year:"numeric",month:settings.date_format==="long"?"long":settings.date_format==="iso"||settings.date_format==="day-month"||settings.date_format==="month-day"?"2-digit":"short",day:"2-digit"}).formatToParts(date).map(part=>[part.type,part.value]));
+  let dateText;
+  if(compact) dateText=`${parts.month}/${parts.day}`;
+  else if(settings.date_format==="iso") dateText=`${parts.year}-${parts.month}-${parts.day}`;
+  else if(settings.date_format==="day-month") dateText=`${parts.day}/${parts.month}/${parts.year}`;
+  else if(settings.date_format==="month-day") dateText=`${parts.month}/${parts.day}/${parts.year}`;
+  else dateText=`${parts.month} ${Number(parts.day)}, ${parts.year}`;
+  const timeOptions={...common,hour:"2-digit",minute:"2-digit",hourCycle:settings.clock_format==="24"?"h23":"h12"};
+  if(!compact)timeOptions.second="2-digit";
+  const time=new Intl.DateTimeFormat("en-US",timeOptions).format(date);
+  return `${dateText} ${time}`;
+}
+function localTimeCandidates(value) {
+  const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value||"");
+  if(!match)return [];
+  const expected=match.slice(1).map(Number),target=Date.UTC(expected[0],expected[1]-1,expected[2],expected[3],expected[4]);
+  const formatter=new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"});
+  const offsets=new Set();
+  for(let hour=-36;hour<=36;hour+=6){const probe=target+hour*3600000;const p=Object.fromEntries(formatter.formatToParts(new Date(probe)).map(item=>[item.type,item.value]));offsets.add(Date.UTC(Number(p.year),Number(p.month)-1,Number(p.day),Number(p.hour),Number(p.minute))-probe);}
+  return [...new Set([...offsets].map(offset=>target-offset).filter(ms=>{const p=Object.fromEntries(formatter.formatToParts(new Date(ms)).map(item=>[item.type,item.value]));return Number(p.year)===expected[0]&&Number(p.month)===expected[1]&&Number(p.day)===expected[2]&&Number(p.hour)===expected[3]&&Number(p.minute)===expected[4];}))].sort((a,b)=>a-b);
+}
+function updateFoldChoices(field) {
+  const input=document.querySelector(`#playback-${field}`),select=document.querySelector(`#playback-${field}-fold`),label=document.querySelector(`#playback-${field}-fold-label`),candidates=localTimeCandidates(input.value);
+  select.replaceChildren(new Option("Choose occurrence",""));
+  if(candidates.length>1){for(const [index,instant] of candidates.entries()){const zoneOffset=new Intl.DateTimeFormat("en-US",{timeZone:displaySettings.time_zone,timeZoneName:"shortOffset"}).formatToParts(new Date(instant)).find(part=>part.type==="timeZoneName")?.value||`Occurrence ${index+1}`;select.add(new Option(`${index===0?"First":"Second"} occurrence · ${zoneOffset}`,String(instant)));}select.classList.remove("hidden");label.classList.remove("hidden");}
+  else{select.classList.add("hidden");label.classList.add("hidden");}
+}
+function localInputForInstant(instant) {
+  const parts=Object.fromEntries(new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(instant).map(part=>[part.type,part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+function initializePlaybackDefaultRange() {
+  const start=document.querySelector("#playback-start"),end=document.querySelector("#playback-end");
+  if(!start||!end||start.value||end.value)return;
+  const now=new Date();start.value=localInputForInstant(new Date(now.getTime()-3600000));end.value=localInputForInstant(now);
+}
+function resolveSearchLocalTime(field) {
+  const input=document.querySelector(`#playback-${field}`),candidates=localTimeCandidates(input.value),fold=document.querySelector(`#playback-${field}-fold`);
+  if(!input.value)throw new Error("Enter both a start and end time.");
+  if(candidates.length===0)throw new Error(`The ${field} time does not exist in ${displaySettings.time_zone} because the clock jumps forward.`);
+  if(candidates.length>1){const chosen=Number(fold.value);if(!candidates.includes(chosen))throw new Error(`Choose which occurrence of the repeated ${field} time to use.`);return new Date(chosen).toISOString();}
+  return new Date(candidates[0]).toISOString();
+}
+function updateExportFoldChoices(field) {
+  const input=document.querySelector(`#export-${field}`),select=document.querySelector(`#export-${field}-fold`),candidates=localTimeCandidates(input.value);
+  select.replaceChildren(new Option("Choose occurrence",""));
+  if(candidates.length>1){for(const [index,instant] of candidates.entries()){const zoneOffset=new Intl.DateTimeFormat("en-US",{timeZone:displaySettings.time_zone,timeZoneName:"shortOffset"}).formatToParts(new Date(instant)).find(part=>part.type==="timeZoneName")?.value||`Occurrence ${index+1}`;select.add(new Option(`${index===0?"First":"Second"} occurrence · ${zoneOffset}`,String(instant)));}select.classList.remove("hidden");select.disabled=false;}
+  else{select.classList.add("hidden");select.disabled=true;}
+}
+function resolveExportLocalTime(field) {
+  const input=document.querySelector(`#export-${field}`),fold=document.querySelector(`#export-${field}-fold`),candidates=localTimeCandidates(input.value);
+  if(!input.value)throw new Error("Choose an export start and end time.");
+  if(!candidates.length)throw new Error(`The export ${field} time does not exist in ${displaySettings.time_zone}.`);
+  if(candidates.length>1){const chosen=Number(fold.value);if(!candidates.includes(chosen))throw new Error(`Choose which repeated export ${field} time to use.`);return chosen;}
+  return candidates[0];
+}
+function selectedExportRange() {
+  if(!playbackTimeline)throw new Error("Search footage before preparing an export.");
+  if(playbackResultsStale)throw new Error("Search inputs changed. Load the timeline again before exporting.");
+  const start=resolveExportLocalTime("start"),end=resolveExportLocalTime("end"),boundStart=playbackMilliseconds(playbackTimeline.start),boundEnd=playbackMilliseconds(playbackTimeline.end);
+  if(end<=start)throw new Error("Export end must be later than export start.");
+  if(start<boundStart||end>boundEnd)throw new Error("Export marks must stay within the executed search range.");
+  if(end-start>24*60*60*1000)throw new Error("Export ranges are limited to 24 hours.");
+  return {start,end};
+}
+function updatePlaybackExportPreview() {
+  const message=document.querySelector("#export-preflight"),button=document.querySelector("#playback-export"),enabled=Boolean(playbackTimeline&&!playbackResultsStale);
+  ["#playback-mark-in","#playback-mark-out","#playback-clear-marks","#export-start","#export-end"].forEach(selector=>{document.querySelector(selector).disabled=!enabled;});
+  button.disabled=!enabled;
+  document.querySelectorAll("[data-export-camera]").forEach(input=>{input.disabled=!enabled;});
+  const selectedViews=playbackViews.filter(view=>[...document.querySelectorAll("[data-export-camera]:checked")].some(input=>input.value===view.cameraId));
+  const audioToggle=document.querySelector("#export-include-audio"),sourceSelect=document.querySelector("#export-grid-audio-source");
+  const gridSelected=[...document.querySelectorAll('[data-export-mode="grid"]')].some(input=>input.checked);
+  const selectableAudio=selectedViews.filter(view=>view.audio_supported===true&&view.audio_enabled);
+  audioToggle.disabled=!enabled||!selectableAudio.length;
+  if(audioToggle.disabled)audioToggle.checked=false;
+  sourceSelect.replaceChildren(...selectableAudio.map(view=>{const option=document.createElement("option");option.value=view.cameraId;option.textContent=view.name;return option;}));
+  sourceSelect.disabled=!enabled||!audioToggle.checked||!gridSelected||!selectableAudio.length;
+  if(!playbackTimeline){message.textContent="Search footage to preview recording coverage and gaps.";renderPlaybackTracks();return;}
+  if(playbackResultsStale){message.textContent="Search inputs changed; export is unavailable until the timeline is reloaded.";renderPlaybackTracks();return;}
+  try {
+    const range=selectedExportRange(),cameraIds=[...document.querySelectorAll("[data-export-camera]:checked")].map(input=>input.value),eligible=[],omitted=[],gaps=[];
+    for(const view of playbackViews.filter(item=>cameraIds.includes(item.cameraId))){
+      const seconds=view.segments.reduce((sum,segment)=>sum+Math.max(0,Math.min(range.end,playbackMilliseconds(segment.ends_at))-Math.max(range.start,playbackMilliseconds(segment.starts_at)))/1000,0);
+      const gapSeconds=view.gaps.reduce((sum,gap)=>sum+Math.max(0,Math.min(range.end,playbackMilliseconds(gap.ends_at))-Math.max(range.start,playbackMilliseconds(gap.starts_at)))/1000,0);
+      if(seconds>0)eligible.push(view);else omitted.push(view.name);
+      gaps.push(`${view.name}: ${gapSeconds.toFixed(0)}s gap`);
+    }
+    if(!cameraIds.length)throw new Error("Select at least one searched camera for export.");
+    if(!eligible.length){button.disabled=true;message.textContent=`No footage overlaps this export range. ${omitted.length?`No-footage cameras: ${omitted.join(", ")}.`:""}`;renderPlaybackTracks();return;}
+    message.textContent=`${formatDateTime(range.start)} – ${formatDateTime(range.end)} · footage from ${eligible.map(view=>view.name).join(", ")}${omitted.length?` · omitted without footage: ${omitted.join(", ")}`:""}${gaps.length?` · ${gaps.join("; ")}`:""}`;
+    renderPlaybackTracks();
+  }catch(error){button.disabled=true;message.textContent=error.message;renderPlaybackTracks();}
+}
+function initializeExportSelection() {
+  const target=document.querySelector("#export-camera-selection"),legend=target.querySelector("legend");
+  target.replaceChildren(legend);
+  if(!playbackViews.length){const note=document.createElement("p");note.textContent="Search footage to choose cameras.";target.append(note);return;}
+  for(const view of playbackViews){const label=document.createElement("label"),input=document.createElement("input");input.type="checkbox";input.checked=true;input.value=view.cameraId;input.dataset.exportCamera="";input.addEventListener("change",updatePlaybackExportPreview);label.append(input,document.createTextNode(` ${view.name}`));target.append(label);}
+}
+function setExportBoundary(field,instant) {
+  document.querySelector(`#export-${field}`).value=localInputForInstant(new Date(instant));
+  updateExportFoldChoices(field);
+  updatePlaybackExportPreview();
+}
+function updateExportSelectionOverlay(track) {
+  track.querySelector(".playback-export-selection")?.remove();
+  try {
+    const {start,end}=selectedExportRange(),window=currentPlaybackWindow();if(!window||end<=window.start||start>=window.end)return;
+    const overlay=document.createElement("span");overlay.className="playback-export-selection";overlay.style.left=`${Math.max(0,(start-window.start)/(window.end-window.start)*100)}%`;overlay.style.width=`${Math.max(0,Math.min(100,(end-window.start)/(window.end-window.start)*100)-Math.max(0,(start-window.start)/(window.end-window.start)*100))}%`;overlay.setAttribute("aria-label",`Selected export range ${formatDateTime(start)} to ${formatDateTime(end)}`);track.append(overlay);
+  }catch{}
+}
+function show(name) { if(name!=="status") stopSynchronizedPlayback(); document.querySelector("main > h1").classList.toggle("hidden", name === "status"); for (const id of sections) document.querySelector(`#${id}`).classList.toggle("hidden", id !== name); }
+function moveInto(selector, targetSelector) {
+  const element = document.querySelector(selector), target = document.querySelector(targetSelector);
+  if (element && target) target.append(element);
+}
+function setupConsoleShell() {
+  if (consoleShellReady) return;
+  const live = document.querySelector("#live-page-content"), footage = document.querySelector("#footage-page-content");
+  const cameraSettings = document.querySelector("#camera-settings-content"), appSettings = document.querySelector("#app-settings-content");
+  for (const selector of ["#live-heading", "#incidents-heading"]) {
+    const heading = document.querySelector(selector);
+    if (heading) live.append(heading.closest("section"));
+  }
+  for (const selector of ["#playback-heading"]) {
+    const heading = document.querySelector(selector);
+    if (heading) footage.append(heading.closest("section"));
+  }
+  for (const selector of ["#camera-heading", "#discovery-admin", "#bulk-admin", "#camera-form", "#camera-message", "#camera-inventory-search", "#camera-list", "#segment-list", "#playback"]) {
+    if (selector === "#camera-heading") {
+      const heading = document.querySelector(selector);
+      if (heading) cameraSettings.append(heading);
+    } else moveInto(selector, "#camera-settings-content");
+  }
+  const recordedHeading = [...document.querySelectorAll("h3")].find(item => item.textContent.trim() === "Recorded footage");
+  if (recordedHeading) cameraSettings.append(recordedHeading);
+  moveInto("#status > .badge", "#app-settings-content");
+  for (const selector of ["#status-heading", "#status-list", "#session-admin", "#diagnostics-admin", "#webhooks-admin", "#heartbeat-admin", "#display-settings-admin", "#logout"]) moveInto(selector, "#app-settings-content");
+  document.querySelectorAll("[data-screen]").forEach(button => button.addEventListener("click", () => setScreen(button.dataset.screen)));
+  document.querySelector("#sidebar-toggle").addEventListener("click", () => {
+    const layout = document.querySelector("#console-layout"), button = document.querySelector("#sidebar-toggle");
+    const collapsed = layout.classList.toggle("sidebar-collapsed");
+    button.setAttribute("aria-expanded", String(!collapsed));
+    button.setAttribute("aria-label", collapsed ? "Expand camera sidebar" : "Collapse camera sidebar");
+    saveLiveWorkspace();
+  });
+  document.querySelector("#sidebar-search").addEventListener("input", filterSidebar);
+  document.querySelector("#camera-inventory-search").addEventListener("input",()=>renderCameras(latestCameras));
+  const theme = document.querySelector("#theme-choice"), savedTheme = localStorage.getItem("nvr-theme") || "system";
+  theme.value = savedTheme; document.documentElement.dataset.theme = savedTheme === "system" ? "" : savedTheme;
+  theme.addEventListener("change", () => { localStorage.setItem("nvr-theme", theme.value); document.documentElement.dataset.theme = theme.value === "system" ? "" : theme.value; });
+  for(const selector of ["#display-time-zone","#display-date-format","#display-clock-format"])document.querySelector(selector).addEventListener("input",previewDisplaySettings);
+  document.querySelector("#display-settings-save").addEventListener("click",saveDisplaySettings);
+  for(const field of ["start","end"])document.querySelector(`#playback-${field}`).addEventListener("change",()=>updateFoldChoices(field));
+  for(const field of ["start","end"])document.querySelector(`#playback-${field}-fold`).addEventListener("change",markPlaybackResultsStale);
+  for(const selector of ["#playback-start","#playback-end"])document.querySelector(selector).addEventListener("input",markPlaybackResultsStale);
+  document.querySelector("#playback-camera-picker").addEventListener("change",event=>{
+    if(event.target.matches("[data-playback-camera]")){
+      playbackManualChoices.set(event.target.value,event.target.checked);
+      syncPlaybackGroupChecks();markPlaybackResultsStale();
+    } else if(event.target.matches("[data-playback-group]")){
+      const group=sidebarGroups.find(item=>item.id===event.target.value),members=new Set(group?.camera_ids||[]);
+      for(const cameraId of members)playbackManualChoices.delete(cameraId);
+      syncPlaybackCameraChecks();markPlaybackResultsStale();
+    }
+  });
+  document.querySelector("#playback-grid-size").addEventListener("change",markPlaybackResultsStale);
+  document.querySelector("#playback-zoom-in").addEventListener("click",()=>zoomPlaybackTimeline(.5));
+  document.querySelector("#playback-zoom-out").addEventListener("click",()=>zoomPlaybackTimeline(2));
+  document.querySelector("#playback-fit-range").addEventListener("click",fitPlaybackTimeline);
+  setupPlaybackRulerGestures();
+  consoleShellReady = true;
+}
+function readDisplaySettingsForm() {
+  return {time_zone:document.querySelector("#display-time-zone").value.trim(),date_format:document.querySelector("#display-date-format").value,clock_format:document.querySelector("#display-clock-format").value};
+}
+function updateSiteTimeContext() {
+  const target=document.querySelector("#site-time-context");
+  if(target)target.textContent=`Search times use ${displaySettings.time_zone}. Repeated fall-back times require choosing an occurrence; nonexistent spring-forward times are rejected.`;
+}
+async function previewDisplaySettings() {
+  const target=document.querySelector("#display-settings-preview"),draft=readDisplaySettingsForm();
+  try {
+    const result=await api("/api/settings/display/preview",{method:"POST",body:JSON.stringify(draft)});
+    target.textContent=`Preview: ${result.preview} · ${draft.time_zone}`;
+    document.querySelector("#display-settings-message").textContent="Preview only; save to apply these settings.";
+  } catch(error) { target.textContent="Preview unavailable until the time zone and display options are valid.";document.querySelector("#display-settings-message").textContent=error.message; }
+}
+async function saveDisplaySettings() {
+  const message=document.querySelector("#display-settings-message"),button=document.querySelector("#display-settings-save");
+  button.disabled=true;
+  try {
+    displaySettings=await api("/api/settings/display",{method:"PUT",body:JSON.stringify(readDisplaySettingsForm())});
+    updateSiteTimeContext();
+    for(const field of ["start","end"])updateFoldChoices(field);
+    markPlaybackResultsStale();
+    message.textContent="Site date and time display settings saved.";
+    await previewDisplaySettings();
+  } catch(error) { message.textContent=error.message; }
+  finally { button.disabled=false; }
+}
+async function refreshDisplaySettings() {
+  displaySettings=await api("/api/settings/display");
+  document.querySelector("#display-time-zone").value=displaySettings.time_zone;
+  document.querySelector("#display-date-format").value=displaySettings.date_format;
+  document.querySelector("#display-clock-format").value=displaySettings.clock_format;
+  updateSiteTimeContext();
+  initializePlaybackDefaultRange();
+  for(const field of ["start","end"])updateFoldChoices(field);
+  if(currentRole==="administrator")await previewDisplaySettings();
+}
+function setScreen(screen) {
+  if (!document.querySelector(`[data-page="${screen}"]`)) return;
+  if (activeScreen === "live" && screen !== "live") {
+    if(activeLiveCameraIds.length)cachedLiveArrangement={camera_ids:[...activeLiveCameraIds],tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize};
+    stopLiveViews();
+  }
+  if (screen !== "footage") stopSynchronizedPlayback();
+  activeScreen = screen;
+  document.querySelectorAll("[data-page]").forEach(page => page.classList.toggle("hidden", page.dataset.page !== screen));
+  document.querySelectorAll("#console-nav [data-screen]").forEach(button => {
+    if (button.classList.contains("hidden")) return;
+    if (button.dataset.screen === screen) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  if(screen==="live"&&cachedLiveArrangement&&!activeLiveCameraIds.length){
+    const prior=cachedLiveArrangement;cachedLiveArrangement=null;
+    for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=prior.camera_ids.includes(input.value);
+    startLiveViews(prior.camera_ids,latestCameras,null,prior.grid_size,prior.tile_camera_ids);
+    clearLiveViewDirty();
+  }
+}
+function filterSidebar() {
+  const query = document.querySelector("#sidebar-search").value.trim().toLocaleLowerCase();
+  document.querySelectorAll("#console-sidebar li").forEach(item => { item.hidden = !item.dataset.searchText.includes(query); });
+}
+function sidebarItem(target, label, searchText, activate, health = null) {
+  const row = document.createElement("li"); row.dataset.searchText = searchText.toLocaleLowerCase();
+  const button = document.createElement("button"); button.type = "button"; button.append(document.createTextNode(label));
+  if (health) { const dot = document.createElement("span"); dot.className = "health-dot"; dot.dataset.health = health; dot.setAttribute("aria-label", `Health: ${health.replaceAll("_", " ")}`); button.append(dot); }
+  button.addEventListener("click", activate); row.append(button); target.append(row); return row;
+}
+function renderSidebar() {
+  const cameraList = document.querySelector("#sidebar-cameras"), groupList = document.querySelector("#sidebar-groups"), viewList = document.querySelector("#sidebar-views");
+  cameraList.replaceChildren(); groupList.replaceChildren(); viewList.replaceChildren();
+  for (const camera of [...sidebarCameras].filter(camera=>!camera.archived_at).sort((a, b) => a.name.localeCompare(b.name))) {
+    let address = "";
+    try { address = new URL(camera.stream_url).hostname; } catch {}
+    const row=sidebarItem(cameraList, camera.name, `${camera.name} ${address}`, () => {
+    setScreen("live"); const choice = [...document.querySelectorAll("[data-live-camera]")].find(input => input.value === camera.id);
+    if (choice) choice.checked = true;
+    }, camera.recording_health?.state || camera.recording_status || "unknown");
+    row.draggable=true;
+    row.addEventListener("dragstart",event=>event.dataTransfer.setData("text/plain",camera.id));
+    row.addEventListener("dblclick",()=>{setScreen("live");const choice=[...document.querySelectorAll("[data-live-camera]")].find(input=>input.value===camera.id);if(choice)choice.checked=true;addCameraToLiveGrid(camera.id,latestCameras);});
+  }
+  for (const group of sidebarGroups) sidebarItem(groupList, group.name, group.name, () => {
+    setScreen("live"); const members = new Set(group.camera_ids || []);
+    document.querySelectorAll("[data-live-camera]").forEach(input => { input.checked = members.has(input.value); });
+    if (!members.size) document.querySelector("#live-message").textContent = "This group has no available cameras.";
+  });
+  for (const view of sidebarViews) sidebarItem(viewList, `${view.name} · ${view.scope}`, `${view.name} ${view.scope}`, () => applySavedView(view));
+  filterSidebar();
+}
 async function showLogin() {
   const state = await api("/api/setup/status");
   show(state.setup_required ? "setup" : "login");
@@ -60,8 +349,13 @@ async function refresh() {
     const who = await api("/api/auth/me");
     currentRole = who.role;
     const admin = currentRole === "administrator";
-    document.querySelector("#status h2").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
+    document.querySelector("#live-layout-scope option[value=shared]").classList.toggle("hidden", !admin);
+    setupConsoleShell();
+    document.querySelectorAll('#console-nav [data-screen="camera-settings"], #console-nav [data-screen="app-settings"]').forEach(button => button.classList.toggle("hidden", !admin));
+    if (!admin && ["camera-settings", "app-settings"].includes(activeScreen)) setScreen("live");
+    document.querySelector("#status-heading").textContent = admin ? `System status · ${who.username}` : `Cameras · ${who.username}`;
     document.querySelector("#status-list").classList.toggle("hidden", !admin);
+    document.querySelector("#display-settings-admin").classList.toggle("hidden", !admin);
     document.querySelector("#session-admin").classList.toggle("hidden", !admin);
     document.querySelector("#diagnostics-admin").classList.toggle("hidden", !admin);
     document.querySelector("#webhooks-admin").classList.toggle("hidden", !admin);
@@ -69,6 +363,7 @@ async function refresh() {
     document.querySelector("#camera-form").classList.toggle("hidden", !admin);
     document.querySelector("#discovery-admin").classList.toggle("hidden", !admin);
     document.querySelector("#bulk-admin").classList.toggle("hidden", !admin);
+    await refreshDisplaySettings();
     if (admin) {
       const data = await api("/api/system/status");
       const rows = [["Version", data.version], ["Database", data.database], ["Administrators", data.configured_administrators], ["Storage available", data.storage.available_bytes == null ? "Unavailable" : `${(data.storage.available_bytes / 1073741824).toFixed(1)} GiB`]];
@@ -80,15 +375,21 @@ async function refresh() {
       await loadAiRuntimeSettings();
     }
     const inventory = await api("/api/cameras");
-    if (admin) await refreshGroups();
     latestCameras = inventory.cameras;
+    sidebarCameras = inventory.cameras;
+    const {groups} = await api("/api/camera-groups");
+    sidebarGroups = groups;
+    if (admin) await refreshGroups();
     await refreshIncidents();
     renderCameras(inventory.cameras);
     renderLiveCameraPicker(inventory.cameras);
-    renderPlaybackCameraPicker(inventory.cameras);
+    renderPlaybackCameraPicker(inventory.cameras,sidebarGroups);
     await refreshLiveLayouts();
+    if (!workspaceRestored) { await restoreLiveWorkspace(); workspaceRestored = true; }
+    renderSidebar();
     await refreshExports();
     if (admin) await refreshDiscovery();
+    setScreen(activeScreen === "footage" ? "footage" : "live");
     show("status");
   } catch (error) {
     if (error.message === "Authentication required" || error.message === "Session expired") {
@@ -98,7 +399,7 @@ async function refresh() {
 }
 function renderLiveCameraPicker(cameras) {
   const target=document.querySelector("#live-camera-picker");
-  target.replaceChildren(...cameras.map(camera=>{
+  target.replaceChildren(...cameras.filter(camera=>!camera.archived_at).map(camera=>{
     const label=document.createElement("label"); label.textContent=`${camera.name}${camera.live_substream_available?" · low-resolution profile":""} `;
     const input=document.createElement("input"); input.type="checkbox"; input.dataset.liveCamera="true"; input.value=camera.id;
     label.append(input); return label;
@@ -106,10 +407,12 @@ function renderLiveCameraPicker(cameras) {
 }
 async function refreshLiveLayouts() {
   try {
-    const {layouts}=await api("/api/live/layouts");
+    const {layouts,shared_views=[]}=await api("/api/live/views");
+    sidebarViews = [...layouts,...shared_views];
     const select=document.querySelector("#live-layouts"), previous=select.value;
-    select.replaceChildren(new Option("Choose a saved layout",""),...layouts.map(layout=>new Option(layout.name,layout.name)));
-    if(layouts.some(layout=>layout.name===previous)) select.value=previous;
+    select.replaceChildren(new Option("Choose a saved view",""),...sidebarViews.map(layout=>new Option(`${layout.name} · ${layout.scope}`,`${layout.scope}:${layout.name}`)));
+    if(sidebarViews.some(layout=>`${layout.scope}:${layout.name}`===previous)) select.value=previous;
+    renderSidebar();
   } catch(error) { document.querySelector("#live-message").textContent=error.message; }
 }
 async function refreshIncidents() {
@@ -123,7 +426,7 @@ async function refreshIncidents() {
       const summary=document.createElement("strong");
       summary.textContent=`${incident.state.toUpperCase()} · ${incident.summary}`;
       const details=document.createElement("p");
-      details.textContent=`First seen ${new Date(incident.first_seen_at).toLocaleString()} · Last seen ${new Date(incident.last_seen_at).toLocaleString()} · Recurrences ${Math.max(0,incident.recurrence_count-1)} · ${incident.events.length} history events`;
+      details.textContent=`First seen ${formatDateTime(incident.first_seen_at)} · Last seen ${formatDateTime(incident.last_seen_at)} · Recurrences ${Math.max(0,incident.recurrence_count-1)} · ${incident.events.length} history events`;
       item.append(summary,details);
       if(incident.state==="active") {
         const acknowledge=document.createElement("button"); acknowledge.type="button"; acknowledge.textContent="Acknowledge";
@@ -171,7 +474,7 @@ async function refreshHeartbeatStatus() {
     const target=document.querySelector("#heartbeat-state");
     if(!state.configured) target.textContent="No external heartbeat receiver is configured.";
     else {
-      const lastSuccess=state.last_success_at?new Date(state.last_success_at).toLocaleString():"none yet";
+      const lastSuccess=state.last_success_at?formatDateTime(state.last_success_at):"none yet";
       target.textContent=`${state.enabled?"Enabled":"Disabled"} · ${state.url_origin} · every ${state.interval_seconds}s · last successful send ${lastSuccess}${state.last_error?` · latest attempt failed: ${state.last_error}`:""}. ${state.checker_note}`;
     }
   }catch(error){document.querySelector("#heartbeat-message").textContent=error.message;}
@@ -210,25 +513,130 @@ document.querySelector("#webhook-create").addEventListener("click",async()=>{
 function stopLiveViews() {
   if(liveStatusTimer) clearInterval(liveStatusTimer);
   liveStatusTimer=null;
-  for(const view of liveViews) { view.controller.abort(); if(view.url) URL.revokeObjectURL(view.url); }
+  for(const view of liveViews) {
+    view.controller.abort();
+    if(view.url) URL.revokeObjectURL(view.url);
+    const audio=view.tile?.querySelector("audio");
+    if(audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
+  }
   liveViews=[];
+  activeLiveCameraIds=[];
+  activeLiveTileCameraIds=[];
+  focusedLiveCameraId=null;
   document.querySelector("#live-grid").replaceChildren();
 }
 function selectedLiveCameras() { return [...document.querySelectorAll("[data-live-camera]:checked")].map(input=>input.value); }
-function startLiveViews(cameraIds,cameras,focusedCameraId=null) {
-  if(!cameraIds.length || cameraIds.length>8) { document.querySelector("#live-message").textContent="Choose between one and eight cameras."; return; }
+function liveGridSizeFor(cameraCount) { return LIVE_GRID_SIZES.find(size=>size>=cameraCount)||16; }
+function currentLiveTiles(size=activeLiveGridSize) {
+  const tiles=[...document.querySelectorAll("#live-grid .live-tile")].map(tile=>tile.dataset.cameraId||null);
+  if(tiles.length===size)return tiles;
+  const ids=activeLiveCameraIds;
+  return [...ids,...Array(Math.max(0,size-ids.length)).fill(null)].slice(0,size);
+}
+function markLiveViewDirty() {
+  liveViewDirty=true;
+  document.querySelector("#live-unsaved").classList.remove("hidden");
+  document.querySelector("#live-message").textContent="Unsaved changes to this view.";
+}
+function clearLiveViewDirty() { liveViewDirty=false;document.querySelector("#live-unsaved").classList.add("hidden"); }
+async function saveLiveWorkspace() {
+  if(!currentRole)return;
+  const arrangement=activeLiveTileCameraIds.length?{tile_camera_ids:[...activeLiveTileCameraIds],grid_size:activeLiveGridSize}:
+    cachedLiveArrangement||{tile_camera_ids:[...Array(activeLiveGridSize).fill(null)],grid_size:activeLiveGridSize};
+  const state={camera_ids:arrangement.tile_camera_ids.filter(Boolean),tile_camera_ids:arrangement.tile_camera_ids,
+    grid_size:arrangement.grid_size,sidebar_collapsed:document.querySelector("#console-layout").classList.contains("sidebar-collapsed")};
+  clearTimeout(workspaceSaveTimer);
+  workspaceSaveTimer=setTimeout(async()=>{
+    try { await api("/api/live/workspace",{method:"PUT",body:JSON.stringify(state)}); }
+    catch(error) { document.querySelector("#live-message").textContent=`Workspace could not be saved: ${error.message}`; }
+  },250);
+}
+async function restoreLiveWorkspace() {
+  try {
+    const state=await api("/api/live/workspace");
+    const layout=document.querySelector("#console-layout"), button=document.querySelector("#sidebar-toggle");
+    layout.classList.toggle("sidebar-collapsed",!!state.sidebar_collapsed);
+    button.setAttribute("aria-expanded",String(!state.sidebar_collapsed));
+    button.setAttribute("aria-label",state.sidebar_collapsed?"Expand camera sidebar":"Collapse camera sidebar");
+    if(!state.camera_ids?.length)return;
+    for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=state.camera_ids.includes(input.value);
+    startLiveViews(state.camera_ids,latestCameras,null,state.grid_size,state.tile_camera_ids);
+    clearLiveViewDirty();
+  } catch(error) { document.querySelector("#live-message").textContent=`Previous workspace could not be restored: ${error.message}`; }
+}
+function applySavedView(view) {
+  if(activeScreen==="footage") {
+    playbackViews.forEach(view=>view.video.pause());
+    const playbackPicker=document.querySelector("#playback-camera-picker");
+    const cameraLabels=new Map([...playbackPicker.querySelectorAll("[data-playback-camera]")].map(input=>[input.value,input.closest("label")]));
+    const labels=cameraLabels;
+    const ordered=view.tile_camera_ids.map(id=>id&&labels.get(id)).filter(Boolean);
+    playbackPicker.querySelectorAll("fieldset")[1]?.prepend(...ordered);
+    for(const input of playbackPicker.querySelectorAll("[data-playback-group]"))input.checked=false;
+    playbackManualChoices.clear();
+    for(const input of playbackPicker.querySelectorAll("[data-playback-camera]")){
+      input.checked=view.camera_ids.includes(input.value);playbackManualChoices.set(input.value,input.checked);
+    }
+    syncPlaybackGroupChecks();
+    document.querySelector("#playback-grid-size").value=String(view.grid_size);
+    const unavailable=view.camera_ids.filter(id=>!labels.has(id)).length;
+    markPlaybackResultsStale();
+    document.querySelector("#playback-status").textContent=`Applied ${view.scope} view “${view.name}”. Camera selection and layout changed; date inputs were kept.${unavailable?` ${unavailable} saved camera(s) are unavailable.`:""}`;
+    return;
+  }
+  setScreen("live");
+  document.querySelector("#live-layouts").value=`${view.scope}:${view.name}`;
+  document.querySelector("#live-layout-name").value=view.name;
+  for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=view.camera_ids.includes(input.value);
+  document.querySelector("#live-grid-size").value=String(view.grid_size);
+  startLiveViews(view.camera_ids,latestCameras,null,view.grid_size,view.tile_camera_ids);
+  clearLiveViewDirty();
+  document.querySelector("#live-message").textContent=`Applied ${view.scope} view “${view.name}”.`;
+}
+function startLiveViews(cameraIds,cameras,focusedCameraId=null,gridSize=null,tileCameraIds=null) {
+  const selectedSize=gridSize||Number(document.querySelector("#live-grid-size").value)||4;
+  let tiles=tileCameraIds?[...tileCameraIds]:[...cameraIds,...Array(Math.max(0,selectedSize-cameraIds.length)).fill(null)];
+  tiles=tiles.slice(0,selectedSize);
+  while(tiles.length<selectedSize)tiles.push(null);
+  cameraIds=[...new Set(tiles.filter(Boolean))];
+  if(!cameraIds.length) { document.querySelector("#live-message").textContent="Choose at least one camera."; return; }
+  if(cameraIds.length>16 || cameraIds.length>selectedSize) {
+    document.querySelector("#live-message").textContent=`The ${selectedSize}-feed grid cannot show ${cameraIds.length} selected cameras. Choose a larger grid or remove cameras; selections are never dropped.`;
+    return;
+  }
   stopLiveViews();
-  const focusQuality=document.querySelector("#live-quality").value;
   const grid=document.querySelector("#live-grid"), liveMessage=document.querySelector("#live-message");
-  const displayed=focusedCameraId?[focusedCameraId]:cameraIds;
-  for(const cameraId of displayed) {
-    const camera=cameras.find(item=>item.id===cameraId); if(!camera) continue;
-    const tile=document.createElement("article"); tile.className="live-tile";
-    const title=document.createElement("strong"); title.textContent=camera.name;
-    const state=document.createElement("span"); state.className="live-state"; state.textContent="Loading";
+  activeLiveCameraIds=cameraIds;
+  activeLiveTileCameraIds=tiles;
+  cachedLiveArrangement={camera_ids:[...cameraIds],tile_camera_ids:[...tiles],grid_size:selectedSize};
+  activeLiveGridSize=selectedSize;
+  focusedLiveCameraId=focusedCameraId;
+  document.querySelector("#live-grid-size").value=String(selectedSize);
+  grid.style.setProperty("--live-grid-columns",String(focusedCameraId?1:Math.ceil(Math.sqrt(selectedSize))));
+  const displayed=focusedCameraId?[focusedCameraId]:tiles;
+  const slots=focusedCameraId?1:selectedSize;
+  for(let index=0;index<slots;index++) {
+    const cameraId=displayed[index]||null;
+    const tile=document.createElement("article"); tile.className="live-tile";tile.tabIndex=0;tile.dataset.tileIndex=String(index);
+    tile.addEventListener("dragover",event=>event.preventDefault());
+    tile.addEventListener("drop",event=>dropCameraOnTile(event,index,cameras));
+    if(!cameraId) {
+      const placeholder=document.createElement("div");placeholder.className="live-placeholder";placeholder.textContent="Empty tile · drop a camera here";
+      tile.append(placeholder);grid.append(tile);continue;
+    }
+    tile.dataset.cameraId=cameraId;
+    const camera=cameras.find(item=>item.id===cameraId&&!item.archived_at);
+    const archivedCamera=cameras.find(item=>item.id===cameraId&&item.archived_at);
+    const title=document.createElement("strong"); title.textContent=camera?.name||(archivedCamera?`Archived camera · ${archivedCamera.name}`:`Unavailable camera · ${cameraId}`);
+    const state=document.createElement("span"); state.className="live-state"; state.textContent=camera?"Loading":archivedCamera?"Archived":"Unavailable";state.setAttribute("role","status");state.setAttribute("aria-live","polite");
+    if(!camera){tile.append(title,state);grid.append(tile);continue;}
     const image=document.createElement("img"); image.alt=`Live video from ${camera.name}`;
-    const focus=document.createElement("button"); focus.type="button"; focus.textContent=focusedCameraId?"Back to grid":"Focus";
-    focus.addEventListener("click",()=>startLiveViews(cameraIds,cameras,focusedCameraId?null:cameraId));
+    const focus=document.createElement("button"); focus.type="button"; focus.textContent=focusedCameraId?"Restore grid":"Expand feed";focus.setAttribute("aria-label",focusedCameraId?"Restore camera grid":`Expand ${camera.name}`);
+    focus.addEventListener("click",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]));
+    tile.draggable=true;
+    tile.addEventListener("dragstart",event=>event.dataTransfer.setData("text/plain",cameraId));
+    tile.addEventListener("dblclick",()=>startLiveViews(activeLiveCameraIds,cameras,focusedCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]));
+    tile.addEventListener("keydown",event=>{if(event.key==="Enter"&&event.altKey){event.preventDefault();startLiveViews(activeLiveCameraIds,cameras,focusedLiveCameraId?null:cameraId,activeLiveGridSize,[...activeLiveTileCameraIds]);}});
     tile.append(title,state,focus);
     if(focusedCameraId) {
       const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Enter fullscreen";
@@ -243,61 +651,273 @@ function startLiveViews(cameraIds,cameras,focusedCameraId=null) {
     if(camera.audio_enabled) {
       const listening=document.createElement("audio");listening.controls=true;listening.preload="none";
       listening.setAttribute("aria-label",`Live audio from ${camera.name}`);
+      listening.muted=true;
+      listening.title="Audio is muted. Unmute to listen; only one camera can play audio at a time.";
+      const audioToggle=document.createElement("button");audioToggle.type="button";audioToggle.textContent="Listen";audioToggle.setAttribute("aria-label",`Listen to ${camera.name}`);
+      audioToggle.addEventListener("click",async()=>{
+        if(listening.muted){for(const other of document.querySelectorAll("#live-grid audio"))if(other!==listening){other.pause();other.muted=true;}listening.muted=false;try{await listening.play();}catch{listening.muted=true;liveMessage.textContent=`Audio could not start for ${camera.name}.`;}}
+        else{listening.pause();listening.muted=true;}
+      });
+      listening.addEventListener("volumechange",()=>{
+        audioToggle.textContent=listening.muted?"Listen":"Mute audio";
+        audioToggle.setAttribute("aria-label",listening.muted?`Listen to ${camera.name}`:`Mute audio from ${camera.name}`);
+        if(listening.muted)return;
+        for(const other of document.querySelectorAll("#live-grid audio")) if(other!==listening){other.pause();other.muted=true;}
+      });
       listening.src=`/api/cameras/${encodeURIComponent(camera.id)}/audio/live`;
-      tile.append(listening);
+      tile.append(audioToggle,listening);
     }
     grid.append(tile);
-    const view={cameraId,controller:new AbortController(),image,state,url:null,lastFrame:0}; liveViews.push(view);
-    consumeLiveStream(view,"low",focusQuality).catch(error=>{if(!view.controller.signal.aborted){state.textContent="Lost";liveMessage.textContent=`${camera.name}: ${error.message}`;}});
+    const view={cameraId,controller:new AbortController(),image,state,url:null,lastFrame:0,startedAt:Date.now(),tile,quality:focusedCameraId?document.querySelector("#live-quality").value:"low",retrying:false}; liveViews.push(view);
+    consumeLiveStream(view).catch(error=>{if(!view.controller.signal.aborted){state.textContent="Lost";liveMessage.textContent=`${camera.name}: ${error.message}`;}});
   }
   liveStatusTimer=setInterval(async()=>{
     for(const view of liveViews) {
+      if(view.controller.signal.aborted)continue;
+      if(Date.now()-(view.lastFrame||view.startedAt)>12000&&!view.retrying){
+        view.retrying=true;view.state.textContent="Stale";view.controller.abort();
+        if(view.url){URL.revokeObjectURL(view.url);view.url=null;}view.image.removeAttribute("src");
+        view.controller=new AbortController();view.lastFrame=0;view.startedAt=Date.now();
+        view.state.textContent="Reconnecting";
+        consumeLiveStream(view).finally(()=>{view.retrying=false;});
+        continue;
+      }
       try {
         const status=await api(`/api/cameras/${encodeURIComponent(view.cameraId)}/live/status`);
-        if(!view.controller.signal.aborted) view.state.textContent=status.state==="live"?"Live":status.active_viewers?"Stale":"Lost";
+        if(!view.controller.signal.aborted) view.state.textContent=view.lastFrame?(Date.now()-view.lastFrame>12000?"Stale":status.state==="live"?"Live":status.active_viewers?"Stale":"Reconnecting"):status.state==="stale"?"Stale":"Loading";
       } catch { if(!view.controller.signal.aborted) view.state.textContent="Lost"; }
     }
   },5000);
+  markLiveViewDirty();
+  saveLiveWorkspace();
 }
-async function consumeLiveStream(view,gridQuality,focusQuality) {
-  const quality=view.image.closest(".live-tile")?.querySelector("button")?.textContent==="Back to grid"?focusQuality:gridQuality;
-  const response=await fetch(`/api/cameras/${encodeURIComponent(view.cameraId)}/live?quality=${quality}`,{credentials:"same-origin",signal:view.controller.signal});
-  if(!response.ok) { const body=await response.json().catch(()=>({})); throw new Error(body.detail||"Live view could not start"); }
-  if(!response.body) throw new Error("This browser cannot read the live stream");
-  const reader=response.body.getReader(); let buffer=new Uint8Array(0);
-  while(!view.controller.signal.aborted) {
-    const {value,done}=await reader.read();
-    if(done) break;
-    const merged=new Uint8Array(buffer.length+value.length); merged.set(buffer); merged.set(value,buffer.length); buffer=merged;
-    while(true) {
-      let start=-1,end=-1;
-      for(let i=0;i<buffer.length-1;i++) if(buffer[i]===255&&buffer[i+1]===216){start=i;break;}
-      if(start<0){buffer=buffer.slice(Math.max(0,buffer.length-1));break;}
-      for(let i=start+2;i<buffer.length-1;i++) if(buffer[i]===255&&buffer[i+1]===217){end=i+2;break;}
-      if(end<0){buffer=buffer.slice(start);if(buffer.length>4*1024*1024)throw new Error("Video frame exceeded size limit");break;}
-      const frame=buffer.slice(start,end);buffer=buffer.slice(end);
-      const url=URL.createObjectURL(new Blob([frame],{type:"image/jpeg"}));
-      if(view.url) URL.revokeObjectURL(view.url); view.url=url; view.image.src=url; view.lastFrame=Date.now(); view.state.textContent="Live";
+function waitForLiveRetry(delay,signal){return new Promise(resolve=>{const finish=()=>{clearTimeout(timer);signal.removeEventListener("abort",finish);resolve();};const timer=setTimeout(finish,delay);signal.addEventListener("abort",finish,{once:true});});}
+async function consumeLiveStream(view) {
+  let attempt=0;
+  while(!view.controller.signal.aborted){
+    let retryable=true;
+    try{
+      view.state.textContent=view.lastFrame?"Reconnecting":"Loading";
+      const response=await fetch(`/api/cameras/${encodeURIComponent(view.cameraId)}/live?quality=${view.quality}`,{credentials:"same-origin",signal:view.controller.signal});
+      if(!response.ok){const body=await response.json().catch(()=>({}));const error=new Error(body.detail||"Live view could not start");retryable=response.status>=500;throw error;}
+      if(!response.body)throw new Error("This browser cannot read the live stream");
+      const reader=response.body.getReader();let buffer=new Uint8Array(0);attempt=0;
+      while(!view.controller.signal.aborted){
+        const {value,done}=await reader.read();
+        if(done)throw new Error("Camera video stream ended");
+        const merged=new Uint8Array(buffer.length+value.length);merged.set(buffer);merged.set(value,buffer.length);buffer=merged;
+        while(true){
+          let start=-1,end=-1;
+          for(let i=0;i<buffer.length-1;i++)if(buffer[i]===255&&buffer[i+1]===216){start=i;break;}
+          if(start<0){buffer=buffer.slice(Math.max(0,buffer.length-1));break;}
+          for(let i=start+2;i<buffer.length-1;i++)if(buffer[i]===255&&buffer[i+1]===217){end=i+2;break;}
+          if(end<0){buffer=buffer.slice(start);if(buffer.length>4*1024*1024)throw new Error("Video frame exceeded size limit");break;}
+          const frame=buffer.slice(start,end);buffer=buffer.slice(end);
+          const url=URL.createObjectURL(new Blob([frame],{type:"image/jpeg"}));
+          if(view.url)URL.revokeObjectURL(view.url);view.url=url;view.image.src=url;view.lastFrame=Date.now();view.startedAt=view.lastFrame;view.retrying=false;view.state.textContent="Live";
+        }
+        if(buffer.length>4*1024*1024)throw new Error("Live stream exceeded the frame buffer limit");
+      }
+      return;
+    }catch(error){
+      if(view.controller.signal.aborted)return;
+      if(!retryable){view.retrying=false;view.state.textContent="Lost";return;}
+      view.state.textContent="Reconnecting";
+      if(view.url){URL.revokeObjectURL(view.url);view.url=null;view.image.removeAttribute("src");}
+      await waitForLiveRetry(Math.min(1000*2**attempt,8000),view.controller.signal);
+      attempt=Math.min(attempt+1,4);
     }
-    if(buffer.length>4*1024*1024) throw new Error("Live stream exceeded the frame buffer limit");
   }
-  if(!view.controller.signal.aborted) view.state.textContent="Lost";
 }
-function renderPlaybackCameraPicker(cameras) {
+function dropCameraOnTile(event,index,cameras){
+  event.preventDefault();const cameraId=event.dataTransfer.getData("text/plain");if(!cameraId)return;
+  const next=[...activeLiveCameraIds],current=next.indexOf(cameraId);
+  if(current>=0){if(index>=next.length)return;[next[current],next[index]]=[next[index],next[current]];startLiveViews(next,cameras,focusedLiveCameraId,activeLiveGridSize);return;}
+  if(next.length>=activeLiveGridSize){document.querySelector("#live-message").textContent="This grid is full. Choose a larger grid or remove a camera first.";return;}
+  next.splice(Math.min(index,next.length),0,cameraId);startLiveViews(next,cameras,null,activeLiveGridSize);
+  const input=[...document.querySelectorAll("[data-live-camera]")].find(item=>item.value===cameraId);if(input)input.checked=true;
+}
+function addCameraToLiveGrid(cameraId,cameras){
+  if(activeLiveCameraIds.includes(cameraId))return;
+  let size=activeLiveGridSize||Number(document.querySelector("#live-grid-size").value)||4;
+  if(activeLiveCameraIds.length>=size){size=LIVE_GRID_SIZES.find(item=>item>size)||size;}
+  if(activeLiveCameraIds.length>=size){document.querySelector("#live-message").textContent="The 16-feed grid is full. Remove a camera before adding another.";return;}
+  if(!activeLiveCameraIds.length)size=Number(document.querySelector("#live-grid-size").value)||4;
+  startLiveViews([...activeLiveCameraIds,cameraId],cameras,null,size);
+}
+function renderPlaybackCameraPicker(cameras,groups=[]) {
   const target=document.querySelector("#playback-camera-picker");
-  target.replaceChildren(...cameras.map(camera=>{
-    const label=document.createElement("label"); label.textContent=`${camera.name} `;
+  const groupFieldset=document.createElement("fieldset"),groupLegend=document.createElement("legend");
+  groupLegend.textContent="Camera groups";groupFieldset.append(groupLegend);
+  groupFieldset.append(...groups.map(group=>{
+    const label=document.createElement("label");label.textContent=`${group.name} (${(group.camera_ids||[]).length}) `;
+    const input=document.createElement("input");input.type="checkbox";input.dataset.playbackGroup="true";input.value=group.id;
+    label.append(input);return label;
+  }));
+  const cameraFieldset=document.createElement("fieldset"),cameraLegend=document.createElement("legend");
+  cameraLegend.textContent="Cameras";cameraFieldset.append(cameraLegend);
+  cameraFieldset.append(...cameras.map(camera=>{
+    const label=document.createElement("label"); label.textContent=`${camera.name}${camera.archived_at?" · archived":""} `;
     const input=document.createElement("input"); input.type="checkbox"; input.dataset.playbackCamera="true"; input.value=camera.id;
     label.append(input); return label;
   }));
+  target.replaceChildren(groupFieldset,cameraFieldset);
+  syncPlaybackCameraChecks();
+}
+function syncPlaybackCameraChecks() {
+  const selectedByGroups=new Set([...document.querySelectorAll("[data-playback-group]:checked")].flatMap(input=>sidebarGroups.find(group=>group.id===input.value)?.camera_ids||[]));
+  for(const input of document.querySelectorAll("[data-playback-camera]"))
+    input.checked=playbackManualChoices.has(input.value)?playbackManualChoices.get(input.value):selectedByGroups.has(input.value);
+  syncPlaybackGroupChecks();
+}
+function syncPlaybackGroupChecks() {
+  for(const groupInput of document.querySelectorAll("[data-playback-group]")){
+    const memberIds=sidebarGroups.find(group=>group.id===groupInput.value)?.camera_ids||[];
+    const selected=new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value));
+    const count=memberIds.filter(id=>selected.has(id)).length;
+    groupInput.checked=memberIds.length>0&&count===memberIds.length;
+    groupInput.indeterminate=count>0&&count<memberIds.length;
+  }
+}
+function markPlaybackResultsStale() {
+  if(!playbackTimeline)return;
+  playbackResultsStale=true;
+  playbackViews.forEach(view=>view.video.pause());
+  document.querySelector("#playback-stale").classList.remove("hidden");
+  document.querySelector("#playback-status").textContent="Search inputs changed. Results are stale until you load the timeline again.";
+  updatePlaybackExportPreview();
 }
 function stopSynchronizedPlayback() {
+  stopPlaybackClock();
   playbackViews.forEach(view=>{view.video.pause();view.video.removeAttribute("src");view.video.load();});
-  playbackViews=[]; playbackTimeline=null; playbackMaster=null;
+  playbackViews=[]; playbackTimeline=null; playbackMaster=null;playbackWindow=null;
+  playbackExpandedView=null;
+  document.querySelector("#playback-grid")?.classList.remove("expanded");
   document.querySelector("#playback-grid")?.replaceChildren();
   const cursor=document.querySelector("#playback-cursor"); if(cursor) cursor.disabled=true;
+  ["#playback-play","#playback-pause","#playback-prev-frame","#playback-next-frame","#playback-prev-event","#playback-next-event"].forEach(selector=>{const button=document.querySelector(selector);if(button)button.disabled=true;});
 }
+function stopPlaybackClock() { if(playbackClockTimer){clearInterval(playbackClockTimer);playbackClockTimer=null;} playbackIsPlaying=false;playbackClockAnchor=null; }
 function playbackMilliseconds(value) { return new Date(value).getTime(); }
+function currentPlaybackWindow() {
+  if(playbackWindow)return playbackWindow;
+  return playbackTimeline?{start:playbackMilliseconds(playbackTimeline.start),end:playbackMilliseconds(playbackTimeline.end)}:null;
+}
+function playbackPosition(value) {
+  const window=currentPlaybackWindow();if(!window||window.end<=window.start)return null;
+  const time=playbackMilliseconds(value);if(time<window.start||time>window.end)return null;
+  return Math.max(0,Math.min(100,(time-window.start)/(window.end-window.start)*100));
+}
+function renderPlaybackRuler() {
+  const ruler=document.querySelector("#playback-ruler"),window=currentPlaybackWindow();
+  if(!ruler||!window)return;
+  ruler.replaceChildren();
+  ruler.tabIndex=0;ruler.setAttribute("aria-valuemin",String(window.start));ruler.setAttribute("aria-valuemax",String(window.end));
+  ruler.setAttribute("aria-valuenow",String(Number(document.querySelector("#playback-cursor")?.dataset.time||window.start)));
+  ruler.setAttribute("aria-valuetext",formatDateTime(Number(document.querySelector("#playback-cursor")?.dataset.time||window.start)));
+  for(let index=0;index<=4;index++){
+    const at=window.start+(window.end-window.start)*index/4,label=document.createElement("span");
+    label.className="playback-ruler-tick";label.style.left=`${index*25}%`;label.textContent=formatDateTime(at,true);ruler.append(label);
+  }
+  ruler.setAttribute("aria-label",`Timeline from ${formatDateTime(window.start)} to ${formatDateTime(window.end)}. Drag to pan; click to seek.`);
+}
+function fitPlaybackTimeline() {
+  if(!playbackTimeline)return;
+  playbackWindow={start:playbackMilliseconds(playbackTimeline.start),end:playbackMilliseconds(playbackTimeline.end)};
+  renderPlaybackRuler();renderPlaybackTracks();
+}
+function zoomPlaybackTimeline(factor) {
+  const window=currentPlaybackWindow();if(!window||!playbackTimeline)return;
+  const rangeStart=playbackMilliseconds(playbackTimeline.start),rangeEnd=playbackMilliseconds(playbackTimeline.end),range=rangeEnd-rangeStart;
+  const center=Number(document.querySelector("#playback-cursor").dataset.time||((window.start+window.end)/2));
+  const nextSpan=Math.max(60000,Math.min(range,(window.end-window.start)*factor));
+  let start=center-nextSpan/2,end=center+nextSpan/2;
+  if(start<rangeStart){end+=rangeStart-start;start=rangeStart;}
+  if(end>rangeEnd){start-=end-rangeEnd;end=rangeEnd;}
+  playbackWindow={start:Math.max(rangeStart,start),end:Math.min(rangeEnd,end)};
+  renderPlaybackRuler();renderPlaybackTracks();
+}
+function seekPlaybackAtClientX(clientX,element) {
+  const window=currentPlaybackWindow();if(!window)return;
+  const rect=element.getBoundingClientRect(),ratio=Math.max(0,Math.min(1,(clientX-rect.left)/rect.width));
+  seekSynchronizedPlayback(window.start+(window.end-window.start)*ratio);
+}
+function setupPlaybackRulerGestures() {
+  const ruler=document.querySelector("#playback-ruler");if(!ruler)return;
+  let drag=null;
+  ruler.addEventListener("keydown",event=>{
+    if(!playbackTimeline||!playbackWindow||!["ArrowLeft","ArrowRight","PageUp","PageDown"].includes(event.key))return;
+    event.preventDefault();
+    const current=Number(document.querySelector("#playback-cursor").dataset.time||playbackWindow.start);
+    const step=(playbackWindow.end-playbackWindow.start)*(event.key.startsWith("Page")?.25:.01)*(event.key.endsWith("Left")||event.key==="PageDown"?-1:1);
+    seekSynchronizedPlayback(current+step);
+  });
+  ruler.addEventListener("pointerdown",event=>{
+    if(!playbackTimeline)return;
+    ruler.setPointerCapture(event.pointerId);
+    const window=currentPlaybackWindow();drag={id:event.pointerId,x:event.clientX,start:window.start,end:window.end,moved:false};
+  });
+  ruler.addEventListener("pointermove",event=>{
+    if(!drag||drag.id!==event.pointerId)return;
+    const dx=event.clientX-drag.x;if(Math.abs(dx)>4)drag.moved=true;
+    if(!drag.moved)return;
+    const span=drag.end-drag.start,shift=dx/ruler.getBoundingClientRect().width*span;
+    const rangeStart=playbackMilliseconds(playbackTimeline.start),rangeEnd=playbackMilliseconds(playbackTimeline.end);
+    let start=drag.start-shift,end=drag.end-shift;
+    if(start<rangeStart){end+=rangeStart-start;start=rangeStart;}
+    if(end>rangeEnd){start-=end-rangeEnd;end=rangeEnd;}
+    playbackWindow={start:Math.max(rangeStart,start),end:Math.min(rangeEnd,end)};
+    renderPlaybackRuler();renderPlaybackTracks();
+  });
+  const finish=event=>{
+    if(!drag||drag.id!==event.pointerId)return;
+    if(!drag.moved)seekPlaybackAtClientX(event.clientX,ruler);
+    drag=null;
+  };
+  ruler.addEventListener("pointerup",finish);ruler.addEventListener("pointercancel",()=>{drag=null;});
+}
+function renderPlaybackTracks() {
+  if(!playbackViews.length)return;
+  for(const view of playbackViews){
+    const track=view.tile?.querySelector(".playback-track");if(!track)continue;
+    const next=renderPlaybackTrack(view);track.replaceWith(next);
+    const list=view.tile.querySelector(".playback-motion-list");if(list)list.replaceWith(renderPlaybackMotionList(view));
+  }
+}
+function renderPlaybackTrack(view) {
+  const track=document.createElement("div");track.className="playback-track";track.setAttribute("aria-label",`Recording coverage and motion timeline for ${view.name}`);
+  const window=currentPlaybackWindow();if(!window||window.end<=window.start)return track;
+  const pct=ms=>Math.max(0,Math.min(100,(ms-window.start)/(window.end-window.start)*100));
+  for(const segment of view.segments){
+    const left=playbackMilliseconds(segment.starts_at),right=playbackMilliseconds(segment.ends_at);
+    if(right<window.start||left>window.end)continue;
+    const available=document.createElement("span");available.className="playback-recording";available.style.left=`${pct(left)}%`;available.style.width=`${Math.max(.4,pct(right)-pct(left))}%`;available.title=`Recorded footage · ${formatDateTime(segment.starts_at)} to ${formatDateTime(segment.ends_at)}`;track.append(available);
+  }
+  for(const gap of view.gaps){
+    const left=playbackMilliseconds(gap.starts_at),right=playbackMilliseconds(gap.ends_at);
+    if(right<window.start||left>window.end)continue;
+    const mark=document.createElement("button");mark.type="button";mark.className=`playback-gap ${gap.state}`;mark.style.left=`${pct(left)}%`;mark.style.width=`${Math.max(.4,pct(right)-pct(left))}%`;mark.title=`${gap.state}: ${gap.reason}`;mark.setAttribute("aria-label",mark.title);mark.addEventListener("click",event=>{event.stopPropagation();seekSynchronizedPlayback(left);});track.append(mark);
+  }
+  for(const event of view.motion_events){
+    const at=playbackMilliseconds(event.source_event_at),position=playbackPosition(event.source_event_at);if(position===null)continue;
+    const marker=document.createElement("button");marker.type="button";marker.className="playback-motion";marker.style.left=`${position}%`;marker.title=`Motion · ${view.name} · ${formatDateTime(event.source_event_at)}`;marker.setAttribute("aria-label",marker.title);marker.addEventListener("click",click=>{click.stopPropagation();seekSynchronizedPlayback(at);});track.append(marker);
+  }
+  updateExportSelectionOverlay(track);
+  track.addEventListener("click",event=>seekPlaybackAtClientX(event.clientX,track));
+  return track;
+}
+function renderPlaybackMotionList(view) {
+  const list=document.createElement("div");list.className="playback-motion-list";
+  if(!view.motion_events.length){const note=document.createElement("p");note.textContent="No motion events in this range.";list.append(note);return list;}
+  for(const event of view.motion_events){
+    const start=event.actual_start||event.requested_start||event.source_event_at,end=event.actual_end||event.requested_end;
+    const duration=end?Math.max(0,(playbackMilliseconds(end)-playbackMilliseconds(start))/1000):0;
+    const button=document.createElement("button");button.type="button";button.className="playback-motion-event";button.textContent=`Motion · ${view.name} · ${formatDateTime(event.source_event_at)} · ${duration.toFixed(0)} sec · ${event.status}`;
+    button.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(event.source_event_at)));
+    list.append(button);
+  }
+  return list;
+}
 function playbackSegmentAt(view,timeMs) {
   return view.segments.find(segment=>playbackMilliseconds(segment.starts_at)<=timeMs && timeMs<playbackMilliseconds(segment.ends_at));
 }
@@ -314,10 +934,19 @@ function playbackAbsTime(view) {
   if(!view.segment) return null;
   return playbackMilliseconds(view.segment.starts_at)+view.video.currentTime*1000;
 }
+function playbackStartVideo(view) {
+  view.programmaticPlay=true;
+  view.video.play().catch(()=>{view.programmaticPlay=false;view.state.textContent="Press Play to start";});
+}
+function playbackPauseVideo(view) {
+  if(view.video.paused)return;
+  view.programmaticPause=true;
+  view.video.pause();
+}
 function playbackSetSegment(view,timeMs,playing=false) {
   const segment=playbackSegmentAt(view,timeMs);
   if(!segment) {
-    if(view.segment){view.video.pause();view.video.removeAttribute("src");view.video.load();view.segment=null;}
+    if(view.segment){playbackPauseVideo(view);view.video.removeAttribute("src");view.video.load();view.segment=null;}
     view.state.textContent="No footage at this time";
     return false;
   }
@@ -325,14 +954,15 @@ function playbackSetSegment(view,timeMs,playing=false) {
   view.segment=segment; view.targetMs=timeMs;
   const offset=Math.max(0,(timeMs-playbackMilliseconds(segment.starts_at))/1000);
   if(changed) {
+    playbackPauseVideo(view);
     view.video.src=segment.media_url; view.video.load(); view.state.textContent="Loading interval…";
-    view.video.onloadedmetadata=()=>{if(!view.video.isConnected)return;view.video.currentTime=Math.min(offset,Math.max(0,view.video.duration-0.05));view.video.playbackRate=Number(document.querySelector("#playback-rate").value);view.state.textContent="Ready";if(playing)view.video.play().catch(()=>{view.state.textContent="Press Play to start";});};
+    view.video.onloadedmetadata=()=>{if(!view.video.isConnected)return;view.video.currentTime=Math.min(offset,Math.max(0,view.video.duration-0.05));view.video.playbackRate=Number(document.querySelector("#playback-rate").value);view.state.textContent="Ready";if(playing)playbackStartVideo(view);};
   } else {
     const drift=Math.abs(view.video.currentTime-offset);
     if(drift>0.3)view.video.currentTime=offset;
     view.video.playbackRate=Number(document.querySelector("#playback-rate").value);
-    if(playing&&view.video.paused)view.video.play().catch(()=>{view.state.textContent="Press Play to start";});
-    if(!playing&&!view.video.paused)view.video.pause();
+    if(playing&&view.video.paused)playbackStartVideo(view);
+    if(!playing)playbackPauseVideo(view);
   }
   view.state.textContent=changed?"Loading interval…":"In sync";
   return true;
@@ -345,11 +975,84 @@ function seekSynchronizedPlayback(timeMs,playing=false,master=null) {
   playbackSyncGuard=false;
   updatePlaybackDrift();
 }
+function playbackHasFootageAt(timeMs) { return playbackViews.some(view=>Boolean(playbackSegmentAt(view,timeMs))); }
+function nextPlaybackFootage(timeMs) {
+  const starts=playbackViews.flatMap(view=>view.segments.map(segment=>playbackMilliseconds(segment.starts_at))).filter(value=>value>timeMs).sort((a,b)=>a-b);
+  return starts.find(value=>playbackHasFootageAt(value))??null;
+}
+function startPlaybackClock() {
+  if(!playbackTimeline)return;
+  if(playbackClockTimer)clearInterval(playbackClockTimer);
+  playbackMaster=selectedPlaybackView();playbackViews.forEach(view=>{view.video.muted=view!==playbackMaster;});
+  playbackIsPlaying=true;
+  const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start);
+  playbackClockAnchor={at,wall:performance.now()};
+  playbackViews.forEach(view=>{view.video.playbackRate=Number(document.querySelector("#playback-rate").value);playbackPauseVideo(view);});
+  seekSynchronizedPlayback(at,true,playbackMaster);
+  playbackClockTimer=setInterval(()=>{
+    if(!playbackClockAnchor||!playbackTimeline)return;
+    const rate=Number(document.querySelector("#playback-rate").value),candidate=playbackClockAnchor.at+(performance.now()-playbackClockAnchor.wall)*rate;
+    const end=playbackMilliseconds(playbackTimeline.end);
+    if(candidate>=end){seekSynchronizedPlayback(end,false);stopPlaybackClock();return;}
+    let target=candidate;
+    if(document.querySelector("#playback-skip-empty").checked&&!playbackHasFootageAt(target)){
+      const next=nextPlaybackFootage(target);
+      if(next===null){seekSynchronizedPlayback(end,false);stopPlaybackClock();return;}
+      target=next;playbackClockAnchor={at:target,wall:performance.now()};
+    }
+    seekSynchronizedPlayback(target,true,playbackMaster);
+  },100);
+}
+function pausePlaybackClock() {
+  if(playbackClockAnchor&&playbackIsPlaying){const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackClockAnchor.at);playbackClockAnchor={at,wall:performance.now()};}
+  stopPlaybackClock();playbackViews.forEach(playbackPauseVideo);
+}
+function selectedPlaybackView() { return playbackMaster&&playbackViews.includes(playbackMaster)?playbackMaster:playbackViews[0]||null; }
+async function stepPlaybackFrame(direction) {
+  if(!playbackTimeline)return;
+  pausePlaybackClock();
+  const view=selectedPlaybackView();if(!view)return;
+  const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start);
+  const segments=[...view.segments].sort((a,b)=>playbackMilliseconds(a.starts_at)-playbackMilliseconds(b.starts_at));
+  const ordered=direction==="previous"?segments.filter(segment=>playbackMilliseconds(segment.starts_at)<at).reverse().concat(segments.filter(segment=>playbackMilliseconds(segment.starts_at)<=at&&playbackMilliseconds(segment.ends_at)>at).reverse()):segments.filter(segment=>playbackMilliseconds(segment.ends_at)>at);
+  let best=null;
+  for(const segment of ordered){
+    const start=playbackMilliseconds(segment.starts_at),end=playbackMilliseconds(segment.ends_at);
+    const requested=Math.max(start,Math.min(end-1,at));
+    try {
+      const result=await api(`/api/cameras/${encodeURIComponent(view.cameraId)}/segments/${segment.id}/frame-neighbor?at=${encodeURIComponent(new Date(requested).toISOString())}&direction=${direction}`);
+      const found=playbackMilliseconds(result.at);if((direction==="previous"&&found<at||direction==="next"&&found>at)&&(!best||(direction==="previous"?found>best:found<best)))best=found;
+    }catch(error){if(!["No adjacent frame exists in this interval","Frame time is outside this recorded interval"].includes(error.message))throw error;}
+    if(best!==null)break;
+  }
+  if(best===null){document.querySelector("#playback-status").textContent=`No ${direction} frame is available for ${view.name} within the searched range.`;return;}
+  const rangeStart=playbackMilliseconds(playbackTimeline.start),rangeEnd=playbackMilliseconds(playbackTimeline.end);
+  if(best<rangeStart||best>=rangeEnd){document.querySelector("#playback-status").textContent=`No ${direction} frame is available within the searched range.`;return;}
+  seekSynchronizedPlayback(best,false,view);
+}
+function navigatePlaybackEvent(direction) {
+  if(!playbackTimeline)return;
+  const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start),scope=document.querySelector("#playback-event-scope").value;
+  const views=scope==="selected"?[selectedPlaybackView()].filter(Boolean):playbackViews;
+  const times=[...new Set(views.flatMap(view=>view.motion_events.map(event=>playbackMilliseconds(event.source_event_at))).filter(value=>value>=playbackMilliseconds(playbackTimeline.start)&&value<playbackMilliseconds(playbackTimeline.end)))].sort((a,b)=>a-b);
+  const destination=direction==="next"?times.find(value=>value>at):times.filter(value=>value<at).pop();
+  if(destination===undefined){document.querySelector("#playback-status").textContent=`No ${direction} event within the searched range.`;return;}
+  const playing=playbackIsPlaying;seekSynchronizedPlayback(destination,playing);if(playing)startPlaybackClock();
+}
+function expandPlaybackView(view) {
+  const grid=document.querySelector("#playback-grid");
+  if(playbackExpandedView===view){playbackExpandedView=null;grid.classList.remove("expanded");playbackViews.forEach(item=>{item.tile.classList.remove("hidden","expanded");item.expandButton.textContent="Expand";});return;}
+  playbackExpandedView=view;grid.classList.add("expanded");playbackViews.forEach(item=>item.tile.classList.toggle("hidden",item!==view));view.tile.classList.add("expanded");view.expandButton.textContent="Restore grid";
+}
 function updatePlaybackDrift() {
   const times=playbackViews.map(playbackAbsTime).filter(value=>value!==null);
   const drift=times.length>1?Math.max(...times)-Math.min(...times):0;
   const label=document.querySelector("#playback-status");
-  if(playbackTimeline) label.textContent=`Shared time ${new Date(Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start)).toLocaleString()} · measured playback drift ${Math.round(drift)} ms`;
+  if(playbackTimeline) {
+    const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start),ruler=document.querySelector("#playback-ruler");
+    ruler?.setAttribute("aria-valuenow",String(at));ruler?.setAttribute("aria-valuetext",formatDateTime(at));
+    label.textContent=`Shared time ${formatDateTime(at,true)} · measured playback drift ${Math.round(drift)} ms`;
+  }
 }
 function renderPlaybackCamera(view) {
   const tile=document.createElement("article"); tile.className="playback-camera";
@@ -357,43 +1060,63 @@ function renderPlaybackCamera(view) {
   const state=document.createElement("p"); state.className="playback-status"; state.textContent=view.segments.length?"Ready":"No indexed footage in this interval";
   const video=document.createElement("video"); video.controls=true; video.playsInline=true; video.preload="metadata"; video.setAttribute("aria-label",`Synchronized playback for ${view.name}`);
   const controls=document.createElement("div");
+  const select=document.createElement("button");select.type="button";select.textContent="Select camera";select.addEventListener("click",()=>{playbackMaster=view;playbackViews.forEach(item=>{item.video.muted=item!==view;item.tile.classList.toggle("selected",item===view);});});
   const snapshot=document.createElement("button"); snapshot.type="button"; snapshot.textContent="Download snapshot";
   snapshot.addEventListener("click",async()=>{
+    if(playbackResultsStale){state.textContent="Search inputs changed. Reload the timeline before capturing a snapshot.";return;}
     const at=Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline.start);
     const segment=playbackSegmentAt(view,at);
     if(!segment){state.textContent="No snapshot is available at the shared time.";return;}
-    try {const response=await fetch(`${segment.media_url.replace(/\/media$/,"")}/snapshot?at=${encodeURIComponent(new Date(at).toISOString())}`,{credentials:"same-origin"});if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.detail||"Snapshot is unavailable");}const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");link.href=url;link.download=`${view.name.replace(/[^a-z0-9_-]+/gi,"_")}-${new Date(at).toISOString().replace(/[:.]/g,"-")}.jpg`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);state.textContent="Snapshot downloaded.";}catch(error){state.textContent=error.message;}
+    try {const response=await fetch(`${segment.media_url.replace(/\/media$/,"")}/snapshot?at=${encodeURIComponent(new Date(at).toISOString())}`,{credentials:"same-origin"});if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.detail||"Snapshot is unavailable");}const sourceTime=response.headers.get("X-Source-Time"),audit=response.headers.get("X-Audit-Reference"),blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");link.href=url;link.download=`${view.name.replace(/[^a-z0-9_-]+/gi,"_")}-${new Date(at).toISOString().replace(/[:.]/g,"-")}.jpg`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);state.textContent=`Snapshot downloaded from ${sourceTime||new Date(at).toISOString()} · audit ${audit||"reference unavailable"}.`;}catch(error){state.textContent=error.message;}
   });
   const fullscreen=document.createElement("button"); fullscreen.type="button"; fullscreen.textContent="Fullscreen";
   fullscreen.addEventListener("click",()=>{if(!tile.requestFullscreen){state.textContent="Fullscreen is not supported by this browser.";return;}tile.requestFullscreen().catch(()=>{state.textContent="Fullscreen was blocked by the browser.";});});
-  controls.append(snapshot,fullscreen); tile.append(heading,state,video,controls);
-  const track=document.createElement("div"); track.className="playback-track"; track.setAttribute("aria-label",`Motion and coverage timeline for ${view.name}`);
-  const start=playbackMilliseconds(playbackTimeline.start), span=playbackMilliseconds(playbackTimeline.end)-start;
-  for(const gap of view.gaps){const mark=document.createElement("button");mark.type="button";mark.className=`playback-gap ${gap.state}`;const left=(playbackMilliseconds(gap.starts_at)-start)/span*100,width=(playbackMilliseconds(gap.ends_at)-playbackMilliseconds(gap.starts_at))/span*100;mark.style.left=`${left}%`;mark.style.width=`${Math.max(.4,width)}%`;mark.title=`${gap.state}: ${gap.reason}`;mark.setAttribute("aria-label",mark.title);mark.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(gap.starts_at)));track.append(mark);}
-  for(const event of view.motion_events){const marker=document.createElement("button");marker.type="button";marker.className="playback-motion";marker.style.left=`${(playbackMilliseconds(event.source_event_at)-start)/span*100}%`;marker.title=`Motion · ${new Date(event.source_event_at).toLocaleString()} · ${event.status}`;marker.setAttribute("aria-label",marker.title);marker.addEventListener("click",()=>seekSynchronizedPlayback(playbackMilliseconds(event.source_event_at)));track.append(marker);}
+  const expand=document.createElement("button");expand.type="button";expand.textContent="Expand";expand.addEventListener("click",()=>expandPlaybackView(view));
+  controls.append(select,snapshot,fullscreen,expand); tile.append(heading,state,video,controls);
+  const track=renderPlaybackTrack(view),motionList=renderPlaybackMotionList(view);
   tile.append(track);
-  view.video=video;view.state=state;view.tile=tile;
-  video.addEventListener("play",()=>{if(playbackSyncGuard)return;playbackMaster=view;const time=playbackAbsTime(view);if(time!==null)seekSynchronizedPlayback(time,true,view);});
-  video.addEventListener("pause",()=>{if(playbackSyncGuard)return;playbackViews.forEach(other=>{if(other!==view)other.video.pause();});});
-  video.addEventListener("seeking",()=>{if(playbackSyncGuard)return;const time=playbackAbsTime(view);if(time!==null)seekSynchronizedPlayback(time,!view.video.paused,view);});
-  video.addEventListener("timeupdate",()=>{if(playbackSyncGuard||playbackMaster!==view)return;const time=playbackAbsTime(view);if(time===null)return;playbackSetCursor(time);playbackSyncGuard=true;playbackViews.filter(other=>other!==view).forEach(other=>playbackSetSegment(other,time,!view.video.paused));playbackSyncGuard=false;updatePlaybackDrift();});
+  tile.append(motionList);
+  view.video=video;view.state=state;view.tile=tile;view.expandButton=expand;
+  video.addEventListener("play",()=>{if(view.programmaticPlay){view.programmaticPlay=false;return;}if(playbackSyncGuard)return;playbackMaster=view;playbackViews.forEach(other=>{other.video.muted=other!==view;});startPlaybackClock();});
+  video.addEventListener("pause",()=>{
+    if(view.programmaticPause){view.programmaticPause=false;return;}
+    const reachedSegmentEnd=video.ended||(Number.isFinite(video.duration)&&video.currentTime>=video.duration-0.05);
+    if(playbackSyncGuard||reachedSegmentEnd)return;
+    pausePlaybackClock();
+  });
+  video.addEventListener("seeking",()=>{if(playbackSyncGuard)return;const time=playbackAbsTime(view);if(time!==null){playbackMaster=view;seekSynchronizedPlayback(time,!view.video.paused,view);if(playbackIsPlaying)startPlaybackClock();}});
+  video.addEventListener("timeupdate",()=>{if(playbackSyncGuard||playbackMaster!==view||!playbackIsPlaying)return;updatePlaybackDrift();});
   return tile;
 }
 async function loadSynchronizedPlayback() {
-  stopSynchronizedPlayback();
-  const camera_ids=[...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value);
+  const camera_ids=[...new Set([...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value))];
   const startInput=document.querySelector("#playback-start").value,endInput=document.querySelector("#playback-end").value;
   const label=document.querySelector("#playback-status");
   try {
-    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
+    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight unique cameras.");
     if(!startInput||!endInput)throw new Error("Enter both a start and end time.");
-    const result=await api("/api/playback/timeline",{method:"POST",body:JSON.stringify({camera_ids,start:new Date(startInput).toISOString(),end:new Date(endInput).toISOString()})});
+    const start=resolveSearchLocalTime("start"),end=resolveSearchLocalTime("end");
+    const startMs=playbackMilliseconds(start),endMs=playbackMilliseconds(end);
+    if(endMs<=startMs)throw new Error("The end time must be later than the start time.");
+    if(endMs-startMs>24*60*60*1000)throw new Error("Search ranges are limited to 24 hours.");
+    playbackViews.forEach(view=>view.video.pause());
+    label.textContent="Loading indexed coverage and motion events…";
+    const result=await api("/api/playback/timeline",{method:"POST",body:JSON.stringify({camera_ids,start,end})});
+    stopSynchronizedPlayback();
     playbackTimeline=result;const cursor=document.querySelector("#playback-cursor");cursor.disabled=false;cursor.value="0";cursor.dataset.time=String(playbackMilliseconds(result.start));
+    playbackWindow={start:playbackMilliseconds(result.start),end:playbackMilliseconds(result.end)};
     const grid=document.querySelector("#playback-grid");
-    playbackViews=result.cameras.map(camera=>({cameraId:camera.camera_id,name:camera.name,segments:camera.segments,gaps:camera.gaps,motion_events:camera.motion_events,coverage:camera.coverage,video:null,state:null,segment:null}));
+    grid.style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(Number(document.querySelector("#playback-grid-size").value)||4))));
+    playbackViews=result.cameras.map(camera=>({cameraId:camera.camera_id,name:camera.name,audio_supported:camera.audio_supported,audio_enabled:camera.audio_enabled,segments:camera.segments,gaps:camera.gaps,motion_events:camera.motion_events,coverage:camera.coverage,video:null,state:null,segment:null}));
     grid.replaceChildren(...playbackViews.map(renderPlaybackCamera));
-    seekSynchronizedPlayback(playbackMilliseconds(result.start));
-    label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Recorded footage, motion markers, and known gaps are shown below.`;
+    renderPlaybackRuler();
+    const earliest=playbackViews.flatMap(view=>view.segments.map(segment=>playbackMilliseconds(segment.starts_at))).filter(Number.isFinite);
+    seekSynchronizedPlayback(earliest.length?Math.min(...earliest):playbackMilliseconds(result.start));
+    if(playbackViews.length){playbackMaster=playbackViews[0];playbackViews[0].tile.classList.add("selected");playbackViews.forEach((view,index)=>{view.video.muted=index>0;});}
+    ["#playback-play","#playback-pause","#playback-prev-frame","#playback-next-frame","#playback-prev-event","#playback-next-event"].forEach(selector=>{document.querySelector(selector).disabled=false;});
+    playbackResultsStale=false;document.querySelector("#playback-stale").classList.add("hidden");
+    initializeExportSelection();setExportBoundary("start",playbackMilliseconds(result.start));setExportBoundary("end",playbackMilliseconds(result.end));updatePlaybackExportPreview();
+    label.textContent=`Loaded ${result.cameras.length} camera timeline(s). Playback is paused at the earliest indexed recording; events and gaps are aligned to the same search range.`;
   }catch(error){label.textContent=error.message;}
 }
 async function refreshExports() {
@@ -404,7 +1127,7 @@ async function refreshExports() {
     target.replaceChildren(...exports.map(job=>{
       const row=document.createElement("li");
       const state=document.createElement("span");
-      state.textContent=`${job.id.slice(0,8)} · ${job.status}${job.cancel_requested?" · cancelling":""}${job.error?` · ${job.error}`:""}`;
+      state.textContent=`${job.id.slice(0,8)} · ${job.status}${job.status==="queued"||job.status==="running"?` · ${job.progress}%`:""} · ${formatDateTime(job.start)} – ${formatDateTime(job.end)}${job.expires_at?` · expires ${formatDateTime(job.expires_at)}`:""}${job.cancel_requested?" · cancelling":""}${job.error?` · ${job.error}`:""}`;
       row.append(state);
       if(job.download_url){const download=document.createElement("a");download.href=job.download_url;download.textContent=" Download ZIP";row.append(download);}
       if(job.status==="queued"||job.status==="running"){
@@ -421,28 +1144,41 @@ async function refreshExports() {
 }
 async function requestPlaybackExport() {
   const message=document.querySelector("#export-message"),button=document.querySelector("#playback-export");
-  const camera_ids=[...document.querySelectorAll("[data-playback-camera]:checked")].map(input=>input.value);
-  const start=document.querySelector("#playback-start").value,end=document.querySelector("#playback-end").value;
   try {
-    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight cameras.");
-    if(!start||!end)throw new Error("Enter both a start and end time.");
+    const range=selectedExportRange();
+    const camera_ids=[...new Set([...document.querySelectorAll("[data-export-camera]:checked")].map(input=>input.value))];
+    const output_modes=[...document.querySelectorAll("[data-export-mode]:checked")].map(input=>input.dataset.exportMode);
+    if(!camera_ids.length||camera_ids.length>8)throw new Error("Choose between one and eight searched cameras.");
+    if(!output_modes.length)throw new Error("Choose individual camera videos, a synchronized grid, or both.");
+    const eligible=playbackViews.filter(view=>camera_ids.includes(view.cameraId)&&view.segments.some(segment=>Math.min(range.end,playbackMilliseconds(segment.ends_at))>Math.max(range.start,playbackMilliseconds(segment.starts_at))));
+    if(!eligible.length)throw new Error("No indexed footage overlaps this export selection.");
+    const omitted=playbackViews.filter(view=>camera_ids.includes(view.cameraId)&&!eligible.includes(view)).map(view=>view.name);
+    const jobCameraIds=output_modes.includes("grid")?camera_ids:eligible.map(view=>view.cameraId);
+    const tileIds=playbackViews.filter(view=>jobCameraIds.includes(view.cameraId)).map(view=>view.cameraId);
+    const requestedGridSize=Number(document.querySelector("#playback-grid-size").value)||4;
+    const gridSize=[1,4,9,16].find(size=>size>=Math.max(requestedGridSize,tileIds.length))||16;
+    const tile_camera_ids=[...tileIds,...Array(Math.max(0,gridSize-tileIds.length)).fill(null)];
     button.disabled=true;message.textContent="Submitting export…";
-    const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids,start:new Date(start).toISOString(),end:new Date(end).toISOString()})});
-    message.textContent=`Export ${job.id.slice(0,8)} queued. You can leave this page; the job will continue.`;
+    const include_audio=document.querySelector("#export-include-audio").checked;
+    const audio_camera_id=include_audio&&output_modes.includes("grid")?document.querySelector("#export-grid-audio-source").value:null;
+    const job=await api("/api/exports",{method:"POST",body:JSON.stringify({camera_ids:jobCameraIds,tile_camera_ids,grid_resolution:document.querySelector("#export-grid-resolution").value,start:new Date(range.start).toISOString(),end:new Date(range.end).toISOString(),output_modes,include_audio,audio_camera_id})});
+    const omissionNote=omitted.length?`; no footage for ${omitted.join(", ")}`:"";
+    message.textContent=`Export ${job.id.slice(0,8)} queued (${output_modes.join(" + ")})${omissionNote}. You can leave this page; the job will continue.`;
     await refreshExports();
   }catch(error){message.textContent=error.message;}
-  finally{button.disabled=false;}
+  finally{updatePlaybackExportPreview();}
 }
 async function refreshDiagnostics() {
   const state = await api("/api/diagnostics/status");
   const button = document.querySelector("#diagnostics-toggle");
   button.textContent = state.enabled ? "Stop diagnostics capture" : "Enable diagnostics capture";
   document.querySelector("#diagnostics-message").textContent = state.enabled
-    ? `Capture is on until ${new Date(state.capture_until).toLocaleString()} · ${state.event_count} event(s) collected.`
+    ? `Capture is on until ${formatDateTime(state.capture_until)} · ${state.event_count} event(s) collected.`
     : `${state.event_count} event(s) available for download. Capture is off.`;
 }
 async function refreshGroups() {
   const {groups}=await api("/api/camera-groups");
+  renderGroupManagement(groups);
   const select=document.querySelector("#bulk-group");
   const options=[new Option("Leave groups unchanged","__unchanged__"),new Option("Remove from group","")];
   for (const group of groups) options.push(new Option(group.name,group.name));
@@ -450,6 +1186,42 @@ async function refreshGroups() {
   const scheduleSelect=document.querySelector("#schedule-group");
   scheduleSelect.replaceChildren(...(groups.length ? groups.map(group=>new Option(group.name,group.id)) : [new Option("Create a group first","")]));
   try { const runtime=await api("/api/ai/settings"); document.querySelector("#ai-max-active").value=runtime.max_active_cameras; } catch {}
+}
+function renderGroupManagement(groups) {
+  const target=document.querySelector("#group-management-list");
+  target.replaceChildren(...groups.map(group=>{
+    const card=document.createElement("article"),heading=document.createElement("h4");
+    heading.textContent=group.name+" · "+group.camera_count+" camera(s)";
+    const nameLabel=document.createElement("label"),name=document.createElement("input");
+    nameLabel.textContent="Group name ";name.value=group.name;name.maxLength=80;nameLabel.append(name);
+    const rename=document.createElement("button");rename.type="button";rename.textContent="Save group name";
+    rename.addEventListener("click",async()=>{
+      try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"PATCH",body:JSON.stringify({name:name.value})});await refresh();}
+      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
+    });
+    const members=new Set(group.camera_ids||[]),fieldset=document.createElement("fieldset"),legend=document.createElement("legend");
+    legend.textContent="Browsing members";fieldset.append(legend);
+    for(const camera of [...latestCameras].sort((a,b)=>a.name.localeCompare(b.name))){
+      const label=document.createElement("label"),checkbox=document.createElement("input");
+      checkbox.type="checkbox";checkbox.value=camera.id;checkbox.checked=members.has(camera.id);
+      if(camera.group_id===group.id){checkbox.disabled=true;checkbox.title="This is the camera’s policy group and stays in its browsing group automatically.";}
+      label.append(checkbox,document.createTextNode(" "+camera.name));fieldset.append(label);
+    }
+    const saveMembers=document.createElement("button");saveMembers.type="button";saveMembers.textContent="Save browsing members";
+    saveMembers.addEventListener("click",async()=>{
+      const camera_ids=[...fieldset.querySelectorAll('input[type="checkbox"]:checked')].map(input=>input.value);
+      try{await api("/api/camera-groups/"+encodeURIComponent(group.id)+"/members",{method:"PUT",body:JSON.stringify({camera_ids})});await refresh();}
+      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
+    });
+    const remove=document.createElement("button");remove.type="button";remove.textContent="Delete group";
+    remove.addEventListener("click",async()=>{
+      if(!window.confirm("Delete browsing group “"+group.name+"”? Groups that still own camera policies must be reassigned first."))return;
+      try{await api("/api/camera-groups/"+encodeURIComponent(group.id),{method:"DELETE"});await refresh();}
+      catch(error){document.querySelector("#schedule-message").textContent=error.message;}
+    });
+    card.append(heading,nameLabel,rename,fieldset,saveMembers,remove);return card;
+  }));
+  if(!groups.length)target.textContent="No camera groups yet.";
 }
 async function refreshDiscovery() {
   const [{candidates}, inventory] = await Promise.all([api("/api/discovery/candidates"), api("/api/cameras")]);
@@ -461,7 +1233,7 @@ async function refreshDiscovery() {
     const candidateAddress = (() => { try { return new URL(candidate.service_urls[0]).hostname; } catch { return ""; } })();
     title.textContent=candidate.device_uuid.startsWith("ipscan:") ? `Camera at ${candidateAddress}` : `ONVIF device ${candidate.device_uuid}`;
     const state=document.createElement("p");
-    state.textContent=candidate.linked_camera_id ? `Already linked to camera ${candidate.linked_camera_id}` : `First seen ${new Date(candidate.first_seen_at).toLocaleString()} · Last seen ${new Date(candidate.last_seen_at).toLocaleString()}`;
+    state.textContent=candidate.linked_camera_id ? `Already linked to camera ${candidate.linked_camera_id}` : `First seen ${formatDateTime(candidate.first_seen_at)} · Last seen ${formatDateTime(candidate.last_seen_at)}`;
     const services=document.createElement("p"); services.textContent=`Device service: ${candidate.service_urls.join(", ") || "unavailable"}`;
     const capabilities=document.createElement("p");
     capabilities.textContent=`Capabilities · ${Object.entries(candidate.capabilities).map(([name,result])=>`${name}: ${result}`).join(" · ")}`;
@@ -538,7 +1310,7 @@ async function refreshSessions() {
   target.replaceChildren(...sessions.map(session => {
     const row=document.createElement("p");
     const text=document.createElement("span");
-    text.textContent=`${session.username} (${session.role}) · expires ${new Date(session.expires_at).toLocaleString()} `;
+    text.textContent=`${session.username} (${session.role}) · expires ${formatDateTime(session.expires_at)} `;
     const end=document.createElement("button"); end.type="button"; end.textContent="End session";
     end.addEventListener("click", async () => { await api(`/api/admin/sessions/${encodeURIComponent(session.session_id)}`, {method:"DELETE"}); await refreshSessions(); });
     row.append(text,end); return row;
@@ -548,9 +1320,13 @@ async function refreshSessions() {
 function renderCameras(cameras) {
   const list = document.querySelector("#camera-list");
   if (!cameras.length) { list.textContent = "No cameras have been added."; return; }
-  list.replaceChildren(...cameras.map(camera => {
+  const query=(document.querySelector("#camera-inventory-search")?.value||"").trim().toLocaleLowerCase();
+  const filtered=cameras.filter(camera=>!query||`${camera.name} ${camera.group_name||""}`.toLocaleLowerCase().includes(query));
+  if (!filtered.length) { list.textContent = "No cameras match this search."; return; }
+  list.replaceChildren(...filtered.map(camera => {
     const card = document.createElement("article");
     const title = document.createElement("h3"); title.textContent = camera.name;
+    if(camera.archived_at)title.textContent+=` · Archived ${formatDateTime(camera.archived_at)}`;
     if (currentRole === "administrator") {
       const pickLabel=document.createElement("label"); pickLabel.textContent="Select for bulk changes ";
       const pick=document.createElement("input"); pick.type="checkbox"; pick.dataset.cameraSelect="true"; pick.value=camera.id;
@@ -566,6 +1342,63 @@ function renderCameras(cameras) {
     summary.textContent += ` · retention ${camera.retention_days} days (${camera.retention_policy_source||"default"}; ${retentionSummary.achieved_days||0} days achieved` + (retentionSummary.projected_days_at_current_activity == null ? ")" : `; ${retentionSummary.projected_days_at_current_activity} days projected at current activity)`);
     card.append(title, summary);
     if(currentRole === "administrator") {
+      const editor=document.createElement("details"),editorHeading=document.createElement("summary");
+      editorHeading.textContent="Edit camera details";
+      const nameLabel=document.createElement("label"),nameInput=document.createElement("input");
+      nameLabel.textContent="Camera name ";nameInput.type="text";nameInput.maxLength=120;nameInput.required=true;nameInput.value=camera.name;nameLabel.append(nameInput);
+      const saveDetails=document.createElement("button");saveDetails.type="button";saveDetails.textContent="Save camera details";
+      saveDetails.addEventListener("click",async()=>{
+        try{await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PATCH",body:JSON.stringify({name:nameInput.value})});document.querySelector("#camera-message").textContent="Camera details saved.";await refresh();}
+        catch(error){document.querySelector("#camera-message").textContent=error.message;}
+      });
+      editor.append(editorHeading,nameLabel,saveDetails);card.append(editor);
+      const sourcePanel=document.createElement("fieldset"),sourceLegend=document.createElement("legend");sourceLegend.textContent="Video source and advertised ONVIF profiles";sourcePanel.append(sourceLegend);
+      const addressLabel=document.createElement("label"),address=document.createElement("input");addressLabel.textContent="Camera IP address ";address.inputMode="numeric";address.autocomplete="off";address.value=camera.camera_ip||"";addressLabel.append(address);
+      const directLabel=document.createElement("label"),directUrl=document.createElement("input");directLabel.textContent="Direct RTSP URL (use when not selecting by IP) ";directUrl.type="url";directUrl.autocomplete="off";directUrl.placeholder="rtsp://camera.example/stream";directLabel.append(directUrl);
+      const usernameLabel=document.createElement("label"),username=document.createElement("input");usernameLabel.textContent="Camera username (leave blank to keep current credentials) ";username.autocomplete="off";usernameLabel.append(username);
+      const passwordLabel=document.createElement("label"),password=document.createElement("input");passwordLabel.textContent="Camera password (leave blank to keep current credentials) ";password.type="password";password.autocomplete="new-password";passwordLabel.append(password);
+      const confirmLabel=document.createElement("label"),confirm=document.createElement("input");confirmLabel.textContent="Confirm new camera password ";confirm.type="password";confirm.autocomplete="new-password";confirmLabel.append(confirm);
+      const clearLabel=document.createElement("label"),clearCredentials=document.createElement("input");clearCredentials.type="checkbox";clearLabel.append(clearCredentials,document.createTextNode(" Clear saved camera credentials"));
+      const brandLabel=document.createElement("label"),brand=document.createElement("select");brandLabel.textContent="Device type / brand ";
+      for(const [value,label] of [["auto","Auto-detect / ONVIF"],["acti","ACTi"],["axis","Axis"],["bosch","Bosch"],["dahua","Dahua"],["hanwha","Hanwha"],["hikvision","Hikvision"],["reolink","Reolink"],["samsung","Samsung"],["uniview","Uniview"],["other","Other / generic ONVIF"]])brand.add(new Option(label,value));
+      brand.value=camera.camera_brand||"auto";brandLabel.append(brand);
+      const serviceLabel=document.createElement("label"),service=document.createElement("input");serviceLabel.textContent="ONVIF device-service URL (optional custom path) ";service.type="url";service.autocomplete="off";service.value=camera.device_service_url||"";service.placeholder="http://camera/onvif/device_service";serviceLabel.append(service);
+      const mainLabel=document.createElement("label"),mainProfile=document.createElement("select");mainLabel.textContent="Main stream profile ";mainProfile.append(new Option(camera.onvif_profile_token?`Saved profile · ${camera.onvif_profile_token}`:"Load advertised profiles",camera.onvif_profile_token||""));mainLabel.append(mainProfile);
+      const subLabel=document.createElement("label"),subProfile=document.createElement("select");subLabel.textContent="Optional lower-resolution live grid profile ";subProfile.append(new Option("Use main stream for grid scaled by server",""));if(camera.live_substream_profile_token)subProfile.add(new Option(`Saved profile · ${camera.live_substream_profile_token}`,camera.live_substream_profile_token));subLabel.append(subProfile);
+      const sourceMessage=document.createElement("p");sourceMessage.setAttribute("role","status");
+      const loadProfiles=document.createElement("button");loadProfiles.type="button";loadProfiles.textContent="Load advertised endpoints";
+      loadProfiles.addEventListener("click",async()=>{
+        try{
+          if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
+          const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source/profiles`,{method:"POST",body:JSON.stringify({camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,camera_brand:brand.value,device_service_url:service.value||null,clear_credentials:clearCredentials.checked})});
+          mainProfile.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+          if(result.profiles.length>1)mainProfile.prepend(new Option("Select main stream profile",""));
+          subProfile.replaceChildren(new Option("Use main stream for grid scaled by server",""),...result.profiles.map(profile=>new Option(profile.name,profile.token)));
+          mainProfile.value=camera.onvif_profile_token||result.profiles[0]?.token||"";subProfile.value=camera.live_substream_profile_token||"";service.value=result.device_service_url;
+          sourceMessage.textContent=`Found ${result.profiles.length} advertised ONVIF profile(s).`;
+        }catch(error){sourceMessage.textContent=error.message;}
+      });
+      const buildSourcePayload=()=>{
+        if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
+        const common={camera_brand:brand.value,device_service_url:service.value||null,clear_credentials:clearCredentials.checked};
+        if(address.value.trim()){
+          if(!mainProfile.value)throw new Error("Load advertised endpoints and select a main stream profile first");
+          return {...common,camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,onvif_profile_token:mainProfile.value,live_substream_profile_token:subProfile.value||null};
+        }
+        if(!directUrl.value)throw new Error("Enter a camera IP address or a direct RTSP URL");
+        return {...common,stream_url:directUrl.value.trim()};
+      };
+      const testSource=document.createElement("button");testSource.type="button";testSource.textContent="Test source connection";
+      testSource.addEventListener("click",async()=>{
+        try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source/test`,{method:"POST",body:JSON.stringify(buildSourcePayload())});sourceMessage.textContent=result.reachable?`Connection passed · ${result.video.codec} ${result.video.width||"?"}×${result.video.height||"?"}`:result.reason;}
+        catch(error){sourceMessage.textContent=error.message;}
+      });
+      const saveSource=document.createElement("button");saveSource.type="button";saveSource.textContent="Save tested source";
+      saveSource.addEventListener("click",async()=>{
+        try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source`,{method:"PUT",body:JSON.stringify(buildSourcePayload())});sourceMessage.textContent=`Source saved · ${result.video.codec} ${result.video.width||"?"}×${result.video.height||"?"}`;await refresh();}
+        catch(error){sourceMessage.textContent=error.message;}
+      });
+      sourcePanel.append(addressLabel,directLabel,usernameLabel,passwordLabel,confirmLabel,clearLabel,brandLabel,serviceLabel,loadProfiles,mainLabel,subLabel,testSource,saveSource,sourceMessage);editor.append(sourcePanel);
       const audioLabel=document.createElement("label");audioLabel.textContent="Enable audio recording and operator listening ";
       const audioEnabled=document.createElement("input");audioEnabled.type="checkbox";audioEnabled.checked=Boolean(camera.audio_enabled);audioEnabled.disabled=camera.audio_supported!==true;
       audioLabel.append(audioEnabled);
@@ -639,7 +1472,7 @@ function renderCameras(cameras) {
         const target=document.querySelector("#segment-list");
         target.replaceChildren(...result.events.map(event=>{
           const row=document.createElement("p");
-          row.textContent=new Date(event.source_event_at).toLocaleString()+" · "+event.source+" · "+event.status+" · pre-roll "+(event.pre_roll_complete ? "complete" : "incomplete/unknown")+(event.media_url ? " · playable clip available" : "");
+          row.textContent=formatDateTime(event.source_event_at)+" · "+event.source+" · "+event.status+" · pre-roll "+(event.pre_roll_complete ? "complete" : "incomplete/unknown")+(event.media_url ? " · playable clip available" : "");
           if(event.media_url) { const play=document.createElement("button"); play.type="button"; play.textContent="Play"; play.addEventListener("click",()=>{const player=document.querySelector("#playback");player.src=event.media_url;player.classList.remove("hidden");player.play().catch(()=>{});}); row.append(play); }
           return row;
         }));
@@ -660,7 +1493,7 @@ function renderCameras(cameras) {
           const found=await api(`/api/ai/events?${params}`);
           results.replaceChildren();
           const note=document.createElement("p");note.textContent=found.coverage_note;results.append(note);
-          for(const item of found.events){const row=document.createElement("p");row.textContent=`${new Date(item.first_seen_at).toLocaleString()} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version} · OpenVINO ${item.provider}`;
+          for(const item of found.events){const row=document.createElement("p");row.textContent=`${formatDateTime(item.first_seen_at)} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version} · OpenVINO ${item.provider}`;
             const play=document.createElement("button");play.type="button";play.textContent="Find playback";play.addEventListener("click",async()=>{
               const at=new Date(item.first_seen_at),begin=new Date(at.getTime()-30000),finish=new Date(at.getTime()+30000);
               const footage=await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments?from=${encodeURIComponent(begin.toISOString())}&to=${encodeURIComponent(finish.toISOString())}`);
@@ -693,7 +1526,7 @@ function renderCameras(cameras) {
         const substreamLabel=document.createElement("label");substreamLabel.textContent="Use validated lower-resolution stream ";const substream=document.createElement("input");substream.type="checkbox";substream.checked=config.use_substream;substreamLabel.append(substream);
         const zonesLabel=document.createElement("label");zonesLabel.textContent="AI zones (normalized rectangles; empty uses full frame)";const aiZones=document.createElement("textarea");aiZones.spellcheck=false;aiZones.value=JSON.stringify(config.zones);aiZones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';zonesLabel.append(aiZones);
         const saveAI=document.createElement("button");saveAI.type="button";saveAI.textContent="Save AI settings";
-        const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${new Date(config.last_success_at).toLocaleString()}`:""}${config.last_error?` · ${config.last_error}`:""}`;
+        const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${formatDateTime(config.last_success_at)}`:""}${config.last_error?` · ${config.last_error}`:""}`;
         saveAI.addEventListener("click",async()=>{try{const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:JSON.parse(aiZones.value||"[]"),inherit_group:inherit.checked})});aiStatus.textContent=`Status: ${saved.status} · settings ${saved.config_source}${saved.last_error?` · ${saved.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
         const coverageButton=document.createElement("button");coverageButton.type="button";coverageButton.textContent="Refresh analysis coverage";coverageButton.addEventListener("click",async()=>{try{const status=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai/coverage`);aiStatus.textContent=`Status: ${status.status} · ${status.intervals.length} analysis coverage intervals${status.last_error?` · ${status.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
         aiPanel.append(heading,availability,source,inheritLabel,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,zonesLabel,saveAI,coverageButton,aiStatus);
@@ -706,8 +1539,8 @@ function renderCameras(cameras) {
         const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/coverage`);
         coverageList.replaceChildren(...result.intervals.map(interval=>{
           const item=document.createElement("li");
-          const end=interval.ends_at ? new Date(interval.ends_at).toLocaleString() : "ongoing";
-          item.textContent=`${interval.coverage_kind}: ${interval.reason} · ${new Date(interval.starts_at).toLocaleString()} to ${end}`;
+          const end=interval.ends_at ? formatDateTime(interval.ends_at) : "ongoing";
+          item.textContent=`${interval.coverage_kind}: ${interval.reason} · ${formatDateTime(interval.starts_at)} to ${end}`;
           return item;
         }));
         if(!result.intervals.length){const item=document.createElement("li");item.textContent="No coverage transitions recorded yet.";coverageList.replaceChildren(item);}
@@ -736,11 +1569,23 @@ function renderCameras(cameras) {
         await refresh();
       } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
     });
-    const remove=document.createElement("button"); remove.type="button"; remove.textContent="Remove camera";
-    remove.addEventListener("click", async () => {
-      if (!window.confirm(`Remove ${camera.name} and its saved footage?`)) return;
-      try { await api(`/api/cameras/${encodeURIComponent(camera.id)}`, {method:"DELETE"}); await refresh(); }
-      catch (error) { document.querySelector("#camera-message").textContent=error.message; }
+    const archive=document.createElement("button"); archive.type="button"; archive.textContent=camera.archived_at?"Restore camera":"Archive camera";
+    archive.addEventListener("click", async () => {
+      const tiles=[...activeLiveTileCameraIds],ids=[...activeLiveCameraIds],size=activeLiveGridSize,focused=focusedLiveCameraId;
+      if(!camera.archived_at&&!window.confirm(`Archive ${camera.name}? Collection stops, and its recordings remain available for search and export.`))return;
+      try {
+        if(camera.archived_at)await api(`/api/cameras/${encodeURIComponent(camera.id)}/restore`,{method:"POST"});
+        else await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"DELETE"});
+        await refresh();
+        if(ids.includes(camera.id))startLiveViews(ids,latestCameras,focused,size,tiles);
+      } catch (error) { document.querySelector("#camera-message").textContent=error.message; }
+    });
+    const deleteFootage=document.createElement("button");deleteFootage.type="button";deleteFootage.textContent="Permanently delete archived footage";deleteFootage.disabled=!camera.archived_at;
+    deleteFootage.addEventListener("click",async()=>{
+      const confirmation=window.prompt(`This permanently deletes every recording for ${camera.name}. Type the camera name to confirm.`);
+      if(confirmation!==camera.name)return;
+      try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/footage`,{method:"DELETE",body:JSON.stringify({confirm_camera_name:confirmation})});document.querySelector("#camera-message").textContent=`Archived footage for ${camera.name} deleted.`;await refresh();}
+      catch(error){document.querySelector("#camera-message").textContent=error.message;}
     });
     const rotateLabel=document.createElement("label"); rotateLabel.textContent="Update stream credentials or URL";
     const rotateInput=document.createElement("input"); rotateInput.type="url"; rotateInput.autocomplete="off"; rotateInput.placeholder="rtsp://camera.example/stream";
@@ -752,7 +1597,7 @@ function renderCameras(cameras) {
         rotateInput.value=""; await refresh();
       } catch(error) { document.querySelector("#bulk-message").textContent=error.message; }
     });
-    card.append(mode,enabledLabel,pre,post,save,scheduleLabel,inheritLabel,scheduleText,loadSchedule,saveSchedule,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,aiEvents,aiConfigure,coverage,coverageList,remove,rotateLabel,rotateInput,rotate);
+    card.append(mode,enabledLabel,pre,post,save,scheduleLabel,inheritLabel,scheduleText,loadSchedule,saveSchedule,motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zonesLabel,zones,sensitivityLabel,sensitivity,configureMotion,events,aiEvents,aiConfigure,coverage,coverageList,archive,deleteFootage,rotateLabel,rotateInput,rotate);
     return card;
   }));
 }
@@ -774,11 +1619,11 @@ async function loadSegments(camera) {
     list.replaceChildren(...result.segments.map(segment => {
       const item=document.createElement("li");
       const play=document.createElement("button"); play.type="button";
-      play.textContent=`Play ${new Date(segment.starts_at).toLocaleString()} – ${new Date(segment.ends_at).toLocaleTimeString()} · ${(segment.size_bytes/1048576).toFixed(1)} MiB`;
+      play.textContent=`Play ${formatDateTime(segment.starts_at)} – ${formatDateTime(segment.ends_at).split(" ").slice(-1)[0]} · ${(segment.size_bytes/1048576).toFixed(1)} MiB`;
       play.addEventListener("click", () => { player.src=segment.media_url; player.classList.remove("hidden"); player.play().catch(() => { message.textContent="Interval loaded. Press Play to start playback."; }); });
       item.append(play);
       if(segment.preserved) {
-        const held=document.createElement("span"); held.textContent=segment.hold_expires_at ? ` Preserved until ${new Date(segment.hold_expires_at).toLocaleString()}.` : " Preserved until an administrator releases the hold."; item.append(held);
+        const held=document.createElement("span"); held.textContent=segment.hold_expires_at ? ` Preserved until ${formatDateTime(segment.hold_expires_at)}.` : " Preserved until an administrator releases the hold."; item.append(held);
         if(currentRole==="administrator") { const release=document.createElement("button"); release.type="button"; release.textContent="Release hold"; release.addEventListener("click",async()=>{try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments/${segment.id}/hold`,{method:"DELETE"});await loadSegments(camera);}catch(error){message.textContent=error.message;}}); item.append(release); }
       } else {
         const preserve=document.createElement("button"); preserve.type="button"; preserve.textContent="Preserve footage";
@@ -1043,41 +1888,79 @@ document.querySelector("#login-form").addEventListener("submit", async event => 
   catch (error) { message.textContent = error.message; }
 });
 document.querySelector("#live-start").addEventListener("click",()=>startLiveViews(selectedLiveCameras(),latestCameras));
-document.querySelector("#live-stop").addEventListener("click",()=>{stopLiveViews();document.querySelector("#live-message").textContent="Live viewing stopped.";});
+document.querySelector("#live-camera-picker").addEventListener("change",event=>{if(event.target.matches("[data-live-camera]"))markLiveViewDirty();});
+document.querySelector("#live-grid-size").addEventListener("change",event=>{
+  const size=Number(event.target.value);
+  if(activeLiveCameraIds.length>size){document.querySelector("#live-message").textContent=`The active grid has ${activeLiveCameraIds.length} cameras. Remove cameras before switching to ${size} feeds.`;event.target.value=String(activeLiveGridSize);return;}
+  if(activeLiveCameraIds.length)startLiveViews(activeLiveCameraIds,latestCameras,null,size);
+  else markLiveViewDirty();
+});
+document.querySelector("#live-stop").addEventListener("click",()=>{stopLiveViews();cachedLiveArrangement=null;document.querySelector("#live-message").textContent="Live viewing stopped.";});
 document.querySelector("#live-save-layout").addEventListener("click",async()=>{
-  const name=document.querySelector("#live-layout-name").value.trim(), camera_ids=selectedLiveCameras();
-  try {if(!name)throw new Error("Enter a layout name.");const result=await api(`/api/live/layouts/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({camera_ids})});document.querySelector("#live-message").textContent=`Saved “${result.name}” for your account.`;await refreshLiveLayouts();document.querySelector("#live-layouts").value=result.name;}
+  const name=document.querySelector("#live-layout-name").value.trim(), scope=document.querySelector("#live-layout-scope").value;
+  const size=Number(document.querySelector("#live-grid-size").value)||4;
+  let tiles;
+  const selected=new Set(selectedLiveCameras());
+  if(selected.size>size){document.querySelector("#live-message").textContent=`The ${size}-feed grid cannot save ${selected.size} selected cameras. Choose a larger grid or remove cameras.`;return;}
+  if(activeLiveTileCameraIds.length===size){tiles=currentLiveTiles(size).map(id=>id&&selected.has(id)?id:null);for(const id of selected)if(!tiles.includes(id)){const slot=tiles.indexOf(null);if(slot>=0)tiles[slot]=id;}}
+  else tiles=[...selected,...Array(size-selected.size).fill(null)];
+  const camera_ids=tiles.filter(Boolean);
+  try {if(!name)throw new Error("Enter a view name.");if(!camera_ids.length)throw new Error("Select at least one camera.");
+    const path=scope==="shared"?"shared-layouts":"layouts";
+    const result=await api(`/api/live/${path}/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({camera_ids,tile_camera_ids:tiles,grid_size:size})});
+    clearLiveViewDirty();document.querySelector("#live-message").textContent=`Saved ${scope} view “${result.name}”.`;await refreshLiveLayouts();document.querySelector("#live-layouts").value=`${scope}:${result.name}`;}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
 document.querySelector("#live-load-layout").addEventListener("click",async()=>{
-  const name=document.querySelector("#live-layouts").value;
-  try {if(!name)throw new Error("Choose a saved layout.");const {layouts}=await api("/api/live/layouts");const layout=layouts.find(item=>item.name===name);if(!layout)throw new Error("Saved layout is unavailable.");for(const input of document.querySelectorAll("[data-live-camera]"))input.checked=layout.camera_ids.includes(input.value);startLiveViews(layout.camera_ids,latestCameras);}
+  const key=document.querySelector("#live-layouts").value;
+  try {if(!key)throw new Error("Choose a saved view.");const layout=sidebarViews.find(item=>`${item.scope}:${item.name}`===key);if(!layout)throw new Error("Saved view is unavailable.");applySavedView(layout);}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
 document.querySelector("#live-delete-layout").addEventListener("click",async()=>{
-  const name=document.querySelector("#live-layouts").value;
-  try {if(!name)throw new Error("Choose a saved layout.");await api(`/api/live/layouts/${encodeURIComponent(name)}`,{method:"DELETE"});document.querySelector("#live-message").textContent=`Deleted “${name}”.`;await refreshLiveLayouts();}
+  const key=document.querySelector("#live-layouts").value;
+  try {if(!key)throw new Error("Choose a saved view.");const [scope,name]=key.split(":",2);if(scope==="shared"&&currentRole!=="administrator")throw new Error("Only administrators can delete shared views.");await api(`/api/live/${scope==="shared"?"shared-layouts":"layouts"}/${encodeURIComponent(name)}`,{method:"DELETE"});document.querySelector("#live-message").textContent=`Deleted “${name}”.`;await refreshLiveLayouts();}
   catch(error){document.querySelector("#live-message").textContent=error.message;}
 });
 window.addEventListener("pagehide",stopLiveViews);
+window.addEventListener("keydown",event=>{
+  if(event.key==="Escape"&&focusedLiveCameraId){event.preventDefault();startLiveViews(activeLiveCameraIds,latestCameras,null,activeLiveGridSize,[...activeLiveTileCameraIds]);}
+});
 document.querySelector("#playback-search").addEventListener("click",loadSynchronizedPlayback);
+document.querySelector("#playback-grid-size").addEventListener("change",event=>{
+  const size=Number(event.target.value);
+  document.querySelector("#playback-grid").style.setProperty("--playback-grid-columns",String(Math.ceil(Math.sqrt(size))));
+});
 document.querySelector("#playback-stop").addEventListener("click",()=>{stopSynchronizedPlayback();document.querySelector("#playback-status").textContent="Playback stopped.";});
+document.querySelector("#playback-play").addEventListener("click",startPlaybackClock);
+document.querySelector("#playback-pause").addEventListener("click",pausePlaybackClock);
+document.querySelector("#playback-prev-frame").addEventListener("click",()=>stepPlaybackFrame("previous").catch(error=>{document.querySelector("#playback-status").textContent=error.message;}));
+document.querySelector("#playback-next-frame").addEventListener("click",()=>stepPlaybackFrame("next").catch(error=>{document.querySelector("#playback-status").textContent=error.message;}));
+document.querySelector("#playback-prev-event").addEventListener("click",()=>navigatePlaybackEvent("previous"));
+document.querySelector("#playback-next-event").addEventListener("click",()=>navigatePlaybackEvent("next"));
+document.querySelector("#playback-mark-in").addEventListener("click",()=>setExportBoundary("start",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline?.start)));
+document.querySelector("#playback-mark-out").addEventListener("click",()=>setExportBoundary("end",Number(document.querySelector("#playback-cursor").dataset.time||playbackTimeline?.end)));
+document.querySelector("#playback-clear-marks").addEventListener("click",()=>{if(!playbackTimeline)return;setExportBoundary("start",playbackMilliseconds(playbackTimeline.start));setExportBoundary("end",playbackMilliseconds(playbackTimeline.end));});
+for(const field of ["start","end"]){document.querySelector(`#export-${field}`).addEventListener("change",()=>{updateExportFoldChoices(field);updatePlaybackExportPreview();});document.querySelector(`#export-${field}-fold`).addEventListener("change",updatePlaybackExportPreview);}
 document.querySelector("#playback-export").addEventListener("click",requestPlaybackExport);
+document.querySelector("#export-include-audio").addEventListener("change",updatePlaybackExportPreview);
+document.querySelector("#export-grid-audio-source").addEventListener("change",updatePlaybackExportPreview);
+document.querySelectorAll("[data-export-mode]").forEach(input=>input.addEventListener("change",updatePlaybackExportPreview));
 document.querySelector("#playback-cursor").addEventListener("input",event=>{
   if(!playbackTimeline)return;
   const start=playbackMilliseconds(playbackTimeline.start),end=playbackMilliseconds(playbackTimeline.end);
   const target=start+(end-start)*Number(event.target.value)/1000;
-  const playing=playbackViews.some(view=>!view.video.paused);
+  const playing=playbackIsPlaying;
   seekSynchronizedPlayback(target,playing);
+  if(playing)startPlaybackClock();
 });
-document.querySelector("#playback-rate").addEventListener("change",event=>{playbackViews.forEach(view=>{view.video.playbackRate=Number(event.target.value);});});
+document.querySelector("#playback-rate").addEventListener("change",event=>{playbackViews.forEach(view=>{view.video.playbackRate=Number(event.target.value);});if(playbackIsPlaying)startPlaybackClock();});
 window.addEventListener("pagehide",stopSynchronizedPlayback);
 window.addEventListener("pagehide",()=>{if(exportPollTimer)clearInterval(exportPollTimer);exportPollTimer=null;});
 if(incidentPollTimer) clearInterval(incidentPollTimer);
 incidentPollTimer=setInterval(()=>{if(currentRole)refreshIncidents();},15000);
 if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
-document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); document.querySelector("#webhook-list").replaceChildren(); document.querySelector("#webhook-deliveries").replaceChildren(); show("login"); });
+document.querySelector("#logout").addEventListener("click", async () => { stopLiveViews(); cachedLiveArrangement=null;workspaceRestored=false;await api("/api/auth/logout", { method:"POST" }); currentRole=null; document.querySelector("#incidents-list").replaceChildren(); document.querySelector("#webhook-list").replaceChildren(); document.querySelector("#webhook-deliveries").replaceChildren(); show("login"); });
 document.querySelector("#entra-login").addEventListener("click", async () => {
   const button=document.querySelector("#entra-login"); button.disabled=true; message.textContent="Starting Microsoft Entra sign-in…";
   try {

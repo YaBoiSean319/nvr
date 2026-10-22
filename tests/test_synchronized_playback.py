@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -87,6 +88,32 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         })
         self.assertEqual(too_long.status_code, 422)
 
+    def test_timeline_rejects_duplicate_cameras_and_reversed_ranges(self):
+        duplicate = self.client.post("/api/playback/timeline", json={
+            "camera_ids": [self.cameras[0], self.cameras[0]],
+            "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",
+        })
+        self.assertEqual(duplicate.status_code, 422)
+        reversed_range = self.client.post("/api/playback/timeline", json={
+            "camera_ids": [self.cameras[0]],
+            "start": "2026-10-20T12:02:00Z", "end": "2026-10-20T12:01:00Z",
+        })
+        self.assertEqual(reversed_range.status_code, 422)
+
+    def test_timeline_keeps_a_camera_with_no_indexed_footage_visible(self):
+        camera_id = str(uuid.uuid4())
+        with connect() as db:
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')", (camera_id, "Empty camera"))
+        response = self.client.post("/api/playback/timeline", json={
+            "camera_ids": [camera_id], "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        camera = response.json()["cameras"][0]
+        self.assertEqual(camera["name"], "Empty camera")
+        self.assertEqual(camera["segments"], [])
+        self.assertTrue(camera["gaps"])
+        self.assertEqual(camera["gaps"][0]["state"], "missing")
+
     def test_snapshot_is_authenticated_bounded_to_interval_and_returns_jpeg(self):
         with connect() as db:
             row = db.execute("SELECT id,relative_path FROM recording_segments WHERE camera_id=? ORDER BY id LIMIT 1", (self.cameras[0],)).fetchone()
@@ -104,6 +131,13 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["content-type"], "image/jpeg")
         self.assertEqual(response.content, b"\xff\xd8jpeg\xff\xd9")
+        self.assertEqual(response.headers["x-source-time"], "2026-10-20T12:00:30+00:00")
+        self.assertRegex(response.headers["x-audit-reference"], r"^audit-[0-9]+$")
+        with connect() as db:
+            audit = db.execute("SELECT action,resource_id,details_json FROM audit_log WHERE id=?", (int(response.headers["x-audit-reference"].split("-")[1]),)).fetchone()
+        self.assertEqual(audit["action"], "snapshot_downloaded")
+        self.assertEqual(audit["resource_id"], str(segment))
+        self.assertEqual(json.loads(audit["details_json"])["source_time"], response.headers["x-source-time"])
         self.assertTrue(path.is_file())
         self.assertIn("-ss", ffmpeg.await_args.args)
         outside = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{segment}/snapshot?at=2026-10-20T12:01:00Z")
@@ -111,6 +145,47 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         app.dependency_overrides.pop(current_user, None)
         try:
             denied = self.client.get(url)
+        finally:
+            app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "viewer", "role": "operator"}
+        self.assertEqual(denied.status_code, 401)
+
+    def test_frame_neighbor_uses_decoded_frame_timestamps_and_protects_recording(self):
+        with connect() as db:
+            row = db.execute("SELECT id,relative_path FROM recording_segments WHERE camera_id=? ORDER BY id LIMIT 1", (self.cameras[0],)).fetchone()
+        path = Path(os.environ["NVR_RECORDINGS_PATH"]) / row["relative_path"]
+        ffprobe = Mock(returncode=0, stdout='{"frames":[{"best_effort_timestamp_time":"0.000"},{"best_effort_timestamp_time":"20.000"},{"best_effort_timestamp_time":"20.040"}]}')
+        def protected_probe(*args, **kwargs):
+            self.assertFalse(unlink_if_unleased(path), "cleanup must not unlink footage while ffprobe reads frame timestamps")
+            return ffprobe
+        with patch("app.main.shutil.which", return_value="/usr/bin/ffprobe"), patch("app.main.subprocess.run", side_effect=protected_probe) as probe:
+            previous = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:20.020Z&direction=previous")
+            following = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:20.020Z&direction=next")
+        self.assertEqual(previous.status_code, 200, previous.text)
+        self.assertEqual(previous.json()["at"], "2026-10-20T12:00:20+00:00")
+        self.assertEqual(following.status_code, 200, following.text)
+        self.assertEqual(following.json()["at"], "2026-10-20T12:00:20.040000+00:00")
+        self.assertEqual(probe.call_count, 2)
+        self.assertIn("-read_intervals", probe.call_args.args[0])
+        self.assertTrue(path.is_file())
+
+    def test_frame_neighbor_reports_no_neighbor_at_recording_boundary(self):
+        with connect() as db:
+            row = db.execute("SELECT id FROM recording_segments WHERE camera_id=? ORDER BY id LIMIT 1", (self.cameras[0],)).fetchone()
+        result = Mock(returncode=0, stdout='{"frames":[{"best_effort_timestamp_time":"0.000"}]}')
+        with patch("app.main.shutil.which", return_value="/usr/bin/ffprobe"), patch("app.main.subprocess.run", return_value=result):
+            response = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:00Z&direction=previous")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "No adjacent frame exists in this interval")
+
+    def test_frame_neighbor_rejects_out_of_segment_time_and_requires_authentication(self):
+        with connect() as db:
+            segment = db.execute("SELECT id FROM recording_segments WHERE camera_id=? ORDER BY id LIMIT 1", (self.cameras[0],)).fetchone()["id"]
+        base = f"/api/cameras/{self.cameras[0]}/segments/{segment}/frame-neighbor"
+        outside = self.client.get(f"{base}?at=2026-10-20T12:01:00Z&direction=next")
+        self.assertEqual(outside.status_code, 422)
+        app.dependency_overrides.pop(current_user, None)
+        try:
+            denied = self.client.get(f"{base}?at=2026-10-20T12:00:30Z&direction=next")
         finally:
             app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "viewer", "role": "operator"}
         self.assertEqual(denied.status_code, 401)

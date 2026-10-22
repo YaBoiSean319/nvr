@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 from pathlib import Path
 
@@ -71,15 +72,49 @@ def initialize() -> None:
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT NOT NULL COLLATE NOCASE,
                 camera_ids_json TEXT NOT NULL,
+                grid_size INTEGER NOT NULL DEFAULT 4,
+                tile_camera_ids_json TEXT,
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 PRIMARY KEY(user_id,name)
             );
+            CREATE TABLE IF NOT EXISTS shared_viewer_layouts (
+                name TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
+                camera_ids_json TEXT NOT NULL,
+                grid_size INTEGER NOT NULL,
+                tile_camera_ids_json TEXT NOT NULL,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS live_workspace_states (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                camera_ids_json TEXT NOT NULL,
+                grid_size INTEGER NOT NULL,
+                tile_camera_ids_json TEXT NOT NULL,
+                sidebar_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (sidebar_collapsed IN (0,1)),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS site_display_settings (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                time_zone TEXT NOT NULL DEFAULT 'UTC',
+                date_format TEXT NOT NULL DEFAULT 'friendly',
+                clock_format TEXT NOT NULL DEFAULT '12',
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            INSERT OR IGNORE INTO site_display_settings(singleton_id,time_zone,date_format,clock_format)
+                VALUES(1,'UTC','friendly','12');
             CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
             CREATE TABLE IF NOT EXISTS cameras (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 onvif_uuid TEXT,
                 group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL,
+                camera_ip TEXT,
+                camera_brand TEXT NOT NULL DEFAULT 'auto',
+                device_service_url TEXT,
+                onvif_profile_token TEXT,
+                live_substream_profile_token TEXT,
+                archived_at TEXT,
                 stream_url_ciphertext BLOB NOT NULL,
                 live_substream_url_ciphertext BLOB,
                 audio_supported INTEGER CHECK (audio_supported IN (0,1)),
@@ -108,6 +143,14 @@ def initialize() -> None:
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS camera_group_memberships (
+                group_id TEXT NOT NULL REFERENCES camera_groups(id) ON DELETE CASCADE,
+                camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY(group_id,camera_id)
+            );
+            CREATE INDEX IF NOT EXISTS camera_group_memberships_camera_idx
+                ON camera_group_memberships(camera_id,group_id);
             CREATE TABLE IF NOT EXISTS recording_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
@@ -143,6 +186,10 @@ def initialize() -> None:
                 id TEXT PRIMARY KEY,
                 requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 camera_ids_json TEXT NOT NULL,
+                output_modes_json TEXT NOT NULL DEFAULT '["individual","grid"]',
+                display_settings_json TEXT NOT NULL DEFAULT '{"time_zone":"UTC","date_format":"friendly","clock_format":"12"}',
+                tile_camera_ids_json TEXT NOT NULL DEFAULT '[]',
+                grid_resolution TEXT NOT NULL DEFAULT '1080p',
                 requested_start TEXT NOT NULL,
                 requested_end TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','cancelled')),
@@ -150,6 +197,10 @@ def initialize() -> None:
                 output_relative_path TEXT,
                 error TEXT,
                 cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+                include_audio INTEGER NOT NULL DEFAULT 0 CHECK (include_audio IN (0,1)),
+                audio_camera_id TEXT,
+                progress INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+                expires_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 completed_at TEXT
@@ -354,6 +405,23 @@ def initialize() -> None:
         for row in db.execute("SELECT id FROM incident_events WHERE event_id IS NULL").fetchall():
             db.execute("UPDATE incident_events SET event_id=? WHERE id=?", (str(uuid.uuid4()), row["id"]))
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS incident_events_event_id_idx ON incident_events(event_id)")
+        export_columns = {row[1] for row in db.execute("PRAGMA table_info(exports)")}
+        if "output_modes_json" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN output_modes_json TEXT NOT NULL DEFAULT '[\"individual\",\"grid\"]'")
+        if "display_settings_json" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN display_settings_json TEXT NOT NULL DEFAULT '{\"time_zone\":\"UTC\",\"date_format\":\"friendly\",\"clock_format\":\"12\"}'")
+        if "tile_camera_ids_json" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN tile_camera_ids_json TEXT NOT NULL DEFAULT '[]'")
+        if "grid_resolution" not in export_columns:
+            db.execute("ALTER TABLE exports ADD COLUMN grid_resolution TEXT NOT NULL DEFAULT '1080p'")
+        for name, definition in (
+            ("include_audio", "INTEGER NOT NULL DEFAULT 0 CHECK (include_audio IN (0,1))"),
+            ("audio_camera_id", "TEXT"),
+            ("progress", "INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100)"),
+            ("expires_at", "TEXT"),
+        ):
+            if name not in export_columns:
+                db.execute(f"ALTER TABLE exports ADD COLUMN {name} {definition}")
         ai_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_camera_settings)")}
         if ai_columns and "config_override" not in ai_columns:
             db.execute("ALTER TABLE ai_camera_settings ADD COLUMN config_override INTEGER NOT NULL DEFAULT 0 CHECK (config_override IN (0,1))")
@@ -386,6 +454,16 @@ def initialize() -> None:
             db.execute("ALTER TABLE cameras ADD COLUMN onvif_uuid TEXT")
         if "group_id" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN group_id TEXT REFERENCES camera_groups(id) ON DELETE SET NULL")
+        for name, definition in (
+            ("camera_ip", "TEXT"),
+            ("camera_brand", "TEXT NOT NULL DEFAULT 'auto'"),
+            ("device_service_url", "TEXT"),
+            ("onvif_profile_token", "TEXT"),
+            ("live_substream_profile_token", "TEXT"),
+            ("archived_at", "TEXT"),
+        ):
+            if name not in camera_columns:
+                db.execute(f"ALTER TABLE cameras ADD COLUMN {name} {definition}")
         if "live_substream_url_ciphertext" not in camera_columns:
             db.execute("ALTER TABLE cameras ADD COLUMN live_substream_url_ciphertext BLOB")
         if "audio_supported" not in camera_columns:
@@ -451,4 +529,26 @@ def initialize() -> None:
                 db.execute("ALTER TABLE sessions ADD COLUMN session_id TEXT")
                 db.execute("UPDATE sessions SET session_id=lower(hex(randomblob(16))) WHERE session_id IS NULL")
                 db.execute("CREATE UNIQUE INDEX sessions_id_idx ON sessions(session_id)")
+        db.execute(
+            "INSERT OR IGNORE INTO camera_group_memberships(group_id,camera_id) "
+            "SELECT group_id,id FROM cameras WHERE group_id IS NOT NULL"
+        )
+        layout_columns = {row[1] for row in db.execute("PRAGMA table_info(viewer_layouts)")}
+        if "grid_size" not in layout_columns:
+            db.execute("ALTER TABLE viewer_layouts ADD COLUMN grid_size INTEGER NOT NULL DEFAULT 4")
+        if "tile_camera_ids_json" not in layout_columns:
+            db.execute("ALTER TABLE viewer_layouts ADD COLUMN tile_camera_ids_json TEXT")
+        for layout in db.execute("SELECT user_id,name,camera_ids_json,grid_size FROM viewer_layouts WHERE tile_camera_ids_json IS NULL").fetchall():
+            try:
+                camera_ids = json.loads(layout["camera_ids_json"])
+                if not isinstance(camera_ids, list):
+                    camera_ids = []
+            except (TypeError, json.JSONDecodeError):
+                camera_ids = []
+            grid_size = 1 if len(camera_ids) <= 1 else 4 if len(camera_ids) <= 4 else 9 if len(camera_ids) <= 9 else 16
+            tile_ids = [*camera_ids[:grid_size], *([None] * max(0, grid_size - len(camera_ids)))]
+            db.execute(
+                "UPDATE viewer_layouts SET grid_size=?,tile_camera_ids_json=? WHERE user_id=? AND name=?",
+                (grid_size, json.dumps(tile_ids), layout["user_id"], layout["name"]),
+            )
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_provider_identity_idx ON users(provider_issuer, provider_subject) WHERE provider_issuer IS NOT NULL AND provider_subject IS NOT NULL")

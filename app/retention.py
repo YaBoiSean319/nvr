@@ -45,6 +45,17 @@ def unlink_if_unleased(path: Path) -> bool:
         return True
 
 
+def unlink_many_if_unleased(paths: list[Path]) -> bool:
+    """Delete a camera's footage only when none of it is currently leased."""
+    resolved = list(dict.fromkeys(path.resolve() for path in paths))
+    with _lease_lock:
+        if any(path in _leased_paths for path in resolved):
+            return False
+        for path in resolved:
+            path.unlink(missing_ok=True)
+    return True
+
+
 def effective_retention(db, camera_id: str) -> tuple[int, str]:
     camera = db.execute("SELECT group_id FROM cameras WHERE id=?", (camera_id,)).fetchone()
     if camera is None:

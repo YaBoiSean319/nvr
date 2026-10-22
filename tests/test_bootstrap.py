@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+from tests.test_support import TEST_CAMERA_PASSWORD, TEST_OIDC_CLIENT_SECRET, TEST_OIDC_SESSION_SECRET, TEST_PASSWORD, TEST_URL_TOKEN
+
 OIDC_TEST_TENANT = "11111111-1111-4111-8111-111111111111"
 
 
@@ -50,53 +52,53 @@ class BootstrapTests(unittest.TestCase):
             "NVR_PUBLIC_URL":"https://nvr.example.test",
             "NVR_OIDC_TENANT_ID":OIDC_TEST_TENANT,
             "NVR_OIDC_CLIENT_ID":"client-id",
-            "NVR_OIDC_CLIENT_SECRET":"client-secret",
-            "NVR_OIDC_SESSION_SECRET":"test-session-signing-secret-long-enough",
+            "NVR_OIDC_CLIENT_SECRET":TEST_OIDC_CLIENT_SECRET,
+            "NVR_OIDC_SESSION_SECRET":TEST_OIDC_SESSION_SECRET,
             "NVR_OIDC_OPERATOR_ROLES":operator_roles,
         })
 
     def test_bootstrap_closes_setup_and_authenticates_admin(self):
         self.assertEqual(self.client.get("/api/setup/status").json(), {"setup_required": True})
-        response = self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        response = self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["role"], "administrator")
         self.assertEqual(self.client.get("/api/setup/status").json(), {"setup_required": False})
         self.assertEqual(self.client.get("/api/system/status").status_code, 200)
-        self.assertEqual(self.client.post("/api/setup/admin", json={"username":"second-admin", "password":"AnotherStrongPass2026"}).status_code, 409)
+        self.assertEqual(self.client.post("/api/setup/admin", json={"username":"second-admin", "password":TEST_PASSWORD}).status_code, 409)
 
     def test_ip_range_discovery_is_bounded_and_reports_scan_targets(self):
         from app.discovery import DiscoveredDevice, DiscoveryResult
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
-        result=DiscoveryResult((DiscoveredDevice("ipscan:" + "a" * 32, ("http://10.45.50.25:80/onvif/device_service",), ()),), 0, 254)
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
+        result=DiscoveryResult((DiscoveredDevice("ipscan:" + "a" * 32, ("http://198.51.100.25:80/onvif/device_service",), ()),), 0, 254)
         with patch("app.main.discover_onvif_ip_range", new=AsyncMock(return_value=result)) as scan:
-            response=self.client.post("/api/discovery/scan",json={"ip_range":"10.45.50.0/24"})
+            response=self.client.post("/api/discovery/scan",json={"ip_range":"192.0.2.0/24"})
         self.assertEqual(response.status_code,200)
         self.assertEqual(response.json()["scan_mode"],"ip_range")
         self.assertEqual(response.json()["targets_scanned"],254)
         self.assertEqual(response.json()["discovered_count"],1)
-        scan.assert_awaited_once_with("10.45.50.0/24")
+        scan.assert_awaited_once_with("192.0.2.0/24")
 
     def test_onvif_profiles_require_admin_and_return_only_profile_labels(self):
         from app.onvif_stream import OnvifStreamProfile
-        self.assertEqual(self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"10.45.50.25"}).status_code,401)
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
-        with patch("app.main.list_camera_stream_profiles",new=AsyncMock(return_value=("http://10.45.50.25:80/onvif/device_service",(OnvifStreamProfile("profile1","Main stream"),)))):
-            response=self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"10.45.50.25","camera_brand":"hikvision","camera_username":"admin","camera_password":"example"})
+        self.assertEqual(self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"198.51.100.25"}).status_code,401)
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
+        with patch("app.main.list_camera_stream_profiles",new=AsyncMock(return_value=("http://198.51.100.25:80/onvif/device_service",(OnvifStreamProfile("profile1","Main stream"),)))):
+            response=self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"198.51.100.25","camera_brand":"hikvision","camera_username":"admin","camera_password":TEST_CAMERA_PASSWORD})
         self.assertEqual(response.status_code,200)
         self.assertEqual(response.json()["profiles"],[{"token":"profile1","name":"Main stream"}])
         self.assertNotIn("example",response.text)
 
     def test_admin_can_capture_and_download_bounded_redacted_diagnostics(self):
         self.assertEqual(self.client.get("/api/diagnostics/status").status_code, 401)
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         self.assertEqual(self.client.get("/api/diagnostics/status").json()["enabled"], False)
         self.assertEqual(self.client.post("/api/diagnostics/capture", json={"enabled":True,"hours":25}).status_code, 422)
         enabled=self.client.post("/api/diagnostics/capture",json={"enabled":True,"hours":2})
         self.assertEqual(enabled.status_code,200)
         from app.diagnostics import record_event
         record_event("discovery_scan",outcome="completed",elapsed_ms=123,interface_configured=True,
-                     discovered_count=0,ignored_responses=2,ip="192.168.1.30",url="rtsp://user:secret@host/stream",
-                     camera_id="private-camera-id",password="secret")
+                     discovered_count=0,ignored_responses=2,ip="198.51.100.30",url=f"rtsp://user:{TEST_CAMERA_PASSWORD}@host/stream",
+                     camera_id="fixture-camera-id",password=TEST_CAMERA_PASSWORD)
         bundle=self.client.get("/api/diagnostics/bundle")
         self.assertEqual(bundle.status_code,200)
         self.assertIn("attachment",bundle.headers["content-disposition"])
@@ -104,37 +106,37 @@ class BootstrapTests(unittest.TestCase):
         text=bundle.text
         self.assertIn('"discovered_count": 0',text)
         self.assertIn('"ignored_responses": 2',text)
-        for secret in ("192.168.1.30","rtsp://","private-camera-id","secret","password"):
-            self.assertNotIn(secret,text)
+        for secret in ("198.51.100.30", "rtsp://", "fixture-camera-id", TEST_CAMERA_PASSWORD, "password"):
+            self.assertNotIn(secret, text)
         self.assertEqual(self.client.post("/api/diagnostics/capture",json={"enabled":False,"hours":2}).json()["enabled"],False)
 
     def test_operator_cannot_manage_diagnostics(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         from app.security import hash_password
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
-            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)",("operator1",hash_password("OperatorPassword2026"),"operator"))
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)",("operator1",hash_password(TEST_PASSWORD),"operator"))
         self.client.post("/api/auth/logout")
-        self.client.post("/api/auth/login",json={"username":"operator1","password":"OperatorPassword2026"})
+        self.client.post("/api/auth/login",json={"username":"operator1","password":TEST_PASSWORD})
         self.assertEqual(self.client.get("/api/diagnostics/status").status_code,403)
         self.assertEqual(self.client.post("/api/diagnostics/capture",json={"enabled":True,"hours":2}).status_code,403)
         self.assertEqual(self.client.get("/api/diagnostics/bundle").status_code,403)
 
     def test_api_denies_status_and_invalid_credentials(self):
         self.assertEqual(self.client.get("/api/system/status").status_code, 401)
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         self.client.post("/api/auth/logout")
         bad = self.client.post("/api/auth/login", json={"username":"local-admin", "password":"wrong"})
         self.assertEqual(bad.status_code, 401)
 
     def test_restart_preserves_account_and_health(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         self.client_ctx.__exit__(None, None, None)
         from app.main import app
         with TestClient(app) as restarted:
             self.assertEqual(restarted.get("/healthz").status_code, 200)
             self.assertEqual(restarted.get("/api/setup/status").json(), {"setup_required": False})
             self.assertEqual(restarted.get("/api/system/status").status_code, 401)
-            self.assertEqual(restarted.post("/api/auth/login", json={"username":"local-admin", "password":"StrongPassphrase2026"}).status_code, 200)
+            self.assertEqual(restarted.post("/api/auth/login", json={"username":"local-admin", "password":TEST_PASSWORD}).status_code, 200)
 
     def test_password_policy_and_username_validation(self):
         self.assertEqual(self.client.post("/api/setup/admin", json={"username":"a", "password":"short"}).status_code, 422)
@@ -147,18 +149,18 @@ class BootstrapTests(unittest.TestCase):
         os.environ["NVR_SESSION_HOURS"]="0"
         self.assertEqual(_session_hours(),1)
         os.environ["NVR_SESSION_HOURS"]="1"
-        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             db.execute("UPDATE sessions SET expires_at='2000-01-01T00:00:00+00:00'")
         self.assertEqual(self.client.get("/api/auth/me").status_code,401)
 
     def test_operator_can_view_but_cannot_change_camera_configuration(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         from app.security import hash_password
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
-            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)", ("operator1", hash_password("OperatorPassword2026"), "operator"))
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)", ("operator1", hash_password(TEST_PASSWORD), "operator"))
         self.client.post("/api/auth/logout")
-        self.assertEqual(self.client.post("/api/auth/login", json={"username":"operator1", "password":"OperatorPassword2026"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username":"operator1", "password":TEST_PASSWORD}).status_code, 200)
         self.assertEqual(self.client.get("/api/cameras").status_code, 200)
         self.assertEqual(self.client.get("/api/system/status").status_code, 403)
         self.assertEqual(self.client.post("/api/cameras/test", json={"stream_url":"rtsp://camera/stream"}).status_code, 403)
@@ -174,8 +176,8 @@ class BootstrapTests(unittest.TestCase):
     def test_onvif_discovery_candidates_are_reviewed_deduplicated_and_added_explicitly(self):
         from unittest.mock import AsyncMock, patch
         from app.discovery import DiscoveredDevice, DiscoveryResult
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
-        device=DiscoveredDevice("5a30e8d2-1108-4c1e-9b57-76a30b1d8087", ("http://10.1.2.30:80/onvif/device_service",), ("onvif://www.onvif.org/name/Loading Dock",))
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
+        device=DiscoveredDevice("5a30e8d2-1108-4c1e-9b57-76a30b1d8087", ("http://198.51.100.30:80/onvif/device_service",), ("onvif://www.onvif.org/name/Loading Dock",))
         with patch("app.main.discover_onvif", new=AsyncMock(return_value=DiscoveryResult((device,),1))):
             first=self.client.post("/api/discovery/scan",json={"timeout_seconds":1})
         self.assertEqual(first.status_code,200,first.text)
@@ -186,16 +188,16 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/cameras").json()["cameras"],[])
 
         with patch("app.main.probe_stream",new=AsyncMock(return_value={"reachable":False,"reason":"Camera stream could not be opened"})):
-            failed=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":"rtsp://10.1.2.30/stream"})
+            failed=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":"rtsp://198.51.100.30/stream"})
         self.assertEqual(failed.status_code,422)
         failed_candidate=self.client.get("/api/discovery/candidates").json()["candidates"][0]
         self.assertEqual(failed_candidate["capabilities"]["video_stream"],"unavailable")
 
         capability={"reachable":True,"audio":False,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream",new=AsyncMock(return_value=capability)):
-            added=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":"rtsp://user:secret@10.1.2.30/stream"})
+            added=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":f"rtsp://user:{TEST_CAMERA_PASSWORD}@198.51.100.30/stream"})
         self.assertEqual(added.status_code,201,added.text)
-        self.assertNotIn("secret",added.text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD,added.text)
         added_candidate=self.client.get("/api/discovery/candidates").json()["candidates"][0]
         self.assertEqual(added_candidate["capabilities"]["video_stream"],"supported")
         self.assertEqual(added_candidate["capabilities"]["audio"],"unsupported")
@@ -208,15 +210,15 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(candidates[0]["linked_camera_id"],added.json()["id"])
         self.assertEqual(candidates[0]["capabilities"]["video_stream"],"supported")
         self.assertEqual(candidates[0]["capabilities"]["audio"],"unsupported")
-        self.assertEqual(self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Duplicate","stream_url":"rtsp://10.1.2.30/stream"}).status_code,409)
+        self.assertEqual(self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Duplicate","stream_url":"rtsp://198.51.100.30/stream"}).status_code,409)
 
     def test_onvif_probe_parser_rejects_unsafe_service_urls_and_malformed_xml(self):
         from app.discovery import parse_probe_response
-        payload=b'''<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:a="http://www.w3.org/2005/08/addressing"><s:Body><d:ProbeMatches><d:ProbeMatch><a:EndpointReference><a:Address>urn:uuid:5a30e8d2-1108-4c1e-9b57-76a30b1d8087</a:Address></a:EndpointReference><d:XAddrs>http://user:secret@10.1.2.30/onvif?token=hidden ftp://10.1.2.30/service</d:XAddrs><d:Scopes>onvif://www.onvif.org/name/Loading%20Dock?secret=hidden https://evil.example/private</d:Scopes></d:ProbeMatch></d:ProbeMatches></s:Body></s:Envelope>'''
+        payload=f'''<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:a="http://www.w3.org/2005/08/addressing"><s:Body><d:ProbeMatches><d:ProbeMatch><a:EndpointReference><a:Address>urn:uuid:5a30e8d2-1108-4c1e-9b57-76a30b1d8087</a:Address></a:EndpointReference><d:XAddrs>http://fixture-user:{TEST_CAMERA_PASSWORD}@198.51.100.30/onvif?token={TEST_URL_TOKEN} ftp://198.51.100.30/service</d:XAddrs><d:Scopes>onvif://www.onvif.org/name/Loading%20Dock?fixture={TEST_URL_TOKEN} https://evil.example/private</d:Scopes></d:ProbeMatch></d:ProbeMatches></s:Body></s:Envelope>'''.encode()
         parsed=parse_probe_response(payload)
         self.assertEqual(len(parsed),1)
         self.assertEqual(parsed[0].device_uuid,"5a30e8d2-1108-4c1e-9b57-76a30b1d8087")
-        self.assertEqual(parsed[0].service_urls,("http://10.1.2.30/onvif",))
+        self.assertEqual(parsed[0].service_urls,("http://198.51.100.30/onvif",))
         self.assertEqual(parsed[0].scopes,("onvif://www.onvif.org/name/Loading%20Dock",))
         self.assertEqual(parse_probe_response(b"<!DOCTYPE foo><foo/>") ,[])
         self.assertEqual(parse_probe_response(b"<broken"),[])
@@ -224,13 +226,13 @@ class BootstrapTests(unittest.TestCase):
     def test_discovered_identity_links_existing_manual_camera_without_losing_footage(self):
         from unittest.mock import AsyncMock, patch
         from app.discovery import DiscoveredDevice, DiscoveryResult
-        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         capability={"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream",new=AsyncMock(return_value=capability)):
-            camera=self.client.post("/api/cameras",json={"name":"Existing manual camera","stream_url":"rtsp://10.1.2.40/stream","recording_mode":"disabled"}).json()
+            camera=self.client.post("/api/cameras",json={"name":"Existing manual camera","stream_url":"rtsp://198.51.100.40/stream","recording_mode":"disabled"}).json()
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",(camera["id"],f"{camera['id']}/kept.mp4","2026-10-20T12:00:00+00:00","2026-10-20T12:01:00+00:00",123))
-        device=DiscoveredDevice("9d153a1f-d693-4380-8410-0b2c47011ee2",("http://10.1.2.40/onvif/device_service",),())
+        device=DiscoveredDevice("9d153a1f-d693-4380-8410-0b2c47011ee2",("http://198.51.100.40/onvif/device_service",),())
         with patch("app.main.discover_onvif",new=AsyncMock(return_value=DiscoveryResult((device,),0))):
             candidates=self.client.post("/api/discovery/scan",json={"timeout_seconds":0.5}).json()["candidates"]
         linked=self.client.post(f"/api/discovery/candidates/{candidates[0]['id']}/link",json={"camera_id":camera["id"]})
@@ -241,27 +243,27 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM recording_segments WHERE camera_id=?",(camera["id"],)).fetchone()[0],1)
             self.assertEqual(db.execute("SELECT onvif_uuid FROM cameras WHERE id=?",(camera["id"],)).fetchone()[0],device.device_uuid)
 
-    def test_camera_import_preview_reports_duplicates_and_row_errors_without_secrets(self):
-        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+    def test_camera_import_preview_reports_duplicates_and_row_errors_without_credentials(self):
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         identity="bc1b3433-82bd-4bd9-a0a6-6d78e227553a"
         text=("name,stream_url,recording_mode,group_name,onvif_uuid\n"
-              f"Loading Dock,rtsp://operator:supersecret@10.1.2.10/stream,disabled,East,{identity}\n"
-              f"Loading Dock,rtsp://10.1.2.11/stream,disabled,East,{identity}\n"
-              "Broken,http://10.1.2.12/video,continuous,East,\n")
+              f"Loading Dock,rtsp://operator:{TEST_CAMERA_PASSWORD}@198.51.100.10/stream,disabled,East,{identity}\n"
+              f"Loading Dock,rtsp://198.51.100.11/stream,disabled,East,{identity}\n"
+              "Broken,http://198.51.100.12/video,continuous,East,\n")
         response=self.client.post("/api/cameras/import/preview",json={"csv_text":text})
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual([row["status"] for row in response.json()["rows"]],["accepted","duplicate","invalid"])
-        self.assertNotIn("supersecret",response.text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD,response.text)
         self.assertNotIn("rtsp://",response.text)
         self.assertEqual(response.json()["accepted_count"],1)
         self.assertEqual(self.client.get("/api/cameras").json()["cameras"],[])
 
     def test_camera_import_apply_groups_successful_rows_and_reports_probe_failure(self):
         from unittest.mock import AsyncMock, patch
-        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         text=("name,stream_url,recording_mode,group_name\n"
-              "North,rtsp://10.1.2.10/stream,disabled,North Wing\n"
-              "South,rtsp://10.1.2.11/unavailable,continuous,South Wing\n")
+              "North,rtsp://198.51.100.10/stream,disabled,North Wing\n"
+              "South,rtsp://198.51.100.11/unavailable,continuous,South Wing\n")
         async def probe(url):
             if "unavailable" in url:
                 return {"reachable":False,"reason":"Camera stream could not be opened"}
@@ -285,35 +287,35 @@ class BootstrapTests(unittest.TestCase):
     def test_camera_credential_rotation_validates_before_replacing_credentials_and_preserves_identity(self):
         from unittest.mock import AsyncMock, patch
         from app.credentials import decrypt
-        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         good={"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream",new=AsyncMock(return_value=good)):
-            created=self.client.post("/api/cameras",json={"name":"Rotating","stream_url":"rtsp://old:oldsecret@10.1.2.20/stream","recording_mode":"disabled"}).json()
+            created=self.client.post("/api/cameras",json={"name":"Rotating","stream_url":f"rtsp://old:{TEST_CAMERA_PASSWORD}@198.51.100.20/stream","recording_mode":"disabled"}).json()
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",(created["id"],f"{created['id']}/kept.mp4","2026-10-20T12:00:00+00:00","2026-10-20T12:01:00+00:00",123))
         with patch("app.main.probe_stream",new=AsyncMock(return_value={"reachable":False,"reason":"Camera stream could not be opened"})):
-            rejected=self.client.post(f"/api/cameras/{created['id']}/credentials",json={"stream_url":"rtsp://bad:newsecret@10.1.2.20/stream"})
+            rejected=self.client.post(f"/api/cameras/{created['id']}/credentials",json={"stream_url":f"rtsp://bad:{TEST_CAMERA_PASSWORD}@198.51.100.20/stream"})
         self.assertEqual(rejected.status_code,422)
-        self.assertNotIn("newsecret",rejected.text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD,rejected.text)
         with patch("app.main.probe_stream",new=AsyncMock(return_value=good)), patch.object(self.client_ctx.app.state.recorders,"sync_camera",new=AsyncMock()):
-            rotated=self.client.post(f"/api/cameras/{created['id']}/credentials",json={"stream_url":"rtsp://new:newsecret@10.1.2.20/stream"})
+            rotated=self.client.post(f"/api/cameras/{created['id']}/credentials",json={"stream_url":f"rtsp://new:{TEST_CAMERA_PASSWORD}@198.51.100.20/stream"})
         self.assertEqual(rotated.status_code,200,rotated.text)
         self.assertEqual(rotated.json()["id"],created["id"])
-        self.assertNotIn("newsecret",rotated.text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD,rotated.text)
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             stored=db.execute("SELECT stream_url_ciphertext FROM cameras WHERE id=?",(created["id"],)).fetchone()[0]
             footage=db.execute("SELECT COUNT(*) FROM recording_segments WHERE camera_id=?",(created["id"],)).fetchone()[0]
-        self.assertEqual(decrypt(stored),"rtsp://new:newsecret@10.1.2.20/stream")
+        self.assertEqual(decrypt(stored),f"rtsp://new:{TEST_CAMERA_PASSWORD}@198.51.100.20/stream")
         self.assertEqual(footage,1)
 
     def test_administrator_can_terminate_another_session(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         from app.security import hash_password
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
-            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)", ("operator1", hash_password("OperatorPassword2026"), "operator"))
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)", ("operator1", hash_password(TEST_PASSWORD), "operator"))
         operator = TestClient(self.client_ctx.app)
         with operator:
-            operator.post("/api/auth/login", json={"username":"operator1", "password":"OperatorPassword2026"})
+            operator.post("/api/auth/login", json={"username":"operator1", "password":TEST_PASSWORD})
             operator_me = operator.get("/api/auth/me")
             self.assertEqual(operator_me.status_code, 200)
             sessions = self.client.get("/api/admin/sessions").json()["sessions"]
@@ -348,7 +350,7 @@ class BootstrapTests(unittest.TestCase):
         from app.main import _mapped_role
         self.assertIsNone(_mapped_role({"roles":["Unmapped"]}))
         self.assertEqual(_mapped_role({"roles":["NVR-Operator"]}), "operator")
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         tenant_id=OIDC_TEST_TENANT
         claims={"sub":"object-123", "tid":tenant_id, "iss":f"https://login.microsoftonline.com/{tenant_id}/v2.0", "preferred_username":"operator@example.test", "roles":["NVR-Operator"]}
         fake=type("FakeOIDC", (), {"authorize_access_token":AsyncMock(return_value={"userinfo":claims})})()
@@ -361,14 +363,14 @@ class BootstrapTests(unittest.TestCase):
         with patch("app.main._oidc_client", return_value=fake):
             denied=self.client.get("/api/auth/oidc/callback?code=fake&state=fake", follow_redirects=False)
         self.assertEqual(denied.status_code, 403)
-        self.assertEqual(self.client.post("/api/auth/login", json={"username":"local-admin", "password":"StrongPassphrase2026"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username":"local-admin", "password":TEST_PASSWORD}).status_code, 200)
 
     def test_authlib_authorization_request_uses_state_nonce_and_pkce_s256(self):
         import asyncio
         from urllib.parse import parse_qs, urlsplit
         from authlib.integrations.starlette_client import OAuth
         oauth=OAuth()
-        oauth.register("test", client_id="id", client_secret="secret", authorize_url="https://idp.test/authorize", access_token_url="https://idp.test/token", client_kwargs={"scope":"openid profile email", "code_challenge_method":"S256", "trust_env":False})
+        oauth.register("test", client_id="id", client_secret=TEST_OIDC_CLIENT_SECRET, authorize_url="https://idp.test/authorize", access_token_url="https://idp.test/token", client_kwargs={"scope":"openid profile email", "code_challenge_method":"S256", "trust_env":False})
         data=asyncio.run(oauth.create_client("test").create_authorization_url("https://nvr.test/callback"))
         query=parse_qs(urlsplit(data["url"]).query)
         self.assertTrue(query.get("state"))
@@ -427,7 +429,7 @@ class BootstrapTests(unittest.TestCase):
                 super().__init__(*args,**kwargs)
 
         self.configure_oidc()
-        self.client.post("/api/setup/admin",json={"username":"local-admin","password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         with patch.object(StarletteOAuth2App,"client_cls",FakeProviderClient):
             login=self.client.get("https://testserver.local/api/auth/oidc/login?format=json",follow_redirects=False)
             self.assertEqual(login.status_code,200,login.text)
@@ -454,17 +456,17 @@ class BootstrapTests(unittest.TestCase):
     def test_oidc_provider_outage_does_not_disable_local_administrator(self):
         self.configure_oidc()
         from unittest.mock import AsyncMock, patch
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         fake=type("FakeOIDC", (), {"create_authorization_url":AsyncMock(side_effect=OSError("provider offline"))})()
         with patch("app.main._oidc_client", return_value=fake):
             unavailable=self.client.get("/api/auth/oidc/login?format=json", follow_redirects=False)
             self.assertEqual(unavailable.status_code, 503)
             self.assertIn("local administrator sign-in remains available", unavailable.json()["detail"])
-        self.assertEqual(self.client.post("/api/auth/login", json={"username":"local-admin", "password":"StrongPassphrase2026"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username":"local-admin", "password":TEST_PASSWORD}).status_code, 200)
 
     def test_camera_credentials_are_encrypted_and_not_returned(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
-        stream_url = "rtsp://viewer:CameraSecret2026@127.0.0.1:554/stream?token=NeverReturnThis"
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
+        stream_url = f"rtsp://fixture-user:{TEST_CAMERA_PASSWORD}@127.0.0.1:554/stream?token={TEST_URL_TOKEN}"
         probe = {"reachable": True, "video": {"codec":"h264", "width":640, "height":360}}
         with patch("app.main.probe_stream", new=AsyncMock(return_value=probe)):
             added = self.client.post("/api/cameras", json={"name":"Test Camera", "stream_url":stream_url})
@@ -473,35 +475,37 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(added.json()["recording_enabled"])
         self.assertEqual(added.json()["recording_status"], "stopped")
         response_text = added.text + self.client.get("/api/cameras").text
-        self.assertNotIn("CameraSecret2026", response_text)
-        self.assertNotIn("NeverReturnThis", response_text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD, response_text)
+        self.assertNotIn(TEST_URL_TOKEN, response_text)
         self.assertIn("rtsp://127.0.0.1:554", response_text)
         self.assertNotIn("/stream", response_text)
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             ciphertext = db.execute("SELECT stream_url_ciphertext FROM cameras").fetchone()[0]
-        self.assertNotIn(b"CameraSecret2026", ciphertext)
+        self.assertNotIn(TEST_CAMERA_PASSWORD.encode(), ciphertext)
         self.assertEqual(Path(os.environ["NVR_CREDENTIAL_KEY_PATH"]).stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.client.delete(f"/api/cameras/{added.json()['id']}").status_code, 204)
-        self.assertEqual(self.client.get("/api/cameras").json()["cameras"], [])
+        archived = self.client.get("/api/cameras").json()["cameras"]
+        self.assertEqual(len(archived), 1)
+        self.assertTrue(archived[0]["archived_at"])
 
     def test_motion_recording_requires_enablement_and_encrypts_event_credentials(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
             response = self.client.post("/api/cameras", json={
                 "name":"Motion policy camera", "stream_url":"rtsp://127.0.0.1/stream",
                 "recording_mode":"motion", "motion_service_url":"http://127.0.0.1/onvif/device_service",
-                "motion_username":"onvif-user", "motion_password":"MotionSecret2026",
+                "motion_username":"onvif-user", "motion_password":TEST_CAMERA_PASSWORD,
             })
         self.assertEqual(response.status_code, 201, response.text)
         camera = response.json()
         self.assertFalse(camera["recording_enabled"])
         self.assertEqual(camera["recording_status"], "stopped")
         self.assertTrue(camera["motion_source_configured"])
-        self.assertNotIn("MotionSecret2026", response.text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD, response.text)
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             ciphertext = db.execute("SELECT motion_credentials_ciphertext FROM cameras WHERE id=?", (camera["id"],)).fetchone()[0]
-        self.assertNotIn(b"MotionSecret2026", ciphertext)
+        self.assertNotIn(TEST_CAMERA_PASSWORD.encode(), ciphertext)
         malformed_auth = self.client.post(f"/api/cameras/{camera['id']}/motion-source", json={
             "service_url":"http://127.0.0.1/onvif/device_service", "username":"only-user"
         })
@@ -519,7 +523,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(disabled.json()["recording_enabled"])
 
     def test_bulk_recording_enablement_updates_only_selected_cameras(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
             first = self.client.post("/api/cameras", json={"name":"Bulk first","stream_url":"rtsp://127.0.0.1/one"}).json()
@@ -531,12 +535,12 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(cameras[second["id"]]["recording_enabled"])
 
     def test_group_schedule_inheritance_camera_override_and_restoration(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)), \
              patch("app.main.app.state.recorders.sync_camera", new=AsyncMock()):
             camera = self.client.post("/api/cameras", json={
-                "name":"Scheduled camera", "stream_url":"rtsp://10.1.2.40/stream", "recording_mode":"continuous"
+                "name":"Scheduled camera", "stream_url":"rtsp://198.51.100.40/stream", "recording_mode":"continuous"
             }).json()
             group = self.client.post("/api/camera-groups", json={"name":"Night shift"}).json()
             assigned = self.client.post("/api/cameras/bulk-update", json={"camera_ids":[camera["id"]],"group_name":group["name"]})
@@ -571,7 +575,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertTrue(restored.json()["inherits_group"])
 
     def test_schedule_overlap_validation_and_operator_write_denial(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         group = self.client.post("/api/camera-groups", json={"name":"Schedule ACL"}).json()
         invalid = self.client.put(f"/api/camera-groups/{group['id']}/schedule", json={
             "timezone":"UTC", "intervals":[
@@ -582,15 +586,15 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(invalid.status_code, 422)
         from app.security import hash_password
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
-            db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", ("operator-one",hash_password("OperatorPassphrase2026"),"operator"))
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", ("operator-one",hash_password(TEST_PASSWORD),"operator"))
         self.client.post("/api/auth/logout")
-        self.assertEqual(self.client.post("/api/auth/login", json={"username":"operator-one","password":"OperatorPassphrase2026"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username":"operator-one","password":TEST_PASSWORD}).status_code, 200)
         self.assertEqual(self.client.get(f"/api/camera-groups/{group['id']}/schedule").status_code, 200)
         denied = self.client.put(f"/api/camera-groups/{group['id']}/schedule", json={"timezone":"UTC","intervals":[]})
         self.assertEqual(denied.status_code, 403)
 
     def test_recording_manager_switches_modes_when_group_schedule_changes(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
         async def hold_recording(*_args):
             await asyncio.Event().wait()
@@ -598,7 +602,7 @@ class BootstrapTests(unittest.TestCase):
         with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)), \
              patch.object(manager, "_run", new=AsyncMock(side_effect=hold_recording)):
             camera = self.client.post("/api/cameras", json={
-                "name":"Scheduled runtime camera", "stream_url":"rtsp://10.1.2.41/stream", "recording_mode":"continuous"
+                "name":"Scheduled runtime camera", "stream_url":"rtsp://198.51.100.41/stream", "recording_mode":"continuous"
             }).json()
             group = self.client.post("/api/camera-groups", json={"name":"Runtime schedule"}).json()
             self.client.post("/api/cameras/bulk-update", json={"camera_ids":[camera["id"]],"group_name":group["name"]})
@@ -615,7 +619,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(manager.task_modes[camera["id"]], "motion")
 
     def test_server_motion_fallback_configuration_is_validated_and_exposed(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
         with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
             camera = self.client.post("/api/cameras", json={
@@ -651,23 +655,23 @@ class BootstrapTests(unittest.TestCase):
 
     @unittest.skipUnless(__import__("shutil").which("ffprobe"), "FFprobe is required for the stream test")
     def test_real_probe_failure_is_reported_without_echoing_credentials(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         response = self.client.post("/api/cameras/test", json={
-            "stream_url":"rtsp://probe-user:ProbeSecret2026@127.0.0.1:1/unavailable"
+            "stream_url":f"rtsp://fixture-user:{TEST_CAMERA_PASSWORD}@127.0.0.1:1/unavailable"
         })
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["reachable"])
-        self.assertNotIn("ProbeSecret2026", response.text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD, response.text)
         self.assertEqual(response.json()["reason"], "Camera stream could not be opened")
 
     @unittest.skipUnless(__import__("shutil").which("ffmpeg"), "FFmpeg is required for reconnect testing")
     def test_continuous_recorder_reconnects_after_stream_failure(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable": True, "video": {"codec":"h264", "width":640, "height":360}}
         with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
             created = self.client.post("/api/cameras", json={
                 "name":"Unavailable test feed",
-                "stream_url":"rtsp://feed-user:FeedSecret2026@127.0.0.1:1/stream",
+                "stream_url":f"rtsp://feed-user:{TEST_CAMERA_PASSWORD}@127.0.0.1:1/stream",
                 "recording_mode":"continuous",
                 "recording_enabled":True,
             })
@@ -681,13 +685,13 @@ class BootstrapTests(unittest.TestCase):
                 break
             time.sleep(0.2)
         self.assertEqual(current["recording_status"], "reconnecting")
-        self.assertNotIn("FeedSecret2026", self.client.get("/api/cameras").text)
+        self.assertNotIn(TEST_CAMERA_PASSWORD, self.client.get("/api/cameras").text)
         stopped = self.client.patch(f"/api/cameras/{camera_id}", json={"recording_mode":"disabled"})
         self.assertEqual(stopped.status_code, 200)
 
     @unittest.skipUnless(os.environ.get("NVR_RTSP_TEST_URL"), "A simulated RTSP publisher is required")
     def test_rtsp_stream_is_probed_recorded_indexed_and_playable(self):
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         ffmpeg_log = Path(self.tmp.name) / "ffmpeg-stderr.log"
         stderr_log = ffmpeg_log.open("wb")
         self.addCleanup(stderr_log.close)
@@ -736,15 +740,15 @@ class BootstrapTests(unittest.TestCase):
             "-segment_format_options", "movflags=+faststart", "-segment_list", str(index_path),
             "-segment_list_type", "csv", "-strftime", "1", str(directory / "segment-%Y%m%dT%H%M%SZ.mp4"),
         ], check=True, timeout=20)
-        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         from app.credentials import encrypt
         from app.security import hash_password
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             db.execute(
                 "INSERT INTO cameras(id, name, stream_url_ciphertext, recording_mode) VALUES (?, ?, ?, 'disabled')",
-                (camera_id, "Playback camera", encrypt("rtsp://viewer:secret@camera/stream")),
+                (camera_id, "Playback camera", encrypt(f"rtsp://viewer:{TEST_CAMERA_PASSWORD}@camera/stream")),
             )
-            db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", ("viewer1", hash_password("ViewerPassword2026"), "operator"))
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", ("viewer1", hash_password(TEST_PASSWORD), "operator"))
         from app.recording import RecordingManager
         self.assertEqual(RecordingManager()._index_csv(camera_id, index_path, directory), 1)
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
@@ -755,7 +759,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(anonymous.status_code, 204)
         denied = self.client.get(f"/api/cameras/{camera_id}/segments/{segment_id}/media")
         self.assertEqual(denied.status_code, 401)
-        self.client.post("/api/auth/login", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/auth/login", json={"username":"local-admin", "password":TEST_PASSWORD})
         response = self.client.get(f"/api/cameras/{camera_id}/segments/{segment_id}/media")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "video/mp4")
@@ -767,7 +771,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(partial.status_code, 206)
         self.assertEqual(len(partial.content), 100)
         self.client.post("/api/auth/logout")
-        self.client.post("/api/auth/login", json={"username":"viewer1", "password":"ViewerPassword2026"})
+        self.client.post("/api/auth/login", json={"username":"viewer1", "password":TEST_PASSWORD})
         self.assertEqual(self.client.get(f"/api/cameras/{camera_id}/segments").status_code, 200)
         self.assertEqual(self.client.get(f"/api/cameras/{camera_id}/segments/{segment_id}/media").status_code, 200)
         probe = subprocess.run(
@@ -776,9 +780,11 @@ class BootstrapTests(unittest.TestCase):
         )
         self.assertGreater(float(probe.stdout.strip()), 0)
         self.client.post("/api/auth/logout")
-        self.client.post("/api/auth/login", json={"username":"local-admin", "password":"StrongPassphrase2026"})
+        self.client.post("/api/auth/login", json={"username":"local-admin", "password":TEST_PASSWORD})
         self.assertEqual(self.client.delete(f"/api/cameras/{camera_id}").status_code, 204)
-        self.assertFalse((media_root / camera_id).exists())
+        self.assertTrue((media_root / relative_path).is_file())
+        archived = self.client.get("/api/cameras").json()["cameras"]
+        self.assertTrue(next(camera for camera in archived if camera["id"] == camera_id)["archived_at"])
 
 
 if __name__ == "__main__":
