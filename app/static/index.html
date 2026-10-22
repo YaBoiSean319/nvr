@@ -87,7 +87,7 @@
     .camera-import-results-table [data-state=created] { color:var(--good); }
     #import-row-details { min-height:2rem; margin:.6rem 0; padding:.55rem .7rem; border-left:3px solid var(--line); background:var(--panel-raised); }
     #import-row-details h4 { margin:.1rem 0 .4rem; }
-    .camera-admin-layout { display:grid; grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr); gap:.8rem; align-items:start; }
+    .camera-admin-layout { display:grid; grid-template-columns:minmax(17rem,.95fr) .65rem minmax(18rem,1.05fr); gap:.35rem; align-items:start; }
     .discovery-scan-toolbar { display:grid; grid-template-columns:auto minmax(16rem,1fr) auto auto; gap:.6rem; align-items:end; margin:.75rem 0; padding:.7rem; border:1px solid var(--line); border-radius:.65rem; background:var(--panel); }
     .discovery-scan-action { align-self:end; }
     .discovery-range-scan { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.45rem; align-items:end; }
@@ -129,6 +129,8 @@
     @media(max-width:900px) { .discovery-layout { grid-template-columns:minmax(0,1fr); } .discovery-results-pane,.discovery-selected-pane { max-height:min(70vh,42rem); } .discovery-table-scroll { max-height:40vh; } }
     @media(max-width:560px) { .discovery-scan-toolbar { grid-template-columns:minmax(0,1fr) auto; } .discovery-scan-toolbar > .discovery-range-scan { grid-column:1/-1; } .discovery-scan-advanced[open] { grid-column:1/-1; } .discovery-results-toolbar { grid-template-columns:minmax(0,1fr) auto; } .discovery-results-toolbar .discovery-linked-filter { grid-column:1; } .discovery-results-toolbar button { grid-column:2; grid-row:1/4; } .discovery-table { min-width:34rem; } }
     .camera-inventory-pane,.camera-editor-pane { min-width:0; max-height:calc(100vh - 13rem); overflow:auto; padding:.8rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
+    .camera-pane-resizer { align-self:stretch; min-height:12rem; border-radius:.45rem; background:linear-gradient(90deg,transparent 35%,var(--line) 35%,var(--line) 65%,transparent 65%); cursor:col-resize; touch-action:none; }
+    .camera-pane-resizer:hover,.camera-pane-resizer:focus-visible { background:linear-gradient(90deg,transparent 25%,var(--accent) 25%,var(--accent) 75%,transparent 75%); }
     .camera-inventory-pane > h3,.camera-editor-pane > h3 { margin:.1rem 0 .65rem; }
     .camera-inventory-filters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.35rem .6rem; margin:.55rem 0; }
     .camera-inventory-filters label { min-width:0; margin:0; font-size:.78rem; }
@@ -187,7 +189,7 @@
     #sidebar-toggle { min-width:2.5rem; padding:.4rem; margin:0; } #console-layout.sidebar-collapsed #console-sidebar { width:3.25rem; padding:.8rem .35rem; overflow:hidden; }
     .sidebar-collapsed #sidebar-search,.sidebar-collapsed #console-sidebar h2,.sidebar-collapsed #console-sidebar section { display:none; }
     #status-heading,#status-list { margin-left:auto; margin-right:auto; max-width:80rem; padding-left:1rem; padding-right:1rem; }
-    #logout { margin:1rem; } .live-grid-controls,.playback-controls,.toolbar-row { display:flex; flex-wrap:wrap; align-items:center; gap:.45rem; } .live-grid-controls label,.playback-controls label { margin:.35rem 0; }
+    #logout { margin:1rem; } .console-tools #logout { margin:0; } .live-grid-controls,.playback-controls,.toolbar-row { display:flex; flex-wrap:wrap; align-items:center; gap:.45rem; } .live-grid-controls label,.playback-controls label { margin:.35rem 0; }
     .live-grid-controls > *, .playback-controls > * { margin-top:.3rem; }
     @media(max-width:960px) { .console-layout,.console-layout.sidebar-collapsed { grid-template-columns:minmax(13rem,17rem) minmax(0,1fr); } .console-layout.sidebar-collapsed { grid-template-columns:3.25rem minmax(0,1fr); } .console-header { flex-wrap:wrap; } #console-nav { order:3; width:100%; justify-content:flex-start; overflow:auto; } }
     @media(max-width:600px) { .console-header { gap:.5rem; padding:.55rem .7rem; } .console-header h1 { max-width:40vw; overflow:hidden; text-overflow:ellipsis; } .console-tools { margin-left:auto; } .console-tools label { display:none; } .console-layout,.console-layout.sidebar-collapsed { display:block; min-height:0; } #console-sidebar { position:relative; top:auto; width:auto!important; height:auto; max-height:40vh; border-right:0; border-bottom:1px solid var(--line); } .sidebar-collapsed #console-sidebar { height:2.8rem; max-height:2.8rem; } #console-workspace { padding:.75rem; } #live-grid,.playback-grid { grid-template-columns:minmax(0,1fr)!important; } #live-camera-picker { max-height:7rem; } #playback-export-selection { grid-template-columns:1fr; } .camera-add-mode-panel { max-height:none; padding:.5rem; } .camera-import-results-scroll { max-height:17rem; } .camera-import-results-table th,.camera-import-results-table td { padding:.35rem; } button,select { min-height:2.65rem; } }
@@ -218,6 +220,7 @@
     .keyboard-help { margin:.5rem 0; color:var(--muted); } .keyboard-help summary { cursor:pointer; }
     @media(max-width:1050px) {
       .camera-admin-layout { display:block; }
+      .camera-pane-resizer { display:none; }
       .camera-inventory-pane,.camera-editor-pane { max-height:none; }
       .camera-inventory-table-scroll { max-height:55vh; }
       #camera-admin-layout[data-mobile-editor="true"] .camera-inventory-pane { display:none; }
@@ -260,7 +263,7 @@
         <div class="console-tools">
           <button id="ops-status-toggle" type="button" aria-controls="ops-status-drawer" aria-expanded="false">Status <span id="ops-status-count" aria-label="Open issues">0</span></button>
           <label for="theme-choice">Theme</label><select id="theme-choice" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
-          <button id="sidebar-toggle" type="button" aria-controls="console-sidebar" aria-expanded="true" aria-label="Collapse camera sidebar">☰</button>
+          <button id="sidebar-toggle" type="button" aria-controls="console-sidebar" aria-expanded="true" aria-label="Collapse camera sidebar">☰</button><button id="logout" type="button">Sign out</button>
         </div>
       </header>
       <aside id="ops-status-drawer" class="hidden" aria-labelledby="ops-status-heading">
@@ -564,7 +567,6 @@
         <div id="segment-list"></div>
         <video id="playback" controls preload="metadata" class="hidden" aria-label="Recorded camera footage"></video>
       </section>
-      <button id="logout">Sign out</button>
     </section>
     <p id="message" role="alert" aria-live="polite"></p>
   </main>
