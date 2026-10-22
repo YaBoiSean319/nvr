@@ -100,6 +100,22 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         })
         self.assertEqual(reversed_range.status_code, 422)
 
+    def test_timeline_accepts_sixteen_cameras_and_rejects_seventeen(self):
+        extra=[str(uuid.uuid4()) for _ in range(14)]
+        with connect() as db:
+            db.executemany("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')",
+                           [(camera,f"Extra {index}") for index,camera in enumerate(extra)])
+        sixteen=self.cameras+extra
+        payload={"camera_ids":sixteen,"start":"2026-10-20T12:00:00Z","end":"2026-10-20T12:01:00Z"}
+        accepted=self.client.post("/api/playback/timeline",json=payload)
+        self.assertEqual(accepted.status_code,200,accepted.text)
+        self.assertEqual(len(accepted.json()["cameras"]),16)
+        seventeenth=str(uuid.uuid4())
+        with connect() as db:
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')",(seventeenth,"Extra 17"))
+        rejected=self.client.post("/api/playback/timeline",json={**payload,"camera_ids":sixteen+[seventeenth]})
+        self.assertEqual(rejected.status_code,422)
+
     def test_timeline_keeps_a_camera_with_no_indexed_footage_visible(self):
         camera_id = str(uuid.uuid4())
         with connect() as db:

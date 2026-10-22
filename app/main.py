@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import csv
+import hashlib
 import io
 import os
 import re
@@ -178,10 +181,47 @@ class DisplaySettingsRequest(BaseModel):
         return self
 
 
+class BrandingAssetRequest(BaseModel):
+    media_type: Literal["image/png", "image/webp", "image/jpeg"]
+    data_base64: str = Field(min_length=4, max_length=2_800_000)
+
+
+class BrandingSaveRequest(BaseModel):
+    app_name: str = Field(min_length=1, max_length=80)
+    primary_color: str = Field(min_length=7, max_length=7)
+    accent_color: str = Field(min_length=7, max_length=7)
+    assets: dict[str, BrandingAssetRequest | None] = Field(default_factory=dict)
+    reset_defaults: bool = False
+
+    @field_validator("app_name")
+    @classmethod
+    def normalize_app_name(cls, value: str) -> str:
+        value=value.strip()
+        if not value or any(ord(char)<32 or ord(char)==127 for char in value):
+            raise ValueError("Application name must be plain text between 1 and 80 characters")
+        return value
+
+    @field_validator("primary_color", "accent_color")
+    @classmethod
+    def validate_hex_color(cls, value: str) -> str:
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("Use a six-digit hex color such as #1a2b3c")
+        return value.lower()
+
+    @model_validator(mode="after")
+    def validate_asset_keys(self) -> "BrandingSaveRequest":
+        if not set(self.assets) <= {"primary", "light", "dark", "icon"}:
+            raise ValueError("Unknown branding asset key")
+        if self.reset_defaults and self.assets:
+            raise ValueError("Reset to defaults cannot be combined with asset changes")
+        return self
+
+
 class ViewerLayoutRequest(BaseModel):
     camera_ids: list[str] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
     grid_size: int = Field(default=4)
     tile_camera_ids: list[str | None] | None = Field(default=None, max_length=MAX_LIVE_VIEWERS)
+    layout_mode: Literal["auto", "manual"] = "auto"
 
     @model_validator(mode="after")
     def validate_layout(self) -> "ViewerLayoutRequest":
@@ -198,6 +238,7 @@ class LiveWorkspaceRequest(BaseModel):
     grid_size: int = Field(default=4)
     tile_camera_ids: list[str | None] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
     sidebar_collapsed: bool = False
+    layout_mode: Literal["auto", "manual"] = "auto"
 
     @model_validator(mode="after")
     def validate_workspace(self) -> "LiveWorkspaceRequest":
@@ -258,7 +299,7 @@ class CameraSourceUpdateRequest(CameraSourceRequest):
 
 
 class SynchronizedPlaybackRequest(BaseModel):
-    camera_ids: list[str] = Field(min_length=1, max_length=8)
+    camera_ids: list[str] = Field(min_length=1, max_length=16)
     start: datetime
     end: datetime
 
@@ -684,6 +725,11 @@ def javascript() -> FileResponse:
     return FileResponse(Path(__file__).with_name("static") / "app.js", media_type="text/javascript")
 
 
+@app.get("/workspace-layout.js", include_in_schema=False)
+def workspace_layout_javascript() -> FileResponse:
+    return FileResponse(Path(__file__).with_name("static") / "workspace-layout.js", media_type="text/javascript")
+
+
 @app.get("/healthz", include_in_schema=False)
 def health() -> dict[str, str]:
     try:
@@ -789,14 +835,127 @@ def save_display_settings(payload: DisplaySettingsRequest, _: Annotated[sqlite3.
     return _display_settings_view(row)
 
 
+BRANDING_DEFAULTS = {"app_name": "Workplace NVR", "primary_color": "#17212b", "accent_color": "#69a1ff"}
+BRANDING_ASSET_TYPES = {"primary", "light", "dark", "icon"}
+
+
+def _branding_view(db: sqlite3.Connection) -> dict[str, object]:
+    row=db.execute("SELECT app_name,primary_color,accent_color,updated_at FROM site_branding WHERE singleton_id=1").fetchone()
+    assets={}
+    for asset in db.execute("SELECT asset_key,media_type,sha256,updated_at FROM site_branding_assets").fetchall():
+        assets[asset["asset_key"]]={"url":f"/api/public/branding/assets/{asset['asset_key']}?v={asset['sha256'][:16]}",
+                                     "media_type":asset["media_type"],"sha256":asset["sha256"]}
+    return {"app_name":row["app_name"],"primary_color":row["primary_color"],"accent_color":row["accent_color"],
+            "assets":assets,"updated_at":row["updated_at"]}
+
+
+def _decode_branding_asset(asset: BrandingAssetRequest) -> tuple[bytes, str]:
+    try:
+        data=base64.b64decode(asset.data_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Branding image data is not valid base64") from exc
+    if not data or len(data)>2*1024*1024:
+        raise HTTPException(status_code=413, detail="Each branding image must be no larger than 2 MiB")
+    signatures={"image/png":data.startswith(b"\x89PNG\r\n\x1a\n"),
+                "image/jpeg":data.startswith(b"\xff\xd8\xff"),
+                "image/webp":len(data)>=12 and data[:4]==b"RIFF" and data[8:12]==b"WEBP"}
+    if not signatures.get(asset.media_type,False):
+        raise HTTPException(status_code=415, detail="Image bytes do not match the declared PNG, WebP, or JPEG type")
+    ffprobe,ffmpeg=shutil.which("ffprobe"),shutil.which("ffmpeg")
+    if not ffprobe or not ffmpeg:
+        raise HTTPException(status_code=503, detail="Image validation tools are unavailable; branding was not changed")
+    stage="probe"
+    try:
+        probed=subprocess.run([ffprobe,"-v","error","-select_streams","v:0","-show_entries","stream=codec_name,width,height","-of","json","-i","pipe:0"],
+                              input=data,capture_output=True,timeout=8,check=False)
+        metadata=json.loads(probed.stdout) if probed.returncode==0 else {}
+        streams=metadata.get("streams") or []
+        if len(streams)!=1:
+            raise ValueError("Image must contain exactly one frame stream")
+        stream=streams[0];width=int(stream.get("width") or 0);height=int(stream.get("height") or 0)
+        expected_codec={"image/png":"png","image/jpeg":"mjpeg","image/webp":"webp"}[asset.media_type]
+        if stream.get("codec_name")!=expected_codec or not (1<=width<=4096 and 1<=height<=4096) or width*height>16_777_216:
+            raise ValueError("Image type or dimensions are unsupported")
+        stage="decode"
+        decoded=subprocess.run([ffmpeg,"-hide_banner","-v","error","-threads","1","-max_pixels","16777216","-i","pipe:0","-frames:v","1","-f","null","-"],
+                               input=data,capture_output=True,timeout=8,check=False)
+        if decoded.returncode!=0:
+            raise ValueError("Image could not be decoded")
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=422, detail=f"Image {stage} validation timed out") from exc
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return data,hashlib.sha256(data).hexdigest()
+
+
+@app.get("/api/public/branding")
+def get_public_branding() -> dict[str, object]:
+    with connect() as db:
+        return _branding_view(db)
+
+
+@app.get("/api/settings/branding")
+def get_branding_settings(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    with connect() as db:
+        return _branding_view(db)
+
+
+@app.put("/api/settings/branding")
+def save_branding_settings(payload: BrandingSaveRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+    validated_assets={key:None if asset is None else _decode_branding_asset(asset) for key,asset in payload.assets.items()}
+    now=datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if payload.reset_defaults:
+                db.execute("UPDATE site_branding SET app_name=?,primary_color=?,accent_color=?,updated_by=?,updated_at=? WHERE singleton_id=1",
+                           (BRANDING_DEFAULTS["app_name"],BRANDING_DEFAULTS["primary_color"],BRANDING_DEFAULTS["accent_color"],int(user["id"]),now))
+                db.execute("DELETE FROM site_branding_assets")
+                action="branding_reset"
+                details={"assets":"all","fields":["app_name","primary_color","accent_color"]}
+            else:
+                db.execute("UPDATE site_branding SET app_name=?,primary_color=?,accent_color=?,updated_by=?,updated_at=? WHERE singleton_id=1",
+                           (payload.app_name,payload.primary_color,payload.accent_color,int(user["id"]),now))
+                for key,asset in validated_assets.items():
+                    if asset is None:
+                        db.execute("DELETE FROM site_branding_assets WHERE asset_key=?",(key,))
+                    else:
+                        data,digest=asset;requested=payload.assets[key]
+                        db.execute("INSERT INTO site_branding_assets(asset_key,media_type,image_bytes,sha256,updated_at) VALUES(?,?,?,?,?) "
+                                   "ON CONFLICT(asset_key) DO UPDATE SET media_type=excluded.media_type,image_bytes=excluded.image_bytes,sha256=excluded.sha256,updated_at=excluded.updated_at",
+                                   (key,requested.media_type,data,digest,now))
+                action="branding_saved"
+                details={"fields":["app_name","primary_color","accent_color"],"asset_keys":sorted(validated_assets)}
+            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                       (int(user["id"]),action,"site_branding","site",json.dumps(details,separators=(",",":"))))
+            result=_branding_view(db)
+            db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            raise
+
+
+@app.get("/api/public/branding/assets/{asset_key}")
+def get_public_branding_asset(asset_key: str) -> Response:
+    if asset_key not in BRANDING_ASSET_TYPES:
+        raise HTTPException(status_code=404, detail="Branding asset not found")
+    with connect() as db:
+        asset=db.execute("SELECT media_type,image_bytes,sha256 FROM site_branding_assets WHERE asset_key=?",(asset_key,)).fetchone()
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Branding asset not found")
+    return Response(content=asset["image_bytes"],media_type=asset["media_type"],headers={
+        "ETag":f'"{asset["sha256"]}"',"Cache-Control":"public, max-age=31536000, immutable","X-Content-Type-Options":"nosniff"})
+
+
 def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
     with connect() as db:
         rows = db.execute(
-            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json FROM viewer_layouts WHERE user_id=? ORDER BY name COLLATE NOCASE",
+            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode FROM viewer_layouts WHERE user_id=? ORDER BY name COLLATE NOCASE",
             (int(user["id"]),),
         ).fetchall()
         shared_rows = db.execute(
-            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json FROM shared_viewer_layouts ORDER BY name COLLATE NOCASE"
+            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode FROM shared_viewer_layouts ORDER BY name COLLATE NOCASE"
         ).fetchall()
     def decode_layout(row: sqlite3.Row, scope: str) -> dict[str, object] | None:
         try:
@@ -807,7 +966,7 @@ def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
             if not isinstance(tile_camera_ids, list):
                 tile_camera_ids = [*camera_ids, *([None] * max(0, int(row["grid_size"]) - len(camera_ids)))]
             return {"name": row["name"], "camera_ids": camera_ids, "grid_size": int(row["grid_size"]),
-                    "tile_camera_ids": tile_camera_ids, "scope": scope}
+                    "tile_camera_ids": tile_camera_ids, "layout_mode": row["layout_mode"], "scope": scope}
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
     layouts = []
@@ -848,11 +1007,11 @@ def save_viewer_layout(
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
         db.execute(
-            "INSERT INTO viewer_layouts(user_id,name,camera_ids_json,updated_at,grid_size,tile_camera_ids_json) VALUES(?,?,?,?,?,?) "
+            "INSERT INTO viewer_layouts(user_id,name,camera_ids_json,updated_at,grid_size,tile_camera_ids_json,layout_mode) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(user_id,name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,updated_at=excluded.updated_at,"
-            "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json",
+            "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json,layout_mode=excluded.layout_mode",
             (int(user["id"]), name, json.dumps(payload.camera_ids), datetime.now(timezone.utc).isoformat(),
-             payload.grid_size, json.dumps(payload.tile_camera_ids)),
+             payload.grid_size, json.dumps(payload.tile_camera_ids), payload.layout_mode),
         )
     return {"name": name, "camera_ids": payload.camera_ids}
 
@@ -869,15 +1028,16 @@ def save_shared_viewer_layout(
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
         db.execute(
-            "INSERT INTO shared_viewer_layouts(name,camera_ids_json,grid_size,tile_camera_ids_json,created_by,updated_at) "
-            "VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
+            "INSERT INTO shared_viewer_layouts(name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode,created_by,updated_at) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
             "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json,created_by=excluded.created_by,"
+            "layout_mode=excluded.layout_mode,"
             "updated_at=excluded.updated_at",
-            (name, json.dumps(payload.camera_ids), payload.grid_size, json.dumps(payload.tile_camera_ids),
+            (name, json.dumps(payload.camera_ids), payload.grid_size, json.dumps(payload.tile_camera_ids), payload.layout_mode,
              int(user["id"]), datetime.now(timezone.utc).isoformat()),
         )
     return {"name": name, "camera_ids": payload.camera_ids, "grid_size": payload.grid_size,
-            "tile_camera_ids": payload.tile_camera_ids, "scope": "shared"}
+            "tile_camera_ids": payload.tile_camera_ids, "layout_mode": payload.layout_mode, "scope": "shared"}
 
 
 @app.delete("/api/live/shared-layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -892,14 +1052,14 @@ def get_live_workspace(user: Annotated[sqlite3.Row, Depends(current_user)]) -> d
     with connect() as db:
         row = db.execute("SELECT * FROM live_workspace_states WHERE user_id=?", (int(user["id"]),)).fetchone()
     if row is None:
-        return {"camera_ids": None, "tile_camera_ids": [], "grid_size": 4, "sidebar_collapsed": False}
+        return {"camera_ids": None, "tile_camera_ids": [], "grid_size": 4, "layout_mode": "auto", "sidebar_collapsed": False}
     try:
         camera_ids = json.loads(row["camera_ids_json"])
         tile_camera_ids = json.loads(row["tile_camera_ids_json"])
     except (TypeError, json.JSONDecodeError):
         camera_ids, tile_camera_ids = [], []
     return {"camera_ids": camera_ids, "tile_camera_ids": tile_camera_ids, "grid_size": row["grid_size"],
-            "sidebar_collapsed": bool(row["sidebar_collapsed"])}
+            "layout_mode": row["layout_mode"], "sidebar_collapsed": bool(row["sidebar_collapsed"])}
 
 
 @app.put("/api/live/workspace")
@@ -909,15 +1069,15 @@ def save_live_workspace(payload: LiveWorkspaceRequest, user: Annotated[sqlite3.R
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Workspace contains an unknown camera")
         db.execute(
-            "INSERT INTO live_workspace_states(user_id,camera_ids_json,tile_camera_ids_json,grid_size,sidebar_collapsed,updated_at) "
-            "VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
+            "INSERT INTO live_workspace_states(user_id,camera_ids_json,tile_camera_ids_json,grid_size,sidebar_collapsed,updated_at,layout_mode) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
             "tile_camera_ids_json=excluded.tile_camera_ids_json,grid_size=excluded.grid_size,"
-            "sidebar_collapsed=excluded.sidebar_collapsed,updated_at=excluded.updated_at",
+            "sidebar_collapsed=excluded.sidebar_collapsed,updated_at=excluded.updated_at,layout_mode=excluded.layout_mode",
             (int(user["id"]), json.dumps(payload.camera_ids), json.dumps(payload.tile_camera_ids), payload.grid_size,
-             int(payload.sidebar_collapsed), datetime.now(timezone.utc).isoformat()),
+             int(payload.sidebar_collapsed), datetime.now(timezone.utc).isoformat(), payload.layout_mode),
         )
     return {"camera_ids": payload.camera_ids, "tile_camera_ids": payload.tile_camera_ids,
-            "grid_size": payload.grid_size, "sidebar_collapsed": payload.sidebar_collapsed}
+            "grid_size": payload.grid_size, "layout_mode": payload.layout_mode, "sidebar_collapsed": payload.sidebar_collapsed}
 
 
 @app.delete("/api/live/layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)

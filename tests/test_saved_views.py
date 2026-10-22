@@ -47,13 +47,14 @@ class SavedViewsTests(unittest.TestCase):
         camera_a, camera_b, camera_c = self.camera_ids
         response = self.client.put(
             "/api/live/layouts/North%20desk",
-            json={"camera_ids": [camera_b, camera_a], "tile_camera_ids": [camera_b, None, camera_a, None], "grid_size": 4},
+            json={"camera_ids": [camera_b, camera_a], "tile_camera_ids": [camera_b, None, camera_a, None], "grid_size": 4, "layout_mode":"auto"},
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["camera_ids"], [camera_b, camera_a])
         detail = self.client.get("/api/live/views").json()["layouts"][0]
         self.assertEqual(detail["tile_camera_ids"], [camera_b, None, camera_a, None])
         self.assertEqual(detail["grid_size"], 4)
+        self.assertEqual(detail["layout_mode"], "auto")
 
         self.active_user = {"id": 2, "username": "other", "role": "operator"}
         other_views = self.client.get("/api/live/views").json()
@@ -70,10 +71,11 @@ class SavedViewsTests(unittest.TestCase):
         self.active_user = {"id": 3, "username": "admin", "role": "administrator"}
         created = self.client.put(
             "/api/live/shared-layouts/Front%20desk",
-            json={"camera_ids": [camera_a, camera_b], "grid_size": 4, "tile_camera_ids": [camera_b, camera_a, None, None]},
+            json={"camera_ids": [camera_a, camera_b], "grid_size": 4, "tile_camera_ids": [camera_b, camera_a, None, None], "layout_mode":"manual"},
         )
         self.assertEqual(created.status_code, 200, created.text)
         self.assertEqual(created.json()["scope"], "shared")
+        self.assertEqual(self.client.get("/api/live/views").json()["shared_views"][0]["layout_mode"], "manual")
 
         self.active_user = {"id": 1, "username": "operator", "role": "operator"}
         views = self.client.get("/api/live/views").json()
@@ -121,8 +123,10 @@ class SavedViewsTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertEqual(saved.json()["sidebar_collapsed"], True)
         self.assertEqual(saved.json()["tile_camera_ids"], [camera_b, None, camera_a, None])
+        self.assertEqual(saved.json()["layout_mode"], "auto")
         restored = self.client.get("/api/live/workspace").json()
         self.assertEqual(restored["grid_size"], 4)
+        self.assertEqual(restored["layout_mode"], "auto")
         self.assertEqual(restored["camera_ids"], [camera_b, camera_a])
         self.assertNotIn("audio_enabled", restored)
 
@@ -140,6 +144,7 @@ class SavedViewsTests(unittest.TestCase):
         layout = self.client.get("/api/live/views").json()["layouts"][0]
         self.assertEqual(layout["camera_ids"], [camera_b, camera_a])
         self.assertEqual(layout["grid_size"], 4)
+        self.assertEqual(layout["layout_mode"], "manual")
         self.assertEqual(layout["tile_camera_ids"][:2], [camera_b, camera_a])
         self.assertEqual(layout["tile_camera_ids"][2:], [None, None])
 
