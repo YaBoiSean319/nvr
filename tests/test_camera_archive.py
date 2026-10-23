@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from tests.test_support import patch_camera_probe, TEST_PASSWORD
+from app.migrations import m0001_baseline
 from app.store import connect, initialize
 
 
@@ -163,9 +165,14 @@ class CameraArchiveTests(unittest.TestCase):
         with connect() as db:
             db.execute("ALTER TABLE cameras DROP COLUMN archived_at")
             # Databases created before archiving existed also predate versioned
-            # migrations and every table those migrations add.
-            db.execute("DROP TABLE schema_migrations")
-            db.execute("DROP TABLE api_tokens")
+            # migrations and every table added after the baseline.
+            reference = sqlite3.connect(":memory:", isolation_level=None)
+            m0001_baseline.upgrade(reference)
+            baseline = {row[0] for row in reference.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            reference.close()
+            current = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            for table in sorted(current - baseline):
+                db.execute(f"DROP TABLE {table}")
         initialize()
         with connect() as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}

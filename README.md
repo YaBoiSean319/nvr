@@ -43,6 +43,7 @@ Do not expose the initial HTTP setup screen to untrusted networks. Place it behi
 ## Health and setup
 
 - `GET /healthz` returns `200` when the app can query its database; Compose uses it as its health check.
+- The container runs a supervisor that keeps recording in a separate process from the web interface. A web crash or restart does not interrupt footage writes. Either process is restarted automatically with backoff, and an incident stays active until it is running again. `GET /api/system/status` reports each worker's liveness and restart count. See [architecture](docs/architecture.md).
 - `GET /api/setup/status` reports whether initial setup is still required.
 - `POST /api/setup/admin` creates the one-time local administrator. Passwords require at least 14 characters, including a letter and a number.
 - `GET /api/system/status` requires an authenticated administrator session.

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 
 from app.version import APP_VERSION
+from app.workers import liveness, supervised
 from app.principal import Administrator
 from app.store import connect, database_path
 from app import diagnostics
@@ -31,10 +32,12 @@ def system_status(user: Administrator) -> dict[str, object]:
         storage = {"available_bytes": disk.f_bavail * disk.f_frsize, "total_bytes": disk.f_blocks * disk.f_frsize}
     except OSError:
         storage = {"available_bytes": None, "total_bytes": None}
+    workers = liveness.report(supervised())
     return {
         "application": "Workplace NVR",
         "version": APP_VERSION,
-        "application_status": "healthy",
+        "application_status": "healthy" if all(worker["alive"] for worker in workers) else "degraded",
+        "workers": workers,
         "database": "connected",
         "configured_administrators": admin_count,
         "configured_cameras": camera_count,

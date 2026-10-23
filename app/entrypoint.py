@@ -1,9 +1,7 @@
-"""Validated process entrypoint for the configurable host-network listener."""
+"""Container entrypoint: validates the listener and runs the worker supervisor."""
 from __future__ import annotations
 
 import os
-
-import uvicorn
 
 
 def listen_port() -> int:
@@ -18,7 +16,10 @@ def listen_port() -> int:
 
 
 def main() -> None:
-    uvicorn.run("app.main:app", host="0.0.0.0", port=listen_port())
+    listen_port()
+    from app.workers.supervisor import main as supervise
+
+    raise SystemExit(supervise())
 
 
 if __name__ == "__main__":

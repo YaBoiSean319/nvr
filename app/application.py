@@ -1,6 +1,7 @@
 """Application factory: one place that assembles middleware, routers and lifecycle."""
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -19,6 +20,8 @@ from .principal import COOKIE_NAME, current_user, depends_on, scope_for, secure_
 from .store import initialize
 from .version import APP_VERSION
 from .webhooks import WebhookManager
+from .workers import liveness, supervised
+from .workers.control import RecorderClient
 
 
 STARTUP_ORDER = (
@@ -38,7 +41,9 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     Configuration (database, recordings, key and identity settings) comes from the
     environment, so tests isolate an instance by pointing those variables at
     temporary paths before entering its lifespan. ``start_workers=False`` serves the
-    API without recording, export, webhook, heartbeat or detection loops.
+    API without recording, export, webhook, heartbeat or detection loops. Under the
+    supervisor (``NVR_SUPERVISED=1``) recording runs in a separate process and the
+    web process reaches it through ``RecorderClient`` nudges.
     """
 
     @asynccontextmanager
@@ -46,15 +51,24 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         os.umask(0o077)
         initialize()
         started = {}
+        heartbeat = None
         try:
             if start_workers:
                 for name, factory in STARTUP_ORDER:
+                    if name == "recorders" and supervised():
+                        # Recording runs in its own supervised process; nudge it instead.
+                        app.state.recorders = RecorderClient()
+                        continue
                     manager = factory()
                     setattr(app.state, name, manager)
                     await manager.start()
                     started[name] = manager
+            if supervised():
+                heartbeat = asyncio.create_task(liveness.heartbeat_forever("web"), name="web-heartbeat")
             yield
         finally:
+            if heartbeat:
+                heartbeat.cancel()
             for name in SHUTDOWN_ORDER:
                 if name in started:
                     await started[name].stop()
