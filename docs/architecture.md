@@ -36,6 +36,19 @@ FFmpeg copies the camera's H.264 video without re-encoding it. When an administr
 - `app.application.create_app(start_workers=True)` owns the middleware, the lifespan, and router registration. The lifespan applies schema migrations, then starts the export, webhook, heartbeat, recording and detection managers. `start_workers=False` serves the API without background loops.
 - `app.api.ROUTERS` lists every domain router in registration order. The legacy browser interface router (`app.api.web_ui`) is registered last so its catch-all asset paths cannot shadow API routes.
 
+## Browser interface
+
+`web/` is a React and TypeScript single-page application built by Vite into `app/web_dist`, which `app.api.web_next` serves at `/next/` with a strict Content-Security-Policy. The legacy interface stays at `/` until the cutover ticket. The building blocks are:
+
+- `api/client.ts`: same-origin fetch with typed `ApiError`s, a session-expiry signal, and `latestOnly` so overlapping requests never let an older response win.
+- `api/queries.ts`: TanStack Query hooks for server state.
+- The shell: role-gated navigation, plus a status area that reports live-video freshness, recording-write health, incidents and export jobs separately.
+- Site branding: the accent colour is adjusted until it reaches 4.5:1 contrast in both themes, and status colours are never branded.
+- Theme: a per-user preference stored on the server (`/api/me/preferences`).
+- Drawers that return focus to whatever opened them.
+
+Workspaces that are not rebuilt yet say so and link to the current interface, rather than imitating it.
+
 ## Domain routers (`app.api`)
 
 | Module | Responsibility |

@@ -13,6 +13,7 @@ function seedFixtures(count, options = {}) {
   if (options.bulkTrigger) args.push("--bulk-trigger");
   if (options.failNameSave) args.push("--fail-name-save");
   if (options.extraGroup) args.push("--extra-group");
+  if (options.freshInstall) args.push("--fresh-install");
   const result = spawnSync("python", args, {
     cwd: process.cwd(),
     env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT },

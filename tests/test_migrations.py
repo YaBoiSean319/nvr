@@ -46,8 +46,12 @@ class MigrationTests(unittest.TestCase):
     def _copies(self) -> list[Path]:
         return sorted(self.path.parent.glob(f"{self.path.name}.pre-migration-*"))
 
-    def _rows(self, db: sqlite3.Connection, table: str) -> list[tuple]:
-        return [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+    def _rows(self, db: sqlite3.Connection, table: str, columns: list[str] | None = None) -> list[tuple]:
+        selected = ",".join(columns) if columns else "*"
+        return [tuple(row) for row in db.execute(f"SELECT {selected} FROM {table} ORDER BY rowid")]
+
+    def _columns(self, db: sqlite3.Connection, table: str) -> list[str]:
+        return [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
 
     def test_fresh_database_is_created_by_migrations_and_rerun_is_a_no_op(self):
         initialize()
@@ -69,14 +73,17 @@ class MigrationTests(unittest.TestCase):
             "VALUES('c1','Dock East',x'00','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','g1')"
         )
         db.execute("INSERT INTO camera_group_memberships(group_id,camera_id) VALUES('g1','c1')")
-        before = {table: self._rows(db, table) for table in ("users", "camera_groups", "cameras", "camera_group_memberships")}
+        tables = ("users", "camera_groups", "cameras", "camera_group_memberships")
+        columns = {table: self._columns(db, table) for table in tables}
+        before = {table: self._rows(db, table, columns[table]) for table in tables}
         db.close()
 
         initialize()
 
         self.assertEqual(self._versions(), ALL_VERSIONS)
         with connect() as db:
-            after = {table: self._rows(db, table) for table in before}
+            # Later migrations may add columns; every value that existed is unchanged.
+            after = {table: self._rows(db, table, columns[table]) for table in tables}
         self.assertEqual(after, before)
         self.assertEqual(len(self._copies()), 1)
 

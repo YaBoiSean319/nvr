@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -180,6 +181,29 @@ def logout(request: Request, response: Response) -> Response:
 @router.get("/api/auth/me")
 def me(user: CurrentUser) -> dict[str, str]:
     return {"username": user["username"], "role": user["role"]}
+
+
+class PreferencesRequest(BaseModel):
+    theme: Literal["system", "light", "dark"]
+
+
+def _preferences(user_id: int) -> dict[str, str]:
+    with connect() as db:
+        row = db.execute("SELECT theme_preference FROM users WHERE id=?", (user_id,)).fetchone()
+    return {"theme": row["theme_preference"] if row else "system"}
+
+
+@router.get("/api/me/preferences")
+def get_preferences(user: CurrentUser) -> dict[str, str]:
+    return _preferences(int(user["id"]))
+
+
+@router.put("/api/me/preferences")
+def put_preferences(payload: PreferencesRequest, user: CurrentUser) -> dict[str, str]:
+    """Personal appearance only; every role may change its own theme."""
+    with connect() as db:
+        db.execute("UPDATE users SET theme_preference=? WHERE id=?", (payload.theme, int(user["id"])))
+    return _preferences(int(user["id"]))
 
 
 @router.get("/api/auth/oidc/status")

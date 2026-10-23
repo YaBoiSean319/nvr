@@ -8,3 +8,5 @@ data/
 recordings/
 test-results/
 playwright-report/
+app/web_dist/
+web/node_modules/

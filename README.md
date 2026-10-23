@@ -106,8 +106,18 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8280
 ```
+
+The rebuilt browser interface lives in `web/` (React, TypeScript, Vite). It is served at `/next/` while it replaces the current interface at `/`. The container image builds it in a separate stage; for local work:
+
+```sh
+npm ci --prefix web
+npm run build --prefix web     # type-checks, then writes app/web_dist served at /next/
+npm run dev --prefix web       # or a hot-reloading dev server that proxies /api to port 8280
+```
+
+Real-browser journeys run with `npm run test:browser` after `npm ci` and the web build. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to use an already-installed Chromium instead of Playwright's download.
 
 ## Current boundary
 

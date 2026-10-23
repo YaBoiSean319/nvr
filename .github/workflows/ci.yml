@@ -46,6 +46,10 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
+      - name: Build the browser interface
+        run: |
+          npm ci --prefix web --no-audit --no-fund
+          npm run build --prefix web
       - name: Start simulated RTSP camera
         run: |
           nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 600 -an \
@@ -134,6 +138,10 @@ jobs:
         run: python -m compileall -q app tests
       - name: Check browser JavaScript
         run: node --check app/static/app.js
+      - name: Typecheck and build the browser interface
+        run: |
+          npm ci --prefix web --no-audit --no-fund
+          npm run build --prefix web
       - name: Test workspace layout behavior
         run: node --test tests-js/*.test.cjs
       - name: Validate Compose configuration

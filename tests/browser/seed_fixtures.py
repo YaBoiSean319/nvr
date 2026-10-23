@@ -29,9 +29,37 @@ def _camera_id(index: int) -> str:
     return str(uuid.uuid5(NAMESPACE, f"camera-{index:03d}"))
 
 
+def _reset_site_appearance(db: sqlite3.Connection) -> None:
+    db.execute("UPDATE site_branding SET app_name='Workplace NVR',primary_color='#17212b',accent_color='#69a1ff' WHERE singleton_id=1")
+    db.execute("DELETE FROM site_branding_assets")
+
+
+def seed_fresh_install() -> dict[str, object]:
+    """An installation before first-run setup: no accounts, default appearance."""
+    initialize()
+    with connect() as db:
+        db.execute("DELETE FROM sessions")
+        db.execute("DELETE FROM api_tokens")
+        db.execute("DELETE FROM users")
+        _reset_site_appearance(db)
+    return _write_manifest({"camera_count": 0, "camera_ids": [], "fresh_install": True})
+
+
+def _write_manifest(manifest: dict[str, object]) -> dict[str, object]:
+    manifest_path = Path(os.environ.get(
+        "NVR_BROWSER_FIXTURE_MANIFEST",
+        str(Path(os.environ.get("NVR_DB_PATH", "./data/nvr.sqlite3")).with_name("fixtures.json")),
+    ))
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
 def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False, extra_group: bool = False) -> dict[str, object]:
     initialize()
     with connect() as db:
+        _reset_site_appearance(db)
+        db.execute("UPDATE users SET theme_preference='system'")
         users = {str(row["username"]).casefold() for row in db.execute("SELECT username FROM users")}
         if ADMIN_USERNAME.casefold() not in users:
             db.execute(
@@ -144,13 +172,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
             "discovery_linkable_id": DISCOVERY_LINKABLE_ID,
             "discovery_linked_id": DISCOVERY_LINKED_ID if linked_id else None,
         }
-    manifest_path = Path(os.environ.get(
-        "NVR_BROWSER_FIXTURE_MANIFEST",
-        str(Path(os.environ.get("NVR_DB_PATH", "./data/nvr.sqlite3")).with_name("fixtures.json")),
-    ))
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    return manifest
+    return _write_manifest(manifest)
 
 
 def main() -> None:
@@ -159,7 +181,11 @@ def main() -> None:
     parser.add_argument("--bulk-trigger", action="store_true")
     parser.add_argument("--fail-name-save", action="store_true")
     parser.add_argument("--extra-group", action="store_true")
+    parser.add_argument("--fresh-install", action="store_true", help="remove every account so first-run setup is required")
     arguments = parser.parse_args()
+    if arguments.fresh_install:
+        seed_fresh_install()
+        return
     if not 0 <= arguments.count <= 200:
         parser.error("camera fixture count must be between 0 and 200")
     seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save, extra_group=arguments.extra_group)

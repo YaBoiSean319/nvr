@@ -87,6 +87,8 @@ module.exports = {
     baseURL: "http://127.0.0.1:8765",
     browserName: "chromium",
     viewport: { width: 1440, height: 1000 },
+    // Local runs may point at a preinstalled Chromium; CI installs Playwright's own.
+    launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {},
     hasTouch: true,
     // Traces include authenticated network request bodies; do not retain them
     // with CI artifacts because browser journeys sign in using fixture credentials.
