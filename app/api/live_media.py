@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_VIEWERS
-from app.principal import CurrentUser
+from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.credentials import decrypt
 from app.recording import safe_stream_url, _manifest_bytes
@@ -91,6 +91,7 @@ def live_view_status(camera_id: str, _: CurrentUser) -> dict[str, object]:
 
 
 @router.get("/api/cameras/{camera_id}/audio/live")
+@requires_scope("media")
 def live_camera_audio(
     camera_id: str,
     _: CurrentUser,
@@ -212,6 +213,7 @@ async def _mjpeg_frames(camera_id: str, source: str, quality: str):
 
 
 @router.get("/api/cameras/{camera_id}/live")
+@requires_scope("media")
 def live_camera(
     camera_id: str,
     _: CurrentUser,

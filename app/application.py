@@ -6,6 +6,8 @@ import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.openapi.utils import get_openapi
+from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import api
@@ -13,7 +15,7 @@ from .detection import DetectionManager
 from .exports import ExportManager
 from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
-from .principal import secure_cookie
+from .principal import COOKIE_NAME, current_user, depends_on, scope_for, secure_cookie
 from .store import initialize
 from .version import APP_VERSION
 from .webhooks import WebhookManager
@@ -76,4 +78,32 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     )
     for router in api.ROUTERS:
         app.include_router(router)
+    app.openapi = lambda: _openapi_with_scopes(app)
     return app
+
+
+def _openapi_with_scopes(app: FastAPI) -> dict[str, object]:
+    """Publish how each operation is authorized: session cookie or a scoped API token."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "session": {"type": "apiKey", "in": "cookie", "name": COOKIE_NAME},
+        "apiToken": {
+            "type": "http",
+            "scheme": "bearer",
+            "description": "Scoped API token created by an administrator. Scopes: read, media, export, admin (admin implies all).",
+        },
+    }
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or not route.include_in_schema or not depends_on(route.dependant, current_user):
+            continue
+        for method in route.methods:
+            operation = schema["paths"][route.path_format][method.lower()]
+            scope = scope_for(route, method)
+            operation["x-required-scope"] = scope
+            operation["security"] = [{"session": []}, {"apiToken": [scope]}]
+            note = f"Requires a signed-in session or an API token with the `{scope}` scope."
+            operation["description"] = f"{operation['description']}\n\n{note}" if operation.get("description") else note
+    app.openapi_schema = schema
+    return schema

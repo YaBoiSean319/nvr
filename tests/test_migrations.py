@@ -15,6 +15,7 @@ from app.migrations import m0001_baseline
 from app.store import connect, database_path, initialize
 
 FIXTURES = Path(__file__).parent / "fixtures"
+ALL_VERSIONS = [version for version, _ in migrations.MIGRATIONS]
 
 
 class MigrationTests(unittest.TestCase):
@@ -50,10 +51,10 @@ class MigrationTests(unittest.TestCase):
 
     def test_fresh_database_is_created_by_migrations_and_rerun_is_a_no_op(self):
         initialize()
-        self.assertEqual(self._versions(), [1])
+        self.assertEqual(self._versions(), ALL_VERSIONS)
         self.assertEqual(self._copies(), [])
         initialize()
-        self.assertEqual(self._versions(), [1])
+        self.assertEqual(self._versions(), ALL_VERSIONS)
         with connect() as db:
             m0001_baseline.verify(db)
             self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
@@ -73,7 +74,7 @@ class MigrationTests(unittest.TestCase):
 
         initialize()
 
-        self.assertEqual(self._versions(), [1])
+        self.assertEqual(self._versions(), ALL_VERSIONS)
         with connect() as db:
             after = {table: self._rows(db, table) for table in before}
         self.assertEqual(after, before)
@@ -88,7 +89,7 @@ class MigrationTests(unittest.TestCase):
 
                 initialize()
 
-                self.assertEqual(self._versions(), [1])
+                self.assertEqual(self._versions(), ALL_VERSIONS)
                 with connect() as db:
                     m0001_baseline.verify(db)
                     self.assertEqual(db.execute("SELECT username FROM users WHERE id=1").fetchone()[0], "fixture-admin")
@@ -120,7 +121,7 @@ class MigrationTests(unittest.TestCase):
             status = client.get("/api/setup/status")
         self.assertEqual(status.status_code, 200)
         self.assertFalse(status.json()["setup_required"])
-        self.assertEqual(self._versions(), [1])
+        self.assertEqual(self._versions(), ALL_VERSIONS)
 
     def test_unrecognised_database_is_refused_untouched(self):
         self._load("CREATE TABLE inventory(id INTEGER PRIMARY KEY); INSERT INTO inventory VALUES(7);")
@@ -173,11 +174,12 @@ class MigrationTests(unittest.TestCase):
             raise ValueError("deliberate failure")
 
         failing = types.SimpleNamespace(NAME="deliberate", upgrade=broken)
-        with mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, (2, failing)]):
-            with self.assertRaisesRegex(migrations.MigrationError, "Schema migration 2 .*pre-migration copy"):
+        next_version = migrations.latest_version() + 1
+        with mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, (next_version, failing)]):
+            with self.assertRaisesRegex(migrations.MigrationError, f"Schema migration {next_version} .*pre-migration copy"):
                 initialize()
 
-        self.assertEqual(self._versions(), [1])
+        self.assertEqual(self._versions(), ALL_VERSIONS)
         with connect() as db:
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='half_applied'").fetchone())
             self.assertEqual(db.execute("SELECT username FROM users WHERE id=1").fetchone()[0], "admin")
@@ -188,10 +190,11 @@ class MigrationTests(unittest.TestCase):
         with connect() as db:
             db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(1,'admin','unused','administrator')")
         calls = []
-        for version in range(2, 7):
+        first = migrations.latest_version() + 1
+        for version in range(first, first + 5):
             step = types.SimpleNamespace(NAME=f"step{version}", upgrade=lambda db: None)
             with mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, *[
-                (number, types.SimpleNamespace(NAME=f"step{number}", upgrade=lambda db: None)) for number in range(2, version)
+                (number, types.SimpleNamespace(NAME=f"step{number}", upgrade=lambda db: None)) for number in range(first, version)
             ], (version, step)]), mock.patch.object(migrations, "pre_migration_hooks", [calls.append]):
                 initialize()
         self.assertEqual(calls, [database_path()] * 5)

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.api.ai_settings import ai_runtime_model_view, ensure_ai_settings
 from app.api.cameras import camera_view
-from app.principal import Administrator, CurrentUser
+from app.principal import Administrator, CurrentUser, requires_scope
 from app.store import connect
 from app.health import recording_health
 from app.scheduling import effective_policy
@@ -283,6 +283,7 @@ def segment_hold_status(camera_id: str, segment_id: int, _: CurrentUser) -> dict
 
 
 @router.post("/api/cameras/{camera_id}/segments/{segment_id}/hold",status_code=status.HTTP_201_CREATED)
+@requires_scope("export")
 def preserve_camera_segment(camera_id: str, segment_id: int, payload: HoldRequest, user: CurrentUser) -> dict[str, object]:
     if payload.expires_in_days is not None and user["role"]!="administrator":
         raise HTTPException(status_code=403,detail="Only administrators can set a hold expiry")

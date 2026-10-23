@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
-from app.principal import CurrentUser
+from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
 
@@ -37,6 +37,7 @@ class SynchronizedPlaybackRequest(BaseModel):
 
 
 @router.post("/api/playback/timeline")
+@requires_scope("read")
 def synchronized_playback_timeline(
     payload: SynchronizedPlaybackRequest,
     _: CurrentUser,
@@ -115,6 +116,7 @@ def synchronized_playback_timeline(
 
 
 @router.get("/api/cameras/{camera_id}/segments/{segment_id}/media")
+@requires_scope("media")
 def play_segment(
     camera_id: str,
     segment_id: int,
@@ -140,6 +142,7 @@ def play_segment(
 
 
 @router.get("/api/cameras/{camera_id}/segments/{segment_id}/snapshot")
+@requires_scope("media")
 async def snapshot_segment(
     camera_id: str,
     segment_id: int,
@@ -200,6 +203,7 @@ async def snapshot_segment(
 
 
 @router.get("/api/cameras/{camera_id}/segments/{segment_id}/frame-neighbor")
+@requires_scope("media")
 def playback_frame_neighbor(
     camera_id: str,
     segment_id: int,

@@ -19,12 +19,13 @@ from pathlib import Path
 from types import ModuleType
 from typing import Callable
 
-from app.migrations import m0001_baseline
+from app.migrations import m0001_baseline, m0002_api_tokens
 
 logger = logging.getLogger("nvr.migrations")
 
 MIGRATIONS: list[tuple[int, ModuleType]] = [
     (1, m0001_baseline),
+    (2, m0002_api_tokens),
 ]
 
 PRE_MIGRATION_COPIES_KEPT = 3

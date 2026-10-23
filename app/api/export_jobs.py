@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
-from app.principal import CurrentUser
+from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
 from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
@@ -52,11 +52,13 @@ class ExportRequest(BaseModel):
 
 
 @router.get("/api/exports")
+@requires_scope("export")
 def get_exports(user: CurrentUser) -> dict[str, object]:
     return {"exports": list_exports(int(user["id"]), user["role"] == "administrator")}
 
 
 @router.post("/api/exports", status_code=status.HTTP_202_ACCEPTED)
+@requires_scope("export")
 async def create_export(
     payload: ExportRequest,
     request: Request,
@@ -83,6 +85,7 @@ async def create_export(
 
 
 @router.get("/api/exports/{job_id}")
+@requires_scope("export")
 def get_export_status(job_id: str, user: CurrentUser) -> dict[str, object]:
     row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
     if row is None:
@@ -91,6 +94,7 @@ def get_export_status(job_id: str, user: CurrentUser) -> dict[str, object]:
 
 
 @router.post("/api/exports/{job_id}/cancel")
+@requires_scope("export")
 async def cancel_export(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     try:
         state = request_cancel(job_id, int(user["id"]), user["role"] == "administrator")
@@ -103,6 +107,7 @@ async def cancel_export(job_id: str, request: Request, user: CurrentUser) -> dic
 
 
 @router.get("/api/exports/{job_id}/download")
+@requires_scope("export")
 def download_export(job_id: str, user: CurrentUser) -> FileResponse:
     row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
     if row is None:
@@ -125,6 +130,7 @@ def download_export(job_id: str, user: CurrentUser) -> FileResponse:
 
 
 @router.post("/api/exports/{job_id}/verify")
+@requires_scope("export")
 async def verify_export_evidence(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     """Check manifest checksums against uploaded package bytes; media probing is separate."""
     row = get_export(job_id, int(user["id"]), user["role"] == "administrator")

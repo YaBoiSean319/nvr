@@ -39,7 +39,7 @@ Domain logic that does not depend on HTTP (recording, retention, storage, export
 - `CurrentUser`: any signed-in administrator or operator.
 - `Administrator`: administrators only (403 otherwise).
 
-Both yield a `Principal` (`id`, `username`, `role`) that also supports `principal["id"]` style access. Unauthenticated routes are deliberate: setup status/bootstrap, sign-in, OIDC, public branding, health, and the static interface. Tests replace identity by overriding `app.principal.current_user` or `app.principal.administrator` in `app.dependency_overrides`.
+Both yield a `Principal` (`id`, `username`, `role`, and for API tokens `scopes`/`token_id`) that also supports `principal["id"]` style access. A bearer API token resolves to its creating administrator, limited by scope: an endpoint marked `@requires_scope("media")` or `@requires_scope("export")` needs that scope, administrator routes need `admin`, other reads need `read`, and other changes need `admin`. The OpenAPI document publishes the result as `x-required-scope`. Unauthenticated routes are deliberate: setup status/bootstrap, sign-in, OIDC, public branding, health, and the static interface. Tests replace identity by overriding `app.principal.current_user` or `app.principal.administrator` in `app.dependency_overrides`.
 
 ## Database
 

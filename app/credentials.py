@@ -1,6 +1,8 @@
 """Encrypt camera connection strings at rest; never serialize plaintext to API responses."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import tempfile
 from pathlib import Path
@@ -41,6 +43,12 @@ def _fernet() -> Fernet:
         raise RuntimeError("Camera credential key is missing or invalid")
     os.chmod(path, 0o600)
     return Fernet(key)
+
+
+def derived_key(purpose: str) -> bytes:
+    """A key for one named purpose, derived from the protected credential key."""
+    _fernet()
+    return hmac.new(key_path().read_bytes(), b"nvr-derived-key:" + purpose.encode("ascii"), hashlib.sha256).digest()
 
 
 def encrypt(value: str) -> bytes:
