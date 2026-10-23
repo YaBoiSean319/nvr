@@ -49,6 +49,20 @@ export interface Camera {
   last_footage_write_at: string | null;
   effective_recording_mode?: "motion" | "continuous" | "disabled";
   recording_policy_source?: string;
+  schedule_timezone?: string;
+  retention_days?: number;
+  retention_policy_source?: string;
+  storage_volume_id: string | null;
+  recording_fault_since: string | null;
+  motion_pre_roll_seconds: number;
+  motion_post_roll_seconds: number;
+  motion_fallback_enabled: boolean;
+  motion_zones: { x: number; y: number; width: number; height: number }[];
+  motion_sensitivity: number;
+  motion_source_configured: boolean;
+  motion_source_status: string;
+  server_motion_status: string;
+  audio_status: "enabled" | "available_disabled" | "unsupported" | "unknown";
 }
 
 export type CameraBrand = "auto" | "acti" | "axis" | "bosch" | "dahua" | "hanwha" | "hikvision" | "reolink" | "samsung" | "uniview" | "other";

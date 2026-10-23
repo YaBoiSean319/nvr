@@ -8,7 +8,12 @@ import { Modal } from "@/components/Modal";
 import { HEALTH_TONE } from "@/features/cameras/CameraBrowser";
 import { guarded } from "../drafts";
 import { archiveCamera, restoreCamera } from "./api";
+import { AiTab } from "./AiTab";
 import { GeneralTab } from "./GeneralTab";
+import { HealthTab } from "./HealthTab";
+import { MotionTab } from "./MotionTab";
+import { RecordingTab } from "./RecordingTab";
+import { ScheduleTab } from "./ScheduleTab";
 import { CONNECTION_LABEL, HEALTH_LABEL, MODE_LABEL, connectionOf, modeOf } from "./inventory";
 import { Preview } from "./Preview";
 import { useCamerasStore, type EditorTab } from "./store";
@@ -27,6 +32,11 @@ export type TabContent = Partial<Record<EditorTab, (camera: Camera, admin: boole
 
 const CONTENT: TabContent = {
   general: (camera, admin) => <GeneralTab key={camera.id} camera={camera} admin={admin} />,
+  recording: (camera, admin) => <RecordingTab key={camera.id} camera={camera} admin={admin} />,
+  motion: (camera, admin) => <MotionTab key={camera.id} camera={camera} admin={admin} />,
+  ai: (camera, admin) => <AiTab key={camera.id} camera={camera} admin={admin} />,
+  schedule: (camera, admin) => <ScheduleTab key={camera.id} camera={camera} admin={admin} />,
+  health: camera => <HealthTab key={camera.id} camera={camera} />,
 };
 
 /** Exactly one camera's settings, with a fixed identity header and one tab at a time. */
