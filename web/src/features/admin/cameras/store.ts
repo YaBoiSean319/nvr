@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { Batch } from "./bulk";
 import { DEFAULT_FILTERS, DEFAULT_SORT, type Filters, type Sort } from "./inventory";
 
 export type EditorTab = "general" | "recording" | "motion" | "ai" | "schedule" | "health";
@@ -20,6 +21,9 @@ interface CamerasState extends Preferences {
   previewing: boolean;
   /** Phones show the editor over the inventory until Back; the selection stays. */
   detailOpen: boolean;
+  /** The current bulk change; it outlives its dialog so closing never hides a running batch. */
+  batch: Batch | null;
+  bulkOpen: boolean;
   preferencesFor: string | null;
 
   select: (id: string | null) => void;
@@ -32,6 +36,8 @@ interface CamerasState extends Preferences {
   setPaneWidth: (width: number) => void;
   setPreviewing: (on: boolean) => void;
   closeDetail: () => void;
+  setBatch: (batch: Batch | null) => void;
+  setBulkOpen: (open: boolean) => void;
   loadPreferences: (username: string) => void;
   reset: () => void;
 }
@@ -46,6 +52,8 @@ const initial = {
   filters: DEFAULT_FILTERS,
   previewing: false,
   detailOpen: false,
+  batch: null,
+  bulkOpen: false,
   preferencesFor: null,
 };
 
@@ -69,6 +77,8 @@ export const useCamerasStore = create<CamerasState>((set, get) => ({
     tab: id === state.selectedId ? state.tab : "general",
   })),
   closeDetail: () => set({ detailOpen: false }),
+  setBatch: batch => set({ batch }),
+  setBulkOpen: bulkOpen => set({ bulkOpen }),
   setTab: tab => set({ tab }),
   toggleChecked: id => set(state => ({ checked: state.checked.includes(id) ? state.checked.filter(existing => existing !== id) : [...state.checked, id] })),
   setChecked: checked => set({ checked }),

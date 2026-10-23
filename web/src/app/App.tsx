@@ -12,6 +12,7 @@ import { useLiveStore } from "@/features/live/store";
 import { CamerasInventory, CamerasShell } from "@/features/admin/cameras/CamerasWorkspace";
 import { useCamerasStore } from "@/features/admin/cameras/store";
 import { AddCameras } from "@/features/admin/cameras/add/AddCameras";
+import { GroupsWorkspace } from "@/features/admin/groups/GroupsWorkspace";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
 import { Shell } from "@/features/shell/Shell";
@@ -37,7 +38,7 @@ function router(me: Me) {
             children: [
               { index: true, element: <CamerasInventory /> },
               { path: "add", element: <AdminRoute me={me}><AddCameras /></AdminRoute> },
-              { path: "groups", element: <AdminRoute me={me}><WorkspacePlaceholder title="Groups & Policies" legacyHint="Group policies are available in the current interface." /></AdminRoute> },
+              { path: "groups", element: <AdminRoute me={me}><GroupsWorkspace /></AdminRoute> },
               { path: "*", element: <NotFound /> },
             ],
           },

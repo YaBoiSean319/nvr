@@ -23,7 +23,8 @@ type Drag = { kind: "draw" | "move" | "resize"; index: number; startX: number; s
  * selected zone, and every value can be typed.
  */
 export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false }: {
-  cameraId: string; zones: Zone[]; onChange: (zones: Zone[]) => void; label: string; readOnly?: boolean;
+  /** A camera to borrow a representative frame from; groups may have none. */
+  cameraId: string | null; zones: Zone[]; onChange: (zones: Zone[]) => void; label: string; readOnly?: boolean;
 }) {
   const stage = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
@@ -31,6 +32,7 @@ export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false 
   const [frame, setFrame] = useState<{ url: string; ratio: string } | null>(null);
 
   useEffect(() => {
+    if (!cameraId) return;
     const controller = new AbortController();
     latestSegment(cameraId, controller.signal).then(segment => {
       if (!segment || controller.signal.aborted) return;

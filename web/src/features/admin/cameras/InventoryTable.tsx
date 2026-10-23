@@ -24,6 +24,7 @@ export function InventoryTable({ cameras, loading, error, admin }: Props) {
   const showBrand = useCamerasStore(state => state.showBrand);
   const selectedId = useCamerasStore(state => state.selectedId);
   const checked = useCamerasStore(state => state.checked);
+  const batch = useCamerasStore(state => state.batch);
   const { setFilters, setSort, setShowBrand, select, toggleChecked, setChecked } = useCamerasStore.getState();
   const query = useDeferredValue(filters.query);
   const rows = useMemo(() => visibleCameras(cameras ?? [], { ...filters, query }, sort), [cameras, filters, query, sort]);
@@ -70,9 +71,21 @@ export function InventoryTable({ cameras, loading, error, admin }: Props) {
       <div className="inventory-meta" aria-live="polite">
         {rows.length} of {(cameras ?? []).length} cameras
         {admin && checked.length ? (
-          <span className="bulk-summary">
+          <span className="bulk-summary" role="group" aria-label="Bulk selection">
             {" · "}{checked.length} selected for bulk changes{hiddenChecked ? ` (${hiddenChecked} hidden by filters)` : ""}
             <button type="button" className="button" data-variant="ghost" onClick={() => setChecked([])}>Clear selection</button>
+            {!allVisibleChecked ? (
+              <button type="button" className="button" data-variant="ghost" onClick={() => setChecked([...new Set([...checked, ...rows.map(camera => camera.id)])])}>
+                Select all {rows.length} matching
+              </button>
+            ) : null}
+            <button type="button" className="button" data-variant="primary" onClick={() => useCamerasStore.getState().setBulkOpen(true)}>Bulk change…</button>
+          </span>
+        ) : null}
+        {admin && batch && batch.phase !== "review" ? (
+          <span className="bulk-summary" role="status">
+            {" · "}{batch.phase === "running" ? "Bulk change running…" : "Bulk change finished."}
+            <button type="button" className="button" data-variant="ghost" onClick={() => useCamerasStore.getState().setBulkOpen(true)}>View results</button>
           </span>
         ) : null}
       </div>

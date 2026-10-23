@@ -8,15 +8,16 @@ interface ModalProps {
   description?: string;
   children: ReactNode;
   footer: ReactNode;
+  wide?: boolean;
 }
 
 /** A centred dialog for short decisions; focus returns to the opener on close. */
-export function Modal({ open, onOpenChange, title, description, children, footer }: ModalProps) {
+export function Modal({ open, onOpenChange, title, description, children, footer, wide = false }: ModalProps) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="drawer-overlay" />
-        <Dialog.Content className="modal">
+        <Dialog.Content className={wide ? "modal modal-wide" : "modal"}>
           <Dialog.Title className="drawer-title">{title}</Dialog.Title>
           <Dialog.Description className={description ? "drawer-description" : "visually-hidden"}>{description ?? title}</Dialog.Description>
           <div className="modal-body">{children}</div>

@@ -3,6 +3,7 @@ import { NavLink } from "react-router";
 import { ApiError } from "@/api/client";
 import { useCameras, useMe } from "@/api/queries";
 import { DraftGuard } from "../drafts";
+import { BulkDialog } from "./BulkDialog";
 import { CameraEditor, type TabContent } from "./CameraEditor";
 import { InventoryTable } from "./InventoryTable";
 import { matches, revealing } from "./inventory";
@@ -72,6 +73,7 @@ export function CamerasInventory({ extraTabs }: { extraTabs?: TabContent }) {
     <div ref={panes} className="admin-panes" data-detail={selectedId && detailOpen ? "open" : "closed"}
          style={{ gridTemplateColumns: `minmax(0, ${paneWidth}fr) 8px minmax(0, ${100 - paneWidth}fr)` }}>
       <InventoryTable cameras={cameras.data} loading={cameras.isPending} error={error} admin={admin} />
+      {admin ? <BulkDialog cameras={cameras.data ?? []} /> : null}
       <div className="pane-resizer" role="separator" aria-orientation="vertical" aria-label="Resize inventory and settings"
            aria-valuemin={30} aria-valuemax={75} aria-valuenow={Math.round(paneWidth)} tabIndex={0} onKeyDown={onResizerKey}
            onPointerDown={(event: PointerEvent<HTMLDivElement>) => { dragging.current = true; event.currentTarget.setPointerCapture(event.pointerId); }}
