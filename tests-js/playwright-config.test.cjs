@@ -19,14 +19,14 @@ const EXPECTED_SERVER_ENV_KEYS = [
   "PATH",
 ].sort();
 
-test("browser server and fallback reports do not expose unrelated environment values", () => {
+test("browser server, fallback reports, and failure diagnostics protect credentials", () => {
   const sentinels = ["proxy-secret-sentinel", "credential-secret-sentinel", "runner-secret-sentinel"];
   const childProgram = [
     `const config = require(${JSON.stringify(path.join(ROOT, "playwright.config.cjs"))});`,
     'const fs = require("node:fs");',
     'const report = JSON.parse(fs.readFileSync("test-results/camera-browser-acceptance.json", "utf8"));',
     'const measurements = JSON.parse(fs.readFileSync("test-results/camera-admin-acceptance-measurements.json", "utf8"));',
-    'process.stdout.write(JSON.stringify({ serverEnv: config.webServer.env, report, measurements }));',
+    'process.stdout.write(JSON.stringify({ serverEnv: config.webServer.env, trace: config.use.trace, report, measurements }));',
   ].join("\n");
   const result = spawnSync(process.execPath, ["-e", childProgram], {
     cwd: ROOT,
@@ -43,6 +43,7 @@ test("browser server and fallback reports do not expose unrelated environment va
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const output = JSON.parse(result.stdout);
   assert.deepEqual(Object.keys(output.serverEnv).sort(), EXPECTED_SERVER_ENV_KEYS);
+  assert.equal(output.trace, "off", "Playwright traces can contain authenticated request bodies");
   assert.equal(output.serverEnv.PATH, process.env.PATH);
   const serialized = JSON.stringify(output);
   for (const sentinel of sentinels) assert.equal(serialized.includes(sentinel), false);

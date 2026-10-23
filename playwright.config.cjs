@@ -82,7 +82,9 @@ module.exports = {
     browserName: "chromium",
     viewport: { width: 1440, height: 1000 },
     hasTouch: true,
-    trace: "retain-on-failure",
+    // Traces include authenticated network request bodies; do not retain them
+    // with CI artifacts because browser journeys sign in using fixture credentials.
+    trace: "off",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
     actionTimeout: 8_000,

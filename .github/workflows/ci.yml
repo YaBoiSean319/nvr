@@ -59,7 +59,7 @@ jobs:
         env:
           NVR_BROWSER_REPORT_PRIVACY_SENTINEL: nvr-camera-browser-report-privacy-sentinel-v1
         run: node tests/browser/validate_acceptance_report_privacy.cjs
-      - name: Retain browser traces and sanitized acceptance measurements
+      - name: Retain browser acceptance evidence and failure media
         if: always() && steps.report-privacy.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:

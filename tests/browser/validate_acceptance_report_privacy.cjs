@@ -25,6 +25,20 @@ if (sentinel && reportText.includes(sentinel)) {
   throw new Error("Playwright JSON report contains the browser-runner privacy sentinel.");
 }
 
+const playwrightOutputDirectory = path.resolve("test-results/playwright");
+function assertNoTraceArchives(directory) {
+  if (!fs.existsSync(directory)) return;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      assertNoTraceArchives(entryPath);
+    } else if (entry.isFile() && entry.name === "trace.zip") {
+      throw new Error("Playwright trace archives can contain authenticated request bodies and must not be uploaded.");
+    }
+  }
+}
+assertNoTraceArchives(playwrightOutputDirectory);
+
 let checkedServerEnvironment = false;
 function inspect(value, parentPath = []) {
   if (Array.isArray(value)) {
