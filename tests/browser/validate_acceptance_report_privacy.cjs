@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { FIXTURE_ENVIRONMENT_PATH } = require("./fixture_environment.cjs");
 
 const reportPath = path.resolve("test-results/camera-browser-acceptance.json");
 const allowedWebServerEnvironment = new Set([
@@ -18,6 +19,7 @@ const allowedWebServerEnvironment = new Set([
 ]);
 
 if (!fs.existsSync(reportPath)) throw new Error("Playwright JSON report is missing; privacy validation cannot run.");
+if (fs.existsSync(FIXTURE_ENVIRONMENT_PATH)) throw new Error("Temporary browser fixture environment must not be retained in CI artifacts.");
 const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
 const sentinel = process.env.NVR_BROWSER_REPORT_PRIVACY_SENTINEL;
 function findSentinelPaths(value, parentPath = []) {

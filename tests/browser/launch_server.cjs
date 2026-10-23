@@ -1,4 +1,5 @@
 const { spawn } = require("node:child_process");
+const { loadFixtureEnvironment } = require("./fixture_environment.cjs");
 
 const SERVER_ENVIRONMENT_KEYS = Object.freeze([
   "PATH",
@@ -26,7 +27,7 @@ function childEnvironment(source = process.env) {
 function run() {
   const server = spawn("python", ["tests/browser/server.py"], {
     cwd: process.cwd(),
-    env: childEnvironment(),
+    env: childEnvironment({ PATH: process.env.PATH, ...loadFixtureEnvironment() }),
     stdio: "inherit",
   });
   for (const signal of ["SIGINT", "SIGTERM"]) {

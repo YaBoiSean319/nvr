@@ -2,22 +2,11 @@ const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const { test: base, expect } = require("playwright/test");
+const { loadFixtureEnvironment } = require("./fixture_environment.cjs");
 
-const FIXTURE_PASSWORD = fs.readFileSync(process.env.NVR_BROWSER_FIXTURE_PASSWORD_PATH, "utf8").trim();
-const MANIFEST_PATH = process.env.NVR_BROWSER_FIXTURE_MANIFEST;
-const FIXTURE_ENVIRONMENT_KEYS = [
-  "NVR_DB_PATH",
-  "NVR_RECORDINGS_PATH",
-  "NVR_CREDENTIAL_KEY_PATH",
-  "NVR_COOKIE_SECURE",
-  "NVR_STORAGE_VOLUMES",
-  "NVR_BROWSER_FIXTURE_MANIFEST",
-  "NVR_BROWSER_FIXTURE_PASSWORD_PATH",
-  "NVR_BROWSER_HOST",
-  "NVR_BROWSER_PORT",
-  "NVR_SEGMENT_SECONDS",
-  "NVR_DISCOVERY_INTERFACE",
-];
+const FIXTURE_ENVIRONMENT = loadFixtureEnvironment();
+const FIXTURE_PASSWORD = fs.readFileSync(FIXTURE_ENVIRONMENT.NVR_BROWSER_FIXTURE_PASSWORD_PATH, "utf8").trim();
+const MANIFEST_PATH = FIXTURE_ENVIRONMENT.NVR_BROWSER_FIXTURE_MANIFEST;
 
 function seedFixtures(count, options = {}) {
   const args = ["-m", "tests.browser.seed_fixtures", "--count", String(count)];
@@ -26,7 +15,7 @@ function seedFixtures(count, options = {}) {
   if (options.extraGroup) args.push("--extra-group");
   const result = spawnSync("python", args, {
     cwd: process.cwd(),
-    env: Object.fromEntries(["PATH", ...FIXTURE_ENVIRONMENT_KEYS].map(key => [key, process.env[key]]).filter(([, value]) => value !== undefined)),
+    env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT },
     encoding: "utf8",
     timeout: 30_000,
   });
@@ -40,6 +29,13 @@ async function signIn(page, username = "camera-admin") {
   page.on("pageerror", onPageError);
   try {
     await page.goto("/");
+    const loginVisible = await page.locator("#login").isVisible().catch(() => false);
+    if (!loginVisible) {
+      const setupResponse = await page.request.get(new URL("/api/setup/status", page.url()).toString()).catch(() => null);
+      const setupStatus = setupResponse?.ok() ? await setupResponse.json().catch(() => null) : null;
+      const setupRequired = setupStatus ? String(setupStatus.setup_required) : "unknown";
+      throw new Error(`Login screen is hidden. Initial setup required: ${setupRequired}. Page errors: ${pageErrors.join("; ") || "(none)"}`);
+    }
     await expect(page.locator("#login")).toBeVisible();
     await page.locator("#login-user").fill(username);
     await page.locator("#login-pass").fill(FIXTURE_PASSWORD);

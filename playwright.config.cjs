@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { FIXTURE_ENVIRONMENT_PATH } = require("./tests/browser/fixture_environment.cjs");
 
 const fixtureDirectory = path.join(os.tmpdir(), `nvr-camera-browser-${process.pid}`);
 fs.mkdirSync(fixtureDirectory, { recursive: true, mode: 0o700 });
@@ -48,6 +49,8 @@ const fixtureEnvironment = {
   NVR_SEGMENT_SECONDS: "10",
   NVR_DISCOVERY_INTERFACE: "127.0.0.1",
 };
+fs.writeFileSync(FIXTURE_ENVIRONMENT_PATH, `${JSON.stringify(fixtureEnvironment, null, 2)}\n`, { mode: 0o600 });
+fs.chmodSync(FIXTURE_ENVIRONMENT_PATH, 0o600);
 // The server only needs PATH and these isolated fixture settings. Playwright
 // merges process.env into webServer children, so launch_server.cjs enforces this
 // allowlist at the actual Python server boundary.
@@ -56,12 +59,9 @@ const serverEnvironment = {
   ...fixtureEnvironment,
 };
 
-// Playwright's webServer child and browser-test subprocesses must use the same
-// isolated store. The tests reseed the running app between journeys.
-Object.assign(process.env, fixtureEnvironment);
-
 process.on("exit", () => {
   fs.rmSync(fixtureDirectory, { recursive: true, force: true });
+  fs.rmSync(FIXTURE_ENVIRONMENT_PATH, { force: true });
 });
 
 module.exports = {
