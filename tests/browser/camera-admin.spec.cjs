@@ -967,7 +967,10 @@ test("administrator Cameras, Add Cameras, and Groups work responsively with keyb
   await operations.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#group-editor-heading")).toContainText("Operations");
+  await expect(page.locator("#group-policy-tabs")).toBeVisible();
   const general = page.locator('[data-group-policy-tab="general"]');
+  await expect(general).toBeVisible();
+  await expect(general).toHaveAttribute("aria-selected", "true");
   await general.focus();
   await page.keyboard.press("ArrowRight");
   await expect(page.locator('[data-group-policy-tab="recording"]')).toHaveAttribute("aria-selected", "true");
@@ -1204,11 +1207,11 @@ test("200-camera filtering and panel selection record browser measurements witho
   page.on("request", request => {
     if (/\/api\/cameras\/[^/]+\/live(?:\?|$)/.test(request.url())) mediaRequests.push(request.url());
   });
+  await signIn(page);
   page.on("pageerror", error => { browserErrors.page += 1; browserErrorDetails.push(`page: ${error.message}`); });
   page.on("console", message => { if (message.type() === "error") { browserErrors.console += 1; browserErrorDetails.push(`console: ${message.text()}`); } });
   page.on("requestfailed", request => { browserErrors.failed_requests += 1; browserErrorDetails.push(`request failed ${new URL(request.url()).pathname}: ${request.failure()?.errorText||"unknown error"}`); });
   page.on("response", response => { if (response.status() >= 400) { browserErrors.http_errors += 1; browserErrorDetails.push(`HTTP ${response.status()} ${new URL(response.url()).pathname}`); } });
-  await signIn(page);
   await openCameraSettings(page);
   await expect(page.locator("#camera-inventory-table tbody tr")).toHaveCount(200);
   await expect(page.locator("#camera-list")).toContainText("Select a camera");

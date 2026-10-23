@@ -91,6 +91,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Workplace NVR", version=APP_VERSION, lifespan=lifespan)
+@app.middleware("http")
+async def prevent_api_caching(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("NVR_OIDC_SESSION_SECRET") or secrets.token_urlsafe(48),

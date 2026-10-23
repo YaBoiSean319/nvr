@@ -236,7 +236,7 @@ function renderDiscoverySelection() {
     const label=document.createElement("strong");label.className="discovery-selected-name";label.textContent=window.NvrCameraDiscovery.candidateLabel(candidate);
     const address=document.createElement("p");address.className="discovery-selected-address";address.textContent=`Address · ${window.NvrCameraDiscovery.candidateAddress(candidate)||"Not reported"}`;
     const identity=document.createElement("p");identity.className="discovery-selected-identity";identity.textContent=String(candidate.device_uuid||"").startsWith("ipscan:")?"ONVIF identity was not advertised. This result is tracked by an address-based fingerprint.":`ONVIF identity · ${candidate.device_uuid}`;
-    const state=document.createElement("p");state.className="discovery-candidate-state";state.dataset.discoveryCandidateState="";state.setAttribute("role","status");
+    const candidateStatus=document.createElement("p");candidateStatus.className="discovery-candidate-state";candidateStatus.dataset.discoveryCandidateState="";candidateStatus.setAttribute("role","status");
     const feedback=document.createElement("p");feedback.className="discovery-device-message";feedback.id="discovery-device-message";feedback.setAttribute("role","status");feedback.setAttribute("aria-live","polite");
     target.append(heading,label,address,identity);
     const endpoints=(candidate.service_urls||[]).map(safeDiscoveredEndpoint).filter(Boolean);
@@ -253,12 +253,12 @@ function renderDiscoverySelection() {
       for(const [name,value] of capabilities){const item=document.createElement("li");item.textContent=`${name.replaceAll("_"," ")} · ${String(value||"unknown")}`;list.append(item);}
       capabilityDetails.append(capabilitySummary,list);target.append(capabilityDetails);
     }
-    target.append(state,feedback);
+    target.append(candidateStatus,feedback);
     const current=state.candidates.find(item=>item.id===candidate.id);
-    if(!current){state.textContent="This device is no longer in the current discovery results. Refresh the results before continuing.";updateDiscoverySelectedStatus(candidate);return;}
+    if(!current){candidateStatus.textContent="This device is no longer in the current discovery results. Refresh the results before continuing.";updateDiscoverySelectedStatus(candidate);return;}
     if(current.linked_camera_id){
       const linked=window.NvrCameraDiscovery.linkedCamera(state,current);
-      state.textContent=linked?`Already added as ${linked.name}. Duplicate addition is disabled.`:"Already linked to an existing camera. Duplicate addition is disabled.";
+      candidateStatus.textContent=linked?`Already added as ${linked.name}. Duplicate addition is disabled.`:"Already linked to an existing camera. Duplicate addition is disabled.";
       if(linked){const open=document.createElement("button");open.type="button";open.className="discovery-open-camera";open.dataset.discoveryOpenExisting="";open.textContent="Open existing camera";open.onclick=()=>void inspectCameraFromStatus(linked.id);target.append(open);}
       return;
     }
@@ -268,15 +268,15 @@ function renderDiscoverySelection() {
 }
 
 function updateDiscoverySelectedStatus(candidate) {
-  const state=root.querySelector("[data-discovery-candidate-state]");if(!state)return;
+  const candidateStatus=root.querySelector("[data-discovery-candidate-state]");if(!candidateStatus)return;
   const current=state.candidates.find(item=>item.id===candidate.id);
   const linked=current&&window.NvrCameraDiscovery.linkedCamera(state,current);
-  if(!current){state.textContent="This device is no longer in the current discovery results. Its draft is kept here but cannot be submitted.";}
-  else if(current.linked_camera_id){state.textContent=linked?`Already added as ${linked.name}. Your current draft is preserved, but duplicate addition is disabled.`:"Already linked to an existing camera. Your current draft is preserved, but duplicate addition is disabled.";}
-  else if(current.add_in_progress)state.textContent="Another request is testing or adding this device. Wait for it to finish before retrying.";
-  else state.textContent=`First seen ${current.first_seen_at?formatDateTime(current.first_seen_at):"unknown"} · Last seen ${current.last_seen_at?formatDateTime(current.last_seen_at):"unknown"}. Testing must pass before the camera is added.`;
+  if(!current){candidateStatus.textContent="This device is no longer in the current discovery results. Its draft is kept here but cannot be submitted.";}
+  else if(current.linked_camera_id){candidateStatus.textContent=linked?`Already added as ${linked.name}. Your current draft is preserved, but duplicate addition is disabled.`:"Already linked to an existing camera. Your current draft is preserved, but duplicate addition is disabled.";}
+  else if(current.add_in_progress)candidateStatus.textContent="Another request is testing or adding this device. Wait for it to finish before retrying.";
+  else candidateStatus.textContent=`First seen ${current.first_seen_at?formatDateTime(current.first_seen_at):"unknown"} · Last seen ${current.last_seen_at?formatDateTime(current.last_seen_at):"unknown"}. Testing must pass before the camera is added.`;
   let open= root.querySelector("#discovery-device-panel [data-discovery-open-existing]");
-  if(linked&&!open){open=document.createElement("button");open.type="button";open.className="discovery-open-camera";open.dataset.discoveryOpenExisting="";open.textContent="Open existing camera";state.after(open);}
+  if(linked&&!open){open=document.createElement("button");open.type="button";open.className="discovery-open-camera";open.dataset.discoveryOpenExisting="";open.textContent="Open existing camera";candidateStatus.after(open);}
   if(linked&&open)open.onclick=()=>void inspectCameraFromStatus(linked.id);
   else open?.remove();
   const unavailable=!current||Boolean(current.linked_camera_id)||Boolean(current.add_in_progress);
