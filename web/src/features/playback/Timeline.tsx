@@ -27,6 +27,7 @@ interface Props {
  */
 export function Timeline({ settings, range, cameraIds, cameras, timeline, loading }: Props) {
   const stored = usePlaybackStore(store => store.window);
+  const exportMarks = usePlaybackStore(store => store.marks);
   const { setWindow } = usePlaybackStore.getState();
   const window = stored ?? range;
   const time = useClockTime();
@@ -100,9 +101,14 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
   const multiDay = !sameSiteDay(window.start, window.end, settings.time_zone);
   const cursor = percent(time, window);
   const span = window.end - window.start;
+  const marked = exportMarks.in !== null || exportMarks.out !== null
+    ? visibleSpan(Math.min(exportMarks.in ?? range.start, exportMarks.out ?? range.end), Math.max(exportMarks.in ?? range.start, exportMarks.out ?? range.end), window)
+    : null;
+  const rangeStyle = marked ? { left: `${marked.left}%`, width: `${marked.width}%` } : undefined;
 
   return (
-    <section id="playback-timeline" className="timeline" aria-label="Timeline" data-window-start={Math.round(window.start)} data-window-end={Math.round(window.end)}>
+    <section id="playback-timeline" className="timeline" aria-label="Timeline" data-window-start={Math.round(window.start)} data-window-end={Math.round(window.end)}
+             data-mark-in={exportMarks.in === null ? undefined : Math.round(exportMarks.in)} data-mark-out={exportMarks.out === null ? undefined : Math.round(exportMarks.out)}>
       <div className="timeline-tools">
         <button type="button" className="button" onClick={() => apply(zoom(window, range, 0.5, Math.max(window.start, Math.min(window.end, time))))}
                 disabled={span <= 10_000}>Zoom in</button>
@@ -138,6 +144,7 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
                 {formatSiteTime(mark, settings, step < 60_000)}
               </span>
             ))}
+            {marked ? <span className="timeline-range" data-testid="export-range" style={rangeStyle} /> : null}
             <span className="timeline-cursor-head" style={{ left: `${cursor}%` }} hidden={cursor < 0 || cursor > 100} />
           </div>
         </div>
@@ -152,6 +159,7 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
               </span>
               <div className="timeline-track" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={() => (dragging.current = false)}>
                 {row ? <Track row={row} window={window} settings={settings} /> : null}
+                {marked ? <span className="timeline-range" style={rangeStyle} /> : null}
                 <span className="timeline-cursor" style={{ left: `${cursor}%` }} hidden={cursor < 0 || cursor > 100} />
               </div>
             </div>

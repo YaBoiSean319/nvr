@@ -47,7 +47,9 @@ export function summarize(cameras: Camera[] | undefined, incidents: Incident[] |
       : open.length
         ? { tone: open.some(incident => incident.state === "active") ? "bad" : "warn", label: `Incidents: ${open.length}`, open }
         : { tone: "good", label: "No incidents", open },
-    jobs: running.length
+    jobs: running.length === 1 && running[0]!.status === "running"
+      ? { tone: "neutral", label: `Exporting · ${running[0]!.progress}%`, active: running, failed }
+      : running.length
       ? { tone: "neutral", label: `Exports: ${running.length} running`, active: running, failed }
       : failed.length
         ? { tone: "warn", label: `Exports: ${failed.length} failed`, active: running, failed }

@@ -58,6 +58,28 @@ export interface ExportJob {
   progress: number;
   error: string | null;
   created_at: string;
+  completed_at: string | null;
+  start: string;
+  end: string;
+  camera_ids: string[];
+  output_modes: ("individual" | "grid")[];
+  grid_resolution: "1080p" | "4k";
+  include_audio: boolean;
+  expires_at: string | null;
+  download_url: string | null;
+  cancel_requested: boolean;
+  retry_of: string | null;
+}
+
+export interface ExportRequest {
+  camera_ids: string[];
+  start: string;
+  end: string;
+  output_modes: ("individual" | "grid")[];
+  tile_camera_ids: (string | null)[];
+  grid_resolution: "1080p" | "4k";
+  include_audio: boolean;
+  audio_camera_id: string | null;
 }
 
 export interface SavedView {

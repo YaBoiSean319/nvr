@@ -31,14 +31,14 @@ function fieldsAt(instant: number, zone: string): Fields {
   };
 }
 
-const LOCAL_INPUT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
+const LOCAL_INPUT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
 
 /** UTC instants (ms) that show this wall time in `zone`, earliest first: zero, one or two. */
 export function localTimeCandidates(value: string, zone: string): number[] {
   const match = LOCAL_INPUT.exec(value);
   if (!match) return [];
-  const [year, month, day, hour, minute] = match.slice(1).map(Number) as [number, number, number, number, number];
-  const target = Date.UTC(year, month - 1, day, hour, minute);
+  const [year, month, day, hour, minute, second = 0] = match.slice(1).map(value => Number(value ?? 0)) as [number, number, number, number, number, number];
+  const target = Date.UTC(year, month - 1, day, hour, minute, second);
   const offsets = new Set<number>();
   for (let hours = -36; hours <= 36; hours += 6) {
     const probe = target + hours * 3_600_000;
@@ -47,16 +47,16 @@ export function localTimeCandidates(value: string, zone: string): number[] {
   }
   const matches = [...offsets].map(offset => target - offset).filter(instant => {
     const fields = fieldsAt(instant, zone);
-    return fields.year === year && fields.month === month && fields.day === day && fields.hour === hour && fields.minute === minute;
+    return fields.year === year && fields.month === month && fields.day === day && fields.hour === hour && fields.minute === minute && fields.second === second;
   });
   return [...new Set(matches)].sort((a, b) => a - b);
 }
 
-/** The `datetime-local` value for an instant at the site. */
-export function toLocalInput(instant: number, zone: string): string {
+/** The `datetime-local` value for an instant at the site, optionally to the second. */
+export function toLocalInput(instant: number, zone: string, seconds = false): string {
   const f = fieldsAt(instant, zone);
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${f.year}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}`;
+  return `${f.year}-${pad(f.month)}-${pad(f.day)}T${pad(f.hour)}:${pad(f.minute)}${seconds ? `:${pad(f.second)}` : ""}`;
 }
 
 /** Short UTC offset label for an instant at the site, such as "GMT-4". */

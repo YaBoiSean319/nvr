@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Callable, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import FileResponse
@@ -65,8 +65,15 @@ async def create_export(
     user: CurrentUser,
 ) -> dict[str, object]:
     start, end = payload.start.astimezone(timezone.utc), payload.end.astimezone(timezone.utc)
+    return _submit(request, user, lambda: create_export_record(
+        int(user["id"]), payload.camera_ids, start, end, payload.output_modes, payload.tile_camera_ids,
+        payload.grid_resolution, payload.include_audio, payload.audio_camera_id))
+
+
+def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str, object]:
+    """Validate and record a job, then hand it to the export worker."""
     try:
-        job_id = create_export_record(int(user["id"]), payload.camera_ids, start, end, payload.output_modes, payload.tile_camera_ids, payload.grid_resolution, payload.include_audio, payload.audio_camera_id)
+        job_id = create()
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OverflowError as exc:
@@ -82,6 +89,23 @@ async def create_export(
         raise HTTPException(status_code=503, detail="Export worker is unavailable") from exc
     row = get_export(job_id, int(user["id"]))
     return _job_view(row)
+
+
+@router.post("/api/exports/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+@requires_scope("export")
+async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
+    """Repeat a finished-unsuccessfully job as a new attempt; the original stays as it was."""
+    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if row["status"] not in {"failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Only failed or cancelled exports can be retried")
+    original = _job_view(row)
+    return _submit(request, user, lambda: create_export_record(
+        int(user["id"]), original["camera_ids"],
+        datetime.fromisoformat(original["start"]).astimezone(timezone.utc), datetime.fromisoformat(original["end"]).astimezone(timezone.utc),
+        original["output_modes"], original["tile_camera_ids"], original["grid_resolution"], original["include_audio"],
+        original["audio_camera_id"], retry_of=job_id))
 
 
 @router.get("/api/exports/{job_id}")

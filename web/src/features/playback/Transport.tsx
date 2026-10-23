@@ -16,7 +16,6 @@ export function Transport({ settings, ready, children }: { settings: DisplaySett
       <button type="button" className="button transport-play" data-variant="primary" disabled={!ready}
               onClick={() => (playing ? playbackClock.pause() : playbackClock.play())}>{playing ? "Pause" : "Play"}</button>
       <button type="button" className="button" disabled={!ready} onClick={() => playbackClock.stop()}>Stop</button>
-      {children}
       <label className="transport-speed">
         <span>Speed</span>
         <select value={String(rate)} onChange={event => playbackClock.setRate(Number(event.target.value) as Speed)}>
@@ -26,6 +25,7 @@ export function Transport({ settings, ready, children }: { settings: DisplaySett
       <output className="transport-time" aria-label="Playback time" data-time={ready ? Math.round(time) : undefined}>
         {ready ? formatSiteDateTime(time, settings) : "Search a time range to play footage"}
       </output>
+      {children}
       <button type="button" className="button transport-timeline" data-variant="ghost" aria-expanded={timelineOpen}
               aria-controls="playback-timeline" onClick={() => setTimelineOpen(!timelineOpen)}>
         {timelineOpen ? "Hide timeline" : "Show timeline"}

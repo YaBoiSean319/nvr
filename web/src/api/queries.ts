@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
-import type { Branding, Camera, CameraGroup, DisplaySettings, ExportJob, Incident, LiveWorkspaceState, Me, PlaybackTimeline, SavedView, ThemePreference } from "./types";
+import type { Branding, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, SavedView, ThemePreference } from "./types";
 
 export const keys = {
   setup: ["setup"] as const,
@@ -140,9 +140,19 @@ export function useExportJobs(enabled = true) {
     queryKey: keys.exports,
     enabled,
     queryFn: ({ signal }) => api<{ exports: ExportJob[] }>("/api/exports", { signal }).then(result => result.exports),
-    refetchInterval: STATUS_REFRESH_MS,
+    // Follow progress closely while work is queued or running.
+    refetchInterval: query => (query.state.data?.some(job => job.status === "queued" || job.status === "running") ? 2_000 : STATUS_REFRESH_MS),
   });
 }
+
+function useExportAction<T>(run: (value: T) => Promise<ExportJob>) {
+  const client = useQueryClient();
+  return useMutation({ mutationFn: run, onSuccess: () => client.invalidateQueries({ queryKey: keys.exports }) });
+}
+
+export const useCreateExport = () => useExportAction((request: ExportRequest) => api<ExportJob>("/api/exports", { method: "POST", body: request }));
+export const useCancelExport = () => useExportAction((id: string) => api<ExportJob>(`/api/exports/${encodeURIComponent(id)}/cancel`, { method: "POST" }));
+export const useRetryExport = () => useExportAction((id: string) => api<ExportJob>(`/api/exports/${encodeURIComponent(id)}/retry`, { method: "POST" }));
 
 export const viewKeys = {
   views: ["live", "views"] as const,

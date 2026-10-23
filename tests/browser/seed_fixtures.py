@@ -152,6 +152,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DROP TRIGGER IF EXISTS camera_browser_fixture_reject_bulk_update")
         db.execute("DROP TRIGGER IF EXISTS camera_browser_fixture_reject_name_save")
         db.execute("DELETE FROM discovery_candidates")
+        db.execute("DELETE FROM export_sources")
+        db.execute("DELETE FROM exports")
         db.execute("DELETE FROM live_workspace_states")
         db.execute("DELETE FROM viewer_layouts")
         db.execute("DELETE FROM shared_viewer_layouts")

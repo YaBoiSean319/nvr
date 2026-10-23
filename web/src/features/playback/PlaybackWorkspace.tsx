@@ -6,7 +6,9 @@ import { BrowserFrame, CameraList } from "@/features/cameras/CameraBrowser";
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
 import { toLocalInput } from "@/lib/zonedTime";
 import { playbackClock } from "./clock";
+import { ExportDrawer } from "./ExportDrawer";
 import { FullChooser } from "./FullChooser";
+import { MarkControls } from "./MarkControls";
 import { Investigation } from "./Investigation";
 import { PlaybackGrid } from "./PlaybackGrid";
 import { SearchBar } from "./SearchBar";
@@ -50,6 +52,7 @@ export function PlaybackWorkspace() {
   const timelineOpen = usePlaybackStore(store => store.timelineOpen);
   const notice = usePlaybackStore(store => store.notice);
   const pendingOpen = usePlaybackStore(store => store.pendingOpen);
+  const exportOpen = usePlaybackStore(store => store.exportOpen);
   const { toggle, setSidebarOpen, clearNotice, searchLoaded } = usePlaybackStore.getState();
   const [incoming, setIncoming] = useState<string | null>(null);
   const byId = useMemo(() => new Map((cameras.data ?? []).filter(camera => !camera.archived_at).map(camera => [camera.id, camera])), [cameras.data]);
@@ -109,7 +112,7 @@ export function PlaybackWorkspace() {
   const names = useMemo(() => new Map([...byId].map(([id, camera]) => [id, camera.name])), [byId]);
 
   return (
-    <div className="workspace playback-workspace" data-sidebar={sidebarOpen ? "open" : "closed"}>
+    <div className="workspace playback-workspace" data-sidebar={sidebarOpen ? "open" : "closed"} data-export={exportOpen && range ? "open" : "closed"}>
       {sidebarOpen ? (
         <BrowserFrame onCollapse={() => setSidebarOpen(false)}>
           <div className="browser-heading">Cameras</div>
@@ -137,12 +140,16 @@ export function PlaybackWorkspace() {
           <Transport settings={display.data} ready={ready && Boolean(applied)}>
             <Investigation settings={display.data} range={range} names={names}
                            rows={shownIds.map(id => timeline.get(id)).filter((row): row is TimelineCamera => row !== undefined)} />
+            <MarkControls ready={ready && Boolean(applied)} />
           </Transport>
         ) : null}
         {timelineOpen && display.data && range ? (
           <Timeline settings={display.data} range={range} cameraIds={shownIds} cameras={byId} timeline={timeline} loading={query.isFetching} />
         ) : null}
       </section>
+      {exportOpen && range && display.data ? (
+        <ExportDrawer settings={display.data} range={range} shownIds={shownIds} cameras={byId} timeline={timeline} />
+      ) : null}
       <FullChooser incoming={incoming ? byId.get(incoming) : undefined} current={shownIds.map(id => byId.get(id)!)}
                    onClose={() => setIncoming(null)}
                    onReplace={target => { if (incoming) usePlaybackStore.getState().replaceCamera(target, incoming); setIncoming(null); }} />

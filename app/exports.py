@@ -524,6 +524,7 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
         "error": row["error"],
         "download_url": f"/api/exports/{row['id']}/download" if row["status"] == "completed" and row["output_relative_path"] and (not row["expires_at"] or _parse_time(row["expires_at"]) > datetime.now(timezone.utc)) else None,
         "cancel_requested": bool(row["cancel_requested"]),
+        "retry_of": row["retry_of"],
     }
 
 
@@ -984,7 +985,7 @@ def create_export_record(
     requested_by: int, camera_ids: list[str], start: datetime, end: datetime,
     output_modes: list[str] | None = None,
     tile_camera_ids: list[str | None] | None = None, grid_resolution: str = "1080p",
-    include_audio: bool = False, audio_camera_id: str | None = None,
+    include_audio: bool = False, audio_camera_id: str | None = None, retry_of: str | None = None,
 ) -> str:
     output_modes = output_modes or ["individual", "grid"]
     if not output_modes or len(set(output_modes)) != len(output_modes) or any(mode not in {"individual", "grid"} for mode in output_modes):
@@ -1034,11 +1035,14 @@ def create_export_record(
             raise OverflowError("Export source exceeds the supported size or segment limit")
         display_row = db.execute("SELECT time_zone,date_format,clock_format FROM site_display_settings WHERE singleton_id=1").fetchone()
         display_settings = {"time_zone": display_row["time_zone"], "date_format": display_row["date_format"], "clock_format": display_row["clock_format"]}
-        db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,output_modes_json,display_settings_json,tile_camera_ids_json,grid_resolution,requested_start,requested_end,status,include_audio,audio_camera_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)",
-                   (job_id, requested_by, json.dumps(camera_ids), json.dumps(output_modes), json.dumps(display_settings), json.dumps(tile_camera_ids), grid_resolution, start.isoformat(), end.isoformat(), int(include_audio), audio_camera_id, now, now))
+        db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,output_modes_json,display_settings_json,tile_camera_ids_json,grid_resolution,requested_start,requested_end,status,include_audio,audio_camera_id,created_at,updated_at,retry_of) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                   (job_id, requested_by, json.dumps(camera_ids), json.dumps(output_modes), json.dumps(display_settings), json.dumps(tile_camera_ids), grid_resolution, start.isoformat(), end.isoformat(), int(include_audio), audio_camera_id, now, now, retry_of))
         db.executemany("INSERT INTO export_sources(export_id,segment_id) VALUES(?,?)", ((job_id, segment["id"]) for segment in segments))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (requested_by, "export_requested", "export", job_id, json.dumps({"cameras": len(camera_ids), "start": start.isoformat(), "end": end.isoformat(), "output_modes": output_modes, "include_audio": include_audio, "audio_camera_id": audio_camera_id})))
+                   (requested_by, "export_retried" if retry_of else "export_requested", "export", job_id, json.dumps({
+                       "cameras": len(camera_ids), "start": start.isoformat(), "end": end.isoformat(), "output_modes": output_modes,
+                       "include_audio": include_audio, "audio_camera_id": audio_camera_id, **({"retry_of": retry_of} if retry_of else {}),
+                   })))
     return job_id
 
 

@@ -455,6 +455,42 @@ class ExportJobTests(unittest.TestCase):
         self.assertEqual(cancelled.status_code, 200, cancelled.text)
         self.assertEqual(self.client.get(f"/api/exports/{job_id}").json()["status"], "cancelled")
 
+    def test_retry_creates_a_new_audited_attempt_from_the_original_request(self):
+        job_id = create_export_record(self.user_id, [self.camera], datetime.fromisoformat("2026-10-20T09:59:59.500000+00:00"),
+                                      datetime.fromisoformat("2026-10-20T10:00:00.800000+00:00"), ["individual"], grid_resolution="4k")
+        with connect() as db:
+            db.execute("UPDATE exports SET status='failed',error='Disk full',completed_at=updated_at WHERE id=?", (job_id,))
+        retried = self.client.post(f"/api/exports/{job_id}/retry")
+        self.assertEqual(retried.status_code, 202, retried.text)
+        attempt = retried.json()
+        self.assertNotEqual(attempt["id"], job_id)
+        self.assertEqual(attempt["retry_of"], job_id)
+        self.assertEqual((attempt["camera_ids"], attempt["output_modes"], attempt["grid_resolution"]), ([self.camera], ["individual"], "4k"))
+        self.assertEqual((attempt["start"], attempt["end"]), ("2026-10-20T09:59:59.500000+00:00", "2026-10-20T10:00:00.800000+00:00"))
+        original = self.client.get(f"/api/exports/{job_id}").json()
+        self.assertEqual((original["status"], original["error"], original["retry_of"]), ("failed", "Disk full", None))
+        with connect() as db:
+            audit = db.execute("SELECT actor_id,details_json FROM audit_log WHERE action='export_retried' AND resource_id=?", (attempt["id"],)).fetchone()
+        self.assertEqual(audit["actor_id"], self.user_id)
+        self.assertEqual(json.loads(audit["details_json"])["retry_of"], job_id)
+        self._wait_for_status(attempt["id"], "completed", "failed")
+
+    def test_retry_is_refused_for_active_jobs_other_users_and_vanished_media(self):
+        job_id = create_export_record(self.user_id, [self.camera], datetime.fromisoformat("2026-10-20T09:59:59.500000+00:00"),
+                                      datetime.fromisoformat("2026-10-20T10:00:00.800000+00:00"), ["individual"])
+        self.assertEqual(self.client.post(f"/api/exports/{job_id}/retry").status_code, 409)
+        with connect() as db:
+            db.execute("UPDATE exports SET status='cancelled' WHERE id=?", (job_id,))
+        app.dependency_overrides[current_user] = lambda: {"id": self.other_user_id, "username": "second", "role": "operator"}
+        self.assertEqual(self.client.post(f"/api/exports/{job_id}/retry").status_code, 404)
+        app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+        # Retrying revalidates the media: footage that is gone now cannot be exported.
+        with connect() as db:
+            db.execute("UPDATE recording_segments SET unavailable_at='2026-10-21T00:00:00+00:00',unavailable_reason='restored' WHERE id=?", (self.segment_id,))
+        refused = self.client.post(f"/api/exports/{job_id}/retry")
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertEqual(refused.json()["detail"], "No indexed footage is available in the requested interval")
+
     def test_download_requires_owner_or_administrator(self):
         job_id = create_export_record(self.user_id, [self.camera], datetime.fromisoformat("2026-10-20T09:59:59.500000+00:00"), datetime.fromisoformat("2026-10-20T10:00:00.800000+00:00"), ["individual"])
         package = self.root / "exports" / f"{job_id}.zip"

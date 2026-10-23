@@ -1,12 +1,19 @@
-import { useState } from "react";
+import { create } from "zustand";
 import { ApiError } from "@/api/client";
 import { useAcknowledgeIncident, useCameras, useExportJobs, useOpenIncidents } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { Drawer } from "@/components/Drawer";
+import { ExportJobs } from "@/features/exports/ExportJobs";
 import { formatRelative } from "@/lib/time";
 import { summarize, type StatusSummary, type Tone } from "./summary";
 
 type Section = "video" | "recording" | "incidents" | "jobs";
+
+/** Which part of the status drawer is open; other workspaces can open it (for example, export jobs). */
+export const useStatusPanel = create<{ section: Section | null; show: (section: Section | null) => void }>(set => ({
+  section: null,
+  show: section => set({ section }),
+}));
 
 function Chip({ tone, label, onClick }: { tone: Tone; label: string; onClick: () => void }) {
   return (
@@ -22,7 +29,8 @@ export function StatusArea() {
   const cameras = useCameras();
   const incidents = useOpenIncidents();
   const jobs = useExportJobs();
-  const [section, setSection] = useState<Section | null>(null);
+  const section = useStatusPanel(state => state.section);
+  const setSection = useStatusPanel(state => state.show);
   const summary = summarize(cameras.data, incidents.data, jobs.data);
   const unreachable = cameras.isError || incidents.isError;
   return (
@@ -94,18 +102,7 @@ function StatusDetails({ summary, focus }: { summary: StatusSummary; focus: Sect
       </section>
       <section aria-labelledby="status-jobs" data-focused={focus === "jobs"}>
         <h3 id="status-jobs">Export jobs</h3>
-        {summary.jobs.active.length || summary.jobs.failed.length ? (
-          <ul className="status-list">
-            {[...summary.jobs.active, ...summary.jobs.failed].map(job => (
-              <li key={job.id}>
-                <strong>{job.status === "failed" ? "Failed export" : job.status === "queued" ? "Queued export" : `Exporting · ${job.progress}%`}</strong>
-                <span className="muted">{job.error ?? `Started ${formatRelative(job.created_at)}`}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="muted">No exports are running.</p>
-        )}
+        <ExportJobs />
       </section>
     </div>
   );

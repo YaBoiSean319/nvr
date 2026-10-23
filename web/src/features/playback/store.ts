@@ -17,6 +17,11 @@ export interface AppliedSearch {
   draft: SearchDraft;
 }
 
+export interface Marks {
+  in: number | null;
+  out: number | null;
+}
+
 export interface TimeWindow {
   start: number;
   end: number;
@@ -41,6 +46,11 @@ interface PlaybackState {
   skipEmpty: boolean;
   /** A camera sent from Live with Open in Playback, handled once Playback is restored. */
   pendingOpen: string | null;
+  /** Export range marks; a missing mark means the matching search boundary. */
+  marks: Marks;
+  exportOpen: boolean;
+  /** Cameras chosen for export; null means every searched camera. */
+  exportCameraIds: string[] | null;
   restoredFor: string | null;
 
   toggle: (id: string) => void;
@@ -61,6 +71,10 @@ interface PlaybackState {
   replaceCamera: (target: string, incoming: string) => void;
   openInPlayback: (id: string) => void;
   clearPendingOpen: () => void;
+  setMark: (kind: keyof Marks, time: number | null) => void;
+  clearMarks: () => void;
+  setExportOpen: (open: boolean) => void;
+  setExportCameraIds: (ids: string[] | null) => void;
   restore: (username: string, available: Set<string>, defaults: SearchDraft) => void;
   reset: () => void;
 }
@@ -80,6 +94,9 @@ const initial = {
   eventScope: "all" as const,
   skipEmpty: false,
   pendingOpen: null,
+  marks: { in: null, out: null },
+  exportOpen: false,
+  exportCameraIds: null,
   restoredFor: null,
 };
 
@@ -111,7 +128,8 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     playbackClock.pause();
     playbackClock.setRange(Date.parse(search.start), Date.parse(search.end));
     playbackClock.seek(Date.parse(search.start));
-    set({ applied: search, window: null, seekToEarliest: true, message: null });
+    // Marks belong to one search; a new search starts without them.
+    set({ applied: search, window: null, seekToEarliest: true, message: null, marks: { in: null, out: null } });
   },
   searchLoaded: () => set({ seekToEarliest: false }),
   setWindow: window => set({ window }),
@@ -132,6 +150,16 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     })),
   openInPlayback: id => set({ pendingOpen: id }),
   clearPendingOpen: () => set({ pendingOpen: null }),
+  setMark: (kind, time) =>
+    set(state => {
+      const marks = { ...state.marks, [kind]: time };
+      // Completing a range opens the export drawer beside Playback.
+      const completed = marks.in !== null && marks.out !== null && (state.marks.in === null || state.marks.out === null);
+      return { marks, exportOpen: state.exportOpen || completed };
+    }),
+  clearMarks: () => set({ marks: { in: null, out: null } }),
+  setExportOpen: exportOpen => set({ exportOpen }),
+  setExportCameraIds: exportCameraIds => set({ exportCameraIds }),
   restore: (username, available, defaults) => {
     const saved = readSaved(username);
     const cameraIds = (saved?.cameraIds ?? []).filter(id => available.has(id)).slice(0, MAX_DISPLAYED_CAMERAS);
@@ -146,6 +174,8 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       timelineOpen: saved?.timelineOpen ?? true,
       eventScope: saved?.eventScope === "active" ? "active" : "all",
       skipEmpty: saved?.skipEmpty === true,
+      marks: { in: typeof saved?.marks?.in === "number" ? saved.marks.in : null, out: typeof saved?.marks?.out === "number" ? saved.marks.out : null },
+      exportCameraIds: Array.isArray(saved?.exportCameraIds) ? saved.exportCameraIds : null,
       restoredFor: username,
     });
     if (saved?.applied) {
@@ -174,6 +204,8 @@ interface Saved {
   timelineOpen: boolean;
   eventScope: "all" | "active";
   skipEmpty: boolean;
+  marks: Marks;
+  exportCameraIds: string[] | null;
 }
 
 const storageKey = (username: string) => `nvr-next-playback:${username}`;
@@ -194,7 +226,7 @@ export function savePlaybackState(): void {
     cameraIds: state.cameraIds, draft: state.draft, applied: state.applied, window: state.window,
     time: state.applied ? playbackClock.time() : null, rate: playbackClock.rate,
     sidebarOpen: state.sidebarOpen, timelineOpen: state.timelineOpen,
-    eventScope: state.eventScope, skipEmpty: state.skipEmpty,
+    eventScope: state.eventScope, skipEmpty: state.skipEmpty, marks: state.marks, exportCameraIds: state.exportCameraIds,
   };
   try {
     localStorage.setItem(storageKey(state.restoredFor), JSON.stringify(saved));

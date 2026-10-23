@@ -19,7 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Callable
 
-from app.migrations import m0001_baseline, m0002_api_tokens, m0003_worker_status, m0004_backups, m0005_user_preferences
+from app.migrations import m0001_baseline, m0002_api_tokens, m0003_worker_status, m0004_backups, m0005_user_preferences, m0006_export_retries
 
 logger = logging.getLogger("nvr.migrations")
 
@@ -29,6 +29,7 @@ MIGRATIONS: list[tuple[int, ModuleType]] = [
     (3, m0003_worker_status),
     (4, m0004_backups),
     (5, m0005_user_preferences),
+    (6, m0006_export_retries),
 ]
 
 PRE_MIGRATION_COPIES_KEPT = 3
