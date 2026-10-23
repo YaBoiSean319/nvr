@@ -213,8 +213,8 @@ function renderDiscoveryResults() {
     select.addEventListener("click",()=>void selectDiscoveryCandidate(candidate.id));nameCell.append(select);row.append(nameCell);
     const address=document.createElement("td");address.textContent=window.NvrCameraDiscovery.candidateAddress(candidate)||"Not reported";row.append(address);
     const identity=document.createElement("td");identity.textContent=String(candidate.device_uuid||"").startsWith("ipscan:")?"Not advertised":candidate.device_uuid||"Not advertised";row.append(identity);
-    const state=document.createElement("td"),linked=window.NvrCameraDiscovery.linkedCamera(state,candidate);
-    state.textContent=candidate.linked_camera_id?`Already added${linked?` · ${linked.name}`:""}`:candidate.add_in_progress?"Add in progress":"Not added";row.append(state);
+    const stateCell=document.createElement("td"),linked=window.NvrCameraDiscovery.linkedCamera(state,candidate);
+    stateCell.textContent=candidate.linked_camera_id?`Already added${linked?` · ${linked.name}`:""}`:candidate.add_in_progress?"Add in progress":"Not added";row.append(stateCell);
     const seen=document.createElement("td");seen.textContent=candidate.last_seen_at?formatDateTime(candidate.last_seen_at,true):"Unknown";row.append(seen);body.append(row);
   }
   table.append(body);scroll.replaceChildren(table);

@@ -885,7 +885,10 @@ function refreshCameraTabStatuses(){
     const revert=document.querySelector(`[data-camera-tab-revert="${tab.id}"]`);
     if(save)save.disabled=!dirty.length||cameraEditorSaveInProgress||currentRole!=="administrator";
     if(revert)revert.disabled=!dirty.length||cameraEditorSaveInProgress||currentRole!=="administrator";
-    if(!dirty.length)setCameraTabStatus(tab.id,"Saved","saved");
+    if(!dirty.length){
+      if(status?.dataset.state!=="saved")setCameraTabStatus(tab.id,"Saved","saved");
+      else if(status.textContent!=="Reverted to saved settings")setCameraTabStatus(tab.id,"Saved","saved");
+    }
     else if(status?.dataset.state==="saving"&&cameraEditorSaveInProgress)continue;
     else if(status?.dataset.state!=="error")setCameraTabStatus(tab.id,`${dirty.length} unsaved section${dirty.length===1?"":"s"}`,"dirty");
   }

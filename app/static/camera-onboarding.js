@@ -219,6 +219,7 @@
     const status = message || document.querySelector("#camera-import-message");
     let requestGeneration = 0;
     let applyInProgress = false;
+    let previewInProgress = false;
     let rows = [];
     let sourceCsv = "";
     let pendingCsv = "";
@@ -286,20 +287,24 @@
     function setActions({ applying = false, retrying = false, unknown = outcomeUnknown } = {}) {
       input.disabled = unknown || applying || retrying;
       previewButton.disabled = applying || retrying || unknown;
-      applyButton.disabled = applying || retrying || unknown || !canApply;
+      applyButton.disabled = applying || retrying || previewInProgress || unknown || !canApply;
       const failed = rows.some(row => row.status === "failed");
       retryButton.classList.toggle("hidden", unknown || !(retryPrepared || previewFresh && failed));
-      retryButton.disabled = applying || retrying;
+      retryButton.disabled = applying || retrying || previewInProgress;
       reconcileButton.classList.toggle("hidden", !unknown);
-      reconcileButton.disabled = applying || retrying;
+      reconcileButton.disabled = applying || retrying || previewInProgress;
     }
 
     async function preview({ csvText = input.value, reconcile = false, rowMap = null } = {}) {
       if (applyInProgress) return false;
       if (outcomeUnknown && !reconcile) { status.textContent = "Reconcile the previous import outcome before starting another preview."; return false; }
       const generation = ++requestGeneration;
+      previewInProgress = true;
+      if (!reconcile) {
+        canApply = false; pendingCsv = ""; pendingRowMap = []; lastPreviewCsv = "";
+      }
       status.textContent = reconcile ? "Checking the prior import against the current inventory…" : "Validating CSV rows…";
-      setActions({ applying: true, unknown: outcomeUnknown });
+      setActions({ unknown: outcomeUnknown });
       try {
         const response = await request("/api/cameras/import/preview", { method: "POST", body: JSON.stringify({ csv_text: csvText }) });
         if (generation !== requestGeneration) return false;
@@ -349,7 +354,7 @@
         if (generation === requestGeneration) { status.textContent = error.message; if (!reconcile) previewFresh = false; }
         return false;
       } finally {
-        if (generation === requestGeneration) setActions({ unknown: outcomeUnknown });
+        if (generation === requestGeneration) { previewInProgress = false; setActions({ unknown: outcomeUnknown }); }
       }
     }
 
@@ -410,6 +415,7 @@
 
     function discardDraft() {
       requestGeneration += 1;
+      previewInProgress = false;
       input.value = ""; rows = []; sourceCsv = ""; pendingCsv = ""; pendingRowMap = [];
       canApply = false; outcomeUnknown = false; retryPrepared = false; previewFresh = false; lastPreviewCsv = "";
       clearDraft?.(root);
@@ -427,6 +433,7 @@
     input.addEventListener("input", () => {
       requestGeneration += 1;
       if (outcomeUnknown) return;
+      previewInProgress = false;
       canApply = false; pendingCsv = ""; pendingRowMap = []; lastPreviewCsv = ""; retryPrepared = false; previewFresh = false;
       status.textContent = "CSV changed. Preview this text before importing.";
       setActions({ unknown: false });

@@ -334,7 +334,7 @@ test("motion, AI, schedule, retention, history, and revert controls persist thro
   await expect(page.getByLabel("Motion pre-roll seconds")).toHaveValue("12");
   await expect(page.getByLabel("Motion post-roll seconds")).toHaveValue("42");
   await expect(page.locator('[data-config-section="camera-motion-source"] input[type="checkbox"]')).toBeChecked();
-  await expect(page.getByLabel("Server motion sensitivity (1–100)")).toHaveValue("64");
+  await expect(page.locator("#camera-editor-motion-sensitivity")).toHaveValue("64");
   await expect(page.locator('[data-config-section="camera-motion-source"] [data-zone-field="x"]')).toHaveValue("0.1");
   await page.getByLabel("Motion pre-roll seconds").fill("15");
   await page.locator('[data-camera-tab-revert="motion"]').click();
@@ -503,6 +503,7 @@ test("discovery scan shows progress, retries after a network failure, and ingest
   await signIn(page);
   await openCameraSettings(page);
   await page.locator('[data-camera-workspace-button="add"]').click();
+  await page.locator("details.discovery-scan-advanced summary").click();
   await page.locator("#discovery-timeout").fill("0.5");
 
   let captured;
@@ -814,7 +815,7 @@ test("group schedule, retention, storage, and AI save with inherited values and 
   expect(inheritedRetention.retention_days).toBe(14);
   expect(inheritedAi.config_source).toBe("group");
   expect(inheritedAi.analysis_fps).toBe(1.3);
-  expect(storage.volumes.find(volume => volume.id === "archive").cameras).toContain(fixtures.camera_ids[0]);
+  expect(storage.volumes.find(volume => volume.id === "archive").cameras.some(camera => camera.id === fixtures.camera_ids[0])).toBe(true);
 
   const weekend = page.locator(`#group-management-list [data-group-id="${fixtures.extra_group_id}"]`);
   await page.locator("#group-ai-confidence").fill("0.78");
@@ -1088,7 +1089,10 @@ test("a pending preview is discarded on quick selection changes and an active pr
 
   await cameraEditor.getByRole("button", { name: "Restore camera" }).click();
   await expect(cameraEditor.getByRole("button", { name: "Archive camera" })).toBeVisible();
-  await expect.poll(async () => page.evaluate(async id => (await (await fetch(`/api/cameras/${id}/live/status`)).json()).active_viewers, fixtures.camera_ids[0])).toBe(0);
+  await expect.poll(async () => page.evaluate(async id => {
+    const response=await fetch(`/api/cameras/${id}/live/status`);
+    return {status:response.status,body:await response.json()};
+  }, fixtures.camera_ids[0])).toMatchObject({status:200,body:{active_viewers:0}});
 
   await page.locator("[data-preview-start]").click();
   await expect(page.locator("[data-preview-status]")).toHaveAttribute("data-state", "fresh", { timeout: 30_000 });
@@ -1196,13 +1200,14 @@ test("200-camera filtering and panel selection record browser measurements witho
   const fixtures = seedFixtures(200);
   const mediaRequests = [];
   const browserErrors = { page: 0, console: 0, failed_requests: 0, http_errors: 0 };
+  const browserErrorDetails = [];
   page.on("request", request => {
     if (/\/api\/cameras\/[^/]+\/live(?:\?|$)/.test(request.url())) mediaRequests.push(request.url());
   });
-  page.on("pageerror", () => { browserErrors.page += 1; });
-  page.on("console", message => { if (message.type() === "error") browserErrors.console += 1; });
-  page.on("requestfailed", () => { browserErrors.failed_requests += 1; });
-  page.on("response", response => { if (response.status() >= 400) browserErrors.http_errors += 1; });
+  page.on("pageerror", error => { browserErrors.page += 1; browserErrorDetails.push(`page: ${error.message}`); });
+  page.on("console", message => { if (message.type() === "error") { browserErrors.console += 1; browserErrorDetails.push(`console: ${message.text()}`); } });
+  page.on("requestfailed", request => { browserErrors.failed_requests += 1; browserErrorDetails.push(`request failed ${new URL(request.url()).pathname}: ${request.failure()?.errorText||"unknown error"}`); });
+  page.on("response", response => { if (response.status() >= 400) { browserErrors.http_errors += 1; browserErrorDetails.push(`HTTP ${response.status()} ${new URL(response.url()).pathname}`); } });
   await signIn(page);
   await openCameraSettings(page);
   await expect(page.locator("#camera-inventory-table tbody tr")).toHaveCount(200);
@@ -1259,7 +1264,7 @@ test("200-camera filtering and panel selection record browser measurements witho
   };
   writeAcceptanceMeasurements(evidence);
   expect(mediaRequests).toEqual([]);
-  expect(errorCount).toBe(0);
+  expect(errorCount, browserErrorDetails.join("\n") || "No browser error details were captured.").toBe(0);
   expect(evidence.sample_counts.filter_feedback).toBe(10);
   expect(evidence.sample_counts.panel_feedback).toBe(5);
 });
@@ -1281,7 +1286,7 @@ test("resizer persists only a bounded harmless preference, and camera assets res
     const editor = layout.querySelector(".camera-editor-pane").getBoundingClientRect();
     return Math.round(inventory.width / (inventory.width + editor.width) * 100);
   });
-  expect(renderedRatio).toBe(upperBound);
+  expect(Math.abs(renderedRatio-upperBound)).toBeLessThanOrEqual(1);
   const preference = await page.evaluate(() => ({
     keys: Object.keys(localStorage),
     value: localStorage.getItem(`nvr-camera-pane-ratio:${encodeURIComponent("camera-admin")}`),

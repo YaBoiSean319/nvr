@@ -326,7 +326,7 @@ async function executeBulkReview(review,requestedIds=null,priorResults=null){
     cameraBulkOperationInProgress=false;
     clearConfigDraft(document.querySelector('[data-config-section="bulk-update"]'));
     refreshBulkResultsDialog();
-    if(cameraBulkStatusDialog?.open)cameraBulkStatusDialog.querySelector("#camera-bulk-hide-results")?.focus();
+    if(cameraBulkStatusDialog?.open)cameraBulkStatusDialog.querySelector("#camera-bulk-results-title")?.focus();
   }
 }
 async function retryFailedBulkTargets(){
