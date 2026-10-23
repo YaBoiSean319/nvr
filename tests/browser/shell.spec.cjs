@@ -1,18 +1,10 @@
 // Real-browser journeys for the rebuilt interface's foundation (#89): first-run
 // setup, sign-in, role-gated navigation, operational status, branding and theme.
-const { test, expect, FIXTURE_PASSWORD, seedFixtures } = require("./helpers.cjs");
+const { test, expect, FIXTURE_PASSWORD, seedFixtures, signInNext } = require("./helpers.cjs");
 
 const NEXT = "/next/";
 const ADMIN = "camera-admin";
 const OPERATOR = "camera-operator";
-
-async function signInNext(page, username) {
-  await page.goto(NEXT);
-  await page.getByLabel("Username").fill(username);
-  await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
-}
 
 async function expectNoHorizontalOverflow(page) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);

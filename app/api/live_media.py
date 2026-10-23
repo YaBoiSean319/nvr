@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -258,6 +260,14 @@ def _same_origin(websocket: WebSocket) -> bool:
     return urlsplit(origin).netloc.lower() == host.lower()
 
 
+def _client_message(message: dict[str, object]) -> dict[str, object]:
+    try:
+        parsed = json.loads(message.get("text") or "{}")
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 async def _refuse(websocket: WebSocket, code: int, message: dict[str, object]) -> None:
     await websocket.send_json(message)
     await websocket.close(code=code)
@@ -275,7 +285,9 @@ async def live_stream(
 
     Messages: a JSON ``init`` (MIME/codecs, profile, audio), the binary
     initialization segment, then binary media fragments, starting at a keyframe.
-    Refusals send a JSON message with ``type`` and close with a 44xx/45xx code;
+    The client may send ``{"type": "listen", "on": true|false}`` to claim or return
+    an audio slot; the reply is ``listening``. Refusals send a JSON message with
+    ``type`` and close with a 44xx/45xx code;
     ``unsupported`` names the MJPEG ``fallback`` URL for codecs the browser cannot
     play directly.
     """
@@ -327,7 +339,10 @@ async def live_stream(
             if status_data:
                 status_data["last_frame_at"] = datetime.now(timezone.utc).isoformat()
 
-    stream = hub.join((camera_id, profile, "audio" if include_audio else "video"), source, include_audio, viewer, mark_fresh)
+    # The source fingerprint keeps a changed stream URL (rotation, new profile) from
+    # joining a stream that is still connected to the old one.
+    fingerprint = hashlib.sha256(source.encode()).hexdigest()[:16]
+    stream = hub.join((camera_id, profile, "audio" if include_audio else "video", fingerprint), source, include_audio, viewer, mark_fresh)
     receiver = asyncio.create_task(websocket.receive())
     try:
         await asyncio.wait({receiver, asyncio.create_task(stream.ready.wait())}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
@@ -340,7 +355,13 @@ async def live_stream(
             await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": "unknown", "fallback": fallback,
                                                          "detail": "This camera's video cannot be played directly; use the fallback stream"})
             return
-        await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": include_audio, "listening": listening})
+        # Audio is offered only when the stream really carries a track.
+        has_audio = "mp4a" in (stream.mime or "")
+        if listening and not has_audio:
+            _release_live_audio()
+            listening = False
+        include_audio = has_audio
+        await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening})
         await websocket.send_bytes(stream.init)
         while True:
             getter = asyncio.create_task(viewer.queue.get())
@@ -350,7 +371,18 @@ async def live_stream(
                 message = receiver.result()
                 if message["type"] == "websocket.disconnect":
                     return
-                receiver = asyncio.create_task(websocket.receive())  # ignore client keep-alives
+                request = _client_message(message)
+                if request.get("type") == "listen":
+                    # Unmuting claims one of the audio slots; muting returns it.
+                    wanted = bool(request.get("on"))
+                    if wanted and not listening:
+                        listening = include_audio and _acquire_live_audio()
+                    elif not wanted and listening:
+                        _release_live_audio()
+                        listening = False
+                    reason = None if listening or not wanted else ("This camera's audio is not enabled" if not include_audio else "All live audio slots are in use")
+                    await websocket.send_json({"type": "listening", "on": listening, "detail": reason})
+                receiver = asyncio.create_task(websocket.receive())
                 continue
             item = getter.result()
             if item is None:

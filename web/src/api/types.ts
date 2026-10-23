@@ -33,6 +33,8 @@ export interface Camera {
   recording_enabled: boolean;
   recording_status: string;
   last_video_at: string | null;
+  audio_enabled: boolean;
+  live_substream_available: boolean;
   recording_health: { state: RecordingHealthState; detail: string; video_fresh: boolean };
 }
 

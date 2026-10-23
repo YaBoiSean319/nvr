@@ -14,6 +14,8 @@ function seedFixtures(count, options = {}) {
   if (options.failNameSave) args.push("--fail-name-save");
   if (options.extraGroup) args.push("--extra-group");
   if (options.freshInstall) args.push("--fresh-install");
+  for (const [index, url] of Object.entries(options.streams ?? {})) args.push("--stream", `${index}=${url}`);
+  for (const index of options.audio ?? []) args.push("--audio", String(index));
   const result = spawnSync("python", args, {
     cwd: process.cwd(),
     env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT },
@@ -102,4 +104,29 @@ function writeAcceptanceMeasurements(record) {
   return output;
 }
 
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, signIn, openCameraSettings, selectCamera, median, percentile, writeAcceptanceMeasurements };
+/** Sign in to the rebuilt interface at /next/. */
+async function signInNext(page, username = "camera-admin") {
+  await page.goto("/next/");
+  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
+}
+
+/** Record every live WebSocket the page opens, by camera. */
+function trackLiveSockets(page) {
+  const sockets = [];
+  page.on("websocket", socket => {
+    const match = /\/api\/cameras\/([^/]+)\/live\/stream/.exec(socket.url());
+    if (!match) return;
+    const entry = { cameraId: decodeURIComponent(match[1]), url: socket.url(), closed: false };
+    socket.on("close", () => { entry.closed = true; });
+    sockets.push(entry);
+  });
+  return {
+    opened: cameraId => sockets.filter(entry => !cameraId || entry.cameraId === cameraId).length,
+    open: cameraId => sockets.filter(entry => !entry.closed && (!cameraId || entry.cameraId === cameraId)).length,
+  };
+}
+
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, signIn, signInNext, trackLiveSockets, openCameraSettings, selectCamera, median, percentile, writeAcceptanceMeasurements };

@@ -55,7 +55,8 @@ def _write_manifest(manifest: dict[str, object]) -> dict[str, object]:
     return manifest
 
 
-def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False, extra_group: bool = False) -> dict[str, object]:
+def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False, extra_group: bool = False,
+                  streams: dict[int, str] | None = None, audio_cameras: set[int] | None = None) -> dict[str, object]:
     initialize()
     with connect() as db:
         _reset_site_appearance(db)
@@ -100,12 +101,15 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
                     GROUP_ID if index % 2 else None,
                     ip,
                     "axis" if metadata_known else "auto",
-                    encrypt("rtsp://127.0.0.1:8554/nvr-test"),
+                    encrypt((streams or {}).get(index, "rtsp://127.0.0.1:8554/nvr-test")),
                     "h264" if metadata_known else None,
                     320 if metadata_known else None,
                     240 if metadata_known else None,
                 ),
             )
+
+            if index in (audio_cameras or set()):
+                db.execute("UPDATE cameras SET audio_supported=1,audio_enabled=1 WHERE id=?", (camera_id,))
 
         now = "2026-01-01T00:00:00+00:00"
         linked_id = cameras[0] if cameras else None
@@ -182,13 +186,17 @@ def main() -> None:
     parser.add_argument("--fail-name-save", action="store_true")
     parser.add_argument("--extra-group", action="store_true")
     parser.add_argument("--fresh-install", action="store_true", help="remove every account so first-run setup is required")
+    parser.add_argument("--stream", action="append", default=[], metavar="INDEX=URL", help="give camera INDEX this RTSP URL")
+    parser.add_argument("--audio", action="append", type=int, default=[], metavar="INDEX", help="enable audio on camera INDEX")
     arguments = parser.parse_args()
     if arguments.fresh_install:
         seed_fresh_install()
         return
     if not 0 <= arguments.count <= 200:
         parser.error("camera fixture count must be between 0 and 200")
-    seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save, extra_group=arguments.extra_group)
+    streams = {int(index): url for index, url in (item.split("=", 1) for item in arguments.stream)}
+    seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save, extra_group=arguments.extra_group,
+                  streams=streams, audio_cameras=set(arguments.audio))
 
 
 if __name__ == "__main__":

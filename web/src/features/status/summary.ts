@@ -18,7 +18,9 @@ const UNCERTAIN = new Set(["uncertain", "motion_source_degraded"]);
  */
 export function summarize(cameras: Camera[] | undefined, incidents: Incident[] | undefined, jobs: ExportJob[] | undefined): StatusSummary {
   const active = (cameras ?? []).filter(camera => !camera.archived_at && camera.enabled);
-  const stale = active.filter(camera => !camera.recording_health.video_fresh);
+  // Ingest freshness is only measured for cameras the recorder is reading.
+  const monitored = active.filter(camera => camera.recording_enabled);
+  const stale = monitored.filter(camera => !camera.recording_health.video_fresh);
   const failing = active.filter(camera => FAILING.has(camera.recording_health.state));
   const uncertain = active.filter(camera => UNCERTAIN.has(camera.recording_health.state));
   const open = (incidents ?? []).filter(incident => incident.fault_active);
@@ -28,9 +30,11 @@ export function summarize(cameras: Camera[] | undefined, incidents: Incident[] |
   return {
     video: cameras === undefined
       ? { tone: "neutral", label: "Video: checking", cameras: [] }
-      : stale.length
-        ? { tone: "warn", label: `Video: ${stale.length} not live`, cameras: stale }
-        : { tone: "good", label: `Video: ${active.length} live`, cameras: [] },
+      : !monitored.length
+        ? { tone: "neutral", label: "Video: not monitored", cameras: [] }
+        : stale.length
+          ? { tone: "warn", label: `Video: ${stale.length} stale`, cameras: stale }
+          : { tone: "good", label: `Video: ${monitored.length} fresh`, cameras: [] },
     recording: cameras === undefined
       ? { tone: "neutral", label: "Recording: checking", failing: [], uncertain: [] }
       : failing.length

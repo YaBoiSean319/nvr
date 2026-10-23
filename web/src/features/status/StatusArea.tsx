@@ -66,7 +66,7 @@ function StatusDetails({ summary, focus }: { summary: StatusSummary; focus: Sect
       </section>
       <section aria-labelledby="status-video" data-focused={focus === "video"}>
         <h3 id="status-video">Live video</h3>
-        <CameraList cameras={summary.video.cameras} empty="Every enabled camera has delivered fresh video recently." />
+        <CameraList cameras={summary.video.cameras} empty="Every recorded camera has delivered fresh video recently. Freshness is measured for cameras with recording enabled." />
       </section>
       <section aria-labelledby="status-incidents" data-focused={focus === "incidents"}>
         <h3 id="status-incidents">Incidents</h3>

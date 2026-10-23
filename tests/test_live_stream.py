@@ -141,6 +141,17 @@ class LiveStreamTests(unittest.TestCase):
         self.assertEqual(hub.snapshot(), [])
         self.assertEqual(live_media._live_view_count, 0)
 
+    def test_a_changed_stream_url_never_joins_the_old_stream(self):
+        hub = self.app.state.live_hub
+        with self.client.websocket_connect("/api/cameras/cam/live/stream") as first:
+            self._receive_stream(first, 1)
+            with connect() as db:
+                db.execute("UPDATE cameras SET stream_url_ciphertext=? WHERE id='cam'", (encrypt(RTSP + "?rotated=1"),))
+            with self.client.websocket_connect("/api/cameras/cam/live/stream") as second:
+                second.receive_json()
+                streams = {tuple(entry["key"]) for entry in hub.snapshot()}
+        self.assertEqual(len(streams), 2)
+
     def test_slots_are_enforced_and_released_on_disconnect(self):
         with patch.object(live_media, "MAX_LIVE_VIEWERS", 1):
             with self.client.websocket_connect("/api/cameras/cam/live/stream") as first:
@@ -153,6 +164,41 @@ class LiveStreamTests(unittest.TestCase):
             self.assertEqual(live_media._live_view_count, 0)
             with self.client.websocket_connect("/api/cameras/cam/live/stream") as again:
                 self.assertEqual(again.receive_json()["type"], "init")
+
+    def test_audio_is_offered_only_when_the_stream_has_a_track(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET audio_enabled=1,audio_supported=1 WHERE id='cam'")
+        with self.client.websocket_connect("/api/cameras/cam/live/stream") as websocket:
+            init = websocket.receive_json()
+        # The simulated camera publishes video only, so no audio track is offered.
+        self.assertFalse(init["audio"])
+        self.assertNotIn("mp4a", init["mime"])
+
+    @unittest.skipUnless(os.environ.get("NVR_RTSP_AUDIO_TEST_URL"), "A simulated RTSP publisher with audio is required")
+    def test_listening_claims_and_returns_an_audio_slot(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET audio_enabled=1,audio_supported=1,stream_url_ciphertext=? WHERE id='cam'", (encrypt(os.environ["NVR_RTSP_AUDIO_TEST_URL"]),))
+        with patch.object(live_media, "MAX_LIVE_AUDIO_LISTENERS", 1):
+            with self.client.websocket_connect("/api/cameras/cam/live/stream") as first, \
+                 self.client.websocket_connect("/api/cameras/cam/live/stream") as second:
+                self.assertTrue(first.receive_json()["audio"])
+                second.receive_json()
+                first.send_json({"type": "listen", "on": True})
+                second.send_json({"type": "listen", "on": True})
+                replies = []
+                for websocket in (first, second):
+                    while True:
+                        message = websocket.receive()
+                        if message.get("text"):
+                            replies.append(json.loads(message["text"]))
+                            break
+                self.assertEqual([reply["on"] for reply in replies], [True, False])
+                self.assertEqual(replies[1]["detail"], "All live audio slots are in use")
+                first.send_json({"type": "listen", "on": False})
+            deadline = time.monotonic() + 3
+            while live_media._live_audio_count and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(live_media._live_audio_count, 0)
 
     def test_api_tokens_need_the_media_scope(self):
         media = self.client.post("/api/admin/api-tokens", json={"name": "wall", "scopes": ["media"]}).json()["secret"]

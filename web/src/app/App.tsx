@@ -7,6 +7,7 @@ import type { Me } from "@/api/types";
 import { SetupPage } from "@/features/auth/SetupPage";
 import { SignInPage } from "@/features/auth/SignInPage";
 import { AdministratorOnly, NotFound, WorkspacePlaceholder } from "@/features/placeholders/Pages";
+import { LiveWorkspace } from "@/features/live/LiveWorkspace";
 import { Shell } from "@/features/shell/Shell";
 import { applyBranding, applyTheme, storedTheme } from "@/lib/appearance";
 
@@ -22,7 +23,7 @@ function router(me: Me) {
         element: <Shell me={me} />,
         children: [
           { index: true, element: <Navigate to="/live" replace /> },
-          { path: "live/*", element: <WorkspacePlaceholder title="Live" legacyHint="Live viewing is available in the current interface until this workspace is complete." /> },
+          { path: "live/*", element: <LiveWorkspace /> },
           { path: "playback/*", element: <WorkspacePlaceholder title="Playback" legacyHint="Footage search and export are available in the current interface." /> },
           { path: "cameras/*", element: <AdminRoute me={me}><WorkspacePlaceholder title="Cameras" legacyHint="Camera administration is available in the current interface." /></AdminRoute> },
           { path: "settings/*", element: <AdminRoute me={me}><WorkspacePlaceholder title="Settings" legacyHint="Settings are available in the current interface." /></AdminRoute> },
