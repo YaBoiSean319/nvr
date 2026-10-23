@@ -13,6 +13,7 @@ from .detection import DetectionManager
 from .exports import ExportManager
 from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
+from .principal import secure_cookie
 from .store import initialize
 from .webhooks import WebhookManager
 
@@ -27,12 +28,6 @@ STARTUP_ORDER = (
 )
 # Detection reads recorder state, and recording should outlive everything else.
 SHUTDOWN_ORDER = ("detectors", "exports", "webhooks", "heartbeat", "recorders")
-
-
-def secure_cookie() -> bool:
-    if os.environ.get("NVR_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}:
-        return True
-    return os.environ.get("NVR_PUBLIC_URL", "").lower().startswith("https://")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:

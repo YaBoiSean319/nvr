@@ -6,6 +6,7 @@ same type so routes do not care how the caller authenticated.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,12 @@ from .store import connect
 
 COOKIE_NAME = "nvr_session"
 Role = Literal["administrator", "operator"]
+
+
+def secure_cookie() -> bool:
+    if os.environ.get("NVR_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}:
+        return True
+    return os.environ.get("NVR_PUBLIC_URL", "").lower().startswith("https://")
 
 
 @dataclass(frozen=True)

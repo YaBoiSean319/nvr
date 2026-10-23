@@ -143,7 +143,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"longpasswordonly"}).status_code, 422)
 
     def test_session_lifetime_is_clamped_to_bounded_range(self):
-        from app.main import _session_hours
+        from app.api.identity import _session_hours
         os.environ["NVR_SESSION_HOURS"]="1000"
         self.assertEqual(_session_hours(),168)
         os.environ["NVR_SESSION_HOURS"]="0"
@@ -347,20 +347,20 @@ class BootstrapTests(unittest.TestCase):
     def test_oidc_maps_roles_denies_unmapped_users_and_keeps_local_login_available(self):
         self.configure_oidc("NVR-Operator")
         from unittest.mock import AsyncMock, patch
-        from app.main import _mapped_role
+        from app.api.identity import _mapped_role
         self.assertIsNone(_mapped_role({"roles":["Unmapped"]}))
         self.assertEqual(_mapped_role({"roles":["NVR-Operator"]}), "operator")
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         tenant_id=OIDC_TEST_TENANT
         claims={"sub":"object-123", "tid":tenant_id, "iss":f"https://login.microsoftonline.com/{tenant_id}/v2.0", "preferred_username":"operator@example.test", "roles":["NVR-Operator"]}
         fake=type("FakeOIDC", (), {"authorize_access_token":AsyncMock(return_value={"userinfo":claims})})()
-        with patch("app.main._oidc_client", return_value=fake):
+        with patch("app.api.identity._oidc_client", return_value=fake):
             callback=self.client.get("/api/auth/oidc/callback?code=fake&state=fake", follow_redirects=False)
         self.assertEqual(callback.status_code, 303)
         self.assertEqual(self.client.get("https://testserver.local/api/auth/me").json()["role"], "operator")
         self.client.post("/api/auth/logout")
         claims["roles"]=["Unmapped"]
-        with patch("app.main._oidc_client", return_value=fake):
+        with patch("app.api.identity._oidc_client", return_value=fake):
             denied=self.client.get("/api/auth/oidc/callback?code=fake&state=fake", follow_redirects=False)
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(self.client.post("/api/auth/login", json={"username":"local-admin", "password":TEST_PASSWORD}).status_code, 200)
@@ -458,7 +458,7 @@ class BootstrapTests(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         fake=type("FakeOIDC", (), {"create_authorization_url":AsyncMock(side_effect=OSError("provider offline"))})()
-        with patch("app.main._oidc_client", return_value=fake):
+        with patch("app.api.identity._oidc_client", return_value=fake):
             unavailable=self.client.get("/api/auth/oidc/login?format=json", follow_redirects=False)
             self.assertEqual(unavailable.status_code, 503)
             self.assertIn("local administrator sign-in remains available", unavailable.json()["detail"])

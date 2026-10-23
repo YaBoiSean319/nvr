@@ -10,9 +10,8 @@ from app.main import (
     CameraGroupCreateRequest,
     CameraGroupUpdateRequest,
     CameraImportRow,
-    LiveWorkspaceRequest,
-    ViewerLayoutRequest,
 )
+from app.api.live_views import LiveWorkspaceRequest, ViewerLayoutRequest
 
 
 class SharedRequestValidationTests(unittest.TestCase):
