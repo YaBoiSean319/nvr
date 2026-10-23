@@ -437,10 +437,26 @@ test("motion, AI, schedule, retention, history, and revert controls persist thro
   const historyTab = page.locator('[role="tab"][data-camera-tab="health-history"]');
   await historyTab.click();
   await expect(historyTab).toHaveAttribute("aria-selected", "true");
+  const coverageResponse = page.waitForResponse(response => {
+    try {
+      return new URL(response.url()).pathname === `/api/cameras/${fixtures.primary_camera_id}/coverage` && response.status() === 200;
+    } catch {
+      return false;
+    }
+  });
   await page.getByRole("button", { name: "View coverage history" }).click();
-  await expect(page.locator(`#camera-list article[data-camera-id="${fixtures.primary_camera_id}"]`)).toContainText("No coverage transitions recorded yet.");
-  const history = await page.evaluate(async id => (await (await fetch(`/api/cameras/${id}/coverage`)).json()), fixtures.primary_camera_id);
-  expect(history.intervals).toEqual([]);
+  const history = await (await coverageResponse).json();
+  expect(history.camera_id).toBe(fixtures.primary_camera_id);
+  const historyList = page.locator(`#camera-list article[data-camera-id="${fixtures.primary_camera_id}"] [data-camera-tab-panel="health-history"] ul`);
+  if (history.intervals.length === 0) {
+    await expect(historyList).toContainText("No coverage transitions recorded yet.");
+  } else {
+    const historyItems = historyList.locator("li");
+    await expect(historyItems).toHaveCount(history.intervals.length);
+    for (const [index, interval] of history.intervals.entries()) {
+      await expect(historyItems.nth(index)).toContainText(`${interval.coverage_kind}: ${interval.reason} ·`);
+    }
+  }
 
   const cameraEditor = page.locator(`#camera-list article[data-camera-id="${fixtures.primary_camera_id}"]`);
   page.once("dialog", dialog => dialog.accept());
