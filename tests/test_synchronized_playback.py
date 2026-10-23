@@ -142,7 +142,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
             self.assertFalse(unlink_if_unleased(path), "cleanup must not unlink footage while snapshot extraction is reading it")
             return b"\xff\xd8jpeg\xff\xd9", b""
         fake_process.communicate = AsyncMock(side_effect=read_snapshot)
-        with patch("app.main.shutil.which", return_value="/usr/bin/ffmpeg"), patch("app.main.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_process) as ffmpeg:
+        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_process) as ffmpeg:
             response = self.client.get(url)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["content-type"], "image/jpeg")
@@ -173,7 +173,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         def protected_probe(*args, **kwargs):
             self.assertFalse(unlink_if_unleased(path), "cleanup must not unlink footage while ffprobe reads frame timestamps")
             return ffprobe
-        with patch("app.main.shutil.which", return_value="/usr/bin/ffprobe"), patch("app.main.subprocess.run", side_effect=protected_probe) as probe:
+        with patch("shutil.which", return_value="/usr/bin/ffprobe"), patch("subprocess.run", side_effect=protected_probe) as probe:
             previous = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:20.020Z&direction=previous")
             following = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:20.020Z&direction=next")
         self.assertEqual(previous.status_code, 200, previous.text)
@@ -188,7 +188,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         with connect() as db:
             row = db.execute("SELECT id FROM recording_segments WHERE camera_id=? ORDER BY id LIMIT 1", (self.cameras[0],)).fetchone()
         result = Mock(returncode=0, stdout='{"frames":[{"best_effort_timestamp_time":"0.000"}]}')
-        with patch("app.main.shutil.which", return_value="/usr/bin/ffprobe"), patch("app.main.subprocess.run", return_value=result):
+        with patch("shutil.which", return_value="/usr/bin/ffprobe"), patch("subprocess.run", return_value=result):
             response = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:00Z&direction=previous")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "No adjacent frame exists in this interval")

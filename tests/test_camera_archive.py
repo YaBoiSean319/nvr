@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_PASSWORD
 from app.store import connect, initialize
 
 
@@ -43,7 +43,7 @@ class CameraArchiveTests(unittest.TestCase):
 
     def add_camera(self) -> str:
         capability = {"reachable": True, "video": {"codec": "h264", "width": 640, "height": 360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             response = self.client.post("/api/cameras", json={
                 "name": "Archive camera", "stream_url": "rtsp://camera.example/live", "recording_mode": "disabled",
             })

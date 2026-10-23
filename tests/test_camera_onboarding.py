@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.security import hash_password
 from app.store import initialize
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_PASSWORD
 
 
 class CameraOnboardingAuthorizationTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class CameraOnboardingAuthorizationTests(unittest.TestCase):
         self.context = TestClient(app)
         self.client = self.context.__enter__()
         self.client.post("/api/setup/admin", json={"username": "onboarding-admin", "password": TEST_PASSWORD})
-        with patch("app.main.probe_stream", new=AsyncMock(return_value={
+        with patch_camera_probe(new=AsyncMock(return_value={
             "reachable": True, "video": {"codec": "h264", "width": 640, "height": 360},
         })), patch.object(self.context.app.state.recorders, "sync_camera", new=AsyncMock()):
             created = self.client.post("/api/cameras", json={

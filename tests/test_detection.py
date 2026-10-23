@@ -169,7 +169,7 @@ class DetectionApiTests(unittest.TestCase):
     def test_runtime_provider_and_model_are_validated_before_activation(self):
         self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
         candidate = {"provider": "GPU", "model_id": MODEL_ID}
-        with patch("app.main.validate_detector", return_value={"valid": False, "reason": "GPU unavailable"}):
+        with patch("app.api.ai_settings.validate_detector", return_value={"valid": False, "reason": "GPU unavailable"}):
             preview = self.client.post("/api/ai/settings/validate", json=candidate)
             rejected = self.client.put("/api/ai/settings", json={"max_active_cameras": 2, **candidate})
         self.assertEqual(preview.status_code, 200, preview.text)
@@ -179,7 +179,7 @@ class DetectionApiTests(unittest.TestCase):
             runtime = db.execute("SELECT provider,model_id FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
         self.assertEqual((runtime["provider"], runtime["model_id"]), ("CPU", MODEL_ID))
 
-        with patch("app.main.validate_detector", return_value={"valid": True, "model_version": "sha256:fixture-1"}):
+        with patch("app.api.ai_settings.validate_detector", return_value={"valid": True, "model_version": "sha256:fixture-1"}):
             activated = self.client.put("/api/ai/settings", json={"max_active_cameras": 2, **candidate})
         self.assertEqual(activated.status_code, 200, activated.text)
         self.assertEqual(activated.json()["model"]["provider"], "GPU")
