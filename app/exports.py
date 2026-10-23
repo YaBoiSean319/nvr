@@ -22,6 +22,7 @@ from .storage import recording_file_path
 from .store import connect
 
 MAX_EXPORT_WORKERS = 1
+POLL_SECONDS = 2
 MAX_ACTIVE_EXPORTS = 4
 MAX_EXPORT_CAMERAS = 16
 MAX_EXPORT_WINDOW = timedelta(hours=24)
@@ -433,6 +434,13 @@ def _write_source_time_subtitles(
 
 
 def _subtitle_filter_path(path: Path) -> str:
+    """The burn-in filter for a subtitle file, or a pass-through when it has no cues.
+
+    FFmpeg's subtitles filter refuses an empty file, which would fail an export
+    whose interval simply has no skipped gaps.
+    """
+    if not path.is_file() or path.stat().st_size == 0:
+        return "null"
     rendered = path.as_posix().replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     return f"subtitles=filename='{rendered}':force_style='Alignment=7,Fontsize=24,BorderStyle=3,Outline=1,Shadow=0,MarginL=18,MarginV=14,PrimaryColour=&H00FFFFFF,BackColour=&H80000000'"
 
@@ -488,6 +496,9 @@ class ExportManager:
         self._cancelled: set[str] = set()
         self._stopping = False
         self._expiry_task: asyncio.Task[None] | None = None
+        self._poll_task: asyncio.Task[None] | None = None
+        self._pending: set[str] = set()
+        self._running: str | None = None
 
     async def start(self) -> None:
         recover_interrupted_exports()
@@ -497,8 +508,9 @@ class ExportManager:
         self._stopping = False
         self._worker = asyncio.create_task(self._run(), name="nvr-export-worker")
         self._expiry_task = asyncio.create_task(self._expire_loop(), name="nvr-export-expiry")
+        self._poll_task = asyncio.create_task(self._poll_loop(), name="nvr-export-poll")
         for job_id in pending:
-            self._queue.put_nowait(job_id)
+            self.enqueue(job_id)
 
     def _progress(self, job_id: str, percent: int) -> None:
         with connect() as db:
@@ -509,15 +521,31 @@ class ExportManager:
             await asyncio.sleep(60)
             expire_exports()
 
+    async def _poll_loop(self) -> None:
+        """Pick up queued jobs and cancel requests even when a nudge was lost."""
+        while True:
+            await asyncio.sleep(POLL_SECONDS)
+            try:
+                with connect() as db:
+                    queued = [row[0] for row in db.execute("SELECT id FROM exports WHERE status='queued' ORDER BY created_at")]
+                    cancelling = {row[0] for row in db.execute("SELECT id FROM exports WHERE status='running' AND cancel_requested=1")}
+            except sqlite3.Error:
+                continue
+            for job_id in queued:
+                self.enqueue(job_id)
+            if self._running in cancelling and self._running not in self._cancelled:
+                await self.cancel(self._running)
+
     async def stop(self) -> None:
         self._stopping = True
-        if self._expiry_task:
-            self._expiry_task.cancel()
-            try:
-                await self._expiry_task
-            except asyncio.CancelledError:
-                pass
-            self._expiry_task = None
+        for task in (self._expiry_task, self._poll_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._expiry_task = self._poll_task = None
         for process in list(self._processes.values()):
             if process.returncode is None:
                 process.terminate()
@@ -538,6 +566,9 @@ class ExportManager:
     def enqueue(self, job_id: str) -> None:
         if self._worker is None or self._worker.done():
             raise RuntimeError("Export worker is not running")
+        if job_id in self._pending or job_id == self._running:
+            return
+        self._pending.add(job_id)
         self._queue.put_nowait(job_id)
 
     async def cancel(self, job_id: str) -> None:
@@ -549,6 +580,7 @@ class ExportManager:
     async def _run(self) -> None:
         while True:
             job_id = await self._queue.get()
+            self._pending.discard(job_id)
             try:
                 if self._stopping:
                     return
@@ -556,8 +588,10 @@ class ExportManager:
                     row = db.execute("SELECT status FROM exports WHERE id=?", (job_id,)).fetchone()
                 if not row or row["status"] != "queued":
                     continue
+                self._running = job_id
                 await self._execute(job_id)
             finally:
+                self._running = None
                 self._queue.task_done()
 
     async def _execute(self, job_id: str) -> None:

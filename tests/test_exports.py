@@ -137,6 +137,25 @@ class ExportJobTests(unittest.TestCase):
         self.assertEqual(actions, ["export_requested", "export_completed"])
         self.assertIsNotNone(hold, "export must retain active preservation holds")
 
+    def test_fully_covered_interval_exports_without_gap_notices(self):
+        if not self.ffmpeg or not self.ffprobe:
+            self.skipTest("FFmpeg and ffprobe are required for the playable export check")
+        response = self.client.post("/api/exports", json={
+            "camera_ids": [self.camera],
+            "start": "2026-10-20T10:00:00Z",
+            "end": "2026-10-20T10:00:01Z",
+        })
+        self.assertEqual(response.status_code, 202, response.text)
+        result = self._wait_for_status(response.json()["id"], "completed", "failed")
+        self.assertEqual(result["status"], "completed", result)
+        package = Path(self.temporary.name) / "covered.zip"
+        package.write_bytes(self.client.get(result["download_url"]).content)
+        with zipfile.ZipFile(package) as archive:
+            metadata = json.loads(archive.read("metadata.json"))
+            self.assertEqual(metadata["grid"]["global_gaps_compressed"], [])
+            self.assertAlmostEqual(metadata["grid"]["duration_seconds"], 1.0, places=3)
+            self.assertIn(metadata["grid"]["video_file"], archive.namelist())
+
     def test_optional_audio_is_muxed_and_grid_audio_stays_silent_over_compressed_missing_source_time(self):
         if not self.ffmpeg or not self.ffprobe:
             self.skipTest("FFmpeg and ffprobe are required for generated audio checks")
