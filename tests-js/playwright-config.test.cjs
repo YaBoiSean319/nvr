@@ -27,7 +27,7 @@ test("browser server, fallback reports, and failure diagnostics protect credenti
     'const fs = require("node:fs");',
     'const report = JSON.parse(fs.readFileSync("test-results/camera-browser-acceptance.json", "utf8"));',
     'const measurements = JSON.parse(fs.readFileSync("test-results/camera-admin-acceptance-measurements.json", "utf8"));',
-    'process.stdout.write(JSON.stringify({ serverEnv: config.webServer.env, trace: config.use.trace, report, measurements }));',
+    'process.stdout.write(JSON.stringify({ serverEnv: config.webServer.env, trace: config.use.trace, captureGitInfo: config.captureGitInfo, report, measurements }));',
   ].join("\n");
   const result = spawnSync(process.execPath, ["-e", childProgram], {
     cwd: ROOT,
@@ -45,6 +45,7 @@ test("browser server, fallback reports, and failure diagnostics protect credenti
   const output = JSON.parse(result.stdout);
   assert.deepEqual(Object.keys(output.serverEnv).sort(), EXPECTED_SERVER_ENV_KEYS);
   assert.equal(output.trace, "off", "Playwright traces can contain authenticated request bodies");
+  assert.deepEqual(output.captureGitInfo, { diff: false }, "CI reports must not embed the full source diff");
   assert.equal(output.serverEnv.PATH, process.env.PATH);
   const serialized = JSON.stringify(output);
   for (const sentinel of sentinels) assert.equal(serialized.includes(sentinel), false);

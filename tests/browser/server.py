@@ -126,11 +126,7 @@ class FixtureDiscoveryResponder:
 
 
 def main() -> None:
-    os.environ.setdefault("NVR_BROWSER_FIXTURE_MANIFEST", str(Path(os.environ["NVR_DB_PATH"]).with_name("fixtures.json")))
     os.environ.setdefault("NVR_DISCOVERY_INTERFACE", "127.0.0.1")
-    from tests.browser.seed_fixtures import seed_fixtures
-
-    seed_fixtures(0)
     onvif = ThreadingHTTPServer(("127.0.0.1", 8766), FixtureOnvifHandler)
     onvif_thread = Thread(target=onvif.serve_forever, name="browser-fixture-onvif", daemon=True)
     onvif_thread.start()

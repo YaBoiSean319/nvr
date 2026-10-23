@@ -54,7 +54,16 @@ async function signIn(page, username = "camera-admin") {
       throw new Error(`No /api/auth/login response. Message: ${message || "(empty)"}. Page errors: ${pageErrors.join("; ") || "(none)"}`);
     }
     if (!loginResponse.ok()) {
-      throw new Error(`Fixture login returned HTTP ${loginResponse.status()}. Message: ${message || "(empty)"}.`);
+      const setupResponse = loginResponse.status() === 401
+        ? await page.request.get(new URL("/api/setup/status", page.url()).toString()).catch(() => null)
+        : null;
+      const setupStatus = setupResponse?.ok()
+        ? await setupResponse.json().catch(() => null)
+        : null;
+      const accountConfigured = setupStatus
+        ? String(setupStatus.setup_required === false)
+        : "unknown";
+      throw new Error(`Fixture login returned HTTP ${loginResponse.status()}. Message: ${message || "(empty)"}. Fixture account configured: ${accountConfigured}.`);
     }
     await expect(page.locator("#status"), `Login returned HTTP ${loginResponse.status()}, but the workspace stayed hidden. Message: ${message || "(empty)"}. Page errors: ${pageErrors.join("; ") || "(none)"}`).toBeVisible();
     await expect(page.locator('#console-nav [data-screen="camera-settings"]')).toBeVisible();

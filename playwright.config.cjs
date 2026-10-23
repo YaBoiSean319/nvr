@@ -67,6 +67,9 @@ process.on("exit", () => {
 module.exports = {
   testDir: "./tests/browser",
   testMatch: "**/*.spec.cjs",
+  // CI reports should retain the tested commit but must not embed the full PR
+  // source diff, which can include workflow-only privacy sentinels.
+  captureGitInfo: { diff: false },
   fullyParallel: false,
   workers: 1,
   retries: 0,
