@@ -16,23 +16,23 @@ import uuid
 import json
 import time
 import threading
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, ValidationError, field_validator, model_validator
 from authlib.integrations.starlette_client import OAuth
-from starlette.middleware.sessions import SessionMiddleware
 
+from .application import APP_VERSION, create_app, secure_cookie
+from .principal import COOKIE_NAME, Administrator, CurrentUser, administrator, current_user  # noqa: F401 - dependencies are overridden through this module
 from .security import hash_password, new_session_token, token_digest, verify_password
-from .store import connect, database_path, initialize
+from .store import connect, database_path
 from .credentials import encrypt, decrypt
-from .recording import RecordingManager, masked_stream_url, probe_stream, safe_stream_url, _manifest_bytes
+from .recording import masked_stream_url, probe_stream, safe_stream_url, _manifest_bytes
 from .health import recording_health
 from .discovery import DiscoveryResult, discover_onvif, discover_onvif_ip_range
 from .onvif_stream import list_camera_stream_profiles, resolve_camera_stream
@@ -41,17 +41,15 @@ from . import diagnostics
 from .retention import acquire_playback, coverage_summary, effective_retention, release_playback
 from .storage import assign_group_volume, configured_volumes, refresh_registry, storage_status
 from .preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
-from .exports import ExportManager, create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
+from .exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 from .incidents import acknowledge_incident, incident_view, list_incidents, sync_storage_incidents
-from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, WebhookManager, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
-from .heartbeat import HeartbeatManager, configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
-from .detection import DetectionManager, detector_availability, effective_camera_config, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
+from .webhooks import EVENT_TYPES as WEBHOOK_EVENT_TYPES, create_endpoint as create_webhook_endpoint, delete_endpoint as delete_webhook_endpoint, enqueue_test as enqueue_webhook_test, list_deliveries as list_webhook_deliveries, list_endpoints as list_webhook_endpoints, rotate_secret as rotate_webhook_secret, update_endpoint as update_webhook_endpoint
+from .heartbeat import configure_heartbeat, disable_heartbeat, heartbeat_status, queue_heartbeat_test, rotate_heartbeat_secret
+from .detection import detector_availability, effective_camera_config, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
 from .display_settings import format_display_datetime, validate_display_settings
 from .request_validation import normalize_group_name, normalize_live_grid_selection, normalize_required_group_name
 
-APP_VERSION = "0.1.0"
 CameraGroupName = Annotated[str, StringConstraints(min_length=1, max_length=80), AfterValidator(normalize_required_group_name)]
-COOKIE_NAME = "nvr_session"
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.@-]{3,128}$")
 CameraBrand = Literal["auto", "acti", "axis", "bosch", "dahua", "hanwha", "hikvision", "reolink", "samsung", "uniview", "other"]
 MAX_LIVE_VIEWERS = 16
@@ -62,50 +60,8 @@ _live_audio_count = 0
 _live_camera_status: dict[str, dict[str, object]] = {}
 
 
-def _secure_cookie() -> bool:
-    if os.environ.get("NVR_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}:
-        return True
-    return os.environ.get("NVR_PUBLIC_URL", "").lower().startswith("https://")
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    os.umask(0o077)
-    initialize()
-    app.state.exports = ExportManager()
-    await app.state.exports.start()
-    app.state.webhooks = WebhookManager()
-    await app.state.webhooks.start()
-    app.state.heartbeat = HeartbeatManager()
-    await app.state.heartbeat.start()
-    app.state.recorders = RecordingManager()
-    await app.state.recorders.start()
-    app.state.detectors = DetectionManager()
-    await app.state.detectors.start()
-    yield
-    await app.state.detectors.stop()
-    await app.state.exports.stop()
-    await app.state.webhooks.stop()
-    await app.state.heartbeat.stop()
-    await app.state.recorders.stop()
-
-
-app = FastAPI(title="Workplace NVR", version=APP_VERSION, lifespan=lifespan)
-@app.middleware("http")
-async def prevent_api_caching(request: Request, call_next):
-    response = await call_next(request)
-    if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
-        response.headers["Cache-Control"] = "no-store"
-    return response
-
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.environ.get("NVR_OIDC_SESSION_SECRET") or secrets.token_urlsafe(48),
-    same_site="lax",
-    https_only=_secure_cookie(),
-    session_cookie="nvr_oidc_flow",
-    max_age=600,
-)
+_secure_cookie = secure_cookie
+app = create_app()
 oauth = OAuth()
 
 
@@ -701,27 +657,6 @@ def _new_session(response: Response, user_id: int) -> None:
     )
 
 
-def current_user(request: Request) -> sqlite3.Row:
-    raw = request.cookies.get(COOKIE_NAME)
-    if not raw:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    with connect() as db:
-        row = db.execute(
-            "SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id=s.user_id "
-            "WHERE s.token_hash=? AND s.expires_at>?",
-            (token_digest(raw), datetime.now(timezone.utc).isoformat()),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
-    return row
-
-
-def administrator(user: Annotated[sqlite3.Row, Depends(current_user)]) -> sqlite3.Row:
-    if user["role"] != "administrator":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required")
-    return user
-
-
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(Path(__file__).with_name("static") / "index.html")
@@ -763,16 +698,6 @@ def stylesheet_asset(asset_name: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Stylesheet asset not found")
     return FileResponse(path, media_type="text/css")
-
-
-@app.get("/healthz", include_in_schema=False)
-def health() -> dict[str, str]:
-    try:
-        with connect() as db:
-            db.execute("SELECT 1").fetchone()
-        return {"status": "ok"}
-    except sqlite3.Error as exc:
-        raise HTTPException(status_code=503, detail="Database unavailable") from exc
 
 
 @app.get("/api/setup/status")
@@ -834,7 +759,7 @@ def logout(request: Request, response: Response) -> Response:
 
 
 @app.get("/api/auth/me")
-def me(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, str]:
+def me(user: CurrentUser) -> dict[str, str]:
     return {"username": user["username"], "role": user["role"]}
 
 
@@ -844,14 +769,14 @@ def _display_settings_view(row: sqlite3.Row) -> dict[str, object]:
 
 
 @app.get("/api/settings/display")
-def get_display_settings(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_display_settings(_: CurrentUser) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT time_zone,date_format,clock_format,updated_at FROM site_display_settings WHERE singleton_id=1").fetchone()
     return _display_settings_view(row)
 
 
 @app.post("/api/settings/display/preview")
-def preview_display_settings(payload: DisplaySettingsRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def preview_display_settings(payload: DisplaySettingsRequest, _: Administrator) -> dict[str, object]:
     sample = datetime(2026, 10, 21, 16, 5, 6, tzinfo=timezone.utc)
     return {**payload.model_dump(), "preview": format_display_datetime(
         sample, payload.time_zone, payload.date_format, payload.clock_format
@@ -859,7 +784,7 @@ def preview_display_settings(payload: DisplaySettingsRequest, _: Annotated[sqlit
 
 
 @app.put("/api/settings/display")
-def save_display_settings(payload: DisplaySettingsRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def save_display_settings(payload: DisplaySettingsRequest, _: Administrator) -> dict[str, object]:
     updated_at = datetime.now(timezone.utc).isoformat()
     with connect() as db:
         db.execute(
@@ -930,13 +855,13 @@ def get_public_branding() -> dict[str, object]:
 
 
 @app.get("/api/settings/branding")
-def get_branding_settings(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def get_branding_settings(_: Administrator) -> dict[str, object]:
     with connect() as db:
         return _branding_view(db)
 
 
 @app.put("/api/settings/branding")
-def save_branding_settings(payload: BrandingSaveRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def save_branding_settings(payload: BrandingSaveRequest, user: Administrator) -> dict[str, object]:
     validated_assets={key:None if asset is None else _decode_branding_asset(asset) for key,asset in payload.assets.items()}
     now=datetime.now(timezone.utc).isoformat()
     with connect() as db:
@@ -1014,7 +939,7 @@ def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
 
 
 @app.get("/api/live/layouts")
-def get_viewer_layouts(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_viewer_layouts(user: CurrentUser) -> dict[str, object]:
     views = _load_live_views(user)
     with connect() as db:
         available = {row["id"] for row in db.execute("SELECT id FROM cameras")}
@@ -1024,7 +949,7 @@ def get_viewer_layouts(user: Annotated[sqlite3.Row, Depends(current_user)]) -> d
 
 
 @app.get("/api/live/views")
-def get_live_views(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_live_views(user: CurrentUser) -> dict[str, object]:
     return _load_live_views(user)
 
 
@@ -1032,7 +957,7 @@ def get_live_views(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[
 def save_viewer_layout(
     name: str,
     payload: ViewerLayoutRequest,
-    user: Annotated[sqlite3.Row, Depends(current_user)],
+    user: CurrentUser,
 ) -> dict[str, object]:
     name = name.strip()
     if not name or len(name) > 60:
@@ -1053,7 +978,7 @@ def save_viewer_layout(
 
 @app.put("/api/live/shared-layouts/{name}")
 def save_shared_viewer_layout(
-    name: str, payload: ViewerLayoutRequest, user: Annotated[sqlite3.Row, Depends(administrator)],
+    name: str, payload: ViewerLayoutRequest, user: Administrator,
 ) -> dict[str, object]:
     name = name.strip()
     if not name or len(name) > 60:
@@ -1076,14 +1001,14 @@ def save_shared_viewer_layout(
 
 
 @app.delete("/api/live/shared-layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_shared_viewer_layout(name: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def delete_shared_viewer_layout(name: str, user: Administrator) -> Response:
     with connect() as db:
         db.execute("DELETE FROM shared_viewer_layouts WHERE name=? COLLATE NOCASE", (name.strip(),))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/live/workspace")
-def get_live_workspace(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_live_workspace(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT * FROM live_workspace_states WHERE user_id=?", (int(user["id"]),)).fetchone()
     if row is None:
@@ -1098,7 +1023,7 @@ def get_live_workspace(user: Annotated[sqlite3.Row, Depends(current_user)]) -> d
 
 
 @app.put("/api/live/workspace")
-def save_live_workspace(payload: LiveWorkspaceRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def save_live_workspace(payload: LiveWorkspaceRequest, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall()}
         if not set(payload.camera_ids) <= present:
@@ -1116,7 +1041,7 @@ def save_live_workspace(payload: LiveWorkspaceRequest, user: Annotated[sqlite3.R
 
 
 @app.delete("/api/live/layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_viewer_layout(name: str, user: Annotated[sqlite3.Row, Depends(current_user)]) -> Response:
+def delete_viewer_layout(name: str, user: CurrentUser) -> Response:
     with connect() as db:
         db.execute("DELETE FROM viewer_layouts WHERE user_id=? AND name=?", (int(user["id"]), name))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -1160,7 +1085,7 @@ def _release_live_audio() -> None:
 
 
 @app.get("/api/cameras/{camera_id}/live/status")
-def live_view_status(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def live_view_status(camera_id: str, _: CurrentUser) -> dict[str, object]:
     with connect() as db:
         camera = db.execute("SELECT archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if camera is None:
@@ -1184,7 +1109,7 @@ def live_view_status(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_u
 @app.get("/api/cameras/{camera_id}/audio/live")
 def live_camera_audio(
     camera_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> StreamingResponse:
     with connect() as db:
         camera = db.execute("SELECT stream_url_ciphertext,audio_supported,audio_enabled,archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -1305,7 +1230,7 @@ async def _mjpeg_frames(camera_id: str, source: str, quality: str):
 @app.get("/api/cameras/{camera_id}/live")
 def live_camera(
     camera_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
     quality: Literal["low", "high"] = Query(default="low"),
 ) -> StreamingResponse:
     with connect() as db:
@@ -1408,7 +1333,7 @@ async def oidc_callback(request: Request) -> RedirectResponse:
 
 
 @app.get("/api/admin/sessions")
-def list_sessions(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def list_sessions(_: Administrator) -> dict[str, object]:
     with connect() as db:
         rows = db.execute(
             "SELECT s.session_id,s.created_at,s.expires_at,u.username,u.role FROM sessions s JOIN users u ON u.id=s.user_id "
@@ -1418,14 +1343,14 @@ def list_sessions(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str
 
 
 @app.delete("/api/admin/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def terminate_session(session_id: str, _: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def terminate_session(session_id: str, _: Administrator) -> Response:
     with connect() as db:
         db.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/system/status")
-def system_status(user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def system_status(user: Administrator) -> dict[str, object]:
     db_path = database_path()
     with connect() as db:
         admin_count = db.execute("SELECT COUNT(*) FROM users WHERE role='administrator'").fetchone()[0]
@@ -1447,20 +1372,20 @@ def system_status(user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[
 
 
 @app.get("/api/diagnostics/status")
-def diagnostics_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def diagnostics_status(_: Administrator) -> dict[str, object]:
     return diagnostics.capture_status()
 
 
 @app.post("/api/diagnostics/capture")
 def diagnostics_capture(
     payload: DiagnosticCaptureRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     return diagnostics.set_capture(payload.enabled, payload.hours)
 
 
 @app.get("/api/diagnostics/bundle")
-def diagnostics_bundle(_: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def diagnostics_bundle(_: Administrator) -> Response:
     return Response(
         content=json.dumps(diagnostics.bundle(), indent=2),
         media_type="application/json",
@@ -1471,7 +1396,7 @@ def diagnostics_bundle(_: Annotated[sqlite3.Row, Depends(administrator)]) -> Res
 @app.post("/api/cameras/onvif-profiles")
 async def camera_onvif_profiles(
     payload: CameraProfileRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     try:
         service_url, profiles = await list_camera_stream_profiles(
@@ -1611,7 +1536,7 @@ def _record_discovery_failure(db: sqlite3.Connection, device_uuid: str) -> None:
 @app.post("/api/cameras/test")
 async def test_camera_stream(
     payload: CameraProbeRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     try:
         stream_url, _ = await _resolve_camera_source(payload)
@@ -1651,7 +1576,7 @@ async def _resolve_camera_source(payload: CameraProbeRequest, service_url: str |
 
 
 @app.get("/api/cameras")
-def list_cameras(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def list_cameras(_: CurrentUser) -> dict[str, object]:
     with connect() as db:
         rows = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE").fetchall()
         cameras = []
@@ -1674,7 +1599,7 @@ def list_cameras(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, 
 
 
 @app.get("/api/camera-groups")
-def list_camera_groups(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def list_camera_groups(_: CurrentUser) -> dict[str, object]:
     with connect() as db:
         groups = db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE").fetchall()
         return {"groups": [_camera_group_view(db, group) for group in groups]}
@@ -1693,7 +1618,7 @@ def _camera_group_view(db: sqlite3.Connection, group: sqlite3.Row) -> dict[str, 
 @app.get("/api/camera-groups/{group_id}/members")
 def list_camera_group_members(
     group_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
         group = db.execute("SELECT id,name FROM camera_groups WHERE id=?", (group_id,)).fetchone()
@@ -1705,7 +1630,7 @@ def list_camera_group_members(
 @app.post("/api/camera-groups", status_code=status.HTTP_201_CREATED)
 def create_camera_group(
     payload: CameraGroupCreateRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, str]:
     name = payload.name
     group_id = str(uuid.uuid4())
@@ -1721,7 +1646,7 @@ def create_camera_group(
 def update_camera_group(
     group_id: str,
     payload: CameraGroupUpdateRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
@@ -1737,7 +1662,7 @@ def update_camera_group(
 @app.delete("/api/camera-groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_camera_group(
     group_id: str,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> Response:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
@@ -1754,7 +1679,7 @@ def delete_camera_group(
 def replace_camera_group_members(
     group_id: str,
     payload: CameraGroupMembershipRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     camera_ids = list(dict.fromkeys(payload.camera_ids))
     with connect() as db:
@@ -1776,7 +1701,7 @@ def replace_camera_group_members(
 
 
 @app.get("/api/camera-groups/{group_id}/retention")
-def get_group_retention(group_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_group_retention(group_id: str, _: CurrentUser) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
@@ -1785,7 +1710,7 @@ def get_group_retention(group_id: str, _: Annotated[sqlite3.Row, Depends(current
 
 
 @app.put("/api/camera-groups/{group_id}/retention")
-def set_group_retention(group_id: str, payload: RetentionRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def set_group_retention(group_id: str, payload: RetentionRequest, _: Administrator) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
@@ -1794,7 +1719,7 @@ def set_group_retention(group_id: str, payload: RetentionRequest, _: Annotated[s
 
 
 @app.delete("/api/camera-groups/{group_id}/retention", status_code=status.HTTP_204_NO_CONTENT)
-def delete_group_retention(group_id: str, _: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def delete_group_retention(group_id: str, _: Administrator) -> Response:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
@@ -1803,7 +1728,7 @@ def delete_group_retention(group_id: str, _: Annotated[sqlite3.Row, Depends(admi
 
 
 @app.get("/api/cameras/{camera_id}/retention")
-def get_camera_retention(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_camera_retention(camera_id: str, _: CurrentUser) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
@@ -1814,7 +1739,7 @@ def get_camera_retention(camera_id: str, _: Annotated[sqlite3.Row, Depends(curre
 
 
 @app.put("/api/cameras/{camera_id}/retention")
-def set_camera_retention(camera_id: str, payload: RetentionRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def set_camera_retention(camera_id: str, payload: RetentionRequest, _: Administrator) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
@@ -1823,7 +1748,7 @@ def set_camera_retention(camera_id: str, payload: RetentionRequest, _: Annotated
 
 
 @app.delete("/api/cameras/{camera_id}/retention", status_code=status.HTTP_204_NO_CONTENT)
-def delete_camera_retention(camera_id: str, _: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def delete_camera_retention(camera_id: str, _: Administrator) -> Response:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
@@ -1832,7 +1757,7 @@ def delete_camera_retention(camera_id: str, _: Annotated[sqlite3.Row, Depends(ad
 
 
 @app.get("/api/storage")
-def get_storage_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def get_storage_status(_: Administrator) -> dict[str, object]:
     refresh_registry()
     result = storage_status()
     with connect() as db:
@@ -1841,7 +1766,7 @@ def get_storage_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dic
 
 
 @app.get("/api/camera-groups/{group_id}/storage-volume")
-def get_group_storage_volume(group_id: str, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def get_group_storage_volume(group_id: str, _: Administrator) -> dict[str, object]:
     with connect() as db:
         row=db.execute("SELECT id,name,storage_volume_id FROM camera_groups WHERE id=?",(group_id,)).fetchone()
         if row is None:
@@ -1850,7 +1775,7 @@ def get_group_storage_volume(group_id: str, _: Annotated[sqlite3.Row, Depends(ad
 
 
 @app.put("/api/camera-groups/{group_id}/storage-volume")
-async def set_group_storage_volume(group_id: str, payload: StorageAssignmentRequest, request: Request, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+async def set_group_storage_volume(group_id: str, payload: StorageAssignmentRequest, request: Request, _: Administrator) -> dict[str, object]:
     try:
         assign_group_volume(group_id,payload.volume_id)
     except LookupError as exc:
@@ -1879,7 +1804,7 @@ def _effective_schedule_view(db: sqlite3.Connection, camera_id: str) -> dict[str
 @app.get("/api/camera-groups/{group_id}/schedule")
 def get_group_schedule(
     group_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
@@ -1895,7 +1820,7 @@ async def update_group_schedule(
     group_id: str,
     payload: GroupScheduleRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     intervals = validate_schedule(payload.timezone, [item.model_dump() for item in payload.intervals])
     with connect() as db:
@@ -1915,7 +1840,7 @@ async def update_group_schedule(
 async def delete_group_schedule(
     group_id: str,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> Response:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
@@ -1929,7 +1854,7 @@ async def delete_group_schedule(
 @app.get("/api/cameras/{camera_id}/schedule")
 def get_camera_schedule(
     camera_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
         camera = db.execute("SELECT id,group_id FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -1958,7 +1883,7 @@ async def update_camera_schedule(
     camera_id: str,
     payload: CameraScheduleRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     if payload.inherit_group:
         intervals = []
@@ -1983,7 +1908,7 @@ async def update_camera_schedule(
 async def delete_camera_schedule(
     camera_id: str,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> Response:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
@@ -2069,7 +1994,7 @@ def _camera_import_preview(csv_text: str) -> tuple[list[dict[str, object]], list
 @app.post("/api/cameras/import/preview")
 def preview_camera_import(
     payload: CameraImportRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     rows, _ = _camera_import_preview(payload.csv_text)
     return {"rows": rows, "accepted_count": sum(row["status"] == "accepted" for row in rows), "rejected_count": sum(row["status"] != "accepted" for row in rows)}
@@ -2079,7 +2004,7 @@ def preview_camera_import(
 async def apply_camera_import(
     payload: CameraImportRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     preview_rows, validated = _camera_import_preview(payload.csv_text)
     probe_limit = asyncio.Semaphore(8)
@@ -2207,7 +2132,7 @@ def _release_discovery_add(candidate_id: str, token: str) -> None:
 @app.post("/api/discovery/scan")
 async def scan_cameras(
     payload: DiscoveryScanRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     started = time.monotonic()
     interface_configured = bool(os.environ.get("NVR_DISCOVERY_INTERFACE", "").strip())
@@ -2276,7 +2201,7 @@ async def scan_cameras(
 
 
 @app.get("/api/discovery/candidates")
-def list_discovery_candidates(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def list_discovery_candidates(_: Administrator) -> dict[str, object]:
     with connect() as db:
         rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid").fetchall()
     return {"candidates": [_candidate_view(row) for row in rows]}
@@ -2286,7 +2211,7 @@ def list_discovery_candidates(_: Annotated[sqlite3.Row, Depends(administrator)])
 def link_discovered_camera(
     candidate_id: str,
     payload: DiscoveredCameraLinkRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     with connect() as db:
         candidate = db.execute("SELECT device_uuid,linked_camera_id FROM discovery_candidates WHERE id=?", (candidate_id,)).fetchone()
@@ -2312,7 +2237,7 @@ async def add_discovered_camera(
     candidate_id: str,
     payload: DiscoveredCameraAddRequest,
     request: Request,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> dict[str, object]:
     candidate, claim_token = _claim_discovery_add(candidate_id)
     request.state.discovery_add_claim = {
@@ -2361,7 +2286,7 @@ async def add_discovered_camera(
 async def create_camera(
     payload: CameraCreateRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     name = payload.name.strip()
     if not name:
@@ -2478,7 +2403,7 @@ def _reuse_source_credentials(current: sqlite3.Row, payload: CameraSourceUpdateR
 async def test_camera_source_update(
     camera_id: str,
     payload: CameraSourceUpdateRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     with connect() as db:
         current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -2502,7 +2427,7 @@ async def test_camera_source_update(
 async def list_camera_source_update_profiles(
     camera_id: str,
     payload: CameraSourceUpdateRequest,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     if not payload.camera_ip:
         raise HTTPException(status_code=422, detail="Enter the camera IP address before loading ONVIF profiles")
@@ -2526,7 +2451,7 @@ async def update_camera_source(
     camera_id: str,
     payload: CameraSourceUpdateRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     with connect() as db:
         current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -2593,7 +2518,7 @@ async def update_camera(
     camera_id: str,
     payload: CameraUpdateRequest,
     request: Request,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> dict[str, object]:
     if "name" in payload.model_fields_set and payload.name is None:
         raise HTTPException(status_code=422, detail="Camera name is required")
@@ -2654,7 +2579,7 @@ async def update_camera(
 async def bulk_update_cameras(
     payload: CameraBulkUpdateRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     if "group_name" not in payload.model_fields_set and payload.recording_mode is None and payload.recording_enabled is None:
         raise HTTPException(status_code=422, detail="Specify a group assignment, recording mode, or enablement")
@@ -2748,7 +2673,7 @@ async def rotate_camera_credentials(
     camera_id: str,
     payload: CameraCredentialRotateRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     try:
         stream_url, _ = await _resolve_camera_source(payload)
@@ -2778,7 +2703,7 @@ async def rotate_camera_credentials(
 async def probe_camera_audio(
     camera_id: str,
     request: Request,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> dict[str, object]:
     with connect() as db:
         camera = db.execute("SELECT stream_url_ciphertext,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -2808,7 +2733,7 @@ async def configure_motion_source(
     camera_id: str,
     payload: MotionSourceUpdateRequest,
     request: Request,
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
 ) -> dict[str, object]:
     credentials_supplied = payload.username is not None or payload.password is not None
     if credentials_supplied and bool(payload.username) != bool(payload.password):
@@ -2846,7 +2771,7 @@ async def configure_motion_source(
 @app.get("/api/cameras/{camera_id}/motion-events")
 def list_camera_motion_events(
     camera_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
@@ -2899,7 +2824,7 @@ def _ai_runtime_model_view() -> dict[str, object]:
 
 
 @app.get("/api/cameras/{camera_id}/ai")
-def get_ai_detection_config(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_ai_detection_config(camera_id: str, _: CurrentUser) -> dict[str, object]:
     row = _ensure_ai_settings(camera_id)
     effective = effective_camera_config(camera_id) or {}
     return {
@@ -2925,7 +2850,7 @@ async def update_ai_detection_config(
     camera_id: str,
     payload: AIDetectionConfigRequest,
     request: Request,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> dict[str, object]:
     existing = _ensure_ai_settings(camera_id)
     zones = [zone.model_dump() for zone in payload.zones]
@@ -2968,7 +2893,7 @@ def _group_ai_view(group_id: str) -> dict[str, object]:
 
 
 @app.get("/api/camera-groups/{group_id}/ai")
-def get_group_ai_config(group_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_group_ai_config(group_id: str, _: CurrentUser) -> dict[str, object]:
     return _group_ai_view(group_id)
 
 
@@ -2977,7 +2902,7 @@ async def update_group_ai_config(
     group_id: str,
     payload: AIDetectionConfigRequest,
     request: Request,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> dict[str, object]:
     zones = [zone.model_dump() for zone in payload.zones]
     active_model = _ai_runtime_model_view()
@@ -3003,7 +2928,7 @@ async def update_group_ai_config(
 
 
 @app.get("/api/ai/settings")
-def get_ai_runtime_settings(_: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_ai_runtime_settings(_: CurrentUser) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT max_active_cameras,updated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
     return {"max_active_cameras": int(row["max_active_cameras"]), "inflight_inferences": 1, "updated_at": row["updated_at"],
@@ -3012,13 +2937,13 @@ def get_ai_runtime_settings(_: Annotated[sqlite3.Row, Depends(current_user)]) ->
 
 
 @app.post("/api/ai/settings/validate")
-async def validate_ai_runtime_settings(payload: AIRuntimeValidationRequest, _: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+async def validate_ai_runtime_settings(payload: AIRuntimeValidationRequest, _: Administrator) -> dict[str, object]:
     result = await asyncio.to_thread(validate_detector, payload.provider, payload.model_id)
     return {**result, "activation_changed": False, "gpu_certification_note": "GPU is certified only for this exact host, OpenVINO runtime, model, and active recording workload after validation."}
 
 
 @app.put("/api/ai/settings")
-async def update_ai_runtime_settings(payload: AIRuntimeSettingsRequest, request: Request, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+async def update_ai_runtime_settings(payload: AIRuntimeSettingsRequest, request: Request, user: Administrator) -> dict[str, object]:
     with connect() as db:
         current = db.execute("SELECT provider,model_id,model_version FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
     provider = payload.provider or str(current["provider"])
@@ -3043,7 +2968,7 @@ async def update_ai_runtime_settings(payload: AIRuntimeSettingsRequest, request:
 
 @app.get("/api/ai/events")
 def search_ai_observations(
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
     camera_id: str | None = Query(default=None, max_length=64),
     label: Literal["person", "vehicle"] | None = None,
     start: str | None = Query(default=None, max_length=64),
@@ -3096,7 +3021,7 @@ def search_ai_observations(
 
 
 @app.get("/api/cameras/{camera_id}/ai/coverage")
-def get_ai_detection_coverage(camera_id: str, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_ai_detection_coverage(camera_id: str, _: CurrentUser) -> dict[str, object]:
     _ensure_ai_settings(camera_id)
     with connect() as db:
         rows = db.execute("SELECT state,starts_at,ends_at,detail FROM ai_coverage WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500", (camera_id,)).fetchall()
@@ -3108,7 +3033,7 @@ def get_ai_detection_coverage(camera_id: str, _: Annotated[sqlite3.Row, Depends(
 async def archive_camera(
     camera_id: str,
     request: Request,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> Response:
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -3136,7 +3061,7 @@ async def archive_camera(
 @app.post("/api/cameras/{camera_id}/restore", status_code=status.HTTP_200_OK)
 def restore_camera(
     camera_id: str,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -3155,7 +3080,7 @@ def restore_camera(
 def delete_archived_camera_footage(
     camera_id: str,
     payload: CameraFootageDeleteRequest,
-    user: Annotated[sqlite3.Row, Depends(administrator)],
+    user: Administrator,
 ) -> Response:
     from .retention import unlink_many_if_unleased
     from .storage import recording_file_path
@@ -3199,7 +3124,7 @@ def delete_archived_camera_footage(
 @app.get("/api/cameras/{camera_id}/segments")
 def list_camera_segments(
     camera_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
     start: datetime | None = Query(default=None, alias="from"),
     end: datetime | None = Query(default=None, alias="to"),
 ) -> dict[str, object]:
@@ -3239,7 +3164,7 @@ def list_camera_segments(
 @app.get("/api/cameras/{camera_id}/coverage")
 def list_camera_coverage(
     camera_id: str,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
         camera = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -3261,7 +3186,7 @@ def list_camera_coverage(
 
 @app.get("/api/incidents")
 def get_incidents(
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
     state: str | None = Query(default=None, pattern="^(active|acknowledged|recovered)$"),
 ) -> dict[str, object]:
     with connect() as db:
@@ -3271,7 +3196,7 @@ def get_incidents(
 @app.post("/api/incidents/{incident_id}/acknowledge")
 def post_incident_acknowledgement(
     incident_id: str,
-    user: Annotated[sqlite3.Row, Depends(current_user)],
+    user: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
         incident = acknowledge_incident(db, incident_id, int(user["id"]))
@@ -3284,17 +3209,17 @@ def post_incident_acknowledgement(
 
 
 @app.get("/api/webhooks/event-types")
-def get_webhook_event_types(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def get_webhook_event_types(_: Administrator) -> dict[str, object]:
     return {"event_types": sorted(WEBHOOK_EVENT_TYPES)}
 
 
 @app.get("/api/heartbeat")
-def get_heartbeat_status(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def get_heartbeat_status(_: Administrator) -> dict[str, object]:
     return heartbeat_status()
 
 
 @app.put("/api/heartbeat")
-def put_heartbeat_config(payload: HeartbeatConfigRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def put_heartbeat_config(payload: HeartbeatConfigRequest, user: Administrator) -> dict[str, object]:
     try:
         result, secret = configure_heartbeat(payload.target_url, payload.interval_seconds, payload.allow_private_receiver, int(user["id"]))
     except ValueError as exc:
@@ -3306,7 +3231,7 @@ def put_heartbeat_config(payload: HeartbeatConfigRequest, user: Annotated[sqlite
 
 
 @app.post("/api/heartbeat/test", status_code=status.HTTP_202_ACCEPTED)
-def post_heartbeat_test(user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, str]:
+def post_heartbeat_test(user: Administrator) -> dict[str, str]:
     if not queue_heartbeat_test():
         raise HTTPException(status_code=409, detail="Configure and enable an external heartbeat receiver first")
     with connect() as db:
@@ -3316,7 +3241,7 @@ def post_heartbeat_test(user: Annotated[sqlite3.Row, Depends(administrator)]) ->
 
 
 @app.post("/api/heartbeat/rotate-secret")
-def post_heartbeat_secret_rotation(user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, str]:
+def post_heartbeat_secret_rotation(user: Administrator) -> dict[str, str]:
     secret = rotate_heartbeat_secret()
     if secret is None:
         raise HTTPException(status_code=409, detail="Configure an enabled heartbeat receiver first")
@@ -3327,7 +3252,7 @@ def post_heartbeat_secret_rotation(user: Annotated[sqlite3.Row, Depends(administ
 
 
 @app.delete("/api/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
-def delete_heartbeat_config(user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def delete_heartbeat_config(user: Administrator) -> Response:
     disable_heartbeat()
     with connect() as db:
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
@@ -3336,12 +3261,12 @@ def delete_heartbeat_config(user: Annotated[sqlite3.Row, Depends(administrator)]
 
 
 @app.get("/api/webhooks")
-def get_webhooks(_: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def get_webhooks(_: Administrator) -> dict[str, object]:
     return {"webhooks": list_webhook_endpoints()}
 
 
 @app.post("/api/webhooks", status_code=status.HTTP_201_CREATED)
-def post_webhook(payload: WebhookCreateRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def post_webhook(payload: WebhookCreateRequest, user: Administrator) -> dict[str, object]:
     try:
         endpoint, secret = create_webhook_endpoint(payload.name, payload.url, payload.events, payload.allow_private_receiver, int(user["id"]))
     except ValueError as exc:
@@ -3353,7 +3278,7 @@ def post_webhook(payload: WebhookCreateRequest, user: Annotated[sqlite3.Row, Dep
 
 
 @app.patch("/api/webhooks/{webhook_id}")
-def patch_webhook(webhook_id: str, payload: WebhookUpdateRequest, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def patch_webhook(webhook_id: str, payload: WebhookUpdateRequest, user: Administrator) -> dict[str, object]:
     fields = payload.model_dump(exclude_unset=True)
     try:
         endpoint = update_webhook_endpoint(webhook_id, fields)
@@ -3368,7 +3293,7 @@ def patch_webhook(webhook_id: str, payload: WebhookUpdateRequest, user: Annotate
 
 
 @app.post("/api/webhooks/{webhook_id}/rotate-secret")
-def post_webhook_secret_rotation(webhook_id: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, str]:
+def post_webhook_secret_rotation(webhook_id: str, user: Administrator) -> dict[str, str]:
     secret = rotate_webhook_secret(webhook_id)
     if secret is None:
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
@@ -3379,7 +3304,7 @@ def post_webhook_secret_rotation(webhook_id: str, user: Annotated[sqlite3.Row, D
 
 
 @app.delete("/api/webhooks/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_webhook(webhook_id: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def remove_webhook(webhook_id: str, user: Administrator) -> Response:
     if not delete_webhook_endpoint(webhook_id):
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
     with connect() as db:
@@ -3389,7 +3314,7 @@ def remove_webhook(webhook_id: str, user: Annotated[sqlite3.Row, Depends(adminis
 
 
 @app.post("/api/webhooks/{webhook_id}/test", status_code=status.HTTP_202_ACCEPTED)
-def post_webhook_test(webhook_id: str, user: Annotated[sqlite3.Row, Depends(administrator)]) -> dict[str, object]:
+def post_webhook_test(webhook_id: str, user: Administrator) -> dict[str, object]:
     event_id = enqueue_webhook_test(webhook_id, int(user["id"]))
     if event_id is None:
         raise HTTPException(status_code=404, detail="Enabled webhook endpoint not found")
@@ -3401,7 +3326,7 @@ def post_webhook_test(webhook_id: str, user: Annotated[sqlite3.Row, Depends(admi
 
 @app.get("/api/webhooks/deliveries")
 def get_webhook_deliveries(
-    _: Annotated[sqlite3.Row, Depends(administrator)],
+    _: Administrator,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, object]:
     return {"deliveries": list_webhook_deliveries(limit)}
@@ -3410,7 +3335,7 @@ def get_webhook_deliveries(
 @app.post("/api/playback/timeline")
 def synchronized_playback_timeline(
     payload: SynchronizedPlaybackRequest,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> dict[str, object]:
     start = payload.start.astimezone(timezone.utc)
     end = payload.end.astimezone(timezone.utc)
@@ -3486,7 +3411,7 @@ def synchronized_playback_timeline(
 
 
 @app.get("/api/cameras/{camera_id}/segments/{segment_id}/hold")
-def segment_hold_status(camera_id: str, segment_id: int, _: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def segment_hold_status(camera_id: str, segment_id: int, _: CurrentUser) -> dict[str, object]:
     try:
         return get_segment_hold(camera_id,segment_id)
     except LookupError as exc:
@@ -3494,7 +3419,7 @@ def segment_hold_status(camera_id: str, segment_id: int, _: Annotated[sqlite3.Ro
 
 
 @app.post("/api/cameras/{camera_id}/segments/{segment_id}/hold",status_code=status.HTTP_201_CREATED)
-def preserve_camera_segment(camera_id: str, segment_id: int, payload: HoldRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def preserve_camera_segment(camera_id: str, segment_id: int, payload: HoldRequest, user: CurrentUser) -> dict[str, object]:
     if payload.expires_in_days is not None and user["role"]!="administrator":
         raise HTTPException(status_code=403,detail="Only administrators can set a hold expiry")
     try:
@@ -3510,7 +3435,7 @@ def preserve_camera_segment(camera_id: str, segment_id: int, payload: HoldReques
 
 
 @app.delete("/api/cameras/{camera_id}/segments/{segment_id}/hold",status_code=status.HTTP_204_NO_CONTENT)
-def release_camera_segment(camera_id: str, segment_id: int, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def release_camera_segment(camera_id: str, segment_id: int, user: Administrator) -> Response:
     try:
         release_segment_hold(camera_id,segment_id,int(user["id"]))
     except LookupError as exc:
@@ -3519,7 +3444,7 @@ def release_camera_segment(camera_id: str, segment_id: int, user: Annotated[sqli
 
 
 @app.delete("/api/cameras/{camera_id}/segments/{segment_id}",status_code=status.HTTP_204_NO_CONTENT)
-def delete_camera_segment(camera_id: str, segment_id: int, user: Annotated[sqlite3.Row, Depends(administrator)]) -> Response:
+def delete_camera_segment(camera_id: str, segment_id: int, user: Administrator) -> Response:
     try:
         delete_preserved_segment(camera_id,segment_id,int(user["id"]))
     except LookupError as exc:
@@ -3537,7 +3462,7 @@ def delete_camera_segment(camera_id: str, segment_id: int, user: Annotated[sqlit
 def play_segment(
     camera_id: str,
     segment_id: int,
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> FileResponse:
     with connect() as db:
         row = db.execute(
@@ -3563,7 +3488,7 @@ async def snapshot_segment(
     camera_id: str,
     segment_id: int,
     at: datetime,
-    user: Annotated[sqlite3.Row, Depends(current_user)],
+    user: CurrentUser,
 ) -> Response:
     if at.tzinfo is None:
         raise HTTPException(status_code=422, detail="Snapshot time must include a timezone")
@@ -3624,7 +3549,7 @@ def playback_frame_neighbor(
     segment_id: int,
     at: datetime,
     direction: Literal["previous", "next"],
-    _: Annotated[sqlite3.Row, Depends(current_user)],
+    _: CurrentUser,
 ) -> dict[str, str]:
     """Return an adjacent decoded video frame timestamp from a protected recording."""
     if at.tzinfo is None:
@@ -3680,7 +3605,7 @@ def playback_frame_neighbor(
 
 
 @app.get("/api/exports")
-def get_exports(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_exports(user: CurrentUser) -> dict[str, object]:
     return {"exports": list_exports(int(user["id"]), user["role"] == "administrator")}
 
 
@@ -3688,7 +3613,7 @@ def get_exports(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str
 async def create_export(
     payload: ExportRequest,
     request: Request,
-    user: Annotated[sqlite3.Row, Depends(current_user)],
+    user: CurrentUser,
 ) -> dict[str, object]:
     start, end = payload.start.astimezone(timezone.utc), payload.end.astimezone(timezone.utc)
     try:
@@ -3711,7 +3636,7 @@ async def create_export(
 
 
 @app.get("/api/exports/{job_id}")
-def get_export_status(job_id: str, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+def get_export_status(job_id: str, user: CurrentUser) -> dict[str, object]:
     row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
     if row is None:
         raise HTTPException(status_code=404, detail="Export job not found")
@@ -3719,7 +3644,7 @@ def get_export_status(job_id: str, user: Annotated[sqlite3.Row, Depends(current_
 
 
 @app.post("/api/exports/{job_id}/cancel")
-async def cancel_export(job_id: str, request: Request, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+async def cancel_export(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     try:
         state = request_cancel(job_id, int(user["id"]), user["role"] == "administrator")
     except LookupError as exc:
@@ -3731,7 +3656,7 @@ async def cancel_export(job_id: str, request: Request, user: Annotated[sqlite3.R
 
 
 @app.get("/api/exports/{job_id}/download")
-def download_export(job_id: str, user: Annotated[sqlite3.Row, Depends(current_user)]) -> FileResponse:
+def download_export(job_id: str, user: CurrentUser) -> FileResponse:
     row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
     if row is None:
         raise HTTPException(status_code=404, detail="Export job not found")
@@ -3753,7 +3678,7 @@ def download_export(job_id: str, user: Annotated[sqlite3.Row, Depends(current_us
 
 
 @app.post("/api/exports/{job_id}/verify")
-async def verify_export_evidence(job_id: str, request: Request, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict[str, object]:
+async def verify_export_evidence(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     """Check manifest checksums against uploaded package bytes; media probing is separate."""
     row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
     if row is None:
