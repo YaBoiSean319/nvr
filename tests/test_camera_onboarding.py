@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -28,6 +29,15 @@ class CameraOnboardingAuthorizationTests(unittest.TestCase):
         self.context = TestClient(app)
         self.client = self.context.__enter__()
         self.client.post("/api/setup/admin", json={"username": "onboarding-admin", "password": TEST_PASSWORD})
+        with patch("app.main.probe_stream", new=AsyncMock(return_value={
+            "reachable": True, "video": {"codec": "h264", "width": 640, "height": 360},
+        })), patch.object(self.context.app.state.recorders, "sync_camera", new=AsyncMock()):
+            created = self.client.post("/api/cameras", json={
+                "name": "Fixture Camera", "stream_url": "rtsp://192.0.2.24/stream",
+            })
+        if created.status_code != 201:
+            self.fail(created.text)
+        self.camera_id = created.json()["id"]
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             db.execute(
                 "INSERT INTO users(username,password_hash,role) VALUES (?,?,?)",
@@ -51,3 +61,9 @@ class CameraOnboardingAuthorizationTests(unittest.TestCase):
         csv_text = "name,stream_url\nUnauthorized,rtsp://198.51.100.25/stream"
         self.assertEqual(self.client.post("/api/cameras/import/preview", json={"csv_text": csv_text}).status_code, 403)
         self.assertEqual(self.client.post("/api/cameras/import/apply", json={"csv_text": csv_text}).status_code, 403)
+
+    def test_operators_can_read_inventory_but_cannot_change_camera_configuration(self):
+        inventory = self.client.get("/api/cameras")
+        self.assertEqual(inventory.status_code, 200, inventory.text)
+        self.assertEqual([camera["id"] for camera in inventory.json()["cameras"]], [self.camera_id])
+        self.assertEqual(self.client.patch(f"/api/cameras/{self.camera_id}", json={"name": "Changed"}).status_code, 403)

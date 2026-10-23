@@ -4,6 +4,8 @@ const path = require("node:path");
 
 const fixtureDirectory = path.join(os.tmpdir(), `nvr-camera-browser-${process.pid}`);
 fs.mkdirSync(fixtureDirectory, { recursive: true, mode: 0o700 });
+const fixturePasswordPath = path.join(fixtureDirectory, "browser-fixture-password");
+fs.writeFileSync(fixturePasswordPath, require("node:crypto").randomBytes(32).toString("base64url"), { mode: 0o600 });
 
 const artifactDirectory = path.join(process.cwd(), "test-results");
 fs.mkdirSync(artifactDirectory, { recursive: true });
@@ -38,10 +40,20 @@ const fixtureEnvironment = {
   NVR_RECORDINGS_PATH: path.join(fixtureDirectory, "recordings"),
   NVR_CREDENTIAL_KEY_PATH: path.join(fixtureDirectory, "credentials.key"),
   NVR_COOKIE_SECURE: "false",
+  NVR_STORAGE_VOLUMES: JSON.stringify({ default: "", archive: "archive" }),
   NVR_BROWSER_FIXTURE_MANIFEST: path.join(fixtureDirectory, "fixtures.json"),
+  NVR_BROWSER_FIXTURE_PASSWORD_PATH: fixturePasswordPath,
   NVR_BROWSER_HOST: "127.0.0.1",
   NVR_BROWSER_PORT: "8765",
   NVR_SEGMENT_SECONDS: "10",
+  NVR_DISCOVERY_INTERFACE: "127.0.0.1",
+};
+// The server needs the executable search path and these isolated fixture
+// settings only. Inheriting the complete runner environment can expose proxy,
+// credential, or CI metadata through webServer configuration serialization.
+const serverEnvironment = {
+  PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  ...fixtureEnvironment,
 };
 
 // Playwright's webServer child and browser-test subprocesses must use the same
@@ -81,7 +93,7 @@ module.exports = {
     url: "http://127.0.0.1:8765/healthz",
     timeout: 60_000,
     reuseExistingServer: false,
-    env: { ...process.env, ...fixtureEnvironment },
+    env: serverEnvironment,
     stdout: "pipe",
     stderr: "pipe",
   },

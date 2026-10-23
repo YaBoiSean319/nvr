@@ -88,6 +88,7 @@
     #import-row-details { min-height:2rem; margin:.6rem 0; padding:.55rem .7rem; border-left:3px solid var(--line); background:var(--panel-raised); }
     #import-row-details h4 { margin:.1rem 0 .4rem; }
     .camera-admin-layout { display:grid; grid-template-columns:minmax(17rem,.95fr) .65rem minmax(18rem,1.05fr); gap:.35rem; align-items:start; }
+    @media(min-width:741px) and (max-width:1050px) { .camera-admin-layout { --camera-inventory-min:14rem; --camera-editor-min:14rem; } }
     .discovery-scan-toolbar { display:grid; grid-template-columns:auto minmax(16rem,1fr) auto auto; gap:.6rem; align-items:end; margin:.75rem 0; padding:.7rem; border:1px solid var(--line); border-radius:.65rem; background:var(--panel); }
     .discovery-scan-action { align-self:end; }
     .discovery-range-scan { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.45rem; align-items:end; }
@@ -218,7 +219,7 @@
     .zone-list fieldset { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.3rem; margin:.35rem 0; border:1px solid var(--line); border-radius:.5rem; }
     .zone-list label { margin:0; font-size:.78rem; } .zone-list input { display:block; width:100%; padding:.4rem; } .zone-list button { grid-column:1/-1; }
     .keyboard-help { margin:.5rem 0; color:var(--muted); } .keyboard-help summary { cursor:pointer; }
-    @media(max-width:1050px) {
+    @media(max-width:740px) {
       .camera-admin-layout { display:block; }
       .camera-pane-resizer { display:none; }
       .camera-inventory-pane,.camera-editor-pane { max-height:none; }
@@ -376,7 +377,7 @@
       </section>
       <section id="settings-integrations-link" class="hidden" aria-labelledby="settings-integrations-heading">
         <h2 id="settings-integrations-heading">Integrations</h2>
-        <p>Camera AI runtime and model settings are managed with camera groups. Webhook and heartbeat integrations are in Notifications.</p>
+        <p>Camera AI runtime and model settings are managed in App Settings under AI runtime. Webhook and heartbeat integrations are in Notifications.</p>
         <button type="button" data-open-camera-admin="ai">Open AI integration settings</button>
       </section>
       <section aria-labelledby="incidents-heading">
@@ -497,7 +498,7 @@
           <details><summary>AI zone JSON view</summary><label for="group-ai-zones">AI zones JSON (read-only view; coordinates are normalized; empty uses full frame)</label><textarea id="group-ai-zones" spellcheck="false" readonly placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]'></textarea></details>
           <button id="save-group-ai" type="button">Save group AI settings</button>
           </fieldset>
-          <fieldset data-config-section="ai-runtime"><legend>AI runtime and model</legend>
+          <fieldset id="ai-runtime" data-config-section="ai-runtime"><legend>AI runtime and model</legend>
           <label for="ai-provider">OpenVINO device</label><select id="ai-provider"><option value="CPU">CPU</option><option value="GPU">GPU</option></select>
           <label for="ai-model">Compatible detection model</label><select id="ai-model"></select>
           <button id="load-ai-runtime" type="button">Load runtime options</button><button id="validate-ai-runtime" type="button">Validate selected runtime</button>
@@ -578,6 +579,7 @@
   <script src="/camera-preview.js" defer></script>
   <script src="/camera-preview-ui.js" defer></script>
   <script src="/camera-editor.js" defer></script>
+  <script src="/camera-admin-save.js" defer></script>
   <script src="/camera-discovery.js" defer></script>
   <script src="/app.js" defer></script>
 </body>

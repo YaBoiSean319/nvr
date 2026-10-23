@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createCameraEditorState, CAMERA_EDITOR_TABS, resolveDirtyNavigation } = require("../app/static/camera-editor.js");
+const { createCameraEditorState, CAMERA_EDITOR_TABS, resolveDirtyNavigation, createCameraEditorView } = require("../app/static/camera-editor.js");
+const { runScopedSave } = require("../app/static/camera-admin-save.js");
 
 test("a new camera editor has no selected camera or active settings tab", () => {
   const editor = createCameraEditorState();
@@ -93,4 +94,86 @@ test("discard navigation clears drafts only after an explicit discard decision",
 
   assert.equal(await resolveDirtyNavigation("discard", { discard: async () => { discarded += 1; } }), true);
   assert.equal(discarded, 1);
+});
+
+test("scoped saves are sequential, clear only committed drafts, and always unlock after failure", async () => {
+  const events = [];
+  const first = { dirty: true };
+  const failed = { dirty: true };
+  const untouched = { dirty: true };
+  const result = await runScopedSave([
+    { scope: first, label: "Recording", save: async () => events.push("save:recording"), clear: scope => { scope.dirty = false; } },
+    { scope: failed, label: "Motion", save: async () => { events.push("save:motion"); throw new Error("write failed"); }, clear: scope => { scope.dirty = false; } },
+    { scope: untouched, label: "AI", save: async () => events.push("save:ai"), clear: scope => { scope.dirty = false; } },
+  ], {
+    lock: () => { events.push("lock"); return () => events.push("unlock"); },
+    onStart: () => events.push("start"),
+    onFinish: result => events.push(result.error ? "finish:error" : "finish:success"),
+  });
+
+  assert.deepEqual(events, ["lock", "start", "save:recording", "save:motion", "unlock", "finish:error"]);
+  assert.deepEqual(result.savedLabels, ["Recording"]);
+  assert.equal(result.failedOperation.scope, failed);
+  assert.match(result.error.message, /write failed/);
+  assert.equal(first.dirty, false);
+  assert.equal(failed.dirty, true);
+  assert.equal(untouched.dirty, true);
+});
+
+test("selected-camera view renders the selected camera through its application service interface", () => {
+  const originalDocument = global.document;
+  const elements = [];
+  const historyVisibility = [];
+  class Element {
+    constructor(tagName) {
+      this.tagName = tagName;
+      this.children = [];
+      this.dataset = {};
+      this.attributes = {};
+      this.listeners = {};
+      this.classList = { toggle: () => {}, remove: name => historyVisibility.push(["remove", name]) };
+    }
+    append(...children) { this.children.push(...children); }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    addEventListener(name, callback) { this.listeners[name] = callback; }
+  }
+  global.document = {
+    createElement(tagName) { const element = new Element(tagName); elements.push(element); return element; },
+    querySelector(selector) { return selector === "#camera-health-history" ? { classList: { remove: name => historyVisibility.push(["remove", name]) } } : null; },
+  };
+  try {
+    const camera = {
+      id: "north-door", name: "North door", recording_mode: "continuous", effective_recording_mode: "continuous",
+      recording_enabled: true, recording_status: "recording", retention_days: 30,
+      retention_coverage: { achieved_days: 12 }, video: { codec: "h264", width: 1280, height: 720 },
+      recording_health: { state: "healthy" }, audio_status: "unavailable",
+    };
+    const loaded = [];
+    const mounted = [];
+    const view = createCameraEditorView({
+      formatDateTime: value => String(value),
+      media: {
+        loadSegments: value => loaded.push(value.id),
+        cameraPreviewWorkspace: { mount: (slot, value) => mounted.push([slot, value.id]) },
+      },
+    });
+    const card = view.render(camera, { role: "operator", selectedCameraId: camera.id, editorState: {} });
+
+    assert.equal(card.tagName, "article");
+    assert.equal(card.dataset.cameraId, "north-door");
+    assert.equal(card.children[0].textContent, "North door");
+    assert.match(card.children[1].textContent, /recording enabled/);
+    assert.match(card.children[1].textContent, /h264 1280×720/);
+    const previewSlot = card.children.find(child => child.dataset.cameraPreviewSlot === "");
+    assert.ok(previewSlot);
+    assert.deepEqual(mounted, [[previewSlot, "north-door"]]);
+    const historyButton = card.children.find(child => child.tagName === "button");
+    assert.equal(historyButton.textContent, "Find recorded footage");
+    historyButton.listeners.click();
+    assert.deepEqual(loaded, ["north-door"]);
+    assert.deepEqual(historyVisibility, [["remove", "hidden"]]);
+  } finally {
+    if (originalDocument === undefined) delete global.document;
+    else global.document = originalDocument;
+  }
 });

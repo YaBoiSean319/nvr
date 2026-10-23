@@ -725,6 +725,7 @@ STATIC_JAVASCRIPT_ASSETS = frozenset({
     "workspace-layout.js",
     "camera-inventory.js",
     "camera-editor.js",
+    "camera-admin-save.js",
     "camera-discovery.js",
     "camera-onboarding.js",
     "camera-preview.js",

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createGroupWorkspaceState, GROUP_POLICY_TABS } = require("../app/static/camera-groups.js");
+const { createGroupWorkspaceState, GROUP_POLICY_TABS, mountWorkspace } = require("../app/static/camera-groups.js");
 
 test("group workspace starts unselected, filters the list, and preserves selection across refreshes", () => {
   const state = createGroupWorkspaceState();
@@ -59,4 +59,9 @@ test("group selection and policy tabs reject missing values without changing the
   assert.equal(state.selectedGroupId, null);
   assert.equal(state.activeTab, "general");
   assert.equal(state.isCurrent(beforeLogout), false);
+});
+
+test("group module exposes the workspace controller seam", () => {
+  assert.equal(typeof mountWorkspace, "function");
+  assert.equal(mountWorkspace(null, {}), null);
 });

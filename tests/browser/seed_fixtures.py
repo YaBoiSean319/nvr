@@ -17,7 +17,7 @@ from app.store import connect, initialize  # noqa: E402
 
 ADMIN_USERNAME = "camera-admin"
 OPERATOR_USERNAME = "camera-operator"
-TEST_PASSWORD = "BrowserFixturePassphrase2026"
+TEST_PASSWORD = Path(os.environ["NVR_BROWSER_FIXTURE_PASSWORD_PATH"]).read_text(encoding="utf-8").strip()
 NAMESPACE = uuid.UUID("9b9d4b48-2be7-4adf-a08b-949a7bc27f28")
 GROUP_ID = str(uuid.uuid5(NAMESPACE, "group-operations"))
 DISCOVERY_UNLINKED_ID = str(uuid.uuid5(NAMESPACE, "discovery-unlinked"))
@@ -29,7 +29,7 @@ def _camera_id(index: int) -> str:
     return str(uuid.uuid5(NAMESPACE, f"camera-{index:03d}"))
 
 
-def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False) -> dict[str, object]:
+def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False, extra_group: bool = False) -> dict[str, object]:
     initialize()
     with connect() as db:
         users = {str(row["username"]).casefold() for row in db.execute("SELECT username FROM users")}
@@ -52,6 +52,9 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DELETE FROM recording_policy_overrides")
         db.execute("DELETE FROM retention_policy_overrides")
         db.execute("INSERT INTO camera_groups(id,name) VALUES(?, 'Operations')", (GROUP_ID,))
+        extra_group_id = str(uuid.uuid5(NAMESPACE, "group-weekend")) if extra_group else None
+        if extra_group_id:
+            db.execute("INSERT INTO camera_groups(id,name) VALUES(?, 'Weekend')", (extra_group_id,))
 
         cameras: list[str] = []
         for index in range(1, count + 1):
@@ -136,6 +139,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
             "bulk_rejected_camera_id": rejected_id,
             "name_save_rejected_camera_id": cameras[0] if fail_name_save and cameras else None,
             "group_id": GROUP_ID,
+            "extra_group_id": extra_group_id,
             "discovery_unlinked_id": DISCOVERY_UNLINKED_ID,
             "discovery_linkable_id": DISCOVERY_LINKABLE_ID,
             "discovery_linked_id": DISCOVERY_LINKED_ID if linked_id else None,
@@ -155,10 +159,11 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--bulk-trigger", action="store_true")
     parser.add_argument("--fail-name-save", action="store_true")
+    parser.add_argument("--extra-group", action="store_true")
     arguments = parser.parse_args()
     if not 0 <= arguments.count <= 200:
         parser.error("camera fixture count must be between 0 and 200")
-    seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save)
+    seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save, extra_group=arguments.extra_group)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { selectionCounts, createReview, reconcileResults, retryableIds, plannedState } = require("../app/static/camera-bulk-actions.js");
+const { selectionCounts, createReview, reconcileResults, retryableIds, plannedState, mountWorkspace } = require("../app/static/camera-bulk-actions.js");
 
 test("bulk selection counts retain hidden and unavailable IDs without changing the selected set", () => {
   const cameras = [{ id: "a" }, { id: "b" }, { id: "archived", archived_at: "today" }];
@@ -72,4 +72,9 @@ test("bulk review keeps a disabled-mode camera disabled when enablement is reque
   ], review.changes);
   assert.equal(reconciled[0].status, "success");
   assert.equal(reconciled[0].code, "reconciled");
+});
+
+test("bulk module exposes the workspace controller seam", () => {
+  assert.equal(typeof mountWorkspace, "function");
+  assert.equal(mountWorkspace(null, {}), null);
 });

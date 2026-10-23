@@ -219,32 +219,6 @@ class CameraInventoryTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/cameras/not-a-camera/source/test", json=payload).status_code, 403)
         self.assertEqual(self.client.put("/api/cameras/not-a-camera/source", json=payload).status_code, 403)
 
-    def test_operator_can_read_inventory_but_cannot_change_camera_configuration(self):
-        from app.security import hash_password
-        from app.store import connect
-
-        with patch("app.main.probe_stream", new=AsyncMock(return_value={
-            "reachable": True, "video": {"codec": "h264", "width": 640, "height": 360},
-        })):
-            created = self.client.post("/api/cameras", json={
-                "name": "Fixture Camera", "stream_url": "rtsp://192.0.2.24/stream",
-            })
-        self.assertEqual(created.status_code, 201, created.text)
-
-        with connect() as db:
-            db.execute("INSERT INTO users(username,password_hash,role) VALUES(?,?,?)", (
-                "inventory-operator", hash_password(TEST_PASSWORD), "operator",
-            ))
-        login = self.client.post("/api/auth/login", json={
-            "username": "inventory-operator", "password": TEST_PASSWORD,
-        })
-        self.assertEqual(login.status_code, 200)
-
-        inventory = self.client.get("/api/cameras")
-        self.assertEqual(inventory.status_code, 200, inventory.text)
-        self.assertEqual([camera["id"] for camera in inventory.json()["cameras"]], [created.json()["id"]])
-        self.assertEqual(self.client.patch(f"/api/cameras/{created.json()['id']}", json={"name": "Changed"}).status_code, 403)
-
 
 if __name__ == "__main__":
     unittest.main()

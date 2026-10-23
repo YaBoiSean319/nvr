@@ -3,16 +3,30 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const { test: base, expect } = require("playwright/test");
 
-const FIXTURE_PASSWORD = "BrowserFixturePassphrase2026";
+const FIXTURE_PASSWORD = fs.readFileSync(process.env.NVR_BROWSER_FIXTURE_PASSWORD_PATH, "utf8").trim();
 const MANIFEST_PATH = process.env.NVR_BROWSER_FIXTURE_MANIFEST;
+const FIXTURE_ENVIRONMENT_KEYS = [
+  "NVR_DB_PATH",
+  "NVR_RECORDINGS_PATH",
+  "NVR_CREDENTIAL_KEY_PATH",
+  "NVR_COOKIE_SECURE",
+  "NVR_STORAGE_VOLUMES",
+  "NVR_BROWSER_FIXTURE_MANIFEST",
+  "NVR_BROWSER_FIXTURE_PASSWORD_PATH",
+  "NVR_BROWSER_HOST",
+  "NVR_BROWSER_PORT",
+  "NVR_SEGMENT_SECONDS",
+  "NVR_DISCOVERY_INTERFACE",
+];
 
 function seedFixtures(count, options = {}) {
   const args = ["-m", "tests.browser.seed_fixtures", "--count", String(count)];
   if (options.bulkTrigger) args.push("--bulk-trigger");
   if (options.failNameSave) args.push("--fail-name-save");
+  if (options.extraGroup) args.push("--extra-group");
   const result = spawnSync("python", args, {
     cwd: process.cwd(),
-    env: process.env,
+    env: Object.fromEntries(["PATH", ...FIXTURE_ENVIRONMENT_KEYS].map(key => [key, process.env[key]]).filter(([, value]) => value !== undefined)),
     encoding: "utf8",
     timeout: 30_000,
   });
@@ -33,6 +47,10 @@ async function signIn(page, username = "camera-admin") {
 async function openCameraSettings(page) {
   await page.locator('#console-nav [data-screen="camera-settings"]').click();
   await expect(page.locator("#camera-inventory-table")).toBeVisible();
+  const fixture = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
+  await page.locator("#camera-inventory-refresh").click();
+  await expect(page.locator("#camera-inventory-load-status")).toHaveAttribute("data-state", "ready");
+  await expect(page.locator("#camera-inventory-table tbody tr")).toHaveCount(fixture.camera_count);
 }
 
 async function selectCamera(page, cameraId) {

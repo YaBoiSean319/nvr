@@ -1,25 +1,15 @@
 const sections = ["setup", "login", "status"];
 const message = document.querySelector("#message");
 let currentRole = null;
-let importCanApply = false;
-let lastPreviewCsv = "";
 let liveViews = [];
 let liveStatusTimer = null;
 let cameraAddModes = null;
+let cameraCsvImportWorkflow = null;
 let cameraManualGeneration = 0;
 let cameraManualSubmitInProgress = false;
 let cameraManualReconcileInProgress = false;
 let cameraManualOutcomeUnknown = false;
 let cameraManualAttempt = null;
-let importRequestGeneration = 0;
-let importApplyInProgress = false;
-let importRows = [];
-let importSourceCsv = "";
-let importPendingCsv = "";
-let importPendingRowMap = [];
-let importOutcomeUnknown = false;
-let importRetryPrepared = false;
-let importPreviewFresh = false;
 const LIVE_GRID_SIZES = [1, 4, 9, 16];
 const {autoLayoutForCount, reconcileCameraOrder} = window.NvrWorkspaceLayout;
 let activeLiveCameraIds = [];
@@ -67,40 +57,17 @@ let cameraInventoryLoadState = "idle";
 let unavailableCamera = null;
 let cameraInventoryRecoveryMessage = "";
 let cameraInventoryLoadGeneration = 0;
-const cameraDiscoveryState=window.NvrCameraDiscovery.createDiscoveryState();
-let discoveryWorkspaceReady=false;
-let discoveryScanGeneration=0;
-let discoverySelectionGeneration=0;
-let discoveryScanPending=false;
-let discoveryLastScanText="No scan has run in this session.";
-let discoveryLastScanRequest=null;
-let discoveryRenderedCandidateId=null;
-let discoverySelectedSnapshot=null;
-let discoveryResultsLoaded=false;
-const discoveryAddPendingIds=new Set();
+let cameraDiscoveryWorkspace = null;
 const cameraEditorState=window.NvrCameraEditor.createCameraEditorState();
 const cameraPreviewWorkspace=window.NvrCameraPreviewWorkspace.createCameraPreviewWorkspace();
 let cameraEditorSaveInProgress=false;
 let cameraDirtyDecisionDialog=null;
 let cameraDirtyDecisionResolve=null;
 let cameraDirtyDecisionPromise=null;
-const cameraBulkSelection = new Set();
-let cameraBulkVisibleIds = [];
-let cameraBulkReview = null;
-let cameraBulkResults = [];
-let cameraBulkOperationInProgress = false;
-let cameraBulkSession = 0;
-let cameraBulkStatusDialog = null;
+let cameraBulkWorkspace = null;
 let activeCameraWorkspace = "cameras";
 let mobileCameraEditorOpen = false;
-const groupWorkspaceState=window.NvrCameraGroups.createGroupWorkspaceState();
-let groupWorkspaceInitialized=false;
-let groupWorkspaceSaveInProgress=false;
-let groupPolicyLoading=false;
-let groupPolicyLoadFailures=new Set();
-let unavailableGroupId=null;
-const GROUP_POLICY_SECTIONS={general:["group-name","group-members"],recording:["group-schedule","group-retention"],storage:["group-storage"],ai:["group-ai"]};
-const GROUP_SECTION_TAB=Object.fromEntries(Object.entries(GROUP_POLICY_SECTIONS).flatMap(([tab,sections])=>sections.map(section=>[section,tab])));
+let cameraGroupWorkspace = null;
 const cameraInventoryFilters = { archive:"active", group:"all", connection:"all", health:"all", sortKey:"name", sortDirection:1 };
 let displaySettings = {time_zone:"UTC",date_format:"friendly",clock_format:"12"};
 let currentBranding = {app_name:"Workplace NVR",primary_color:"#17212b",accent_color:"#69a1ff",assets:{}};
@@ -265,22 +232,48 @@ function configureCameraPaneResizer(layout, separator){
   if(!layout||!separator)return;
   const key=`nvr-camera-pane-ratio:${encodeURIComponent(currentUsername||"anonymous")}`;
   let ratio=48;
+  let renderedRatio=48;
   try{const saved=Number(localStorage.getItem(key));if(Number.isFinite(saved))ratio=Math.min(75,Math.max(25,saved));}catch{}
+  const getRange=()=>{
+    const styles=getComputedStyle(layout),rootFontSize=Number.parseFloat(getComputedStyle(document.documentElement).fontSize)||16;
+    const gap=Number.parseFloat(styles.columnGap)||0;
+    const trackWidth=layout.clientWidth-(separator.getBoundingClientRect().width||0)-(gap*2);
+    if(trackWidth<=0)return {min:25,max:75,trackWidth:0,gap,separatorWidth:0,minInventory:0,minEditor:0,flexSpace:0};
+    const minimum=(name,fallback)=>{
+      const value=Number.parseFloat(styles.getPropertyValue(name));
+      return (Number.isFinite(value)&&value>0?value:fallback)*rootFontSize;
+    };
+    const minInventory=minimum("--camera-inventory-min",17),minEditor=minimum("--camera-editor-min",18);
+    const flexSpace=trackWidth-minInventory-minEditor;
+    const min=Math.max(25,Math.ceil(minInventory/trackWidth*100));
+    const max=Math.min(75,Math.floor((trackWidth-minEditor)/trackWidth*100));
+    return max<min||flexSpace<=0
+      ?{min:25,max:75,trackWidth,gap,separatorWidth:separator.getBoundingClientRect().width||0,minInventory,minEditor,flexSpace}
+      :{min,max,trackWidth,gap,separatorWidth:separator.getBoundingClientRect().width||0,minInventory,minEditor,flexSpace};
+  };
   const apply=(persist=false)=>{
-    layout.style.gridTemplateColumns=`minmax(17rem, ${ratio}fr) .65rem minmax(18rem, ${100-ratio}fr)`;
-    separator.setAttribute("aria-valuenow",String(Math.round(ratio)));
-    separator.setAttribute("aria-valuetext",`Inventory ${Math.round(ratio)}%, settings ${100-Math.round(ratio)}%`);
-    if(persist){try{localStorage.setItem(key,String(Math.round(ratio)));}catch{}}
+    const range=getRange();
+    renderedRatio=Math.min(range.max,Math.max(range.min,Math.round(ratio)));
+    const inventoryFlex=range.flexSpace>0
+      ?Math.min(100,Math.max(0,((renderedRatio/100*range.trackWidth-range.minInventory)/range.flexSpace)*100))
+      :renderedRatio;
+    layout.style.gridTemplateColumns=`minmax(var(--camera-inventory-min,17rem), ${inventoryFlex}fr) .65rem minmax(var(--camera-editor-min,18rem), ${100-inventoryFlex}fr)`;
+    separator.setAttribute("aria-valuemin",String(range.min));
+    separator.setAttribute("aria-valuemax",String(range.max));
+    separator.setAttribute("aria-valuenow",String(renderedRatio));
+    separator.setAttribute("aria-valuetext",`Inventory ${renderedRatio}%, settings ${100-renderedRatio}%`);
+    if(persist){ratio=renderedRatio;try{localStorage.setItem(key,String(renderedRatio));}catch{}}
   };
   const updateFromPointer=event=>{
     const bounds=layout.getBoundingClientRect();
-    if(bounds.width<=0)return;
-    ratio=Math.min(75,Math.max(25,((event.clientX-bounds.left)/bounds.width)*100));
+    const range=getRange();
+    if(bounds.width<=0||range.trackWidth<=0)return;
+    ratio=Math.min(range.max,Math.max(range.min,((event.clientX-bounds.left-range.gap-range.separatorWidth/2)/range.trackWidth)*100));
     apply();
   };
   let activePointer=null;
   separator.addEventListener("pointerdown",event=>{
-    if(window.matchMedia("(max-width: 1050px)").matches)return;
+    if(window.matchMedia("(max-width: 740px)").matches)return;
     activePointer=event.pointerId;
     separator.setPointerCapture(event.pointerId);
     updateFromPointer(event);
@@ -294,13 +287,17 @@ function configureCameraPaneResizer(layout, separator){
   separator.addEventListener("pointerup",finishPointer);
   separator.addEventListener("pointercancel",event=>{if(activePointer===event.pointerId){activePointer=null;apply(true);}});
   separator.addEventListener("keydown",event=>{
+    const range=getRange();
     if(event.key==="ArrowLeft"||event.key==="ArrowRight"){
-      event.preventDefault();ratio=Math.min(75,Math.max(25,ratio+(event.key==="ArrowRight"?2:-2)));apply(true);
+      event.preventDefault();ratio=Math.min(range.max,Math.max(range.min,renderedRatio+(event.key==="ArrowRight"?2:-2)));apply(true);
     }else if(event.key==="Home"||event.key==="End"){
-      event.preventDefault();ratio=event.key==="Home"?25:75;apply(true);
+      event.preventDefault();ratio=event.key==="Home"?range.min:range.max;apply(true);
     }
   });
   apply();
+  if(typeof ResizeObserver==="function")new ResizeObserver(()=>apply()).observe(layout);
+  else window.addEventListener("resize",()=>apply());
+  requestAnimationFrame(()=>apply());
 }
 function setupCameraAdminWorkspaces() {
   const content=document.querySelector("#camera-settings-content");
@@ -348,12 +345,12 @@ function setupCameraAdminWorkspaces() {
   if(searchLabel&&search)inventory.append(searchLabel,search);
   const bulkToolbar=document.createElement("div");bulkToolbar.id="camera-bulk-toolbar";bulkToolbar.className="camera-bulk-toolbar";bulkToolbar.hidden=true;bulkToolbar.setAttribute("role","group");bulkToolbar.setAttribute("aria-label","Selected camera bulk actions");
   const bulkSummary=document.createElement("p");bulkSummary.id="camera-bulk-summary";bulkSummary.setAttribute("role","status");
-  const selectMatching=document.createElement("button");selectMatching.id="camera-bulk-select-matching";selectMatching.type="button";selectMatching.addEventListener("click",()=>{cameraBulkVisibleIds.forEach(id=>cameraBulkSelection.add(id));renderCameras(latestCameras);});
-  const clearSelection=document.createElement("button");clearSelection.id="camera-bulk-clear-selection";clearSelection.type="button";clearSelection.textContent="Clear selection";clearSelection.addEventListener("click",()=>{cameraBulkSelection.clear();renderCameras(latestCameras);});
+  const selectMatching=document.createElement("button");selectMatching.id="camera-bulk-select-matching";selectMatching.type="button";
+  const clearSelection=document.createElement("button");clearSelection.id="camera-bulk-clear-selection";clearSelection.type="button";clearSelection.textContent="Clear selection";
   bulkToolbar.append(bulkSummary,selectMatching,clearSelection);inventory.append(bulkToolbar);
   const bulkStatus=document.createElement("div");bulkStatus.id="camera-bulk-operation-status";bulkStatus.className="camera-bulk-status";bulkStatus.hidden=true;bulkStatus.setAttribute("role","status");bulkStatus.setAttribute("aria-live","polite");
   const bulkStatusText=document.createElement("p");bulkStatusText.id="camera-bulk-operation-summary";
-  const viewBulkResults=document.createElement("button");viewBulkResults.id="camera-bulk-view-results";viewBulkResults.type="button";viewBulkResults.textContent="View bulk results";viewBulkResults.addEventListener("click",openBulkResultsDialog);
+  const viewBulkResults=document.createElement("button");viewBulkResults.id="camera-bulk-view-results";viewBulkResults.type="button";viewBulkResults.textContent="View bulk results";
   bulkStatus.append(bulkStatusText,viewBulkResults);inventory.append(bulkStatus);
   const table=document.createElement("div");table.id="camera-inventory-table";table.className="camera-inventory-table-scroll";table.setAttribute("role","region");table.setAttribute("aria-label","Camera inventory table");table.tabIndex=0;inventory.append(table);
   if(bulkUpdate){bulkUpdate.hidden=true;const applyBulk=bulkUpdate.querySelector("#apply-bulk");if(applyBulk)applyBulk.textContent="Review changes";inventory.append(bulkUpdate);}
@@ -385,6 +382,13 @@ function setupCameraAdminWorkspaces() {
     onBeforeModeChange:(from)=>from==="discover"?guardDraftsIn(document.querySelector("#camera-discovery-mode")):guardAddCameraDrafts(from),
     onOpenInventory:()=>setCameraWorkspace("cameras"),
   });
+  cameraCsvImportWorkflow=window.NvrCameraOnboarding.mountCsvImport(cameraImport,{
+    message:cameraAddModes?.getPanel("csv")?.querySelector("#camera-import-message"),
+    request:api,
+    refresh,
+    clearDraft:clearConfigDraft,
+    showInventoryAction:()=>cameraAddModes?.showInventoryAction("csv"),
+  });
   const reconcileManual=document.createElement("button");reconcileManual.id="reconcile-manual-camera";reconcileManual.type="button";reconcileManual.textContent="Reconcile add outcome";reconcileManual.classList.add("hidden");
   reconcileManual.addEventListener("click",()=>void reconcileManualCameraOutcome());
   cameraAddModes?.getPanel("manual")?.append(reconcileManual);
@@ -396,7 +400,7 @@ function setupCameraAdminWorkspaces() {
   if(heading)content.append(heading);
   content.append(nav,cameras,add,groupsWorkspace);
   ensureCameraDirtyDialog();
-  refreshCameraBulkToolbar();
+  setupCameraBulkWorkspace(inventory);
   if(aiRuntime)document.querySelector("#app-settings-content").append(aiRuntime);
 
   const refreshFilters=()=>{
@@ -906,52 +910,47 @@ async function saveCameraScopes(scopes,{refreshAfter=false,statusTabId=null}={})
     if(seen.has(group))continue;seen.add(group);unique.push({scope,group});
   }
   if(!unique.length)return true;
-  let failure=null,failedGroup=null;
-  const savedLabels=[];
   const lockScopes=unique.flatMap(({group,scope})=>{
     const siblings=[...document.querySelectorAll("#camera-list [data-config-section]")].filter(item=>(item.dataset.cameraSaveGroup||item.dataset.configSection)===group);
     return siblings.length?siblings:[scope];
   });
-  const unlock=lockCameraScopes(lockScopes);
   const affectedTabIds=new Set(unique.map(({scope})=>window.NvrCameraEditor.CAMERA_EDITOR_TABS.find(tab=>tab.sections.includes(scope.dataset.configSection))?.id).filter(Boolean));
   if(statusTabId)affectedTabIds.add(statusTabId);
-  affectedTabIds.forEach(tabId=>setCameraTabStatus(tabId,"Saving…","saving"));
-  cameraEditorSaveInProgress=true;refreshCameraTabStatuses();
-  try{
-    for(const {scope,group} of unique){
-      failedGroup=group;
-      const save=scope.cameraSaveConfig;
-      if(typeof save!=="function")throw new Error(`Saving ${scope.dataset.configSection} is not available.`);
-      await save();
-      if(selectedCameraId!==cameraId)throw new Error("Camera selection changed while settings were saving. Reload the camera settings before trying again.");
-      const groupScopes=[...document.querySelectorAll(`#camera-list [data-config-section]`)].filter(item=>(item.dataset.cameraSaveGroup||item.dataset.configSection)===group);
-      savedLabels.push([...groupScopes].map(cameraScopeLabel).join(" and ")||cameraScopeLabel(scope));
-      groupScopes.forEach(clearConfigDraft);
-    }
-    if(refreshAfter)await refresh();
-    return true;
-  }catch(error){
-    failure=error;
-    if(savedLabels.length===unique.length){
-      failure=null;
-      const message=document.querySelector("#camera-message");if(message)message.textContent=`Settings saved, but the camera view could not refresh: ${error.message}`;
-      return true;
-    }
-    const failedScope=unique.find(item=>item.group===failedGroup)?.scope;
-    const failedLabel=cameraScopeLabel(failedScope);
-    const message=document.querySelector("#camera-message");
-    if(message)message.textContent=savedLabels.length
-      ? `${savedLabels.join(", ")} saved. ${failedLabel} failed: ${error.message} Remaining changes are still available to save.`
-      : `${failedLabel} could not be saved: ${error.message} Your changes are still available.`;
+  const operations=unique.map(({scope,group})=>{
+    const siblings=[...document.querySelectorAll("#camera-list [data-config-section]")].filter(item=>(item.dataset.cameraSaveGroup||item.dataset.configSection)===group);
+    return {
+      scope,
+      group,
+      label:[...siblings].map(cameraScopeLabel).join(" and ")||cameraScopeLabel(scope),
+      unavailableMessage:`Saving ${scope.dataset.configSection} is not available.`,
+      staleMessage:"Camera selection changed while settings were saving. Reload the camera settings before trying again.",
+      save:()=>{
+        if(typeof scope.cameraSaveConfig!=="function")throw new Error(`Saving ${scope.dataset.configSection} is not available.`);
+        return scope.cameraSaveConfig();
+      },
+      isCurrent:()=>selectedCameraId===cameraId,
+      clear:()=>siblings.forEach(clearConfigDraft),
+    };
+  });
+  const outcome=await window.NvrCameraAdminSave.runScopedSave(operations,{
+    lock:()=>lockCameraScopes(lockScopes),
+    onStart:()=>{affectedTabIds.forEach(tabId=>setCameraTabStatus(tabId,"Saving…","saving"));cameraEditorSaveInProgress=true;refreshCameraTabStatuses();},
+    onFinish:()=>{cameraEditorSaveInProgress=false;refreshCameraTabStatuses();},
+  });
+  if(!outcome.complete){
+    const failedScope=outcome.failedOperation?.scope;
+    const failedTab=window.NvrCameraEditor.CAMERA_EDITOR_TABS.find(tab=>tab.sections.includes(failedScope?.dataset.configSection))?.id||statusTabId||cameraEditorState.activeTab;
+    if(failedTab)setCameraTabStatus(failedTab,`Save failed: ${outcome.error.message}`,"error");
+    const message=document.querySelector("#camera-message"),failedLabel=cameraScopeLabel(failedScope);
+    if(message)message.textContent=outcome.savedLabels.length
+      ? `${outcome.savedLabels.join(", ")} saved. ${failedLabel} failed: ${outcome.error.message} Remaining changes are still available to save.`
+      : `${failedLabel} could not be saved: ${outcome.error.message} Your changes are still available.`;
     return false;
-  }finally{
-    unlock();cameraEditorSaveInProgress=false;refreshCameraTabStatuses();
-    if(failure){
-      const failedScope=unique.find(item=>item.group===failedGroup)?.scope;
-      const failedTab=window.NvrCameraEditor.CAMERA_EDITOR_TABS.find(tab=>tab.sections.includes(failedScope?.dataset.configSection))?.id||statusTabId||cameraEditorState.activeTab;
-      setCameraTabStatus(failedTab,`Save failed: ${failure.message}`,"error");
-    }
   }
+  affectedTabIds.forEach(tabId=>setCameraTabStatus(tabId,"Saved","saved"));
+  refreshCameraTabStatuses();
+  if(refreshAfter){try{await refresh();}catch(error){const message=document.querySelector("#camera-message");if(message)message.textContent=`Settings saved, but the camera view could not refresh: ${error.message}`;}}
+  return true;
 }
 async function saveCameraTab(tabId=cameraEditorState.activeTab,{refreshAfter=true}={}){
   const sectionIds=cameraEditorState.sectionsForTab(tabId);
@@ -1050,23 +1049,13 @@ function discardCameraOnboardingDraft(mode){
     const submit=document.querySelector('#camera-form [type="submit"]');if(submit)submit.disabled=false;
     document.querySelector("#camera-add-message").textContent="Camera setup discarded.";
   }
-  if(mode==="csv"){
-    document.querySelector("#camera-import-csv").value="";
-    importRows=[];importSourceCsv="";importPendingCsv="";importPendingRowMap=[];importCanApply=false;importOutcomeUnknown=false;importRetryPrepared=false;importPreviewFresh=false;lastPreviewCsv="";
-    document.querySelector("#camera-import-csv").disabled=false;
-    document.querySelector("#import-preview")?.replaceChildren();
-    document.querySelector("#import-row-details")?.replaceChildren();
-    document.querySelector("#retry-import-failed").classList.add("hidden");
-    document.querySelector("#reconcile-import").classList.add("hidden");
-    document.querySelector("#apply-import").disabled=true;
-    document.querySelector("#camera-import-message").textContent="CSV import draft discarded.";
-  }
+  if(mode==="csv")cameraCsvImportWorkflow?.discardDraft();
 }
 async function guardAddCameraDrafts(mode=cameraAddModes?.activeMode){
   if(mode==="manual"&&cameraManualSubmitInProgress)return false;
   if(mode==="manual"&&cameraManualReconcileInProgress)return false;
   if(mode==="manual"&&cameraManualOutcomeUnknown)return reconcileManualCameraOutcome();
-  if(mode==="csv"&&importApplyInProgress)return false;
+  if(mode==="csv"&&cameraCsvImportWorkflow?.applying)return false;
   const dirty=onboardingDirtyScopes(mode);if(!dirty.length)return true;
   if(mode==="discover")return guardDraftsIn(document.querySelector("#camera-discovery-mode"));
   const dialog=ensureCameraDirtyDialog();
@@ -1080,12 +1069,12 @@ async function guardAddCameraDrafts(mode=cameraAddModes?.activeMode){
   if(decision==="discard"){discardCameraOnboardingDraft(mode);return true;}
   if(mode==="manual")return saveManualCamera();
   if(mode==="csv"){
-    if(!importCanApply||lastPreviewCsv!==document.querySelector("#camera-import-csv").value){
-      const previewed=await previewCameraImport();
+    if(!cameraCsvImportWorkflow?.isPreviewReadyForCurrentInput()){
+      const previewed=await cameraCsvImportWorkflow?.preview();
       if(previewed)document.querySelector("#camera-import-message").textContent="Preview is ready. Review accepted rows, then use Import before leaving this mode.";
       return false;
     }
-    return applyCameraImport({duringGuard:true});
+    return cameraCsvImportWorkflow.apply({duringGuard:true});
   }
   return false;
 }
@@ -2568,711 +2557,42 @@ async function refreshDiagnostics() {
     ? `Capture is on until ${formatDateTime(state.capture_until)} · ${state.event_count} event(s) collected.`
     : `${state.event_count} event(s) available for download. Capture is off.`;
 }
-function setupGroupPolicyWorkspace(){
-  if(groupWorkspaceInitialized)return;
-  const root=document.querySelector("#bulk-admin");if(!root)return;
-  const heading=root.querySelector("#bulk-heading"),groupForm=root.querySelector("#group-form"),instructions=groupForm?.nextElementSibling,list=root.querySelector("#group-management-list");
-  const schedule=root.querySelector('[data-config-section="group-schedule"]'),retention=root.querySelector('[data-config-section="group-retention"]'),storage=root.querySelector('[data-config-section="group-storage"]'),ai=root.querySelector('[data-config-section="group-ai"]');
-  const runtime=root.querySelector('[data-config-section="ai-runtime"]'),scheduleMessage=root.querySelector("#schedule-message"),aiMessage=root.querySelector("#ai-group-message");
-  const layout=document.createElement("div");layout.id="group-policy-layout";layout.className="group-policy-layout";
-  const listPane=document.createElement("aside");listPane.className="group-list-pane";listPane.setAttribute("aria-labelledby","group-list-heading");
-  const listHeading=document.createElement("h4");listHeading.id="group-list-heading";listHeading.textContent="Camera groups";
-  const searchLabel=document.createElement("label");searchLabel.htmlFor="group-search";searchLabel.textContent="Search groups";
-  const search=document.createElement("input");search.type="search";search.id="group-search";search.autocomplete="off";search.placeholder="Group name";
-  const createMessage=document.createElement("p");createMessage.id="group-create-message";createMessage.setAttribute("role","status");createMessage.setAttribute("aria-live","polite");
-  const filteredNotice=document.createElement("p");filteredNotice.id="group-filter-notice";filteredNotice.className="group-filter-notice hidden";
-  const showGroup=document.createElement("button");showGroup.type="button";showGroup.textContent="Show selected group in list";showGroup.addEventListener("click",()=>{search.value="";groupWorkspaceState.setQuery("");renderGroupManagement(groupWorkspaceState.groups);document.querySelector(`#group-management-list button[data-group-id="${CSS.escape(groupWorkspaceState.selectedGroupId||"")}"]`)?.focus();});
-  filteredNotice.append(document.createTextNode("The selected group is outside the current search. "),showGroup);
-  const empty=document.createElement("p");empty.id="group-editor-empty";empty.className="group-editor-empty";empty.textContent="Select a group to view its membership and shared policies.";
-  const loadStatus=document.createElement("div");loadStatus.id="group-policy-load-status";loadStatus.className="group-editor-empty hidden";loadStatus.setAttribute("role","status");loadStatus.setAttribute("aria-live","polite");
-  const loadMessage=document.createElement("p");loadMessage.id="group-policy-load-message";loadStatus.append(loadMessage);
-  const retryLoad=document.createElement("button");retryLoad.type="button";retryLoad.id="retry-group-policy-loads";retryLoad.textContent="Retry failed settings";retryLoad.className="hidden";retryLoad.addEventListener("click",()=>void retryGroupPolicyLoads());loadStatus.append(retryLoad);
-  const editor=document.createElement("section");editor.id="group-management-editor";editor.className="group-general-editor";editor.setAttribute("aria-label","Selected group details");
-  const editorPane=document.createElement("section");editorPane.className="group-editor-pane";editorPane.setAttribute("aria-labelledby","group-editor-heading");
-  const editorHeading=document.createElement("h4");editorHeading.id="group-editor-heading";editorHeading.textContent="Select a group";
-  const tabNav=document.createElement("nav");tabNav.id="group-policy-tabs";tabNav.className="group-editor-tabs";tabNav.setAttribute("role","tablist");tabNav.setAttribute("aria-label","Group policy sections");
-  const panels=new Map();
-  for(const tab of window.NvrCameraGroups.GROUP_POLICY_TABS){
-    const panel=document.createElement("section");panel.id=`group-policy-panel-${tab.id}`;panel.className="group-policy-panel";panel.dataset.groupPolicyPanel=tab.id;panel.setAttribute("role","tabpanel");panel.setAttribute("aria-label",tab.label);panel.tabIndex=0;
-    const actions=document.createElement("div");actions.className="group-tab-actions";
-    const status=document.createElement("p");status.dataset.groupTabStatus=tab.id;status.setAttribute("role","status");status.setAttribute("aria-live","polite");status.textContent="Saved";status.dataset.state="saved";
-    const save=document.createElement("button");save.type="button";save.textContent="Save";save.dataset.groupTabSave=tab.id;save.setAttribute("aria-label",`Save ${tab.label} settings`);save.addEventListener("click",()=>void saveGroupTab(tab.id));
-    const revert=document.createElement("button");revert.type="button";revert.textContent="Revert";revert.dataset.groupTabRevert=tab.id;revert.setAttribute("aria-label",`Revert ${tab.label} settings`);revert.addEventListener("click",()=>void revertGroupTab(tab.id));
-    actions.append(status,save,revert);panel.append(actions);panels.set(tab.id,panel);
-    const button=document.createElement("button");button.type="button";button.id=`group-policy-tab-${tab.id}`;button.textContent=tab.label;button.dataset.groupPolicyTab=tab.id;button.setAttribute("role","tab");button.setAttribute("aria-controls",panel.id);
-    panel.setAttribute("aria-labelledby",button.id);button.addEventListener("click",()=>void navigateGroupTab(tab.id));
-    button.addEventListener("keydown",event=>{const buttons=[...tabNav.querySelectorAll('[role="tab"]')],index=buttons.indexOf(button);let next=null;if(event.key==="ArrowRight")next=buttons[(index+1)%buttons.length];else if(event.key==="ArrowLeft")next=buttons[(index-1+buttons.length)%buttons.length];else if(event.key==="Home")next=buttons[0];else if(event.key==="End")next=buttons.at(-1);if(next){event.preventDefault();next.focus();void navigateGroupTab(next.dataset.groupPolicyTab);}});
-    tabNav.append(button);
-  }
-  const panelContent=document.createElement("div");panelContent.id="group-policy-panel-content";
-  panels.get("general").append(editor);
-  if(schedule)panels.get("recording").append(schedule);
-  if(retention)panels.get("recording").append(retention);
-  if(scheduleMessage)panels.get("recording").append(scheduleMessage);
-  if(storage)panels.get("storage").append(storage);
-  if(ai)panels.get("ai").append(ai);
-  if(aiMessage)panels.get("ai").append(aiMessage);
-  panelContent.append(...panels.values());
-  editorPane.append(editorHeading,empty,loadStatus,filteredNotice,tabNav,panelContent);
-  if(groupForm)listPane.append(groupForm);
-  if(instructions){instructions.textContent="Browsing groups can overlap. A camera inherits recording, schedule, retention, storage, and AI settings from its single policy group unless a supported camera override applies.";listPane.append(instructions);}
-  listPane.append(listHeading,searchLabel,search);
-  if(list)listPane.append(list);
-  listPane.append(createMessage);
-  layout.append(listPane,editorPane);
-  if(heading)root.replaceChildren(heading,layout);else root.replaceChildren(layout);
-  if(runtime)document.querySelector("#app-settings-content")?.append(runtime);
-  const scheduleSelect=document.querySelector("#schedule-group"),scheduleLabel=document.querySelector('label[for="schedule-group"]');
-  if(scheduleSelect){scheduleSelect.hidden=true;scheduleSelect.setAttribute("aria-hidden","true");}
-  if(scheduleLabel){scheduleLabel.hidden=true;scheduleLabel.setAttribute("aria-hidden","true");}
-  for(const selector of ["#save-group-schedule","#save-group-retention","#save-storage-volume","#save-group-ai"]){const button=document.querySelector(selector);if(button)button.hidden=true;}
-  search.addEventListener("input",()=>{groupWorkspaceState.setQuery(search.value);renderGroupManagement(groupWorkspaceState.groups);});
-  groupForm.groupSaveConfig=async()=>{
-    const name=document.querySelector("#new-group-name").value.trim();
-    if(!name)throw new Error("Enter a camera group name.");
-    if(name.length>80)throw new Error("Group names are limited to 80 characters.");
-    const result=await api("/api/camera-groups",{method:"POST",body:JSON.stringify({name})});
-    groupForm.reset();createMessage.textContent=`Created camera group ${result.name}.`;
-  };
-  if(schedule){schedule.groupSaveConfig=saveGroupSchedule;schedule.groupLoadConfig=loadGroupSchedule;}
-  if(retention){retention.groupSaveConfig=saveGroupRetention;retention.groupLoadConfig=loadGroupRetention;}
-  if(storage){storage.groupSaveConfig=saveGroupStorage;storage.groupLoadConfig=loadGroupStorage;}
-  if(ai){ai.groupSaveConfig=saveGroupAi;ai.groupLoadConfig=loadGroupAi;}
-  groupWorkspaceInitialized=true;
-}
-function setGroupTabStatus(tabId,text,state="saved"){
-  const status=document.querySelector(`[data-group-tab-status="${tabId}"]`);if(!status)return;
-  status.textContent=text;status.dataset.state=state;
-}
-function groupPolicyScopeIds(tabId){return GROUP_POLICY_SECTIONS[tabId]||[];}
-function groupDirtyScopes(root=document.querySelector("#bulk-admin")){
-  return [...(root?.matches?.('[data-config-dirty="true"]')?[root]:[]),...(root?.querySelectorAll?.('[data-config-dirty="true"]')||[])].filter(scope=>scope.dataset.configSection&&scope.closest("#bulk-admin"));
-}
-function groupTabDirtyScopes(tabId){
-  const panel=document.querySelector(`[data-group-policy-panel="${tabId}"]`),ids=new Set(groupPolicyScopeIds(tabId));
-  return [...(panel?.querySelectorAll?.('[data-config-dirty="true"]')||[])].filter(scope=>ids.has(scope.dataset.configSection));
-}
-function refreshGroupTabStatuses(){
-  if(!groupWorkspaceInitialized)return;
-  for(const tab of window.NvrCameraGroups.GROUP_POLICY_TABS){
-    const dirty=groupTabDirtyScopes(tab.id),status=document.querySelector(`[data-group-tab-status="${tab.id}"]`);
-    const save=document.querySelector(`[data-group-tab-save="${tab.id}"]`),revert=document.querySelector(`[data-group-tab-revert="${tab.id}"]`);
-    if(save)save.disabled=!dirty.length||groupWorkspaceSaveInProgress||currentRole!=="administrator";
-    if(revert)revert.disabled=!dirty.length||groupWorkspaceSaveInProgress||currentRole!=="administrator";
-    if(!dirty.length)setGroupTabStatus(tab.id,"Saved","saved");
-    else if(status?.dataset.state!=="saving"&&status?.dataset.state!=="error")setGroupTabStatus(tab.id,`${dirty.length} unsaved section${dirty.length===1?"":"s"}`,"dirty");
-  }
-}
-function activateGroupTab(tabId){
-  if(!groupWorkspaceState.selectedGroup()||!groupWorkspaceState.selectTab(tabId))return false;
-  for(const button of document.querySelectorAll("#group-policy-tabs [role=tab]")){
-    const active=button.dataset.groupPolicyTab===tabId;button.setAttribute("aria-selected",String(active));button.tabIndex=active?0:-1;
-  }
-  for(const panel of document.querySelectorAll("[data-group-policy-panel]"))panel.classList.toggle("hidden",panel.dataset.groupPolicyPanel!==tabId);
-  refreshGroupTabStatuses();return true;
-}
-async function navigateGroupTab(tabId){
-  if(tabId===groupWorkspaceState.activeTab)return true;
-  if(!await guardGroupDrafts()){
-    document.querySelector(`[role=tab][data-group-policy-tab="${CSS.escape(groupWorkspaceState.activeTab)}"]`)?.focus();return false;
-  }
-  return activateGroupTab(tabId);
-}
-function updateGroupEditorVisibility(){
-  const selected=groupWorkspaceState.selectedGroup(),empty=document.querySelector("#group-editor-empty"),tabs=document.querySelector("#group-policy-tabs"),heading=document.querySelector("#group-editor-heading"),notice=document.querySelector("#group-filter-notice"),loadStatus=document.querySelector("#group-policy-load-status"),loadMessage=document.querySelector("#group-policy-load-message"),retry=document.querySelector("#retry-group-policy-loads");
-  if(!empty||!tabs||!heading)return;
-  const unavailable=Boolean(!selected&&unavailableGroupId&&groupDirtyScopes().length);
-  const blockedByLoad=Boolean(selected&&(groupPolicyLoading||groupPolicyLoadFailures.size));
-  empty.classList.toggle("hidden",Boolean(selected)||unavailable);tabs.classList.toggle("hidden",!selected||blockedByLoad);
-  heading.textContent=selected?`${selected.name} · ${selected.camera_count} camera(s)`:unavailable?"Group unavailable":"Select a group";
-  const visible=groupWorkspaceState.visibleGroups().some(group=>group.id===selected?.id);notice?.classList.toggle("hidden",!selected||visible);
-  loadStatus?.classList.toggle("hidden",!blockedByLoad&&!unavailable);
-  if(loadMessage)loadMessage.textContent=unavailable?"This group was removed while it had unsaved changes. Discard those changes before selecting another group.":selected?(groupPolicyLoading?`Loading shared settings for ${selected.name}…`:`Some settings for ${selected.name} could not be loaded. Retry before editing this group.`):"";
-  retry?.classList.toggle("hidden",unavailable||groupPolicyLoading||!groupPolicyLoadFailures.size);
-  for(const panel of document.querySelectorAll("[data-group-policy-panel]"))panel.classList.toggle("hidden",!selected||blockedByLoad||panel.dataset.groupPolicyPanel!==groupWorkspaceState.activeTab);
-  if(selected&&!blockedByLoad)activateGroupTab(groupWorkspaceState.activeTab);
-}
-async function selectGroupForEditing(groupId){
-  if(groupWorkspaceState.selectedGroupId===groupId)return true;
-  if(!await guardGroupDrafts())return false;
-  if(!groupWorkspaceState.selectGroup(groupId))return false;
-  const select=document.querySelector("#schedule-group");if(select)select.value=groupId;
-  groupPolicyLoadFailures.clear();resetGroupPolicyControls();groupPolicyLoading=true;
-  renderGroupManagement(groupWorkspaceState.groups);
-  const selection=groupWorkspaceState.captureSelection();
-  await loadSelectedGroupPolicies(groupId,selection,["group-schedule","group-retention","group-storage","group-ai"]);
-  return true;
-}
-function resetGroupPolicyControls(){
-  document.querySelector("#group-schedule-timezone").value="UTC";renderScheduleEditor(document.querySelector("#group-schedule-editor"),[]);document.querySelector("#group-schedule-json").value="";
-  document.querySelector("#group-retention-days").value="30";
-  const storage=document.querySelector("#group-storage-volume");storage.replaceChildren(new Option("Loading storage volumes…","default"));document.querySelector("#storage-volume-status").replaceChildren();
-  document.querySelector("#group-ai-enabled").checked=false;document.querySelector("#group-ai-fps").value="0.5";document.querySelector("#group-ai-confidence").value="0.55";document.querySelector("#group-ai-substream").checked=true;document.querySelector("#group-ai-zones").value="[]";renderZoneEditor(document.querySelector("#group-ai-zones-editor"),[]);
-  document.querySelector("#schedule-message").textContent="";document.querySelector("#ai-group-message").textContent="";
-}
-async function loadSelectedGroupPolicies(groupId,selection,sectionIds){
-  groupPolicyLoading=true;updateGroupEditorVisibility();
-  const scopes=sectionIds.map(id=>document.querySelector(`#bulk-admin [data-config-section="${id}"]`)).filter(Boolean);
-  const results=await Promise.all(scopes.map(async scope=>{
-    try{const loaded=await scope.groupLoadConfig?.(groupId,selection);return {id:scope.dataset.configSection,loaded:loaded!==false};}
-    catch(error){setGroupTabStatus(GROUP_SECTION_TAB[scope.dataset.configSection],`Load failed: ${error.message}`,"error");return {id:scope.dataset.configSection,error};}
-  }));
-  if(!groupWorkspaceState.isCurrent(selection))return false;
-  for(const result of results){if(result.error||!result.loaded)groupPolicyLoadFailures.add(result.id);else groupPolicyLoadFailures.delete(result.id);}
-  groupPolicyLoading=false;updateGroupEditorVisibility();return groupPolicyLoadFailures.size===0;
-}
-async function retryGroupPolicyLoads(){
-  const selected=groupWorkspaceState.selectedGroup();if(!selected||groupPolicyLoading||!groupPolicyLoadFailures.size)return false;
-  const failed=[...groupPolicyLoadFailures],selection=groupWorkspaceState.captureSelection();
-  groupPolicyLoadFailures.clear();
-  return loadSelectedGroupPolicies(selected.id,selection,failed);
-}
-function renderGroupManagement(groups){
-  const target=document.querySelector("#group-management-list"),editor=document.querySelector("#group-management-editor");
-  if(!target||!editor)return;
-  const visible=groupWorkspaceState.visibleGroups().slice().sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id));
-  target.replaceChildren(...visible.map(group=>{
-    const button=document.createElement("button");button.type="button";button.dataset.groupId=group.id;button.setAttribute("aria-pressed",String(group.id===groupWorkspaceState.selectedGroupId));
-    const name=document.createElement("span");name.textContent=group.name;
-    const count=document.createElement("span");count.className="group-camera-count";count.textContent=`${group.camera_count} camera${group.camera_count===1?"":"s"}`;
-    button.append(name,count);button.addEventListener("click",()=>void selectGroupForEditing(group.id));return button;
-  }));
-  if(!visible.length){const empty=document.createElement("p");empty.className="muted";empty.textContent=groups.length?"No groups match this search.":"No camera groups yet. Create a group to manage shared policies.";target.append(empty);}
-  for(const button of target.querySelectorAll("[data-group-id]"))button.setAttribute("aria-pressed",String(button.dataset.groupId===groupWorkspaceState.selectedGroupId));
-  const selected=groupWorkspaceState.selectedGroup();
-  if(!selected){editor.replaceChildren();updateGroupEditorVisibility();return;}
-  const dirty=editor.querySelector('[data-config-dirty="true"]');
-  if(!dirty||editor.dataset.groupId!==selected.id){
-    editor.dataset.groupId=selected.id;editor.replaceChildren();
-    const namePanel=document.createElement("fieldset"),nameLegend=document.createElement("legend");namePanel.dataset.configSection="group-name";nameLegend.textContent="Group name";namePanel.append(nameLegend);
-    const nameLabel=document.createElement("label"),name=document.createElement("input");name.type="text";name.value=selected.name;name.maxLength=80;name.autocomplete="off";nameLabel.textContent="Policy group name ";nameLabel.append(name);namePanel.append(nameLabel);namePanel.groupSaveConfig=async()=>{const value=name.value.trim();if(!value)throw new Error("Group names cannot be empty.");if(value.length>80)throw new Error("Group names are limited to 80 characters.");await api(`/api/camera-groups/${encodeURIComponent(selected.id)}`,{method:"PATCH",body:JSON.stringify({name:value})});};
-    const members=new Set(selected.camera_ids||[]),memberPanel=document.createElement("fieldset"),memberLegend=document.createElement("legend");memberPanel.dataset.configSection="group-members";memberLegend.textContent="Browsing membership";memberPanel.append(memberLegend);
-    const help=document.createElement("p");help.textContent="Browsing membership can overlap. A camera’s single policy group controls inherited settings.";memberPanel.append(help);
-    for(const camera of [...latestCameras].sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id))){
-      const label=document.createElement("label"),checkbox=document.createElement("input");checkbox.type="checkbox";checkbox.value=camera.id;checkbox.checked=members.has(camera.id);
-      if(camera.group_id===selected.id){checkbox.disabled=true;checkbox.title="A camera remains a member of its policy group automatically.";}
-      label.append(checkbox,document.createTextNode(` ${camera.name}${camera.group_id===selected.id?" · policy group":""}`));memberPanel.append(label);
-    }
-    memberPanel.groupSaveConfig=async()=>{const camera_ids=[...memberPanel.querySelectorAll('input[type="checkbox"]:checked')].map(input=>input.value);await api(`/api/camera-groups/${encodeURIComponent(selected.id)}/members`,{method:"PUT",body:JSON.stringify({camera_ids})});};
-    const remove=document.createElement("button");remove.type="button";remove.textContent="Delete group";remove.addEventListener("click",async()=>{if(!window.confirm(`Delete group “${selected.name}”? A group assigned to camera policies must first be reassigned.`))return;if(!await guardGroupDrafts())return;try{await api(`/api/camera-groups/${encodeURIComponent(selected.id)}`,{method:"DELETE"});await refreshGroups();}catch(error){document.querySelector("#group-create-message").textContent=error.message;}});
-    editor.append(namePanel,memberPanel,remove);
-  }
-  updateGroupEditorVisibility();
-}
-async function loadGroupSchedule(groupId,selection=groupWorkspaceState.captureSelection()){
-  const result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/schedule`);if(!groupWorkspaceState.isCurrent(selection))return false;
-  const timezone=document.querySelector("#group-schedule-timezone"),editor=document.querySelector("#group-schedule-editor"),advanced=document.querySelector("#group-schedule-json");
-  timezone.value=result.timezone||"UTC";renderScheduleEditor(editor,result.intervals||[]);advanced.value=JSON.stringify({timezone:result.timezone,intervals:result.intervals},null,2);
-  document.querySelector("#schedule-message").textContent=result.configured?"Group schedule loaded.":"No group schedule is configured.";return true;
-}
-async function saveGroupSchedule(groupId){
-  const schedule={timezone:document.querySelector("#group-schedule-timezone").value.trim()||"UTC",intervals:readScheduleEditor(document.querySelector("#group-schedule-editor"))};
-  const result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/schedule`,{method:"PUT",body:JSON.stringify(schedule)});
-  document.querySelector("#group-schedule-json").value=JSON.stringify(schedule,null,2);document.querySelector("#schedule-message").textContent=`Saved ${result.intervals.length} group schedule interval(s).`;
-}
-async function loadGroupRetention(groupId,selection=groupWorkspaceState.captureSelection()){
-  const policy=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/retention`);if(!groupWorkspaceState.isCurrent(selection))return false;
-  document.querySelector("#group-retention-days").value=policy.retention_days;document.querySelector("#schedule-message").textContent=policy.configured?"Group retention loaded.":"Group uses the 30 day default.";return true;
-}
-async function saveGroupRetention(groupId){
-  const retention_days=Number(document.querySelector("#group-retention-days").value),policy=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/retention`,{method:"PUT",body:JSON.stringify({retention_days})});
-  document.querySelector("#schedule-message").textContent=`Saved group retention target: ${policy.retention_days} days.`;
-}
-async function loadGroupStorage(groupId,selection=groupWorkspaceState.captureSelection()){
-  const [status,assignment]=await Promise.all([api("/api/storage"),api(`/api/camera-groups/${encodeURIComponent(groupId)}/storage-volume`)]);if(!groupWorkspaceState.isCurrent(selection))return false;
-  const select=document.querySelector("#group-storage-volume");select.replaceChildren(...status.volumes.map(volume=>new Option(`${volume.id} · ${volume.state} · ${volume.free_bytes==null?"capacity unknown":Math.round(volume.free_bytes/1048576)+" MiB free"}`,volume.id)));select.value=assignment.volume_id;
-  document.querySelector("#storage-volume-status").replaceChildren(...status.volumes.map(volume=>{const item=document.createElement("li");item.textContent=`${volume.id}: ${volume.state}; ${volume.cameras.length} assigned camera(s)${volume.retention_at_risk?" · retention at risk":""}`;return item;}));return true;
-}
-async function saveGroupStorage(groupId){
-  const volume_id=document.querySelector("#group-storage-volume").value,result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/storage-volume`,{method:"PUT",body:JSON.stringify({volume_id})});
-  document.querySelector("#schedule-message").textContent=`Assigned group cameras to ${result.volume_id}.`;
-}
-async function loadGroupAi(groupId,selection=groupWorkspaceState.captureSelection()){
-  const config=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/ai`);if(!groupWorkspaceState.isCurrent(selection))return false;
-  document.querySelector("#group-ai-enabled").checked=config.enabled;document.querySelector("#group-ai-fps").value=config.analysis_fps;document.querySelector("#group-ai-confidence").value=config.confidence_threshold;
-  document.querySelector("#group-ai-substream").checked=config.use_substream;document.querySelector("#group-ai-zones").value=JSON.stringify(config.zones);
-  renderZoneEditor(document.querySelector("#group-ai-zones-editor"),config.zones||[]);
-  document.querySelector("#ai-group-message").textContent=`${config.group_name}: ${config.inherited_camera_count}/${config.camera_count} camera(s) inherit these settings · ${config.model.available?"model ready":config.model.reason}.`;
-  return true;
-}
-async function saveGroupAi(groupId){
-  const zones=readZoneEditor(document.querySelector("#group-ai-zones-editor"));document.querySelector("#group-ai-zones").value=JSON.stringify(zones);
-  const result=await api(`/api/camera-groups/${encodeURIComponent(groupId)}/ai`,{method:"PUT",body:JSON.stringify({enabled:document.querySelector("#group-ai-enabled").checked,analysis_fps:Number(document.querySelector("#group-ai-fps").value),confidence_threshold:Number(document.querySelector("#group-ai-confidence").value),use_substream:document.querySelector("#group-ai-substream").checked,zones})});
-  document.querySelector("#ai-group-message").textContent=`Saved group settings for ${result.inherited_camera_count} inherited camera(s). Cameras beyond the configured AI limit will show skipped analysis coverage.`;
-}
-function groupScopeLabel(scope){return scope?.querySelector(":scope > legend")?.textContent?.trim()||scope?.dataset.configSection||"Group settings";}
-function lockGroupControls(){
-  const controls=new Map(),root=document.querySelector("#bulk-admin");
-  for(const control of root.querySelectorAll("input,select,textarea,button")){controls.set(control,control.disabled);control.disabled=true;}
-  return ()=>{for(const [control,disabled] of controls)control.disabled=disabled;};
-}
-async function saveGroupScopes(scopes,{refreshAfter=false,statusTabId=null}={}){
-  if(groupWorkspaceSaveInProgress)return false;
-  const unique=[...new Set(scopes)].filter(Boolean);if(!unique.length)return true;
-  const groupId=groupWorkspaceState.selectedGroupId,selection=groupWorkspaceState.captureSelection();
-  if(unique.some(scope=>scope.dataset.configSection!=="group-form")&&!groupId)return false;
-  const labels=[];let failedScope=null,saveError=null,affectedTabs=new Set(unique.map(scope=>GROUP_SECTION_TAB[scope.dataset.configSection]).filter(Boolean));if(statusTabId)affectedTabs.add(statusTabId);
-  const unlock=lockGroupControls();groupWorkspaceSaveInProgress=true;
-  affectedTabs.forEach(tab=>setGroupTabStatus(tab,"Saving…","saving"));refreshGroupTabStatuses();
-  try{
-    for(const scope of unique){
-      failedScope=scope;
-      if(typeof scope.groupSaveConfig!=="function")throw new Error(`Saving ${groupScopeLabel(scope)} is not available.`);
-      await scope.groupSaveConfig(groupId);
-      if(scope.dataset.configSection!=="group-form"&&!groupWorkspaceState.isCurrent(selection))throw new Error("Group selection changed during save. Reload the selected group before retrying.");
-      clearConfigDraft(scope);labels.push(groupScopeLabel(scope));
-    }
-  }catch(error){saveError=error;}
-  finally{unlock();groupWorkspaceSaveInProgress=false;}
-  if(saveError){
-    const failedTab=GROUP_SECTION_TAB[failedScope?.dataset.configSection]||statusTabId;
-    if(failedTab)setGroupTabStatus(failedTab,`Save failed: ${saveError.message}`,"error");
-    const status=failedScope?.dataset.configSection==="group-form"?document.querySelector("#group-create-message"):failedTab==="ai"?document.querySelector("#ai-group-message"):document.querySelector("#schedule-message");
-    if(status)status.textContent=labels.length?`${labels.join(", ")} saved. ${groupScopeLabel(failedScope)} failed: ${saveError.message} Remaining changes are still available to save.`:`${groupScopeLabel(failedScope)} could not be saved: ${saveError.message} Your changes are still available.`;
-    refreshGroupTabStatuses();return false;
-  }
-  for(const tab of affectedTabs)setGroupTabStatus(tab,"Saved","saved");refreshGroupTabStatuses();
-  if(refreshAfter){try{await refresh();}catch(error){const status=statusTabId==="ai"?document.querySelector("#ai-group-message"):document.querySelector("#schedule-message");if(status)status.textContent=`Settings saved, but the workspace could not refresh: ${error.message}`;}}
-  return true;
-}
-async function revertGroupScopes(scopes){
-  if(groupWorkspaceSaveInProgress)return false;
-  const unique=[...new Set(scopes)].filter(Boolean),groupId=groupWorkspaceState.selectedGroupId,selection=groupWorkspaceState.captureSelection();
-  if(unique.some(scope=>scope.dataset.configSection!=="group-form")&&!groupId)return false;
-  const unlock=lockGroupControls();groupWorkspaceSaveInProgress=true;refreshGroupTabStatuses();let failure=null,needsGroupRefresh=false;
-  try{
-    for(const scope of unique){
-      if(scope.dataset.configSection==="group-form"){scope.reset();clearConfigDraft(scope);continue;}
-      if(["group-name","group-members"].includes(scope.dataset.configSection)){needsGroupRefresh=true;continue;}
-      if(typeof scope.groupLoadConfig!=="function")throw new Error(`Reloading ${groupScopeLabel(scope)} is not available.`);
-      await scope.groupLoadConfig(groupId,selection);
-      if(!groupWorkspaceState.isCurrent(selection))throw new Error("The selected group changed while saved settings were loading.");
-      clearConfigDraft(scope);
-    }
-    if(needsGroupRefresh){
-      const {groups}=await api("/api/camera-groups");if(!groupWorkspaceState.isCurrent(selection))throw new Error("The selected group changed while saved settings were loading.");
-      groupWorkspaceState.setGroups(groups);sidebarGroups=groups;clearConfigDrafts(unique.filter(scope=>["group-name","group-members"].includes(scope.dataset.configSection)));renderGroupManagement(groups);
-    }
-  }catch(error){failure=error;}
-  finally{unlock();groupWorkspaceSaveInProgress=false;refreshGroupTabStatuses();}
-  if(failure){const tab=GROUP_SECTION_TAB[unique.find(scope=>scope.dataset.configDirty==="true")?.dataset.configSection]||groupWorkspaceState.activeTab;setGroupTabStatus(tab,`Revert failed: ${failure.message}`,"error");return false;}
-  return true;
-}
-function clearConfigDrafts(scopes){scopes.forEach(clearConfigDraft);}
-async function saveGroupTab(tabId=groupWorkspaceState.activeTab){
-  const dirty=groupTabDirtyScopes(tabId);if(!dirty.length)return true;return saveGroupScopes(dirty,{refreshAfter:true,statusTabId:tabId});
-}
-async function revertGroupTab(tabId=groupWorkspaceState.activeTab){
-  const dirty=groupTabDirtyScopes(tabId);if(!dirty.length)return true;
-  const success=await revertGroupScopes(dirty);if(success)setGroupTabStatus(tabId,"Reverted to saved settings","saved");return success;
-}
-async function guardGroupDrafts(){
-  if(groupWorkspaceSaveInProgress)return false;
-  const dirty=groupDirtyScopes();if(!dirty.length)return true;
-  const decision=await askCameraDirtyDecision({title:"Unsaved group settings",description:"Save or discard group changes before continuing."});
-  if(decision==="save"){
-    if(unavailableGroupId&&!groupWorkspaceState.selectedGroup()){
-      updateGroupEditorVisibility();return false;
-    }
-    return saveGroupScopes(dirty,{refreshAfter:true,statusTabId:groupWorkspaceState.activeTab});
-  }
-  if(decision==="discard"){
-    if(unavailableGroupId&&!groupWorkspaceState.selectedGroup()){
-      clearConfigDrafts(dirty);groupWorkspaceState.clearSelection();unavailableGroupId=null;groupPolicyLoadFailures.clear();groupPolicyLoading=false;resetGroupPolicyControls();renderGroupManagement(groupWorkspaceState.groups);return true;
-    }
-    return revertGroupScopes(dirty);
-  }
-  return false;
-}
-async function guardCameraAdminDrafts(){return activeCameraWorkspace==="groups"?guardGroupDrafts():activeCameraWorkspace==="add"?guardAddCameraDrafts():guardCameraDrafts();}
-async function loadGroupScopeWithGuard(sectionId){
-  if(!await guardGroupDrafts())return false;
-  const scope=document.querySelector(`#bulk-admin [data-config-section="${sectionId}"]`),groupId=groupWorkspaceState.selectedGroupId,selection=groupWorkspaceState.captureSelection();
-  if(!scope||!groupId)return false;
-  const tab=GROUP_SECTION_TAB[sectionId],unlock=lockGroupControls();if(tab)setGroupTabStatus(tab,"Loading saved settings…","saving");
-  try{
-    const loaded=await scope.groupLoadConfig?.(groupId,selection);if(!loaded||!groupWorkspaceState.isCurrent(selection))return false;clearConfigDraft(scope);
-    if(sectionId==="group-ai"&&groupWorkspaceState.isCurrent(selection)){const representative=groupWorkspaceState.selectedGroup()?.camera_ids?.[0];if(representative)await loadRepresentativeZoneFrame(representative,document.querySelector("#group-ai-zones-editor"),()=>groupWorkspaceState.isCurrent(selection));}
-    if(tab)setGroupTabStatus(tab,"Saved settings loaded","saved");
-    return true;
-  }
-  catch(error){const message=sectionId==="group-ai"?document.querySelector("#ai-group-message"):document.querySelector("#schedule-message");if(message)message.textContent=error.message;if(tab)setGroupTabStatus(tab,`Load failed: ${error.message}`,"error");return false;}
-  finally{unlock();}
-}
-async function refreshGroups(){
-  setupGroupPolicyWorkspace();
-  const {groups}=await api("/api/camera-groups");
-  const priorSelection=groupWorkspaceState.selectedGroupId,hadSelectedGroup=Boolean(priorSelection);
-  groupWorkspaceState.setGroups(groups);sidebarGroups=groups;
-  if(hadSelectedGroup&&!groupWorkspaceState.selectedGroupId&&groupDirtyScopes().length)unavailableGroupId=priorSelection;
-  if(unavailableGroupId&&groups.some(group=>group.id===unavailableGroupId)){groupWorkspaceState.selectGroup(unavailableGroupId);unavailableGroupId=null;}
-  const select=document.querySelector("#bulk-group");
-  const options=[new Option("Leave groups unchanged","__unchanged__"),new Option("Remove from group","")];
-  for(const group of groups)options.push(new Option(group.name,group.name));
-  select?.replaceChildren(...options);
-  const scheduleSelect=document.querySelector("#schedule-group");
-  if(scheduleSelect){scheduleSelect.replaceChildren(new Option("No group selected",""),...groups.map(group=>new Option(group.name,group.id)));scheduleSelect.value=groupWorkspaceState.selectedGroupId||"";}
-  const editor=document.querySelector("#group-management-editor");
-  if(!editor?.querySelector('[data-config-dirty="true"]'))renderGroupManagement(groups);
-  else if(unavailableGroupId)updateGroupEditorVisibility();
-  const groupButton=document.querySelector('[data-camera-workspace-button="groups"]');groupButton?.classList.toggle("hidden",currentRole!=="administrator");
-  try{const runtime=await api("/api/ai/settings");const max=document.querySelector("#ai-max-active");if(max)max.value=runtime.max_active_cameras;}catch{}
-}
-function ensureDiscoveryWorkspace() {
-  const root=document.querySelector("#discovery-admin");
-  if(!root||root.dataset.discoveryWorkspaceReady==="true")return;
-  const heading=root.querySelector("#discovery-heading")||document.createElement("h3");
-  heading.id="discovery-heading";heading.textContent="Discover cameras";
-  const description=root.querySelector("p")||document.createElement("p");
-  description.textContent="Use multicast on the camera VLAN or scan a routed private IPv4 range. Devices stay candidates until an administrator reviews and tests one; scanning never starts recording.";
-  const ipLabel=root.querySelector('label[for="discovery-ip-range"]')||document.createElement("label");ipLabel.htmlFor="discovery-ip-range";ipLabel.textContent="Private IPv4 range (CIDR)";
-  const ipRange=root.querySelector("#discovery-ip-range")||document.createElement("input");ipRange.id="discovery-ip-range";ipRange.inputMode="numeric";ipRange.autocomplete="off";ipRange.placeholder="192.168.1.0/24";
-  const timeoutLabel=root.querySelector('label[for="discovery-timeout"]')||document.createElement("label");timeoutLabel.htmlFor="discovery-timeout";timeoutLabel.textContent="VLAN scan duration (seconds)";
-  const timeout=root.querySelector("#discovery-timeout")||document.createElement("input");timeout.id="discovery-timeout";timeout.type="number";timeout.min="0.5";timeout.max="15";timeout.step="0.5";timeout.value=timeout.value||"5";
-  const vlanButton=root.querySelector("#discover-cameras")||document.createElement("button");vlanButton.id="discover-cameras";vlanButton.type="button";vlanButton.textContent="Scan camera VLAN";
-  const rangeButton=root.querySelector("#discover-ip-range")||document.createElement("button");rangeButton.id="discover-ip-range";rangeButton.type="button";rangeButton.textContent="Scan private range";
-  const message=root.querySelector("#discovery-message")||document.createElement("p");message.id="discovery-message";message.setAttribute("role","status");message.setAttribute("aria-live","polite");
-  const candidates=root.querySelector("#discovery-candidates")||document.createElement("div");candidates.id="discovery-candidates";
-  const scanControls=document.createElement("div");scanControls.className="discovery-scan-toolbar";scanControls.setAttribute("aria-label","Discovery scan controls");
-  const vlanScan=document.createElement("div");vlanScan.className="discovery-scan-action";vlanScan.append(vlanButton);
-  const rangeScan=document.createElement("div");rangeScan.className="discovery-range-scan";
-  const rangeField=document.createElement("div");rangeField.className="discovery-scan-field";rangeField.append(ipLabel,ipRange);rangeScan.append(rangeField,rangeButton);
-  const advanced=document.createElement("details");advanced.className="discovery-scan-advanced";
-  const advancedSummary=document.createElement("summary");advancedSummary.textContent="VLAN scan timing";advanced.append(advancedSummary);
-  const timingField=document.createElement("div");timingField.className="discovery-scan-field";timingField.append(timeoutLabel,timeout);
-  const timingNote=document.createElement("p");timingNote.textContent="VLAN scans are bounded to 0.5–15 seconds. Private-range scans use unicast ONVIF probes and are limited to 256 addresses per scan.";advanced.append(timingField,timingNote);
-  const retryScan=document.createElement("button");retryScan.id="discovery-retry-scan";retryScan.type="button";retryScan.textContent="Retry last scan";retryScan.className="hidden";
-  retryScan.addEventListener("click",()=>{if(discoveryLastScanRequest)void runDiscoveryScan(discoveryLastScanRequest.ip_range,discoveryLastScanRequest.timeout_seconds);});
-  scanControls.append(vlanScan,rangeScan,advanced,retryScan);
-  const lastScan=document.createElement("p");lastScan.id="discovery-last-scan";lastScan.className="discovery-last-scan";lastScan.setAttribute("role","status");lastScan.textContent=discoveryLastScanText;
-  const toolbar=document.createElement("div");toolbar.className="discovery-results-toolbar";
-  const searchLabel=document.createElement("label");searchLabel.htmlFor="discovery-search";searchLabel.textContent="Search discovered devices";
-  const search=document.createElement("input");search.id="discovery-search";search.type="search";search.autocomplete="off";search.placeholder="Name, address, or identity";
-  search.addEventListener("input",()=>{cameraDiscoveryState.query=search.value;renderDiscoveryResults();});
-  const linkedLabel=document.createElement("label");linkedLabel.className="discovery-linked-filter";linkedLabel.htmlFor="discovery-show-linked";linkedLabel.textContent="Show added devices";
-  const showLinked=document.createElement("input");showLinked.id="discovery-show-linked";showLinked.type="checkbox";
-  linkedLabel.append(showLinked);
-  showLinked.addEventListener("change",()=>{cameraDiscoveryState.showLinked=showLinked.checked;renderDiscoveryResults();});
-  const refreshButton=document.createElement("button");refreshButton.type="button";refreshButton.textContent="Refresh results";refreshButton.addEventListener("click",()=>void refreshDiscovery());
-  toolbar.append(searchLabel,search,linkedLabel,refreshButton);
-  const count=document.createElement("p");count.className="discovery-result-count";count.dataset.discoveryCount="";count.setAttribute("aria-live","polite");
-  const layout=document.createElement("div");layout.className="discovery-layout";
-  const resultsPane=document.createElement("section");resultsPane.className="discovery-results-pane";resultsPane.setAttribute("aria-labelledby","discovery-results-heading");
-  const resultsHeading=document.createElement("h4");resultsHeading.id="discovery-results-heading";resultsHeading.textContent="Discovered devices";
-  const tableScroll=document.createElement("div");tableScroll.className="discovery-table-scroll";tableScroll.id="discovery-table-scroll";tableScroll.tabIndex=0;tableScroll.setAttribute("role","region");tableScroll.setAttribute("aria-label","Discovered devices results");
-  tableScroll.textContent="Loading discovered devices…";count.textContent="Loading discovery results…";
-  resultsPane.append(resultsHeading,count,tableScroll);
-  const selectedPane=document.createElement("section");selectedPane.id="discovery-device-panel";selectedPane.className="discovery-selected-pane";selectedPane.setAttribute("aria-labelledby","discovery-selected-heading");
-  layout.append(resultsPane,selectedPane);
-  candidates.className="discovery-workspace";candidates.replaceChildren(toolbar,layout);
-  root.replaceChildren(heading,description,scanControls,lastScan,message,candidates);
-  root.dataset.discoveryWorkspaceReady="true";
-}
-
-function discoveryStatusMessage(messageText) {
-  const target=document.querySelector("#discovery-message");if(target)target.textContent=messageText;
-}
-
-function safeDiscoveryError(error, sensitiveValues=[]) {
-  let message=String(error?.message||"Discovery request failed");
-  for(const value of sensitiveValues){if(value)message=message.split(String(value)).join("[redacted]");}
-  return message;
-}
-
-function safeDiscoveredEndpoint(value) {
-  try {
-    const url=new URL(value);
-    if(!["http:","https:"].includes(url.protocol)||!url.hostname)return "";
-    url.username="";url.password="";url.search="";url.hash="";
-    return url.toString();
-  } catch { return ""; }
-}
-
-function discoveryEndpointUrl(value) {
-  try {
-    const url=new URL(value);
-    if(!["http:","https:"].includes(url.protocol)||!url.hostname||url.username||url.password||url.search||url.hash)throw new Error();
-    return url.toString();
-  } catch { throw new Error("Use an HTTP(S) device endpoint without embedded credentials, a query string, or a fragment."); }
-}
-
-function renderDiscoveryResults() {
-  const scroll=document.querySelector("#discovery-table-scroll"),count=document.querySelector("[data-discovery-count]");
-  if(!scroll||!count)return;
-  const rows=window.NvrCameraDiscovery.visibleCandidates(cameraDiscoveryState);
-  const allUnlinked=cameraDiscoveryState.candidates.filter(candidate=>!candidate.linked_camera_id).length;
-  const allLinked=cameraDiscoveryState.candidates.length-allUnlinked;
-  count.textContent=cameraDiscoveryState.showLinked
-    ? `${rows.length} shown · ${allUnlinked} not added · ${allLinked} already added`
-    : `${rows.length} not-added device${rows.length===1?"":"s"} shown${allLinked?` · ${allLinked} added hidden`:""}`;
-  if(!rows.length){
-    const empty=document.createElement("p");empty.className="discovery-empty-state";
-    empty.textContent=cameraDiscoveryState.candidates.length
-      ? "No discovered devices match this search and filter."
-      : "No discovered devices yet. Start a VLAN scan or scan a private IPv4 range.";
-    scroll.replaceChildren(empty);return;
-  }
-  const table=document.createElement("table");table.className="discovery-table";table.setAttribute("aria-label","Discovered cameras");
-  const head=document.createElement("thead"),headRow=document.createElement("tr");
-  for(const label of ["Device","Address","Identity","State","Last seen"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;headRow.append(cell);}
-  head.append(headRow);table.append(head);
-  const body=document.createElement("tbody");
-  for(const candidate of rows){
-    const row=document.createElement("tr");row.classList.toggle("selected-discovery-candidate",candidate.id===cameraDiscoveryState.selectedCandidateId);
-    const nameCell=document.createElement("th");nameCell.scope="row";
-    const select=document.createElement("button");select.type="button";select.className="discovery-candidate-select";select.dataset.discoveryCandidateId=candidate.id;select.textContent=window.NvrCameraDiscovery.candidateLabel(candidate);select.setAttribute("aria-pressed",String(candidate.id===cameraDiscoveryState.selectedCandidateId));
-    select.addEventListener("click",()=>void selectDiscoveryCandidate(candidate.id));nameCell.append(select);row.append(nameCell);
-    const address=document.createElement("td");address.textContent=window.NvrCameraDiscovery.candidateAddress(candidate)||"Not reported";row.append(address);
-    const identity=document.createElement("td");identity.textContent=String(candidate.device_uuid||"").startsWith("ipscan:")?"Not advertised":candidate.device_uuid||"Not advertised";row.append(identity);
-    const state=document.createElement("td"),linked=window.NvrCameraDiscovery.linkedCamera(cameraDiscoveryState,candidate);
-    state.textContent=candidate.linked_camera_id?`Already added${linked?` · ${linked.name}`:""}`:candidate.add_in_progress?"Add in progress":"Not added";row.append(state);
-    const seen=document.createElement("td");seen.textContent=candidate.last_seen_at?formatDateTime(candidate.last_seen_at,true):"Unknown";row.append(seen);body.append(row);
-  }
-  table.append(body);scroll.replaceChildren(table);
-}
-
-function renderDiscoverySelection() {
-  const target=document.querySelector("#discovery-device-panel");if(!target)return;
-  const candidate=cameraDiscoveryState.candidates.find(item=>item.id===cameraDiscoveryState.selectedCandidateId)||discoverySelectedSnapshot;
-  if(!candidate){
-    discoveryRenderedCandidateId=null;
-    const empty=document.createElement("div");empty.className="discovery-selected-empty";
-    const heading=document.createElement("h4");heading.id="discovery-selected-heading";heading.textContent="Device setup";
-    const note=document.createElement("p");note.textContent="Select a discovered device to review its identity, load stream profiles, test the connection, or link it to an existing camera.";
-    empty.append(heading,note);target.replaceChildren(empty);return;
-  }
-  if(discoveryRenderedCandidateId!==candidate.id){
-    discoveryRenderedCandidateId=candidate.id;target.replaceChildren();
-    const heading=document.createElement("h4");heading.id="discovery-selected-heading";heading.textContent="Selected device";
-    const label=document.createElement("strong");label.className="discovery-selected-name";label.textContent=window.NvrCameraDiscovery.candidateLabel(candidate);
-    const address=document.createElement("p");address.className="discovery-selected-address";address.textContent=`Address · ${window.NvrCameraDiscovery.candidateAddress(candidate)||"Not reported"}`;
-    const identity=document.createElement("p");identity.className="discovery-selected-identity";identity.textContent=String(candidate.device_uuid||"").startsWith("ipscan:")?"ONVIF identity was not advertised. This result is tracked by an address-based fingerprint.":`ONVIF identity · ${candidate.device_uuid}`;
-    const state=document.createElement("p");state.className="discovery-candidate-state";state.dataset.discoveryCandidateState="";state.setAttribute("role","status");
-    const feedback=document.createElement("p");feedback.className="discovery-device-message";feedback.id="discovery-device-message";feedback.setAttribute("role","status");feedback.setAttribute("aria-live","polite");
-    target.append(heading,label,address,identity);
-    const endpoints=(candidate.service_urls||[]).map(safeDiscoveredEndpoint).filter(Boolean);
-    if(endpoints.length){
-      const endpointDetails=document.createElement("details"),endpointSummary=document.createElement("summary"),endpointList=document.createElement("ul");
-      endpointDetails.className="discovery-endpoint-details";endpointSummary.textContent=`${endpoints.length} advertised ONVIF endpoint${endpoints.length===1?"":"s"}`;
-      for(const endpoint of endpoints){const item=document.createElement("li");item.textContent=endpoint;endpointList.append(item);}
-      endpointDetails.append(endpointSummary,endpointList);target.append(endpointDetails);
-    }
-    const capabilities=candidate.capabilities&&typeof candidate.capabilities==="object"?Object.entries(candidate.capabilities):[];
-    if(capabilities.length){
-      const capabilityDetails=document.createElement("details"),capabilitySummary=document.createElement("summary"),list=document.createElement("ul");
-      capabilityDetails.className="discovery-capabilities";capabilitySummary.textContent="Reported capabilities";
-      for(const [name,value] of capabilities){const item=document.createElement("li");item.textContent=`${name.replaceAll("_"," ")} · ${String(value||"unknown")}`;list.append(item);}
-      capabilityDetails.append(capabilitySummary,list);target.append(capabilityDetails);
-    }
-    target.append(state,feedback);
-    const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
-    if(!current){state.textContent="This device is no longer in the current discovery results. Refresh the results before continuing.";updateDiscoverySelectedStatus(candidate);return;}
-    if(current.linked_camera_id){
-      const linked=window.NvrCameraDiscovery.linkedCamera(cameraDiscoveryState,current);
-      state.textContent=linked?`Already added as ${linked.name}. Duplicate addition is disabled.`:"Already linked to an existing camera. Duplicate addition is disabled.";
-      if(linked){const open=document.createElement("button");open.type="button";open.className="discovery-open-camera";open.dataset.discoveryOpenExisting="";open.textContent="Open existing camera";open.onclick=()=>void inspectCameraFromStatus(linked.id);target.append(open);}
-      return;
-    }
-    target.append(buildDiscoveryCandidateSetup(current));
-  }
-  updateDiscoverySelectedStatus(cameraDiscoveryState.candidates.find(item=>item.id===candidate.id)||candidate);
-}
-
-function updateDiscoverySelectedStatus(candidate) {
-  const state=document.querySelector("[data-discovery-candidate-state]");if(!state)return;
-  const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
-  const linked=current&&window.NvrCameraDiscovery.linkedCamera(cameraDiscoveryState,current);
-  if(!current){state.textContent="This device is no longer in the current discovery results. Its draft is kept here but cannot be submitted.";}
-  else if(current.linked_camera_id){state.textContent=linked?`Already added as ${linked.name}. Your current draft is preserved, but duplicate addition is disabled.`:"Already linked to an existing camera. Your current draft is preserved, but duplicate addition is disabled.";}
-  else if(current.add_in_progress)state.textContent="Another request is testing or adding this device. Wait for it to finish before retrying.";
-  else state.textContent=`First seen ${current.first_seen_at?formatDateTime(current.first_seen_at):"unknown"} · Last seen ${current.last_seen_at?formatDateTime(current.last_seen_at):"unknown"}. Testing must pass before the camera is added.`;
-  let open= document.querySelector("#discovery-device-panel [data-discovery-open-existing]");
-  if(linked&&!open){open=document.createElement("button");open.type="button";open.className="discovery-open-camera";open.dataset.discoveryOpenExisting="";open.textContent="Open existing camera";state.after(open);}
-  if(linked&&open)open.onclick=()=>void inspectCameraFromStatus(linked.id);
-  else open?.remove();
-  const unavailable=!current||Boolean(current.linked_camera_id)||Boolean(current.add_in_progress);
-  for(const button of document.querySelectorAll("#discovery-device-panel [data-discovery-submit]"))button.disabled=unavailable;
-}
-
-function discoveryField(labelText,control) {
-  const label=document.createElement("label");label.textContent=labelText;label.append(control);return label;
-}
-
-function buildDiscoveryCandidateSetup(candidate) {
-  const setup=document.createElement("fieldset");setup.className="discovery-candidate-setup";setup.dataset.configSection="discovery-candidate-setup";
-  const legend=document.createElement("legend");legend.textContent="Test and add this camera";setup.append(legend);
-  const name=document.createElement("input");name.maxLength=120;name.required=true;name.autocomplete="off";name.value=window.NvrCameraDiscovery.candidateLabel(candidate);name.dataset.discoveryField="name";
-  setup.append(discoveryField("Camera name",name));
-  const address=document.createElement("input");address.inputMode="decimal";address.autocomplete="off";address.required=true;address.value=window.NvrCameraDiscovery.candidateAddress(candidate);address.dataset.discoveryField="address";
-  setup.append(discoveryField("Camera IPv4 address",address));
-  const serviceUrl=(candidate.service_urls||[]).map(safeDiscoveredEndpoint).find(Boolean)||"";
-  const port=document.createElement("input");port.type="number";port.min="1";port.max="65535";port.value=(()=>{try{return new URL(serviceUrl).port|| (new URL(serviceUrl).protocol==="https:"?"443":"80");}catch{return "80";}})();port.dataset.discoveryField="port";
-  setup.append(discoveryField("ONVIF port",port));
-  const brand=document.createElement("select");brand.dataset.discoveryField="brand";
-  for(const [value,label] of [["auto","Auto-detect / ONVIF"],["acti","ACTi"],["axis","Axis"],["bosch","Bosch"],["dahua","Dahua"],["hanwha","Hanwha"],["hikvision","Hikvision"],["reolink","Reolink"],["samsung","Samsung"],["uniview","Uniview"],["other","Other / generic ONVIF"]])brand.append(new Option(label,value));
-  setup.append(discoveryField("Camera brand",brand));
-  const username=document.createElement("input");username.autocomplete="off";username.dataset.discoveryField="username";
-  setup.append(discoveryField("Camera username (optional)",username));
-  const password=document.createElement("input");password.type="password";password.autocomplete="new-password";password.dataset.discoveryField="password";
-  setup.append(discoveryField("Camera password (optional)",password));
-  const confirm=document.createElement("input");confirm.type="password";confirm.autocomplete="new-password";confirm.dataset.discoveryField="password-confirm";
-  setup.append(discoveryField("Confirm camera password",confirm));
-  const endpoint=document.createElement("input");endpoint.type="url";endpoint.autocomplete="off";endpoint.value=serviceUrl;endpoint.dataset.discoveryField="endpoint";
-  setup.append(discoveryField("ONVIF device endpoint URL",endpoint));
-  const profiles=document.createElement("select");profiles.dataset.discoveryField="profile";profiles.append(new Option("Load stream profiles first",""));
-  const substream=document.createElement("select");substream.dataset.discoveryField="substream";substream.append(new Option("Use main stream for live view",""));
-  const loadProfiles=document.createElement("button");loadProfiles.type="button";loadProfiles.textContent="Load stream profiles";
-  const profileMessage=document.createElement("p");profileMessage.className="discovery-profile-message";profileMessage.setAttribute("role","status");
-  endpoint.addEventListener("input",()=>{profiles.replaceChildren(new Option("Load stream profiles first",""));substream.replaceChildren(new Option("Use main stream for live view",""));});
-  loadProfiles.addEventListener("click",async()=>{
-    const selectionGeneration=discoverySelectionGeneration;
-    loadProfiles.disabled=true;profileMessage.textContent="Loading advertised stream profiles…";
-    try {
-      if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
-      const portNumber=Number(port.value);if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535)throw new Error("Enter a valid camera ONVIF port");
-      const device_service_url=discoveryEndpointUrl(endpoint.value.trim()||`http://${address.value.trim()}:${portNumber}/onvif/device_service`);
-      const result=await api("/api/cameras/onvif-profiles",{method:"POST",body:JSON.stringify({camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,camera_brand:brand.value,device_service_url})});
-      if(selectionGeneration!==discoverySelectionGeneration||cameraDiscoveryState.selectedCandidateId!==candidate.id)return;
-      endpoint.value=discoveryEndpointUrl(result.device_service_url||device_service_url);
-      profiles.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
-      if(result.profiles.length>1)profiles.prepend(new Option("Select a main stream",""));
-      substream.replaceChildren(new Option("Use main stream for live view",""),...result.profiles.map(profile=>new Option(profile.name,profile.token)));
-      profileMessage.textContent=result.profiles.length?`Found ${result.profiles.length} stream profile(s).`:"The camera did not advertise a stream profile.";
-    } catch(error) {
-      if(selectionGeneration===discoverySelectionGeneration)profileMessage.textContent=safeDiscoveryError(error,[username.value,password.value,confirm.value]);
-    } finally {loadProfiles.disabled=false;}
+function ensureCameraGroupWorkspace(){
+  if(cameraGroupWorkspace)return cameraGroupWorkspace;
+  cameraGroupWorkspace=window.NvrCameraGroups.mountWorkspace(document.querySelector("#bulk-admin"),{
+    api,
+    refreshApp:refresh,
+    getRole:()=>currentRole,
+    getCameras:()=>latestCameras,
+    setSidebarGroups:groups=>{sidebarGroups=groups;},
+    clearConfigDraft,
+    markConfigDraftElement,
+    askCameraDirtyDecision,
+    renderScheduleEditor,
+    readScheduleEditor,
+    renderZoneEditor,
+    readZoneEditor,
+    loadRepresentativeZoneFrame,
+    addScheduleInterval,
   });
-  setup.append(loadProfiles,discoveryField("Main stream profile",profiles),discoveryField("Live substream profile (optional)",substream),profileMessage);
-  const add=document.createElement("button");add.type="button";add.className="primary";add.textContent="Test connection and add camera";add.dataset.discoverySubmit="";
-  add.addEventListener("click",async()=>{
-    const selectionGeneration=discoverySelectionGeneration;
-    const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
-    if(!current||current.linked_camera_id||current.add_in_progress) {updateDiscoverySelectedStatus(candidate);return;}
-    if(discoveryAddPendingIds.has(candidate.id))return;
-    const sensitive=[username.value,password.value,confirm.value];
-    let submitted=false;
-    try {
-      if(!name.value.trim())throw new Error("Enter a camera name");
-      if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
-      if(!profiles.value)throw new Error("Load stream profiles and select a main stream first");
-      const portNumber=Number(port.value);if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535)throw new Error("Enter a valid camera ONVIF port");
-      const device_service_url=discoveryEndpointUrl(endpoint.value.trim()||`http://${address.value.trim()}:${portNumber}/onvif/device_service`);
-      discoveryAddPendingIds.add(candidate.id);add.disabled=true;add.textContent="Testing camera connection…";
-      profileMessage.textContent="The stream is being tested. Recording will remain disabled.";
-      submitted=true;
-      const camera=await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/add`,{method:"POST",body:JSON.stringify({name:name.value.trim(),camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,camera_brand:brand.value,onvif_profile_token:profiles.value,live_substream_profile_token:substream.value||null,device_service_url,motion_username:username.value||null,motion_password:password.value||null,recording_mode:"motion",recording_enabled:false})});
-      if(selectionGeneration===discoverySelectionGeneration&&cameraDiscoveryState.selectedCandidateId===candidate.id){clearConfigDraft(setup);cameraDiscoveryState.selectedCandidateId=null;discoverySelectedSnapshot=null;discoveryRenderedCandidateId=null;}
-      discoveryStatusMessage(`${camera.name} was added after its connection test. Recording is disabled; review its recording settings before enabling it.`);
-      await refresh();
-      const statusMessage=document.querySelector("#discovery-message");if(statusMessage){statusMessage.tabIndex=-1;statusMessage.focus();}
-    } catch(error) {
-      if(selectionGeneration===discoverySelectionGeneration)profileMessage.textContent=safeDiscoveryError(error,sensitive);
-      if(submitted)await refreshDiscovery();
-    } finally {discoveryAddPendingIds.delete(candidate.id);add.disabled=false;add.textContent="Test connection and add camera";}
-  });
-  setup.append(add);
-  if(cameraDiscoveryState.cameras.length){
-    const linkFieldset=document.createElement("fieldset");linkFieldset.className="discovery-link-existing";linkFieldset.dataset.configSection="discovery-candidate-setup";
-    const linkLegend=document.createElement("legend");linkLegend.textContent="Link to an existing camera";linkFieldset.append(linkLegend);
-    const existing=document.createElement("select");existing.dataset.discoveryField="existing-camera";
-    for(const camera of cameraDiscoveryState.cameras){const option=new Option(`${camera.name}${camera.archived_at?" · Archived":""}`,camera.id);existing.append(option);}
-    linkFieldset.append(discoveryField("Existing camera",existing));
-    const link=document.createElement("button");link.type="button";link.textContent="Link identity to selected camera";link.dataset.discoverySubmit="";
-    link.addEventListener("click",async()=>{
-      const selectionGeneration=discoverySelectionGeneration;
-      const current=cameraDiscoveryState.candidates.find(item=>item.id===candidate.id);
-      if(!current||current.linked_camera_id||current.add_in_progress){updateDiscoverySelectedStatus(candidate);return;}
-      if(!guardDraftsIn(document.querySelector("#discovery-device-panel")))return;
-      link.disabled=true;link.textContent="Linking device identity…";
-      try {
-        await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}/link`,{method:"POST",body:JSON.stringify({camera_id:existing.value})});
-        clearConfigDraft(linkFieldset);
-        if(selectionGeneration===discoverySelectionGeneration)discoveryStatusMessage("Discovered identity linked to the existing camera. Camera ID and recording history were preserved.");
-        await refresh();
-        requestAnimationFrame(()=>document.querySelector("#discovery-device-panel [data-discovery-open-existing]")?.focus());
-      } catch(error) {if(selectionGeneration===discoverySelectionGeneration)profileMessage.textContent=safeDiscoveryError(error);await refreshDiscovery();}
-      finally {link.disabled=false;link.textContent="Link identity to selected camera";}
-    });
-    linkFieldset.append(link);setup.append(linkFieldset);
-  }
-  return setup;
+  return cameraGroupWorkspace;
 }
-
-async function selectDiscoveryCandidate(candidateId) {
-  if(candidateId===cameraDiscoveryState.selectedCandidateId)return;
-  const panel=document.querySelector("#discovery-device-panel");
-  if(panel&&!guardDraftsIn(panel)){renderDiscoveryResults();requestAnimationFrame(()=>document.querySelector(`#discovery-table-scroll [data-discovery-candidate-id="${CSS.escape(candidateId)}"]`)?.focus());return;}
-  if(!window.NvrCameraDiscovery.selectCandidate(cameraDiscoveryState,candidateId))return;
-  discoverySelectionGeneration+=1;discoverySelectedSnapshot=cameraDiscoveryState.candidates.find(candidate=>candidate.id===candidateId)||null;
-  discoveryRenderedCandidateId=null;renderDiscoveryResults();renderDiscoverySelection();
-  requestAnimationFrame(()=>document.querySelector(`#discovery-table-scroll [data-discovery-candidate-id="${CSS.escape(candidateId)}"]`)?.focus());
-}
-
-async function runDiscoveryScan(ip_range=null,requestedTimeout=null) {
-  if(discoveryScanPending)return;
-  const rangeInput=document.querySelector("#discovery-ip-range"),timeoutInput=document.querySelector("#discovery-timeout");
-  const vlanButton=document.querySelector("#discover-cameras"),rangeButton=document.querySelector("#discover-ip-range"),retryButton=document.querySelector("#discovery-retry-scan");
-  const range=ip_range===null?null:String(ip_range).trim();
-  if(ip_range!==null&&!range){rangeInput?.focus();discoveryStatusMessage("Enter a private IPv4 CIDR range, such as 192.168.1.0/24.");return;}
-  const timeoutSeconds=requestedTimeout??Number(timeoutInput?.value||5);
-  discoveryLastScanRequest={ip_range:range,timeout_seconds:timeoutSeconds};
-  discoveryScanPending=true;window.NvrCameraDiscovery.beginRefresh(cameraDiscoveryState);
-  for(const button of [vlanButton,rangeButton,retryButton])if(button)button.disabled=true;
-  if(vlanButton)vlanButton.textContent=range?"Scan camera VLAN":"Scanning camera VLAN…";
-  if(rangeButton)rangeButton.textContent=range?"Scanning private range…":"Scan private range";
-  discoveryStatusMessage(range?`Scanning ${range} with bounded unicast ONVIF probes…`:"Scanning the camera VLAN for ONVIF devices…");
-  try {
-    const body={timeout_seconds:timeoutSeconds};if(range)body.ip_range=range;
-    const result=await api("/api/discovery/scan",{method:"POST",body:JSON.stringify(body)});
-    const when=formatDateTime(new Date());
-    const targetText=range?`${result.targets_scanned} address(es) checked`:"camera VLAN scanned";
-    discoveryLastScanText=`Last scan · ${range||"camera VLAN"} · ${targetText} · ${result.discovered_count} device(s) found · ${when}`;
-    const lastScan=document.querySelector("#discovery-last-scan");if(lastScan)lastScan.textContent=discoveryLastScanText;
-    const partial=(result.partial_failures||[]).join(" ");
-    discoveryStatusMessage(`Scan complete: ${result.discovered_count} device(s) found. ${partial}`.trim());
-    if(retryButton)retryButton.classList.add("hidden");
-    await refreshDiscovery();
-  } catch(error) {
-    discoveryStatusMessage(`Scan failed. ${safeDiscoveryError(error)} The scan controls are ready to retry.`);
-    if(retryButton){retryButton.classList.remove("hidden");retryButton.disabled=false;}
-  } finally {
-    discoveryScanPending=false;
-    if(vlanButton){vlanButton.disabled=false;vlanButton.textContent="Scan camera VLAN";}
-    if(rangeButton){rangeButton.disabled=false;rangeButton.textContent="Scan private range";}
-    if(retryButton)retryButton.disabled=false;
-  }
-}
-
+function setupGroupPolicyWorkspace(){return ensureCameraGroupWorkspace();}
+function renderGroupManagement(groups){return cameraGroupWorkspace?.render(groups);}
+async function guardGroupDrafts(){return ensureCameraGroupWorkspace()?.guardDrafts()??true;}
+async function refreshGroups(){return ensureCameraGroupWorkspace()?.refresh();}
 async function refreshDiscovery() {
-  ensureDiscoveryWorkspace();
-  const generation=window.NvrCameraDiscovery.beginRefresh(cameraDiscoveryState);
-  try {
-    const [{candidates},inventory]=await Promise.all([api("/api/discovery/candidates"),api("/api/cameras")]);
-    if(!window.NvrCameraDiscovery.isCurrentRefresh(cameraDiscoveryState,generation))return;
-    const previousId=cameraDiscoveryState.selectedCandidateId;
-    const previousCandidate=cameraDiscoveryState.candidates.find(candidate=>candidate.id===previousId)||discoverySelectedSnapshot;
-    const selectionMissing=previousId&&!candidates.some(candidate=>candidate.id===previousId);
-    const panel=document.querySelector("#discovery-device-panel");
-    const updatedCandidate=candidates.find(candidate=>candidate.id===previousId);
-    const statusChanged=previousCandidate&&updatedCandidate&&(previousCandidate.linked_camera_id!==updatedCandidate.linked_camera_id||previousCandidate.add_in_progress!==updatedCandidate.add_in_progress);
-    if(selectionMissing&&panel?.querySelector('[data-config-dirty="true"]')&&!guardDraftsIn(panel)){
-      cameraDiscoveryState.candidates=[...candidates];cameraDiscoveryState.cameras=[...inventory.cameras];discoverySelectedSnapshot=previousCandidate;
-      renderDiscoveryResults();renderDiscoverySelection();return;
-    }
-    window.NvrCameraDiscovery.replaceResults(cameraDiscoveryState,candidates,inventory.cameras);
-    discoveryResultsLoaded=true;
-    if(statusChanged&&!panel?.querySelector('[data-config-dirty="true"]'))discoveryRenderedCandidateId=null;
-    discoverySelectedSnapshot=cameraDiscoveryState.candidates.find(candidate=>candidate.id===cameraDiscoveryState.selectedCandidateId)||null;
-    renderDiscoveryResults();renderDiscoverySelection();
-  } catch(error) {
-    if(!window.NvrCameraDiscovery.isCurrentRefresh(cameraDiscoveryState,generation))return;
-    discoveryStatusMessage(`Could not refresh discovered devices. ${safeDiscoveryError(error)}`);
-    if(!discoveryResultsLoaded){
-      const count=document.querySelector("[data-discovery-count]"),scroll=document.querySelector("#discovery-table-scroll");
-      if(count)count.textContent="Discovery results unavailable";
-      if(scroll){const unavailable=document.createElement("p");unavailable.className="discovery-empty-state";unavailable.textContent="The candidate list could not be loaded. Use Refresh results to retry.";scroll.replaceChildren(unavailable);}
-    }
+  if (!cameraDiscoveryWorkspace) {
+    cameraDiscoveryWorkspace = window.NvrCameraDiscovery.mountWorkspace(document.querySelector("#discovery-admin"), {
+      api,
+      refreshApp: refresh,
+      formatDateTime,
+      guardDraftsIn,
+      clearConfigDraft,
+      inspectCameraFromStatus,
+    });
   }
+  return cameraDiscoveryWorkspace?.refresh();
 }
 async function refreshSessions() {
   const target = document.querySelector("#sessions-list");
@@ -3287,40 +2607,25 @@ async function refreshSessions() {
   }));
   if (!sessions.length) target.textContent="No active sessions.";
 }
-function refreshCameraBulkToolbar(){
-  const toolbar=document.querySelector("#camera-bulk-toolbar"),summary=document.querySelector("#camera-bulk-summary"),bulkUpdate=document.querySelector('[data-config-section="bulk-update"]');
-  if(!toolbar||!summary)return;
-  const admin=currentRole==="administrator";
-  const counts=window.NvrCameraBulkActions.selectionCounts(cameraBulkSelection,latestCameras,cameraBulkVisibleIds);
-  const hasSelection=admin&&counts.selected>0;
-  toolbar.hidden=!hasSelection;
-  if(hasSelection)summary.textContent=`${counts.selected} selected · ${counts.hidden} hidden by filters${counts.unavailable?` · ${counts.unavailable} no longer in inventory`:""}`;
-  const selectMatching=document.querySelector("#camera-bulk-select-matching"),clear=document.querySelector("#camera-bulk-clear-selection");
-  const allVisibleSelected=cameraBulkVisibleIds.length>0&&cameraBulkVisibleIds.every(id=>cameraBulkSelection.has(id));
-  if(selectMatching){selectMatching.textContent=`Select all ${cameraBulkVisibleIds.length} matching cameras`;selectMatching.disabled=!admin||cameraBulkOperationInProgress||!cameraBulkVisibleIds.length||allVisibleSelected;}
-  if(clear)clear.disabled=cameraBulkOperationInProgress||counts.selected===0;
-  if(bulkUpdate){bulkUpdate.hidden=!hasSelection;bulkUpdate.disabled=cameraBulkOperationInProgress;const button=bulkUpdate.querySelector("#apply-bulk");if(button)button.disabled=!hasSelection||cameraBulkOperationInProgress;}
-  for(const selector of ["#bulk-group","#bulk-recording-mode","#bulk-recording-enabled"]){const input=document.querySelector(selector);if(input)input.disabled=cameraBulkOperationInProgress;}
-
-  const status=document.querySelector("#camera-bulk-operation-status"),statusText=document.querySelector("#camera-bulk-operation-summary");
-  if(!status||!statusText)return;
-  const hasOperation=Boolean(cameraBulkReview&&(cameraBulkOperationInProgress||cameraBulkResults.length));
-  status.hidden=!hasOperation;
-  if(!hasOperation)return;
-  const totals=cameraBulkResults.reduce((counts,result)=>{counts[result.status]=(counts[result.status]||0)+1;return counts;},{});
-  const success=totals.success||0,failed=totals.failed||0,unknown=totals.unknown||0,pending=totals.pending||0;
-  if(cameraBulkOperationInProgress)statusText.textContent=`Bulk update running for ${cameraBulkReview.cameraIds.length} reviewed camera(s); ${pending} outcome(s) are waiting. Closing this panel will not cancel the update.`;
-  else statusText.textContent=`Bulk update finished: ${success} succeeded, ${failed} failed, ${unknown} need verification.`;
+function setupCameraBulkWorkspace(root){
+  if(cameraBulkWorkspace)return cameraBulkWorkspace;
+  cameraBulkWorkspace=window.NvrCameraBulkActions.mountWorkspace(root,{
+    api,
+    getCameras:()=>latestCameras,
+    setCameras:cameras=>{latestCameras=cameras;sidebarCameras=cameras;},
+    getRole:()=>currentRole,
+    renderCameras,
+    renderSidebar,
+    clearConfigDraft,
+  });
+  return cameraBulkWorkspace;
 }
-function resetCameraBulkSession(){
-  cameraBulkSession+=1;cameraBulkSelection.clear();cameraBulkVisibleIds=[];cameraBulkReview=null;cameraBulkResults=[];cameraBulkOperationInProgress=false;
-  if(cameraBulkStatusDialog?.open)cameraBulkStatusDialog.close();
-  cameraBulkStatusDialog=null;refreshCameraBulkToolbar();
-}
+function refreshCameraBulkToolbar(){return cameraBulkWorkspace?.refreshToolbar();}
+function resetCameraBulkSession(){return cameraBulkWorkspace?.resetSession();}
 function renderCameraInventoryTable(cameras) {
   const target=document.querySelector("#camera-inventory-table");
   if(!target)return;
-  cameraBulkVisibleIds=cameras.map(camera=>String(camera.id));
+  cameraBulkWorkspace?.setVisibleIds(cameras.map(camera=>String(camera.id)));
   target.replaceChildren();
   if(!cameras.length){const empty=document.createElement("p");empty.setAttribute("role","status");empty.textContent=latestCameras.length?"No cameras match these filters.":cameraInventoryLoadState==="loading"?"Loading camera inventory…":cameraInventoryLoadState==="error"?"Camera inventory is unavailable. Retry the inventory refresh.":"No cameras have been added.";target.append(empty);refreshCameraBulkToolbar();return;}
 
@@ -3347,7 +2652,7 @@ function renderCameraInventoryTable(cameras) {
   for(const camera of cameras){
     const row=document.createElement("tr");row.dataset.cameraId=camera.id;row.classList.toggle("selected-camera",camera.id===selectedCameraId);row.tabIndex=0;
     if(currentRole==="administrator"){
-      const selectCell=document.createElement("td"),checkbox=document.createElement("input");selectCell.className="camera-select-column";checkbox.type="checkbox";checkbox.dataset.cameraSelect="true";checkbox.value=camera.id;checkbox.checked=cameraBulkSelection.has(camera.id);checkbox.setAttribute("aria-label",`Select ${camera.name} for bulk changes`);checkbox.disabled=cameraBulkOperationInProgress;checkbox.addEventListener("change",()=>{if(checkbox.checked)cameraBulkSelection.add(camera.id);else cameraBulkSelection.delete(camera.id);refreshCameraBulkToolbar();});selectCell.append(checkbox);row.append(selectCell);
+      const selectCell=document.createElement("td"),checkbox=document.createElement("input");selectCell.className="camera-select-column";checkbox.type="checkbox";checkbox.dataset.cameraSelect="true";checkbox.value=camera.id;checkbox.checked=cameraBulkWorkspace?.isSelected(camera.id) || false;checkbox.setAttribute("aria-label",`Select ${camera.name} for bulk changes`);checkbox.disabled=cameraBulkWorkspace?.isBusy() || false;checkbox.addEventListener("change",()=>cameraBulkWorkspace?.toggleSelection(camera.id,checkbox.checked));selectCell.append(checkbox);row.append(selectCell);
     }
     const nameCell=document.createElement("td"),name=document.createElement("button");name.type="button";name.textContent=camera.archived_at?`${camera.name} · Archived`:camera.name;name.dataset.cameraId=camera.id;name.setAttribute("aria-pressed",String(camera.id===selectedCameraId));name.addEventListener("click",()=>void selectCamera(camera.id));nameCell.append(name);row.append(nameCell);
     const addCell=value=>{const cell=document.createElement("td");cell.textContent=value;row.append(cell);};
@@ -3423,377 +2728,23 @@ function renderCameras(cameras) {
     }
   }else list.querySelector(".filtered-camera-notice")?.remove();
   if(preserveDirtyEditor)return;
-  list.append(...[selectedCamera].map(camera => {
-    const card = document.createElement("article");
-    card.classList.toggle("selected-camera",camera.id===selectedCameraId);
-    const title = document.createElement("h3"); title.textContent = camera.name;
-    if(camera.archived_at)title.textContent+=` · Archived ${formatDateTime(camera.archived_at)}`;
-    const summary = document.createElement("p");
-    const previewSlot=document.createElement("div");previewSlot.dataset.cameraPreviewSlot="";
-    const video = camera.video || {};
-    const effectiveMode=camera.effective_recording_mode || camera.recording_mode;
-    const policyLabel=camera.recording_policy_source === "group" ? "group schedule" : camera.schedule_timezone ? "camera schedule" : "camera policy";
-    const healthSummary=camera.recording_health||{};
-    summary.textContent = (camera.group_name ? camera.group_name + " · " : "") + "storage " + (camera.storage_volume_id||"default") + " · " + (camera.recording_enabled ? "recording enabled" : "recording disabled") + " · effective " + effectiveMode + " (" + policyLabel + ") · " + camera.recording_status + " · coverage " + (healthSummary.state||"unknown") + (healthSummary.detail ? " — " + healthSummary.detail : "") + (healthSummary.last_video_at ? " · video seen " + healthSummary.last_video_at : "") + (healthSummary.last_footage_write_at ? " · footage written " + healthSummary.last_footage_write_at : "") + (camera.recording_mode === "motion" ? " · event source " + camera.motion_source_status + " · server fallback " + (camera.motion_fallback_enabled ? camera.server_motion_status : "disabled") : "") + " · audio " + (camera.audio_status||"unknown") + " · " + (video.codec || "unknown codec") + (video.width && video.height ? " " + video.width + "×" + video.height : "");
-    const retentionSummary=camera.retention_coverage||{};
-    summary.textContent += ` · retention ${camera.retention_days} days (${camera.retention_policy_source||"default"}; ${retentionSummary.achieved_days||0} days achieved` + (retentionSummary.projected_days_at_current_activity == null ? ")" : `; ${retentionSummary.projected_days_at_current_activity} days projected at current activity)`);
-    card.append(title, summary, previewSlot);
-    card.dataset.cameraId=camera.id;
-    if(currentRole === "administrator"&&camera.id===selectedCameraId) {
-      const editor=document.createElement("details"),editorHeading=document.createElement("summary");
-      editor.dataset.configSection="camera-details";
-      editor.dataset.cameraTab="general-connection";
-      editorHeading.textContent="Edit camera details";
-      const nameLabel=document.createElement("label"),nameInput=document.createElement("input");
-      nameLabel.textContent="Camera name ";nameInput.type="text";nameInput.maxLength=120;nameInput.required=true;nameInput.value=camera.name;nameLabel.append(nameInput);
-      const saveDetails=document.createElement("button");saveDetails.type="button";saveDetails.textContent="Save camera details";
-      saveDetails.dataset.configSaves="camera-details";
-      editor.cameraSaveConfig=async()=>{await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PATCH",body:JSON.stringify({name:nameInput.value})});};
-      saveDetails.addEventListener("click",()=>void saveCameraScopes([editor],{refreshAfter:true}));
-      editor.append(editorHeading,nameLabel,saveDetails);card.append(editor);
-      const sourcePanel=document.createElement("fieldset"),sourceLegend=document.createElement("legend");sourcePanel.dataset.configSection="camera-source";sourceLegend.textContent="Video source and advertised ONVIF profiles";sourcePanel.append(sourceLegend);
-      const addressLabel=document.createElement("label"),address=document.createElement("input");addressLabel.textContent="Camera IP address ";address.inputMode="numeric";address.autocomplete="off";address.value=camera.camera_ip||"";addressLabel.append(address);
-      const directLabel=document.createElement("label"),directUrl=document.createElement("input");directLabel.textContent="Direct RTSP URL (use when not selecting by IP) ";directUrl.type="url";directUrl.autocomplete="off";directUrl.placeholder="rtsp://camera.example/stream";directLabel.append(directUrl);
-      const usernameLabel=document.createElement("label"),username=document.createElement("input");usernameLabel.textContent="Camera username (leave blank to keep current credentials) ";username.autocomplete="off";usernameLabel.append(username);
-      const passwordLabel=document.createElement("label"),password=document.createElement("input");passwordLabel.textContent="Camera password (leave blank to keep current credentials) ";password.type="password";password.autocomplete="new-password";passwordLabel.append(password);
-      const confirmLabel=document.createElement("label"),confirm=document.createElement("input");confirmLabel.textContent="Confirm new camera password ";confirm.type="password";confirm.autocomplete="new-password";confirmLabel.append(confirm);
-      const clearLabel=document.createElement("label"),clearCredentials=document.createElement("input");clearCredentials.type="checkbox";clearLabel.append(clearCredentials,document.createTextNode(" Clear saved camera credentials"));
-      const brandLabel=document.createElement("label"),brand=document.createElement("select");brandLabel.textContent="Device type / brand ";
-      for(const [value,label] of [["auto","Auto-detect / ONVIF"],["acti","ACTi"],["axis","Axis"],["bosch","Bosch"],["dahua","Dahua"],["hanwha","Hanwha"],["hikvision","Hikvision"],["reolink","Reolink"],["samsung","Samsung"],["uniview","Uniview"],["other","Other / generic ONVIF"]])brand.add(new Option(label,value));
-      brand.value=camera.camera_brand||"auto";brandLabel.append(brand);
-      const serviceLabel=document.createElement("label"),service=document.createElement("input");serviceLabel.textContent="ONVIF device-service URL (optional custom path) ";service.type="url";service.autocomplete="off";service.value=camera.device_service_url||"";service.placeholder="http://camera/onvif/device_service";serviceLabel.append(service);
-      const mainLabel=document.createElement("label"),mainProfile=document.createElement("select");mainLabel.textContent="Main stream profile ";mainProfile.append(new Option(camera.onvif_profile_token?`Saved profile · ${camera.onvif_profile_token}`:"Load advertised profiles",camera.onvif_profile_token||""));mainLabel.append(mainProfile);
-      const subLabel=document.createElement("label"),subProfile=document.createElement("select");subLabel.textContent="Optional lower-resolution live grid profile ";subProfile.append(new Option("Use main stream for grid scaled by server",""));if(camera.live_substream_profile_token)subProfile.add(new Option(`Saved profile · ${camera.live_substream_profile_token}`,camera.live_substream_profile_token));subLabel.append(subProfile);
-      const sourceMessage=document.createElement("p");sourceMessage.setAttribute("role","status");
-      const loadProfiles=document.createElement("button");loadProfiles.type="button";loadProfiles.textContent="Load advertised endpoints";
-      const loadCameraProfilesForEditor=async()=>{
-        try{
-          if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
-          const selection=cameraEditorState.captureSelection();
-          const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source/profiles`,{method:"POST",body:JSON.stringify({camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,camera_brand:brand.value,device_service_url:service.value||null,clear_credentials:clearCredentials.checked})});
-          if(!cameraEditorState.isCurrent(selection))return;
-          mainProfile.replaceChildren(...result.profiles.map(profile=>new Option(profile.name,profile.token)));
-          if(result.profiles.length>1)mainProfile.prepend(new Option("Select main stream profile",""));
-          subProfile.replaceChildren(new Option("Use main stream for grid scaled by server",""),...result.profiles.map(profile=>new Option(profile.name,profile.token)));
-          mainProfile.value=camera.onvif_profile_token||result.profiles[0]?.token||"";subProfile.value=camera.live_substream_profile_token||"";service.value=result.device_service_url;
-          sourceMessage.textContent=`Found ${result.profiles.length} advertised ONVIF profile(s).`;
-        }catch(error){sourceMessage.textContent=error.message;}
-      };
-      sourcePanel.cameraLoadProfiles=loadCameraProfilesForEditor;
-      loadProfiles.addEventListener("click",async()=>{
-        if(sourcePanel.dataset.configDirty==="true"){
-          if(!await guardCameraDrafts())return;
-          const current=document.querySelector(`#camera-list [data-config-section="camera-source"]`);
-          await current?.cameraLoadProfiles?.();
-        }else await loadCameraProfilesForEditor();
-      });
-      const buildSourcePayload=()=>{
-        if(password.value!==confirm.value)throw new Error("Camera passwords do not match");
-        const common={camera_brand:brand.value,device_service_url:service.value||null,clear_credentials:clearCredentials.checked};
-        if(address.value.trim()){
-          if(!mainProfile.value)throw new Error("Load advertised endpoints and select a main stream profile first");
-          return {...common,camera_ip:address.value.trim(),camera_username:username.value||null,camera_password:password.value||null,onvif_profile_token:mainProfile.value,live_substream_profile_token:subProfile.value||null};
-        }
-        if(!directUrl.value)throw new Error("Enter a camera IP address or a direct RTSP URL");
-        return {...common,stream_url:directUrl.value.trim()};
-      };
-      const testSource=document.createElement("button");testSource.type="button";testSource.textContent="Test source connection";
-      testSource.addEventListener("click",async()=>{
-        try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/source/test`,{method:"POST",body:JSON.stringify(buildSourcePayload())});sourceMessage.textContent=result.reachable?`Connection passed · ${result.video.codec} ${result.video.width||"?"}×${result.video.height||"?"}`:result.reason;}
-        catch(error){sourceMessage.textContent=error.message;}
-      });
-      const saveSource=document.createElement("button");saveSource.type="button";saveSource.textContent="Save tested source";
-      saveSource.dataset.configSaves="camera-source";
-      sourcePanel.cameraSaveConfig=async()=>{await api(`/api/cameras/${encodeURIComponent(camera.id)}/source`,{method:"PUT",body:JSON.stringify(buildSourcePayload())});};
-      saveSource.addEventListener("click",()=>void saveCameraScopes([sourcePanel],{refreshAfter:true}));
-      sourcePanel.append(addressLabel,directLabel,usernameLabel,passwordLabel,confirmLabel,clearLabel,brandLabel,serviceLabel,loadProfiles,mainLabel,subLabel,testSource,saveSource,sourceMessage);editor.append(sourcePanel);
-      const audioPanel=document.createElement("fieldset"),audioLegend=document.createElement("legend");audioPanel.dataset.configSection="camera-audio";audioLegend.textContent="Audio";audioPanel.append(audioLegend);
-      const audioLabel=document.createElement("label");audioLabel.textContent="Enable audio recording and operator listening ";
-      const audioEnabled=document.createElement("input");audioEnabled.type="checkbox";audioEnabled.checked=Boolean(camera.audio_enabled);audioEnabled.disabled=camera.audio_supported!==true;
-      audioLabel.append(audioEnabled);
-      const saveAudio=document.createElement("button");saveAudio.type="button";saveAudio.textContent="Apply audio setting";
-      saveAudio.dataset.configSaves="camera-audio";
-      audioPanel.cameraSaveConfig=async()=>{await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PATCH",body:JSON.stringify({audio_enabled:audioEnabled.checked})});};
-      saveAudio.addEventListener("click",()=>void saveCameraScopes([audioPanel],{refreshAfter:true}));
-      audioPanel.append(audioLabel,saveAudio);card.append(audioPanel);
-      if(camera.audio_supported==null) {
-        const probeAudio=document.createElement("button");probeAudio.type="button";probeAudio.textContent="Probe camera audio";
-        probeAudio.dataset.cameraTab="general-connection";
-        probeAudio.addEventListener("click",async()=>{const selection=cameraEditorState.captureSelection();try{const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/audio/probe`,{method:"POST"});if(!cameraEditorState.isCurrent(selection))return;document.querySelector("#camera-message").textContent=result.detail;await refresh();}catch(error){if(cameraEditorState.isCurrent(selection))document.querySelector("#camera-message").textContent=error.message;}});
-        card.append(probeAudio);
-      }
-    }
-    if(currentRole === "administrator") {
-      const retentionPanel=document.createElement("fieldset"),retentionLegend=document.createElement("legend");retentionPanel.dataset.configSection="camera-retention";retentionLegend.textContent="Retention";retentionPanel.append(retentionLegend);
-      const retentionLabel=document.createElement("label"); retentionLabel.textContent="Camera retention override (days)";
-      const retentionDays=document.createElement("input"); retentionDays.type="number"; retentionDays.min="1"; retentionDays.max="3650"; retentionDays.value=String(camera.retention_days||30);
-      const inheritRetentionLabel=document.createElement("label");inheritRetentionLabel.textContent="Inherit group or default retention ";const inheritRetentionValue=document.createElement("input");inheritRetentionValue.type="checkbox";inheritRetentionValue.checked=camera.retention_policy_source!=="camera";inheritRetentionLabel.append(inheritRetentionValue);
-      const saveRetention=document.createElement("button"); saveRetention.type="button"; saveRetention.textContent="Save camera retention";
-      saveRetention.dataset.configSaves="camera-retention";
-      const inheritRetention=document.createElement("button"); inheritRetention.type="button"; inheritRetention.textContent="Use inherited retention";
-      inheritRetention.addEventListener("click",()=>{inheritRetentionValue.checked=true;markConfigDraftElement(retentionPanel);});
-      retentionPanel.cameraApplyConfig=policy=>{retentionDays.value=String(policy.retention_days||30);inheritRetentionValue.checked=Boolean(policy.inherits_group);};
-      retentionPanel.cameraSaveConfig=async()=>{if(inheritRetentionValue.checked)await api(`/api/cameras/${encodeURIComponent(camera.id)}/retention`,{method:"DELETE"});else await api(`/api/cameras/${encodeURIComponent(camera.id)}/retention`,{method:"PUT",body:JSON.stringify({retention_days:Number(retentionDays.value)})});};
-      saveRetention.addEventListener("click",()=>void saveCameraScopes([retentionPanel],{refreshAfter:true}));
-      retentionPanel.append(retentionLabel,retentionDays,inheritRetentionLabel,saveRetention,inheritRetention);card.append(retentionPanel);
-    }
-    if (camera.last_error) { const note=document.createElement("p"); note.textContent=camera.last_error;note.dataset.cameraTab="health-history"; card.append(note); }
-    const button = document.createElement("button"); button.type="button"; button.textContent="Find recorded footage";
-    button.dataset.cameraTab="health-history";
-    button.addEventListener("click", () => loadSegments(camera)); card.append(button);
-    if (currentRole !== "administrator") {document.querySelector("#camera-health-history")?.classList.remove("hidden");cameraPreviewWorkspace.mount(previewSlot,camera);return card;}
-    const mode=document.createElement("select"); mode.setAttribute("aria-label",`Recording mode for ${camera.name}`);
-    const recordingPanel=document.createElement("fieldset"),recordingLegend=document.createElement("legend");recordingPanel.dataset.configSection="camera-recording-policy";recordingLegend.textContent="Recording policy";recordingPanel.append(recordingLegend);
-    const motionRollPanel=document.createElement("fieldset"),motionRollLegend=document.createElement("legend");motionRollPanel.dataset.configSection="camera-motion-roll";motionRollPanel.dataset.cameraSaveGroup="camera-motion";motionRollLegend.textContent="Motion clip timing";motionRollPanel.append(motionRollLegend);
-    for (const [value,label] of [["motion","Motion (ONVIF events)"],["continuous","Continuous"],["disabled","Disabled"]]) {
-      const option=document.createElement("option"); option.value=value; option.textContent=label; mode.append(option);
-    }
-    mode.value=camera.recording_mode;
-    const enabledLabel=document.createElement("label"); enabledLabel.textContent="Enable recording ";
-    const enabled=document.createElement("input"); enabled.type="checkbox"; enabled.checked=camera.recording_enabled;
-    enabledLabel.append(enabled);
-    const pre=document.createElement("input"); pre.type="number"; pre.min="0"; pre.max="120"; pre.value=camera.motion_pre_roll_seconds; pre.setAttribute("aria-label","Motion pre-roll seconds");
-    const post=document.createElement("input"); post.type="number"; post.min="1"; post.max="600"; post.value=camera.motion_post_roll_seconds; post.setAttribute("aria-label","Motion post-roll seconds");
-    const save=document.createElement("button"); save.type="button"; save.textContent="Apply recording policy";
-    save.dataset.configSaves="camera-recording-policy";
-    recordingPanel.cameraSaveConfig=async()=>{await api(`/api/cameras/${encodeURIComponent(camera.id)}`, { method:"PATCH", body:JSON.stringify({recording_mode:mode.value,recording_enabled:enabled.checked}) });};
-    save.addEventListener("click",()=>void saveCameraScopes([recordingPanel],{refreshAfter:true}));
-    const motionUrlLabel=document.createElement("label"); motionUrlLabel.textContent="ONVIF device service URL for motion events";
-    const motionUrl=document.createElement("input"); motionUrl.type="url"; motionUrl.autocomplete="off"; motionUrl.value=camera.device_service_url||"";motionUrl.placeholder="http://camera/onvif/device_service";
-    const motionUserLabel=document.createElement("label"); motionUserLabel.textContent="ONVIF username";
-    const motionUser=document.createElement("input"); motionUser.autocomplete="off";
-    const motionPassLabel=document.createElement("label"); motionPassLabel.textContent="ONVIF password";
-    const motionPass=document.createElement("input"); motionPass.type="password"; motionPass.autocomplete="new-password";
-    const fallbackLabel=document.createElement("label"); fallbackLabel.textContent="Use server motion detection when ONVIF events are unavailable ";
-    const fallback=document.createElement("input"); fallback.type="checkbox"; fallback.checked=camera.motion_fallback_enabled;
-    fallbackLabel.append(fallback);
-    const zonesLabel=document.createElement("label"); zonesLabel.textContent="Server motion zones (normalized rectangles; empty uses full frame)";
-    const zones=document.createElement("textarea"); zones.spellcheck=false; zones.value=JSON.stringify(camera.motion_zones||[]); zones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';
-    const zoneEditor=document.createElement("div");zoneEditor.setAttribute("aria-label","Visual server motion zones");renderZoneEditor(zoneEditor,camera.motion_zones||[]);loadRepresentativeZoneFrame(camera.id,zoneEditor);
-    const zonesAdvanced=document.createElement("details"),zonesSummary=document.createElement("summary");zonesSummary.textContent="Advanced motion zone JSON";zonesAdvanced.append(zonesSummary,zonesLabel,zones);
-    const sensitivityLabel=document.createElement("label"); sensitivityLabel.textContent="Server motion sensitivity (1–100)";
-    const sensitivity=document.createElement("input"); sensitivity.type="number"; sensitivity.min="1"; sensitivity.max="100"; sensitivity.value=camera.motion_sensitivity||50;
-    const configureMotion=document.createElement("button"); configureMotion.type="button"; configureMotion.textContent="Save motion event source";
-    const motionSourcePanel=document.createElement("fieldset"),motionSourceLegend=document.createElement("legend");motionSourcePanel.dataset.configSection="camera-motion-source";motionSourceLegend.textContent="Motion event source and detection";motionSourcePanel.append(motionSourceLegend);
-    motionSourcePanel.dataset.cameraSaveGroup="camera-motion";
-    configureMotion.dataset.configSaves="camera-motion-roll camera-motion-source";
-    const saveMotionSource=async()=>{
-      const payload={pre_roll_seconds:Number(pre.value),post_roll_seconds:Number(post.value),fallback_enabled:fallback.checked,zones:readZoneEditor(zoneEditor),sensitivity:Number(sensitivity.value)};
-      if(motionUrl.value) payload.service_url=motionUrl.value;
-      if(motionUser.value||motionPass.value){payload.username=motionUser.value;payload.password=motionPass.value;}
-      await api(`/api/cameras/${encodeURIComponent(camera.id)}/motion-source`,{method:"POST",body:JSON.stringify(payload)});
-      motionUser.value=""; motionPass.value="";
-    };
-    motionRollPanel.cameraSaveConfig=saveMotionSource;motionSourcePanel.cameraSaveConfig=saveMotionSource;
-    configureMotion.addEventListener("click",()=>void saveCameraScopes([motionSourcePanel],{refreshAfter:true}));
-    const events=document.createElement("button"); events.type="button"; events.textContent="View motion events";events.dataset.cameraTab="motion";
-    const motionEventsResults=document.createElement("div");motionEventsResults.dataset.cameraTab="motion";motionEventsResults.setAttribute("aria-live","polite");
-    events.addEventListener("click",async()=>{
-      const selection=cameraEditorState.captureSelection();
-      try {
-        const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/motion-events`);
-        if(!cameraEditorState.isCurrent(selection))return;
-        const target=motionEventsResults;
-        target.replaceChildren(...result.events.map(event=>{
-          const row=document.createElement("p");
-          row.textContent=formatDateTime(event.source_event_at)+" · "+event.source+" · "+event.status+" · pre-roll "+(event.pre_roll_complete ? "complete" : "incomplete/unknown")+(event.media_url ? " · playable clip available" : "");
-          if(event.media_url) { const play=document.createElement("button"); play.type="button"; play.textContent="Play"; play.addEventListener("click",async()=>{if(!await navigateCameraTab("health-history"))return;const player=document.querySelector("#playback");player.src=event.media_url;player.classList.remove("hidden");player.play().catch(()=>{});}); row.append(play); }
-          return row;
-        }));
-      } catch(error) { if(cameraEditorState.isCurrent(selection))document.querySelector("#camera-message").textContent=error.message; }
-    });
-    const aiEvents=document.createElement("button"); aiEvents.type="button"; aiEvents.textContent="Search person/vehicle events";aiEvents.dataset.cameraTab="ai";
-    const aiEventResults=document.createElement("div");aiEventResults.dataset.cameraTab="ai";aiEventResults.setAttribute("aria-live","polite");
-    aiEvents.addEventListener("click",async()=>{
-      try {
-        const label=document.createElement("select");
-        for(const [value,text] of [["","All detections"],["person","Person"],["vehicle","Vehicle"]]){const option=document.createElement("option");option.value=value;option.textContent=text;label.append(option);}
-        const from=document.createElement("input");from.type="datetime-local";from.setAttribute("aria-label","AI event start time");
-        const to=document.createElement("input");to.type="datetime-local";to.setAttribute("aria-label","AI event end time");
-        const run=document.createElement("button");run.type="button";run.textContent="Apply AI event search";
-        const results=document.createElement("div");results.setAttribute("aria-live","polite");
-        const selection=cameraEditorState.captureSelection();
-        const search=async()=>{
-          const params=new URLSearchParams({camera_id:camera.id});if(label.value)params.set("label",label.value);
-          if(from.value)params.set("start",new Date(from.value).toISOString());if(to.value)params.set("end",new Date(to.value).toISOString());
-          const found=await api(`/api/ai/events?${params}`);
-          if(!cameraEditorState.isCurrent(selection))return;
-          results.replaceChildren();
-          const note=document.createElement("p");note.textContent=found.coverage_note;results.append(note);
-          for(const item of found.events){const row=document.createElement("p");row.textContent=`${formatDateTime(item.first_seen_at)} · ${item.label} · ${(item.confidence*100).toFixed(1)}% · ${item.model_id} ${item.model_version} · OpenVINO ${item.provider}`;
-            const play=document.createElement("button");play.type="button";play.textContent="Find playback";play.addEventListener("click",async()=>{
-              const at=new Date(item.first_seen_at),begin=new Date(at.getTime()-30000),finish=new Date(at.getTime()+30000);
-              const footage=await api(`/api/cameras/${encodeURIComponent(camera.id)}/segments?from=${encodeURIComponent(begin.toISOString())}&to=${encodeURIComponent(finish.toISOString())}`);
-              if(!cameraEditorState.isCurrent(selection))return;
-              const segment=footage.segments.find(s=>new Date(s.starts_at)<=at&&new Date(s.ends_at)>=at)||footage.segments[0];
-              if(!cameraEditorState.isCurrent(selection))return;
-              if(!segment){row.append(document.createTextNode(" · no retained footage covers this observation"));return;}
-              if(!await navigateCameraTab("health-history"))return;const player=document.querySelector("#playback");player.src=segment.media_url;player.classList.remove("hidden");
-              player.addEventListener("loadedmetadata",()=>{const offset=Math.max(0,(at-new Date(segment.starts_at))/1000);player.currentTime=offset;},{once:true});player.play().catch(()=>{});
-            });row.append(play);results.append(row);
-          }
-          if(!found.events.length){const empty=document.createElement("p");empty.textContent="No analyzed detections match this search. Check analysis coverage; empty results do not prove the scene was empty.";results.append(empty);}
-        };
-        run.addEventListener("click",async()=>{try{await search();}catch(error){results.textContent=error.message;}});
-        await search();
-        if(!cameraEditorState.isCurrent(selection))return;
-        aiEventResults.replaceChildren(label,from,to,run,results);
-      } catch(error) { document.querySelector("#camera-message").textContent=error.message; }
-    });
-    const aiPanel=document.createElement("section");aiPanel.dataset.configSection="camera-ai";
-    const aiConfigure=document.createElement("button");aiConfigure.type="button";aiConfigure.textContent="Configure person/vehicle detection";aiConfigure.dataset.cameraTab="ai";
-    const loadAiConfig=async(configOverride=null)=>{
-        if(aiPanel.dataset.configDirty==="true"&&!configOverride)throw new Error("Save or revert AI settings before reloading them.");
-        const selection=cameraEditorState.captureSelection();
-        const config=configOverride||await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`);
-        if(!cameraEditorState.isCurrent(selection))return;
-        aiPanel.replaceChildren();const heading=document.createElement("h4");heading.textContent="Local CPU AI analysis";
-        const availability=document.createElement("p");availability.textContent=`${config.model.id} ${config.model.version} · ${config.model.runtime} · ${config.model.available?"model ready":config.model.reason}`;
-        const source=document.createElement("p");source.textContent=`Effective settings source: ${config.config_source}${config.config_source==="group"?" (inherited)":""}`;
-        const inheritLabel=document.createElement("label");inheritLabel.textContent="Inherit assigned camera group AI settings ";const inherit=document.createElement("input");inherit.type="checkbox";inherit.dataset.aiField="inherit";inherit.checked=!config.config_override&&config.config_source==="group";inheritLabel.append(inherit);
-        const enabledLabel=document.createElement("label");enabledLabel.textContent="Enable analysis ";const aiEnabled=document.createElement("input");aiEnabled.type="checkbox";aiEnabled.dataset.aiField="enabled";aiEnabled.checked=config.enabled;enabledLabel.append(aiEnabled);
-        const fpsLabel=document.createElement("label");fpsLabel.textContent="Analysis frames per second";const fps=document.createElement("input");fps.type="number";fps.min="0.1";fps.max="5";fps.step="0.1";fps.dataset.aiField="fps";fps.value=config.analysis_fps;fpsLabel.append(fps);
-        const confidenceLabel=document.createElement("label");confidenceLabel.textContent="Minimum confidence (0.1–0.99)";const confidence=document.createElement("input");confidence.type="number";confidence.min="0.1";confidence.max="0.99";confidence.step="0.01";confidence.dataset.aiField="confidence";confidence.value=config.confidence_threshold;confidenceLabel.append(confidence);
-        const substreamLabel=document.createElement("label");substreamLabel.textContent="Use validated lower-resolution stream ";const substream=document.createElement("input");substream.type="checkbox";substream.dataset.aiField="substream";substream.checked=config.use_substream;substreamLabel.append(substream);
-        const zonesLabel=document.createElement("label");zonesLabel.textContent="AI zones (normalized rectangles; empty uses full frame)";const aiZones=document.createElement("textarea");aiZones.spellcheck=false;aiZones.value=JSON.stringify(config.zones);aiZones.placeholder='[{"x":0.1,"y":0.1,"width":0.8,"height":0.8}]';zonesLabel.append(aiZones);
-        const aiZoneEditor=document.createElement("div");aiZoneEditor.dataset.aiField="zones";aiZoneEditor.setAttribute("aria-label","Visual AI zones");renderZoneEditor(aiZoneEditor,config.zones||[]);loadRepresentativeZoneFrame(camera.id,aiZoneEditor);
-        const aiZonesAdvanced=document.createElement("details"),aiZonesSummary=document.createElement("summary");aiZonesSummary.textContent="Advanced AI zone JSON";aiZonesAdvanced.append(aiZonesSummary,zonesLabel);
-        const saveAI=document.createElement("button");saveAI.type="button";saveAI.textContent="Save AI settings";
-        saveAI.dataset.configSaves="camera-ai";
-        const aiStatus=document.createElement("p");aiStatus.textContent=`Status: ${config.status}${config.last_success_at?` · last analyzed ${formatDateTime(config.last_success_at)}`:""}${config.last_error?` · ${config.last_error}`:""}`;
-        const saveAiSettings=async()=>{const selectedZones=readZoneEditor(aiZoneEditor);aiZones.value=JSON.stringify(selectedZones);const saved=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai`,{method:"PUT",body:JSON.stringify({enabled:aiEnabled.checked,analysis_fps:Number(fps.value),confidence_threshold:Number(confidence.value),use_substream:substream.checked,zones:selectedZones,inherit_group:inherit.checked})});aiStatus.textContent=`Status: ${saved.status} · settings ${saved.config_source}${saved.last_error?` · ${saved.last_error}`:""}`;};
-        aiPanel.cameraSaveConfig=saveAiSettings;
-        saveAI.addEventListener("click",()=>void saveCameraScopes([aiPanel],{refreshAfter:false,statusTabId:"ai"}));
-        const coverageButton=document.createElement("button");coverageButton.type="button";coverageButton.textContent="Refresh analysis coverage";coverageButton.addEventListener("click",async()=>{try{const selection=cameraEditorState.captureSelection();const status=await api(`/api/cameras/${encodeURIComponent(camera.id)}/ai/coverage`);if(!cameraEditorState.isCurrent(selection))return;aiStatus.textContent=`Status: ${status.status} · ${status.intervals.length} analysis coverage intervals${status.last_error?` · ${status.last_error}`:""}`;}catch(error){aiStatus.textContent=error.message;}});
-        aiPanel.append(heading,availability,source,inheritLabel,enabledLabel,fpsLabel,confidenceLabel,substreamLabel,aiZoneEditor,aiZonesAdvanced,saveAI,coverageButton,aiStatus);
-    };
-    aiPanel.cameraLoadConfig=loadAiConfig;
-    aiConfigure.addEventListener("click",async()=>{try{
-      if(aiPanel.dataset.configDirty==="true"){
-        if(!await guardCameraDrafts())return;
-        const current=document.querySelector(`#camera-list [data-config-section="camera-ai"]`);
-        await current?.cameraLoadConfig?.();
-      }else await loadAiConfig();
-    }catch(error){document.querySelector("#camera-message").textContent=error.message;}});
-    const coverage=document.createElement("button"); coverage.type="button"; coverage.textContent="View coverage history";coverage.dataset.cameraTab="health-history";
-    const coverageList=document.createElement("ul");
-    coverage.addEventListener("click",async()=>{
-      const selection=cameraEditorState.captureSelection();
-      try {
-        const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/coverage`);
-        if(!cameraEditorState.isCurrent(selection))return;
-        coverageList.replaceChildren(...result.intervals.map(interval=>{
-          const item=document.createElement("li");
-          const end=interval.ends_at ? formatDateTime(interval.ends_at) : "ongoing";
-          item.textContent=`${interval.coverage_kind}: ${interval.reason} · ${formatDateTime(interval.starts_at)} to ${end}`;
-          return item;
-        }));
-        if(!result.intervals.length){const item=document.createElement("li");item.textContent="No coverage transitions recorded yet.";coverageList.replaceChildren(item);}
-      } catch(error) { if(cameraEditorState.isCurrent(selection))document.querySelector("#camera-message").textContent=error.message; }
-    });
-    const scheduleLabel=document.createElement("label"); scheduleLabel.textContent="Camera weekly recording schedule override (JSON; blank intervals mean scheduled idle)";
-    const schedulePanel=document.createElement("fieldset"),scheduleLegend=document.createElement("legend");schedulePanel.dataset.configSection="camera-schedule";scheduleLegend.textContent="Recording schedule";schedulePanel.append(scheduleLegend);
-    const scheduleText=document.createElement("textarea"); scheduleText.spellcheck=false; scheduleText.placeholder='{"timezone":"America/Indiana/Indianapolis","intervals":[{"days":[0,1,2,3,4],"start":"08:00","end":"17:00","mode":"continuous"}]}';
-    const scheduleTimezoneLabel=document.createElement("label");scheduleTimezoneLabel.textContent="Schedule time zone (IANA)";const scheduleTimezone=document.createElement("input");scheduleTimezone.maxLength=128;scheduleTimezone.value=camera.schedule_timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";scheduleTimezoneLabel.append(scheduleTimezone);
-    const scheduleEditor=document.createElement("div");scheduleEditor.setAttribute("aria-label","Visual camera weekly schedule");
-    const addSchedule=document.createElement("button");addSchedule.type="button";addSchedule.textContent="Add schedule interval";addSchedule.addEventListener("click",()=>{markConfigDraftElement(scheduleEditor);addScheduleInterval(scheduleEditor);});
-    const scheduleAdvanced=document.createElement("details"),scheduleSummary=document.createElement("summary");scheduleSummary.textContent="Advanced schedule JSON";scheduleAdvanced.append(scheduleSummary,scheduleLabel,scheduleText);
-    const inheritLabel=document.createElement("label"); inheritLabel.textContent="Inherit assigned group schedule ";
-    const inheritSchedule=document.createElement("input"); inheritSchedule.type="checkbox"; inheritSchedule.checked=true; inheritLabel.append(inheritSchedule);
-    const loadSchedule=document.createElement("button"); loadSchedule.type="button"; loadSchedule.textContent="Load camera schedule";
-    const applyCameraSchedule=result=>{
-      inheritSchedule.checked=result.inherits_group;
-      scheduleTimezone.value=result.timezone||"UTC";
-      renderScheduleEditor(scheduleEditor,result.intervals||[]);
-      scheduleText.value=JSON.stringify({timezone:result.timezone,intervals:result.intervals},null,2);
-      document.querySelector("#camera-message").textContent=`Loaded ${result.source} schedule${result.configured ? "" : " (no schedule configured)"}.`;
-    };
-    const loadCameraSchedule=async()=>{
-      const selection=cameraEditorState.captureSelection();
-      const result=await api(`/api/cameras/${encodeURIComponent(camera.id)}/schedule`);
-      if(!cameraEditorState.isCurrent(selection))return;
-      applyCameraSchedule(result);
-    };
-    schedulePanel.cameraLoadConfig=loadCameraSchedule;
-    schedulePanel.cameraApplyConfig=applyCameraSchedule;
-    loadSchedule.addEventListener("click",async()=>{
-      try{
-        if(schedulePanel.dataset.configDirty==="true"){
-          if(!await guardCameraDrafts())return;
-          const current=document.querySelector(`#camera-list [data-config-section="camera-schedule"]`);
-          await current?.cameraLoadConfig?.();
-        }else await loadCameraSchedule();
-      }catch(error){document.querySelector("#camera-message").textContent=error.message;}
-    });
-    const saveSchedule=document.createElement("button"); saveSchedule.type="button"; saveSchedule.textContent="Save camera schedule";
-    saveSchedule.dataset.configSaves="camera-schedule";
-    schedulePanel.cameraSaveConfig=async()=>{
-      const config=inheritSchedule.checked ? {} : {timezone:scheduleTimezone.value.trim()||"UTC",intervals:readScheduleEditor(scheduleEditor)};
-      const payload=inheritSchedule.checked ? {inherit_group:true} : config;
-      await api(`/api/cameras/${encodeURIComponent(camera.id)}/schedule`,{method:"PUT",body:JSON.stringify(payload)});
-      scheduleText.value=JSON.stringify({timezone:payload.timezone,intervals:payload.intervals},null,2);
-    };
-    saveSchedule.addEventListener("click",()=>void saveCameraScopes([schedulePanel],{refreshAfter:true}));
-    const archive=document.createElement("button"); archive.type="button"; archive.textContent=camera.archived_at?"Restore camera":"Archive camera";archive.dataset.cameraTab="health-history";
-    archive.addEventListener("click", async () => {
-      const tiles=[...activeLiveTileCameraIds],ids=[...activeLiveCameraIds],size=activeLiveGridSize,focused=focusedLiveCameraId;
-      if(!camera.archived_at&&!window.confirm(`Archive ${camera.name}? Collection stops, and its recordings remain available for search and export.`))return;
-      try {
-        if(camera.archived_at)await api(`/api/cameras/${encodeURIComponent(camera.id)}/restore`,{method:"POST"});
-        else await api(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"DELETE"});
-        if(!camera.archived_at)cameraPreviewWorkspace.close();
-        await refresh();
-        if(ids.includes(camera.id))startLiveViews(ids,latestCameras,focused,size,tiles);
-      } catch (error) { document.querySelector("#camera-message").textContent=error.message; }
-    });
-    const deleteFootage=document.createElement("button");deleteFootage.type="button";deleteFootage.textContent="Permanently delete archived footage";deleteFootage.dataset.cameraTab="health-history";deleteFootage.disabled=!camera.archived_at;
-    deleteFootage.addEventListener("click",async()=>{
-      const confirmation=window.prompt(`This permanently deletes every recording for ${camera.name}. Type the camera name to confirm.`);
-      if(confirmation!==camera.name)return;
-      try{await api(`/api/cameras/${encodeURIComponent(camera.id)}/footage`,{method:"DELETE",body:JSON.stringify({confirm_camera_name:confirmation})});document.querySelector("#camera-message").textContent=`Archived footage for ${camera.name} deleted.`;await refresh();}
-      catch(error){document.querySelector("#camera-message").textContent=error.message;}
-    });
-    const rotateLabel=document.createElement("label"); rotateLabel.textContent="Update stream credentials or URL";
-    const rotatePanel=document.createElement("fieldset"),rotateLegend=document.createElement("legend");rotatePanel.dataset.configSection="camera-credentials";rotateLegend.textContent="Stream credentials";rotatePanel.append(rotateLegend);
-    const rotateInput=document.createElement("input"); rotateInput.type="url"; rotateInput.autocomplete="off"; rotateInput.placeholder="rtsp://camera.example/stream";
-    const rotate=document.createElement("button"); rotate.type="button"; rotate.textContent="Test and rotate stream";
-    rotate.dataset.configSaves="camera-credentials";
-    rotatePanel.cameraSaveConfig=async()=>{await api(`/api/cameras/${encodeURIComponent(camera.id)}/credentials`,{method:"POST",body:JSON.stringify({stream_url:rotateInput.value})});rotateInput.value="";};
-    rotate.addEventListener("click",()=>void saveCameraScopes([rotatePanel],{refreshAfter:true}));
-    recordingPanel.append(mode,enabledLabel,save);
-    motionRollPanel.append(pre,post);
-    motionSourcePanel.append(motionUrlLabel,motionUrl,motionUserLabel,motionUser,motionPassLabel,motionPass,fallbackLabel,zoneEditor,zonesAdvanced,sensitivityLabel,sensitivity,configureMotion);
-    schedulePanel.append(inheritLabel,scheduleTimezoneLabel,scheduleEditor,addSchedule,loadSchedule,saveSchedule,scheduleAdvanced);
-    rotatePanel.append(rotateLabel,rotateInput,rotate);
-    card.append(recordingPanel,motionRollPanel,schedulePanel,motionSourcePanel,events,motionEventsResults,aiEvents,aiEventResults,aiConfigure,aiPanel,coverage,coverageList,archive,deleteFootage,rotatePanel);
-    const tabs=window.NvrCameraEditor.CAMERA_EDITOR_TABS;
-    const tabNav=document.createElement("nav");tabNav.className="camera-editor-tabs";tabNav.setAttribute("role","tablist");tabNav.setAttribute("aria-label",`${camera.name} settings`);
-    const panels=new Map();
-    for(const tab of tabs){
-      const panel=document.createElement("section");panel.className="camera-editor-tab-panel";panel.id=`camera-tab-panel-${camera.id}-${tab.id}`;panel.dataset.cameraTabPanel=tab.id;panel.setAttribute("role","tabpanel");panel.setAttribute("aria-label",tab.label);panel.tabIndex=0;
-      const actions=document.createElement("div");actions.className="camera-tab-actions";
-      const status=document.createElement("p");status.dataset.cameraTabStatus=tab.id;status.setAttribute("role","status");status.setAttribute("aria-live","polite");status.textContent="Saved";status.dataset.state="saved";
-      const saveTab=document.createElement("button");saveTab.type="button";saveTab.textContent="Save";saveTab.dataset.cameraTabSave=tab.id;saveTab.setAttribute("aria-label",`Save ${tab.label} settings`);saveTab.addEventListener("click",()=>void saveCameraTab(tab.id,{refreshAfter:tab.id!=="ai"}));
-      const revertTab=document.createElement("button");revertTab.type="button";revertTab.textContent="Revert";revertTab.dataset.cameraTabRevert=tab.id;revertTab.setAttribute("aria-label",`Revert ${tab.label} settings`);revertTab.addEventListener("click",()=>void revertCameraTab(tab.id));
-      actions.append(status,saveTab,revertTab);panel.append(actions);panels.set(tab.id,panel);
-      const tabButton=document.createElement("button");tabButton.type="button";tabButton.id=`camera-tab-${camera.id}-${tab.id}`;tabButton.textContent=tab.label;tabButton.dataset.cameraTab=tab.id;tabButton.setAttribute("role","tab");tabButton.setAttribute("aria-controls",panel.id);panel.setAttribute("aria-labelledby",tabButton.id);
-      tabButton.addEventListener("click",()=>void navigateCameraTab(tab.id));
-      tabButton.addEventListener("keydown",event=>{const buttons=[...tabNav.querySelectorAll('[role="tab"]')],index=buttons.indexOf(tabButton);let next=null;if(event.key==="ArrowRight")next=buttons[(index+1)%buttons.length];else if(event.key==="ArrowLeft")next=buttons[(index-1+buttons.length)%buttons.length];else if(event.key==="Home")next=buttons[0];else if(event.key==="End")next=buttons.at(-1);if(next){event.preventDefault();next.focus();void navigateCameraTab(next.dataset.cameraTab);}});
-      tabNav.append(tabButton);
-    }
-    const sectionTab=new Map(tabs.flatMap(tab=>tab.sections.map(section=>[section,tab.id])));
-    for(const child of [...card.children].slice(2)){
-      if(child===previewSlot)continue;
-      const tabId=sectionTab.get(child.dataset.configSection)||child.dataset.cameraTab||"health-history";
-      panels.get(tabId)?.append(child);
-    }
-    card.append(previewSlot,tabNav,...panels.values());
-    const activeTab=currentRole==="administrator"?(cameraEditorState.activeTab||"general-connection"):"health-history";
-    if(currentRole==="administrator")activateCameraTab(card,activeTab);
-    else document.querySelector("#camera-health-history")?.classList.remove("hidden");
-    cameraPreviewWorkspace.mount(previewSlot,camera);
-    return card;
-  }));
+  list.append(renderSelectedCameraEditor(selectedCamera));
+}
+function renderSelectedCameraEditor(camera) {
+  const view=window.NvrCameraEditor.createCameraEditorView({
+    api, formatDateTime, refresh,
+    configuration:{saveCameraScopes,guardCameraDrafts,markConfigDraftElement},
+    motionZones:{renderZoneEditor,loadRepresentativeZoneFrame,readZoneEditor},
+    schedule:{addScheduleInterval,renderScheduleEditor,readScheduleEditor},
+    tabs:{saveCameraTab,revertCameraTab,navigateCameraTab,activateCameraTab},
+    media:{cameraPreviewWorkspace,loadSegments},
+    liveViews:{
+      getState:()=>({tiles:[...activeLiveTileCameraIds],ids:[...activeLiveCameraIds],size:activeLiveGridSize,focused:focusedLiveCameraId}),
+      getCameras:()=>latestCameras,
+      start:startLiveViews,
+    },
+  });
+  return view.render(camera,{role:currentRole,selectedCameraId,editorState:cameraEditorState});
 }
 async function loadSegments(camera) {
   const message = document.querySelector("#camera-message");
@@ -3850,12 +2801,6 @@ document.querySelector("#test-camera").addEventListener("click", async event => 
   } catch (error) { if(generation===cameraManualGeneration)status.textContent=error.message; }
   finally {button.disabled=cameraManualSubmitInProgress;}
 });
-document.querySelector("#discover-cameras").addEventListener("click", async () => {
-  await runDiscoveryScan();
-});
-document.querySelector("#discover-ip-range").addEventListener("click", async event => {
-  await runDiscoveryScan(event.currentTarget.id==="discover-ip-range"?document.querySelector("#discovery-ip-range").value.trim():null);
-});
 document.querySelector("#diagnostics-toggle").addEventListener("click", async () => {
   const button=document.querySelector("#diagnostics-toggle"); button.disabled=true;
   try {
@@ -3873,413 +2818,6 @@ document.querySelector("#diagnostics-download").addEventListener("click", async 
     const link=document.createElement("a"); link.href=url; link.download="nvr-diagnostics.json"; link.click(); URL.revokeObjectURL(url);
   } catch(error) { document.querySelector("#diagnostics-message").textContent=error.message; }
 });
-document.querySelector("#group-form").addEventListener("submit",async event=>{
-  event.preventDefault();await saveGroupScopes([event.currentTarget],{refreshAfter:true});
-});
-document.querySelector("#load-group-schedule").addEventListener("click",()=>void loadGroupScopeWithGuard("group-schedule"));
-document.querySelector("#save-group-schedule").addEventListener("click",()=>void saveGroupTab("recording"));
-document.querySelector("#clear-group-schedule").addEventListener("click",async()=>{
-  if(!await guardGroupDrafts())return;const group=groupWorkspaceState.selectedGroupId;
-  if(!group){document.querySelector("#schedule-message").textContent="Select a group first.";return;}
-  const selection=groupWorkspaceState.captureSelection(),unlock=lockGroupControls();let removed=false;
-  try{await api(`/api/camera-groups/${encodeURIComponent(group)}/schedule`,{method:"DELETE"});removed=true;const scope=document.querySelector('#group-policy-panel-recording [data-config-section="group-schedule"]');clearConfigDraft(scope);await loadGroupSchedule(group,selection);if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent="Group schedule removed; assigned cameras use their camera policy or camera-level override.";}
-  catch(error){if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent=error.message;}
-  finally{unlock();}
-  if(removed)await refresh();
-});
-document.querySelector("#add-group-schedule-interval").addEventListener("click",()=>{const editor=document.querySelector("#group-schedule-editor");markConfigDraftElement(editor);addScheduleInterval(editor);});
-document.querySelector("#load-group-retention").addEventListener("click",()=>void loadGroupScopeWithGuard("group-retention"));
-document.querySelector("#save-group-retention").addEventListener("click",()=>void saveGroupTab("recording"));
-document.querySelector("#clear-group-retention").addEventListener("click",async()=>{
-  if(!await guardGroupDrafts())return;const group=groupWorkspaceState.selectedGroupId;
-  if(!group){document.querySelector("#schedule-message").textContent="Select a group first.";return;}
-  const selection=groupWorkspaceState.captureSelection(),unlock=lockGroupControls();let removed=false;
-  try{await api(`/api/camera-groups/${encodeURIComponent(group)}/retention`,{method:"DELETE"});removed=true;const scope=document.querySelector('#group-policy-panel-recording [data-config-section="group-retention"]');clearConfigDraft(scope);await loadGroupRetention(group,selection);if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent="Group retention removed; cameras use their camera override or the 30 day default.";}
-  catch(error){if(groupWorkspaceState.isCurrent(selection))document.querySelector("#schedule-message").textContent=error.message;}
-  finally{unlock();}
-  if(removed)await refresh();
-});
-document.querySelector("#load-storage-volumes").addEventListener("click",()=>void loadGroupScopeWithGuard("group-storage"));
-document.querySelector("#save-storage-volume").addEventListener("click",()=>void saveGroupTab("storage"));
-function bulkActionChanges(){
-  const changes={};
-  const group=document.querySelector("#bulk-group").value;
-  const mode=document.querySelector("#bulk-recording-mode").value;
-  const recordingEnabled=document.querySelector("#bulk-recording-enabled").value;
-  if(group!=="__unchanged__")changes.group_name=group||null;
-  if(mode)changes.recording_mode=mode;
-  if(recordingEnabled)changes.recording_enabled=recordingEnabled==="true";
-  return changes;
-}
-function bulkChangeDescriptions(changes){
-  const descriptions=[];
-  if(Object.prototype.hasOwnProperty.call(changes,"group_name"))descriptions.push(changes.group_name?`Assign policy group “${changes.group_name}”.`:"Remove the policy group.");
-  if(changes.recording_mode)descriptions.push(`Set recording mode to ${changes.recording_mode}.`);
-  if(Object.prototype.hasOwnProperty.call(changes,"recording_enabled"))descriptions.push(`${changes.recording_enabled?"Enable":"Disable"} recording.`);
-  return descriptions;
-}
-function bulkTargetStateText(target,changes,after=false){
-  if(target.status!=="ready")return after?"Excluded; no settings will be changed during this apply.":target.status==="archived"?"Archived camera":"Camera no longer available";
-  const state=window.NvrCameraBulkActions.plannedState(target,after?changes:{});
-  const result=[`Policy group: ${state.groupName||"None"}`,`Recording mode: ${state.recordingMode}`,`Recording: ${state.recordingEnabled?"enabled":"disabled"}`];
-  if(after&&state.enablementBlockedByMode)result.push("mode keeps recording disabled");
-  return result.join(" · ");
-}
-function openBulkReviewDialog(){
-  if(cameraBulkOperationInProgress)return;
-  if(cameraBulkReview&&cameraBulkResults.some(result=>["failed","unknown"].includes(result.status))){
-    document.querySelector("#bulk-message").textContent="Resolve or explicitly dismiss the previous per-camera outcomes before starting another bulk change.";
-    openBulkResultsDialog();return;
-  }
-  let review;
-  try{
-    if(!cameraBulkSelection.size)throw new Error("Select at least one camera using its checkbox.");
-    const changes=bulkActionChanges();
-    if(!Object.keys(changes).length)throw new Error("Choose at least one change to review.");
-    review=window.NvrCameraBulkActions.createReview(cameraBulkSelection,latestCameras,cameraBulkVisibleIds,changes);
-  }catch(error){document.querySelector("#bulk-message").textContent=error.message;return;}
-
-  const dialog=document.createElement("dialog");dialog.className="camera-bulk-dialog";dialog.setAttribute("aria-labelledby","camera-bulk-review-title");
-  const title=document.createElement("h2");title.id="camera-bulk-review-title";title.textContent="Review camera changes";title.tabIndex=-1;
-  const intro=document.createElement("p");intro.textContent=`This review is fixed to ${review.cameraIds.length} selected camera ID(s). Filtering or refreshing the table will not change this target list.`;
-  const changeHeading=document.createElement("h3");changeHeading.textContent="Changes to apply";
-  const changesList=document.createElement("ul");changesList.replaceChildren(...bulkChangeDescriptions(review.changes).map(description=>{const item=document.createElement("li");item.textContent=description;return item;}));
-  let policyNote=null;
-  if(Object.prototype.hasOwnProperty.call(review.changes,"group_name")){
-    policyNote=document.createElement("p");policyNote.textContent="Changing the policy group may change inherited schedule, retention, storage, and AI settings for cameras without their own overrides. Browsing-group membership and camera-level overrides are unchanged.";
-  }
-  const eligible=review.targets.filter(target=>target.status==="ready").length,excluded=review.targets.length-eligible;
-  const count=document.createElement("p");count.textContent=`${eligible} eligible to update · ${excluded} excluded for revalidation`;
-  const tableWrap=document.createElement("div");tableWrap.className="camera-bulk-review-table-wrap";
-  const table=document.createElement("table");table.setAttribute("aria-label","Reviewed bulk camera targets");
-  const head=document.createElement("thead"),headRow=document.createElement("tr");
-  for(const label of ["Camera","Stable ID","Current policy and recording","Planned policy and recording","Review status"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;headRow.append(cell);}head.append(headRow);
-  const body=document.createElement("tbody");
-  for(const target of review.targets){
-    const row=document.createElement("tr");
-    for(const value of [target.name,target.id,bulkTargetStateText(target,review.changes),bulkTargetStateText(target,review.changes,true),target.status==="ready"?"Ready":target.status==="archived"?"Archived · excluded":"Missing · excluded"]){const cell=document.createElement("td");cell.textContent=value;row.append(cell);}
-    body.append(row);
-  }
-  table.append(head,body);tableWrap.append(table);
-  const actions=document.createElement("div");actions.className="toolbar-row";
-  const cancel=document.createElement("button");cancel.type="button";cancel.textContent="Cancel";cancel.addEventListener("click",()=>dialog.close());
-  const apply=document.createElement("button");apply.type="button";apply.className="primary";apply.textContent=`Apply to ${eligible} eligible camera(s)`;apply.disabled=!eligible;
-  apply.addEventListener("click",()=>{dialog.close();dialog.remove();void executeBulkReview(review);});
-  actions.append(cancel,apply);dialog.append(title,intro,changeHeading,changesList);if(policyNote)dialog.append(policyNote);dialog.append(count,tableWrap,actions);document.body.append(dialog);
-  dialog.addEventListener("close",()=>dialog.remove());dialog.showModal();title.focus();
-}
-function ensureBulkResultsDialog(){
-  if(cameraBulkStatusDialog)return cameraBulkStatusDialog;
-  const dialog=document.createElement("dialog");dialog.id="camera-bulk-results-dialog";dialog.className="camera-bulk-dialog";dialog.setAttribute("aria-labelledby","camera-bulk-results-title");
-  const title=document.createElement("h2");title.id="camera-bulk-results-title";title.textContent="Bulk camera results";title.tabIndex=-1;
-  const summary=document.createElement("p");summary.id="camera-bulk-results-summary";summary.setAttribute("role","status");summary.setAttribute("aria-live","polite");
-  const tableWrap=document.createElement("div");tableWrap.className="camera-bulk-results-table-wrap";
-  const table=document.createElement("table");table.setAttribute("aria-label","Per-camera bulk results");
-  const head=document.createElement("thead"),headRow=document.createElement("tr");
-  for(const label of ["Camera","Stable ID","Outcome","Details"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;headRow.append(cell);}head.append(headRow);
-  const body=document.createElement("tbody");body.id="camera-bulk-results-body";table.append(head,body);tableWrap.append(table);
-  const actions=document.createElement("div");actions.className="toolbar-row";
-  const reconcile=document.createElement("button");reconcile.id="camera-bulk-reconcile";reconcile.type="button";reconcile.textContent="Check current inventory";reconcile.hidden=true;reconcile.addEventListener("click",()=>void reconcileBulkOutcomes());
-  const retry=document.createElement("button");retry.id="camera-bulk-retry-failed";retry.type="button";retry.textContent="Retry failed only";retry.hidden=true;retry.addEventListener("click",()=>void retryFailedBulkTargets());
-  const dismiss=document.createElement("button");dismiss.id="camera-bulk-dismiss-results";dismiss.type="button";dismiss.textContent="Dismiss results";dismiss.hidden=true;dismiss.addEventListener("click",dismissBulkResults);
-  const close=document.createElement("button");close.id="camera-bulk-hide-results";close.type="button";close.textContent="Close panel";close.addEventListener("click",()=>dialog.close());
-  actions.append(reconcile,retry,dismiss,close);dialog.append(title,summary,tableWrap,actions);document.body.append(dialog);
-  dialog.addEventListener("cancel",event=>{event.preventDefault();dialog.close();});
-  cameraBulkStatusDialog=dialog;return dialog;
-}
-function refreshBulkResultsDialog(){
-  if(!cameraBulkReview)return;
-  const dialog=ensureBulkResultsDialog(),summary=dialog.querySelector("#camera-bulk-results-summary"),body=dialog.querySelector("#camera-bulk-results-body");
-  const targetById=new Map(cameraBulkReview.targets.map(target=>[target.id,target]));
-  const results=window.NvrCameraBulkActions.orderedResults(cameraBulkReview.cameraIds,cameraBulkResults);
-  const totals=results.reduce((counts,result)=>{counts[result.status]=(counts[result.status]||0)+1;return counts;},{});
-  const success=totals.success||0,failed=totals.failed||0,unknown=totals.unknown||0,pending=totals.pending||0;
-  summary.textContent=cameraBulkOperationInProgress?`Applying reviewed changes; ${pending} result(s) are still pending. This request continues if you close this panel.`:`${success} succeeded · ${failed} failed · ${unknown} unknown and not safe to retry yet.`;
-  body.replaceChildren(...results.map(result=>{
-    const target=targetById.get(String(result.camera_id)),camera=latestCameras.find(item=>item.id===result.camera_id),row=document.createElement("tr");
-    const values=[target?.name||camera?.name||"Camera no longer available",result.camera_id,result.status==="unknown"?"Outcome unknown":result.status==="pending"?"Pending":result.status[0].toLocaleUpperCase()+result.status.slice(1),[result.detail,result.warning].filter(Boolean).join(" ")|| (result.status==="pending"?"Waiting for the server to confirm this camera.":"")];
-    values.forEach((value,index)=>{const cell=document.createElement("td");cell.textContent=value;cell.className=index===2?"camera-bulk-outcome":"";if(index===2)cell.dataset.status=result.status;row.append(cell);});return row;
-  }));
-  const retryIds=window.NvrCameraBulkActions.retryableIds(results,latestCameras);
-  dialog.querySelector("#camera-bulk-retry-failed").hidden=cameraBulkOperationInProgress||retryIds.length===0;
-  dialog.querySelector("#camera-bulk-retry-failed").textContent=`Retry ${retryIds.length} failed camera(s) only`;
-  dialog.querySelector("#camera-bulk-reconcile").hidden=cameraBulkOperationInProgress||unknown===0;
-  dialog.querySelector("#camera-bulk-dismiss-results").hidden=cameraBulkOperationInProgress||pending>0;
-  dialog.querySelector("#camera-bulk-hide-results").textContent=cameraBulkOperationInProgress?"Close panel · request continues":"Close panel";
-  refreshCameraBulkToolbar();
-}
-function openBulkResultsDialog(){
-  if(!cameraBulkReview)return;
-  const dialog=ensureBulkResultsDialog();refreshBulkResultsDialog();
-  if(!dialog.open){dialog.showModal();dialog.querySelector("#camera-bulk-results-title").focus();}
-}
-function dismissBulkResults(){
-  if(cameraBulkOperationInProgress)return;
-  if(cameraBulkResults.some(result=>result.status!=="success")&&!window.confirm("Dismiss the saved per-camera outcomes? Any failed or unknown target will no longer be available for retry in this session."))return;
-  cameraBulkReview=null;cameraBulkResults=[];cameraBulkStatusDialog?.close();refreshCameraBulkToolbar();document.querySelector("#camera-inventory-heading")?.focus();
-}
-function mergeBulkResults(review,baseResults,updates){
-  const byId=new Map((baseResults||[]).map(result=>[String(result.camera_id),result]));
-  for(const result of updates||[])byId.set(String(result.camera_id),result);
-  return window.NvrCameraBulkActions.orderedResults(review.cameraIds,[...byId.values()]);
-}
-async function refreshBulkInventory(session=cameraBulkSession){
-  const result=await api("/api/cameras");if(session!==cameraBulkSession)return null;latestCameras=result.cameras||[];sidebarCameras=latestCameras;renderCameras(latestCameras);renderSidebar();return latestCameras;
-}
-async function reconcileBulkOutcomes(){
-  if(!cameraBulkReview||cameraBulkOperationInProgress)return;
-  const session=cameraBulkSession;
-  const summary=ensureBulkResultsDialog().querySelector("#camera-bulk-results-summary");summary.textContent="Checking current camera settings before allowing any retry…";
-  try{
-    const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;
-    cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(cameraBulkReview.cameraIds,cameraBulkResults,cameras,cameraBulkReview.changes);
-    refreshBulkResultsDialog();
-  }catch(error){
-    if(session!==cameraBulkSession)return;
-    summary.textContent=`Current outcomes remain unknown. Inventory could not be checked: ${error.message}. No retry was sent.`;
-  }
-}
-async function executeBulkReview(review,requestedIds=null,priorResults=null){
-  if(cameraBulkOperationInProgress)return;
-  const session=cameraBulkSession;
-  const ids=requestedIds||review.targets.filter(target=>target.status==="ready").map(target=>target.id);
-  if(!ids.length)return;
-  const base=priorResults||review.targets.map(target=>target.status==="ready"
-    ?{camera_id:target.id,status:"pending",detail:"Waiting for the server to confirm this camera."}
-    :{camera_id:target.id,status:"failed",code:target.status,detail:target.status==="archived"?"Archived camera excluded during review.":"Camera no longer available during review."});
-  const pending=ids.map(camera_id=>({camera_id,status:"pending",detail:"Waiting for the server to confirm this camera."}));
-  cameraBulkReview=review;cameraBulkResults=mergeBulkResults(review,base,pending);cameraBulkOperationInProgress=true;
-  if(!priorResults)cameraBulkSelection.clear();
-  refreshCameraBulkToolbar();renderCameras(latestCameras);refreshBulkResultsDialog();openBulkResultsDialog();
-  try{
-    const response=await api("/api/cameras/bulk-update",{method:"POST",body:JSON.stringify({camera_ids:ids,...review.changes})});
-    if(session!==cameraBulkSession)return;
-    cameraBulkResults=mergeBulkResults(review,cameraBulkResults,window.NvrCameraBulkActions.orderedResults(ids,response.results));
-    try{const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(review.cameraIds,cameraBulkResults,cameras,review.changes);}
-    catch{ /* The API's per-camera result remains visible if refreshing the inventory fails. */ }
-  }catch(error){
-    if(session!==cameraBulkSession)return;
-    if(error.status===401||error.status===403){
-      const denied=ids.map(camera_id=>({camera_id,status:"failed",code:"unauthorized",detail:"This session is no longer authorized to change cameras. No retry was sent; sign in with administrator access before starting a new review."}));
-      cameraBulkResults=mergeBulkResults(review,cameraBulkResults,denied);
-    }else{
-      const uncertain=ids.map(camera_id=>({camera_id,status:"unknown",code:"outcome_unknown",detail:"The request did not return a confirmed result. Checking current camera settings before allowing retry."}));
-      cameraBulkResults=mergeBulkResults(review,cameraBulkResults,uncertain);
-      try{const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(review.cameraIds,cameraBulkResults,cameras,review.changes);}
-      catch{
-        cameraBulkResults=cameraBulkResults.map(result=>result.status==="unknown"?{...result,detail:"Unable to verify this outcome. No automatic retry was sent."}:result);
-      }
-    }
-    const message=document.querySelector("#bulk-message");if(message)message.textContent=`Bulk request response was incomplete: ${error.message}. Check the per-camera outcomes before retrying.`;
-  }finally{
-    if(session!==cameraBulkSession)return;
-    cameraBulkOperationInProgress=false;
-    clearConfigDraft(document.querySelector('[data-config-section="bulk-update"]'));
-    refreshBulkResultsDialog();
-    if(cameraBulkStatusDialog?.open)cameraBulkStatusDialog.querySelector("#camera-bulk-hide-results")?.focus();
-  }
-}
-async function retryFailedBulkTargets(){
-  if(!cameraBulkReview||cameraBulkOperationInProgress)return;
-  const session=cameraBulkSession;
-  try{
-    const cameras=await refreshBulkInventory(session);if(session!==cameraBulkSession||!cameras)return;
-    cameraBulkResults=window.NvrCameraBulkActions.reconcileResults(cameraBulkReview.cameraIds,cameraBulkResults,cameras,cameraBulkReview.changes);
-    const ids=window.NvrCameraBulkActions.retryableIds(cameraBulkResults,cameras);
-    if(!ids.length){refreshBulkResultsDialog();return;}
-    await executeBulkReview(cameraBulkReview,ids,cameraBulkResults);
-  }catch(error){
-    if(session!==cameraBulkSession)return;
-    const summary=ensureBulkResultsDialog().querySelector("#camera-bulk-results-summary");summary.textContent=`Current camera status could not be verified: ${error.message}. No retry was sent.`;
-  }
-}
-document.querySelector("#apply-bulk").addEventListener("click",openBulkReviewDialog);
-function importStatusLabel(status){
-  return ({accepted:"Ready to import",created:"Added",duplicate:"Already exists",invalid:"Needs correction",failed:"Import failed"})[status]||status;
-}
-function mergeImportRows(current,updates){
-  const rows=new Map((current||[]).map(row=>[Number(row.row),row]));
-  for(const row of updates||[])rows.set(Number(row.row),row);
-  return [...rows.values()].sort((left,right)=>Number(left.row)-Number(right.row));
-}
-function renderCameraImportRows(){
-  const target=document.querySelector("#import-preview");if(!target)return;
-  target.replaceChildren();
-  const summary=document.createElement("p");summary.id="import-summary";summary.setAttribute("role","status");summary.setAttribute("aria-live","polite");
-  const counts={created:0,failed:0,accepted:0,duplicate:0,invalid:0};
-  for(const row of importRows)if(Object.hasOwn(counts,row.status))counts[row.status]+=1;
-  summary.textContent=importRows.length
-    ? `${counts.created} added · ${counts.failed} failed · ${counts.accepted} ready · ${counts.duplicate} duplicates · ${counts.invalid} invalid`
-    : "Preview CSV rows to see eligible, duplicate, and invalid entries.";
-  target.append(summary);
-  if(!importRows.length)return;
-  const scroll=document.createElement("div");scroll.className="camera-import-results-scroll";scroll.tabIndex=0;scroll.setAttribute("role","region");scroll.setAttribute("aria-label","Camera CSV import results");
-  const table=document.createElement("table");table.className="camera-import-results-table";
-  const caption=document.createElement("caption");caption.textContent="Camera CSV import results";table.append(caption);
-  const head=document.createElement("thead"),header=document.createElement("tr");
-  for(const label of ["CSV row","Camera","Group","Result","Details"]){const cell=document.createElement("th");cell.scope="col";cell.textContent=label;header.append(cell);}
-  head.append(header);table.append(head);
-  const body=document.createElement("tbody");
-  for(const row of importRows){
-    const tr=document.createElement("tr");tr.dataset.importStatus=row.status;
-    const number=document.createElement("th");number.scope="row";number.textContent=String(row.row);tr.append(number);
-    const name=document.createElement("td");name.textContent=row.name||"Unnamed";tr.append(name);
-    const group=document.createElement("td");group.textContent=row.group_name||"No group";tr.append(group);
-    const result=document.createElement("td");result.textContent=importStatusLabel(row.status);result.dataset.state=row.status;tr.append(result);
-    const detail=document.createElement("td");const button=document.createElement("button");button.type="button";button.textContent="View details";button.setAttribute("aria-label",`View details for CSV row ${row.row}, ${row.name||"Unnamed"}`);button.addEventListener("click",()=>showCameraImportRowDetails(row));detail.append(button);tr.append(detail);
-    body.append(tr);
-  }
-  table.append(body);scroll.append(table);target.append(scroll);
-}
-function showCameraImportRowDetails(row){
-  const details=document.querySelector("#import-row-details");if(!details)return;
-  details.replaceChildren();
-  const heading=document.createElement("h4");heading.textContent=`CSV row ${row.row} · ${row.name||"Unnamed"}`;details.append(heading);
-  const state=document.createElement("p");state.textContent=importStatusLabel(row.status);details.append(state);
-  const errors=Array.isArray(row.errors)?row.errors:[];
-  if(errors.length){const list=document.createElement("ul");for(const error of errors){const item=document.createElement("li");item.textContent=error;list.append(item);}details.append(list);}
-  else {const note=document.createElement("p");note.textContent="No additional row detail.";details.append(note);}
-}
-function setCameraImportActions({applying=false,retrying=false,unknown=importOutcomeUnknown}={}){
-  const input=document.querySelector("#camera-import-csv");
-  const preview=document.querySelector("#preview-import");
-  const apply=document.querySelector("#apply-import");
-  const retry=document.querySelector("#retry-import-failed");
-  const reconcile=document.querySelector("#reconcile-import");
-  if(input)input.disabled=unknown||applying||retrying;
-  if(preview)preview.disabled=applying||retrying||unknown;
-  if(apply)apply.disabled=applying||retrying||unknown||!importCanApply;
-  if(retry){const failed=importRows.some(row=>row.status==="failed");retry.classList.toggle("hidden",unknown||!(importRetryPrepared||importPreviewFresh&&failed));retry.disabled=applying||retrying;}
-  if(reconcile){reconcile.classList.toggle("hidden",!unknown);reconcile.disabled=applying||retrying;}
-}
-async function previewCameraImport({csvText=document.querySelector("#camera-import-csv").value,reconcile=false,rowMap=null}={}){
-  if(importApplyInProgress)return false;
-  if(importOutcomeUnknown&&!reconcile){document.querySelector("#camera-import-message").textContent="Reconcile the previous import outcome before starting another preview.";return false;}
-  const generation=++importRequestGeneration;
-  const status=document.querySelector("#camera-import-message");
-  status.textContent=reconcile?"Checking the prior import against the current inventory…":"Validating CSV rows…";
-  setCameraImportActions({applying:true,unknown:importOutcomeUnknown});
-  try{
-    const result=await api("/api/cameras/import/preview",{method:"POST",body:JSON.stringify({csv_text:csvText})});
-    if(generation!==importRequestGeneration)return false;
-    if(!reconcile&&csvText!==document.querySelector("#camera-import-csv").value)return false;
-    const mapping=rowMap||result.rows.map(row=>row.row);
-    const mapped=result.rows.map((row,index)=>({...row,row:mapping[index]??row.row}));
-    if(reconcile){
-      importRows=mergeImportRows(importRows,mapped);
-      importOutcomeUnknown=false;
-      const accepted=result.rows.map((row,index)=>({row,index})).filter(item=>item.row.status==="accepted");
-      importPendingCsv=window.NvrCameraOnboarding.buildCsvForStatuses(csvText,result.rows,["accepted"]);
-      importPendingRowMap=accepted.map(item=>mapping[item.index]??item.row.row);
-      importCanApply=false;
-      importRetryPrepared=Boolean(importPendingCsv);importPreviewFresh=true;
-      document.querySelector("#camera-import-message").textContent=importPendingCsv
-        ? "Inventory checked. Only rows still eligible for addition are ready to retry."
-        : "Inventory checked. No unconfirmed row is eligible to add again.";
-      if(mapped.some(row=>row.status==="duplicate")){
-        cameraAddModes?.showInventoryAction("csv");
-        try{await refresh();}catch{}
-      }
-      if(!importPendingCsv&&!importRows.some(row=>["accepted","failed","invalid"].includes(row.status))){
-        document.querySelector("#camera-import-csv").value="";importSourceCsv="";lastPreviewCsv="";
-        clearConfigDraft(document.querySelector('[data-config-section="camera-import"]'));
-      }
-      const retry=document.querySelector("#retry-import-failed");
-      retry.textContent="Retry unconfirmed rows";
-      retry.classList.toggle("hidden",!importPendingCsv);
-      document.querySelector("#apply-import").disabled=true;
-    }else{
-      importSourceCsv=csvText;
-      importRows=mapped;
-      lastPreviewCsv=csvText;
-      importRetryPrepared=false;importPreviewFresh=true;
-      const accepted=result.rows.filter(row=>row.status==="accepted");
-      importPendingCsv=window.NvrCameraOnboarding.buildCsvForStatuses(csvText,result.rows,["accepted"]);
-      importPendingRowMap=accepted.map(row=>row.row);
-      importCanApply=Boolean(importPendingCsv);
-      document.querySelector("#camera-import-message").textContent=`Preview: ${result.accepted_count} eligible, ${result.rejected_count} duplicate or invalid. Only eligible rows will be sent for testing and import.`;
-      document.querySelector("#retry-import-failed").textContent="Retry failed rows";
-      document.querySelector("#retry-import-failed").classList.add("hidden");
-      if(csvText!==""&&result.accepted_count===0)document.querySelector("#camera-import-message").textContent+=" No rows are eligible to add.";
-    }
-    renderCameraImportRows();
-    setCameraImportActions({unknown:false});
-    return true;
-  }catch(error){
-    if(generation===importRequestGeneration){status.textContent=error.message;if(!reconcile)importPreviewFresh=false;}
-    return false;
-  }finally{
-    if(generation===importRequestGeneration)setCameraImportActions({unknown:importOutcomeUnknown});
-  }
-}
-async function applyCameraImport({duringGuard=false}={}){
-  if(importApplyInProgress)return false;
-  const status=document.querySelector("#camera-import-message");
-  const csvText=importPendingCsv;
-  const rowMap=[...importPendingRowMap];
-  if(!importCanApply||!csvText){status.textContent="Preview the current CSV again before importing.";return false;}
-  if(!duringGuard&&!importOutcomeUnknown&&lastPreviewCsv!==document.querySelector("#camera-import-csv").value){status.textContent="The CSV changed after preview. Preview the current text before importing.";return false;}
-  const generation=++importRequestGeneration;
-  setCameraImportActions({applying:true,unknown:false});
-  importApplyInProgress=true;
-  status.textContent=`Testing and importing ${rowMap.length} reviewed eligible camera row(s)…`;
-  try{
-    const result=await api("/api/cameras/import/apply",{method:"POST",body:JSON.stringify({csv_text:csvText})});
-    if(generation!==importRequestGeneration)return false;
-    const mapped=result.rows.map((row,index)=>({...row,row:rowMap[index]??row.row}));
-    importRows=mergeImportRows(importRows,mapped);
-    importPendingCsv="";importPendingRowMap=[];importCanApply=false;importOutcomeUnknown=false;
-    importRetryPrepared=false;importPreviewFresh=true;
-    const attention=importRows.filter(row=>!["created","duplicate"].includes(row.status));
-    status.textContent=`Added ${result.created_count} camera(s); ${attention.length} row(s) still need attention. Stream credentials are not shown.`;
-    if(result.created_count>0){cameraAddModes?.showInventoryAction("csv");await refresh();}
-    if(!attention.length){
-      clearConfigDraft(document.querySelector('[data-config-section="camera-import"]'));
-      document.querySelector("#camera-import-csv").value="";importSourceCsv="";lastPreviewCsv="";
-      status.textContent+=" The source CSV was cleared; row results are retained.";
-    }
-    document.querySelector("#retry-import-failed").textContent="Retry failed rows";
-    renderCameraImportRows();
-    setCameraImportActions({unknown:false});
-    return attention.length===0;
-  }catch(error){
-    if(generation===importRequestGeneration){
-      if(error instanceof TypeError){
-        importOutcomeUnknown=true;
-        importRetryPrepared=false;importPreviewFresh=false;
-        document.querySelector("#reconcile-import").textContent="Reconcile import outcome";
-        status.textContent="The import response was interrupted. Its outcome is unknown. Reconcile against the current inventory before retrying.";
-      }else status.textContent=error.message;
-      setCameraImportActions({unknown:importOutcomeUnknown});
-    }
-    return false;
-  }finally{
-    importApplyInProgress=false;
-    if(generation===importRequestGeneration)setCameraImportActions({unknown:importOutcomeUnknown});
-  }
-}
-async function retryFailedCameraImport(){
-  if(importOutcomeUnknown){document.querySelector("#camera-import-message").textContent="Reconcile the previous import outcome before retrying.";return false;}
-  if(importRetryPrepared)importCanApply=Boolean(importPendingCsv);
-  else if(!importPendingCsv){
-    importPendingCsv=window.NvrCameraOnboarding.buildRetryCsv(importSourceCsv,importRows);
-    importPendingRowMap=importRows.filter(row=>row.status==="failed").map(row=>row.row);
-    importCanApply=Boolean(importPendingCsv);
-  }
-  return applyCameraImport();
-}
-document.querySelector("#preview-import").addEventListener("click",()=>void previewCameraImport());
-document.querySelector("#apply-import").addEventListener("click",()=>void applyCameraImport());
-document.querySelector("#retry-import-failed").addEventListener("click",()=>void retryFailedCameraImport());
-document.querySelector("#reconcile-import").addEventListener("click",()=>void previewCameraImport({csvText:importPendingCsv,reconcile:true,rowMap:importPendingRowMap}));
-document.querySelector("#camera-import-csv").addEventListener("input",()=>{
-  importRequestGeneration+=1;
-  if(importOutcomeUnknown)return;
-  importCanApply=false;importPendingCsv="";importPendingRowMap=[];lastPreviewCsv="";importRetryPrepared=false;importPreviewFresh=false;
-  document.querySelector("#camera-import-message").textContent="CSV changed. Preview this text before importing.";
-  setCameraImportActions({unknown:false});
-});
-document.querySelector("#load-group-ai").addEventListener("click",()=>void loadGroupScopeWithGuard("group-ai"));
 async function loadAiRuntimeSettings() {
   const result=await api("/api/ai/settings");
   const model=result.model;
@@ -4303,7 +2841,6 @@ document.querySelector("#validate-ai-runtime").addEventListener("click",async()=
     document.querySelector("#ai-runtime-state").textContent=result.valid?`${result.runtime} ${result.model_id} ${result.model_version} passed model compile and test inference; saving will validate again before activation. ${result.gpu_certification_note}`:`Validation failed for ${result.provider}/${result.model_id}: ${result.reason}`;
   }catch(error){document.querySelector("#ai-runtime-state").textContent=error.message;}
 });
-document.querySelector("#save-group-ai").addEventListener("click",()=>void saveGroupTab("ai"));
 document.querySelector("#save-ai-runtime").addEventListener("click",async()=>{
   try{
     const result=await api("/api/ai/settings",{method:"PUT",body:JSON.stringify({max_active_cameras:Number(document.querySelector("#ai-max-active").value),provider:document.querySelector("#ai-provider").value,model_id:document.querySelector("#ai-model").value})});
@@ -4422,11 +2959,11 @@ incidentPollTimer=setInterval(()=>{if(currentRole){refreshOperationalInventory()
 if(webhookPollTimer) clearInterval(webhookPollTimer);
 webhookPollTimer=setInterval(()=>{if(currentRole==="administrator"){refreshWebhooks();refreshHeartbeatStatus();}},10000);
 document.querySelector("#logout").addEventListener("click", async () => {
-  if(cameraBulkOperationInProgress&&!window.confirm("A bulk update is still running. Signing out will not cancel it, and its results will be cleared from this session. Sign out anyway?"))return;
+  if(cameraBulkWorkspace?.isBusy()&&!window.confirm("A bulk update is still running. Signing out will not cancel it, and its results will be cleared from this session. Sign out anyway?"))return;
   if(!await guardScreenDrafts("camera-settings"))return;
   stopLiveViews();cameraPreviewWorkspace.clearSelection();cachedLiveArrangement=null;workspaceRestored=false;playbackWorkspaceRestored=false;playbackManualChoices.clear();
   await api("/api/auth/logout", { method:"POST" });
-  resetCameraBulkSession();groupWorkspaceState.clearSelection();groupWorkspaceState.setQuery("");groupPolicyLoading=false;groupPolicyLoadFailures.clear();unavailableGroupId=null;if(document.querySelector("#group-search"))document.querySelector("#group-search").value="";currentRole=null;currentUsername="";selectedCameraId=null;unavailableCamera=null;cameraInventoryRecoveryMessage="";cameraInventoryLoadGeneration+=1;cameraInventoryLoadState="idle";cameraEditorState.selectCamera(null);clearCameraHistory();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;
+  resetCameraBulkSession();cameraGroupWorkspace?.resetSession();currentRole=null;currentUsername="";selectedCameraId=null;unavailableCamera=null;cameraInventoryRecoveryMessage="";cameraInventoryLoadGeneration+=1;cameraInventoryLoadState="idle";cameraEditorState.selectCamera(null);clearCameraHistory();activeCameraWorkspace="cameras";mobileCameraEditorOpen=false;
   Object.assign(cameraInventoryFilters,{archive:"active",group:"all",connection:"all",health:"all",sortKey:"name",sortDirection:1,query:""});document.querySelector("#camera-inventory-search").value="";
   document.querySelectorAll("[data-camera-workspace]").forEach(section=>section.classList.toggle("hidden",section.dataset.cameraWorkspace!=="cameras"));
   document.querySelectorAll("[data-camera-workspace-button]").forEach(button=>{if(button.dataset.cameraWorkspaceButton==="cameras")button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");});

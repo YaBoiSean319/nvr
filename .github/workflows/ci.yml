@@ -51,8 +51,16 @@ jobs:
           exit 1
       - name: Run authenticated camera administration browser journeys
         run: npm run test:browser
-      - name: Retain browser traces and sanitized acceptance measurements
+        env:
+          NVR_BROWSER_REPORT_PRIVACY_SENTINEL: nvr-camera-browser-report-privacy-sentinel-v1
+      - name: Validate browser report privacy
+        id: report-privacy
         if: always()
+        env:
+          NVR_BROWSER_REPORT_PRIVACY_SENTINEL: nvr-camera-browser-report-privacy-sentinel-v1
+        run: node tests/browser/validate_acceptance_report_privacy.cjs
+      - name: Retain browser traces and sanitized acceptance measurements
+        if: always() && steps.report-privacy.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: camera-admin-browser-acceptance
@@ -115,8 +123,11 @@ jobs:
       - name: Smoke test Compose health and persistence
         run: |
           NVR_PORT=8080 docker compose up --pull never -d
+          NVR_CI_TEST_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          export NVR_CI_TEST_PASSWORD
           python - <<'PY'
           import json
+          import os
           import time
           import urllib.request
 
@@ -140,7 +151,7 @@ jobs:
 
           status, setup = get_json("/api/setup/status")
           assert status == 200 and setup["setup_required"]
-          payload = json.dumps({"username": "ci-admin", "password": "ComposeTestPassphrase2026"}).encode()
+          payload = json.dumps({"username": "ci-admin", "password": os.environ["NVR_CI_TEST_PASSWORD"]}).encode()
           request = urllib.request.Request(
               base + "/api/setup/admin", data=payload,
               headers={"Content-Type": "application/json"}, method="POST"

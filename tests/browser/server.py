@@ -3,14 +3,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socket
+import struct
 import sys
-from threading import Thread
+from threading import Event, Thread
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-
-from tests.browser.seed_fixtures import seed_fixtures  # noqa: E402
-
 
 class FixtureOnvifHandler(BaseHTTPRequestHandler):
     server_version = "NvrBrowserFixture/1.0"
@@ -58,12 +57,86 @@ class FixtureOnvifHandler(BaseHTTPRequestHandler):
         return
 
 
+class FixtureDiscoveryResponder:
+    """Answer real WS-Discovery probes on the isolated loopback test interface."""
+
+    GROUP = "239.255.255.250"
+    PORT = 3702
+    DEVICE_UUID = "e319da0d-a198-4a96-a243-0e25775ae7d1"
+
+    @staticmethod
+    def accepts_datagram(request: bytes, source: tuple[str, int]) -> bool:
+        return source[0] == "127.0.0.1" and b"NetworkVideoTransmitter" in request
+
+    def __init__(self) -> None:
+        self._stopped = Event()
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind(("0.0.0.0", self.PORT))
+        membership = struct.pack("=4s4s", socket.inet_aton(self.GROUP), socket.inet_aton("127.0.0.1"))
+        self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        self._socket.settimeout(0.25)
+
+    @staticmethod
+    def _message_id(request: bytes) -> str:
+        try:
+            import xml.etree.ElementTree as ET
+
+            root = ET.fromstring(request)
+            for node in root.iter():
+                if node.tag.rsplit("}", 1)[-1] == "MessageID" and node.text:
+                    return node.text.strip()
+        except ET.ParseError:
+            pass
+        return "urn:uuid:00000000-0000-0000-0000-000000000000"
+
+    def serve_forever(self) -> None:
+        while not self._stopped.is_set():
+            try:
+                request, address = self._socket.recvfrom(64 * 1024)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if not self.accepts_datagram(request, address):
+                continue
+            response = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope" '
+                'xmlns:a="http://www.w3.org/2005/08/addressing" '
+                'xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery">'
+                '<e:Header><a:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</a:Action>'
+                f'<a:RelatesTo>{self._message_id(request)}</a:RelatesTo></e:Header>'
+                '<e:Body><d:ProbeMatches><d:ProbeMatch>'
+                f'<a:EndpointReference><a:Address>urn:uuid:{self.DEVICE_UUID}</a:Address></a:EndpointReference>'
+                '<d:Types>dn:NetworkVideoTransmitter</d:Types>'
+                '<d:Scopes>onvif://www.onvif.org/name/DeterministicFixtureCamera</d:Scopes>'
+                '<d:XAddrs>http://127.0.0.1:8766/onvif/device_service</d:XAddrs>'
+                '<d:MetadataVersion>1</d:MetadataVersion>'
+                '</d:ProbeMatch></d:ProbeMatches></e:Body></e:Envelope>'
+            ).encode("utf-8")
+            try:
+                self._socket.sendto(response, address)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._stopped.set()
+        self._socket.close()
+
+
 def main() -> None:
     os.environ.setdefault("NVR_BROWSER_FIXTURE_MANIFEST", str(Path(os.environ["NVR_DB_PATH"]).with_name("fixtures.json")))
+    os.environ.setdefault("NVR_DISCOVERY_INTERFACE", "127.0.0.1")
+    from tests.browser.seed_fixtures import seed_fixtures
+
     seed_fixtures(0)
     onvif = ThreadingHTTPServer(("127.0.0.1", 8766), FixtureOnvifHandler)
     onvif_thread = Thread(target=onvif.serve_forever, name="browser-fixture-onvif", daemon=True)
     onvif_thread.start()
+    discovery = FixtureDiscoveryResponder()
+    discovery_thread = Thread(target=discovery.serve_forever, name="browser-fixture-discovery", daemon=True)
+    discovery_thread.start()
     import uvicorn
 
     try:
@@ -75,6 +148,8 @@ def main() -> None:
             access_log=False,
         )
     finally:
+        discovery.close()
+        discovery_thread.join(timeout=1)
         onvif.shutdown()
         onvif.server_close()
 

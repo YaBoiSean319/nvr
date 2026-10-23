@@ -9,6 +9,7 @@ const {
   replaceResults,
   beginRefresh,
   isCurrentRefresh,
+  mountWorkspace,
 } = require("../app/static/camera-discovery.js");
 
 const candidates = [
@@ -91,4 +92,9 @@ test("only the newest discovery refresh may update the view", () => {
   const second = beginRefresh(state);
   assert.equal(isCurrentRefresh(state, first), false);
   assert.equal(isCurrentRefresh(state, second), true);
+});
+
+test("discovery module exposes the workspace controller seam", () => {
+  assert.equal(typeof mountWorkspace, "function");
+  assert.equal(mountWorkspace(null, {}), null);
 });
