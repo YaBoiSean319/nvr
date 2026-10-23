@@ -79,6 +79,27 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         self.assertIsNotNone(second["motion_events"][0]["media_url"])
         self.assertEqual(first["gaps"][-1]["state"], "missing")
 
+    def test_timeline_reports_ai_detections_and_unanalyzed_intervals(self):
+        with connect() as db:
+            for label, seen in (("person", "12:00:10"), ("vehicle", "12:05:00")):
+                db.execute("INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) "
+                           "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                           (str(uuid.uuid4()), self.cameras[0], label, 0.82, "[0.1,0.1,0.5,0.5]", f"2026-10-20T{seen}+00:00", f"2026-10-20T{seen}+00:00", 320, 240, "fixture", "1"))
+            db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,?,?,?,?)",
+                       (self.cameras[0], "failed", "2026-10-20T12:01:00+00:00", "2026-10-20T12:02:00+00:00", "Detector unavailable"))
+            db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,?,?,?,?)",
+                       (self.cameras[0], "analyzed", "2026-10-20T12:00:00+00:00", "2026-10-20T12:01:00+00:00", ""))
+        response = self.client.post("/api/playback/timeline", json={
+            "camera_ids": self.cameras, "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:04:00Z",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        first, second = response.json()["cameras"]
+        self.assertEqual([(item["label"], item["first_seen_at"]) for item in first["ai_detections"]], [("person", "2026-10-20T12:00:10+00:00")])
+        self.assertEqual(first["ai_detections"][0]["confidence"], 0.82)
+        # Only intervals that were not analyzed are marks; analyzed time is the default.
+        self.assertEqual([(item["state"], item["detail"]) for item in first["ai_unanalyzed"]], [("failed", "Detector unavailable")])
+        self.assertEqual((second["ai_detections"], second["ai_unanalyzed"]), ([], []))
+
     def test_timeline_rejects_unknown_camera_and_oversized_window(self):
         unknown = self.client.post("/api/playback/timeline", json={
             "camera_ids": [str(uuid.uuid4())], "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",

@@ -9,6 +9,8 @@ import { SignInPage } from "@/features/auth/SignInPage";
 import { AdministratorOnly, NotFound, WorkspacePlaceholder } from "@/features/placeholders/Pages";
 import { LiveWorkspace } from "@/features/live/LiveWorkspace";
 import { useLiveStore } from "@/features/live/store";
+import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
+import { usePlaybackStore } from "@/features/playback/store";
 import { Shell } from "@/features/shell/Shell";
 import { applyBranding, applyTheme, storedTheme } from "@/lib/appearance";
 
@@ -25,7 +27,7 @@ function router(me: Me) {
         children: [
           { index: true, element: <Navigate to="/live" replace /> },
           { path: "live/*", element: <LiveWorkspace /> },
-          { path: "playback/*", element: <WorkspacePlaceholder title="Playback" legacyHint="Footage search and export are available in the current interface." /> },
+          { path: "playback/*", element: <PlaybackWorkspace /> },
           { path: "cameras/*", element: <AdminRoute me={me}><WorkspacePlaceholder title="Cameras" legacyHint="Camera administration is available in the current interface." /></AdminRoute> },
           { path: "settings/*", element: <AdminRoute me={me}><WorkspacePlaceholder title="Settings" legacyHint="Settings are available in the current interface." /></AdminRoute> },
           { path: "*", element: <NotFound /> },
@@ -40,7 +42,11 @@ function SignedIn({ me }: { me: Me }) {
   // Workspace state belongs to one person: start clean and forget it on sign-out.
   useEffect(() => {
     useLiveStore.getState().reset();
-    return () => useLiveStore.getState().reset();
+    usePlaybackStore.getState().reset();
+    return () => {
+      useLiveStore.getState().reset();
+      usePlaybackStore.getState().reset();
+    };
   }, [me.username]);
   // One router per signed-in identity, so a role change rebuilds the route table.
   const routes = useMemo(() => router(me), [me.username, me.role]); // eslint-disable-line react-hooks/exhaustive-deps

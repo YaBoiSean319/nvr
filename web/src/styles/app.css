@@ -220,3 +220,75 @@
 .radio-row { border: 0; padding: 0; margin: 0; }
 .radio-row legend { font-weight: 600; font-size: 13px; margin-bottom: var(--n-space-1); }
 .radio-row label { display: flex; align-items: center; gap: var(--n-space-2); font-weight: 400; }
+
+/* --- playback ---------------------------------------------------------------- */
+.playback-workspace .browser { grid-template-rows: auto minmax(0, 1fr); }
+.browser-heading { padding: var(--n-space-3) 44px var(--n-space-1) var(--n-space-3); font-weight: 650; }
+/* Bar, video, transport and a bounded timeline share one viewport; only the timeline rows scroll. */
+.playback-canvas { grid-template-rows: auto minmax(120px, 1fr) auto auto; }
+.playback-video { position: relative; display: grid; min-height: 0; min-width: 0; }
+.playback-error { position: absolute; inset: var(--n-space-2) var(--n-space-2) auto; z-index: 2; margin: 0; }
+.playback-tile .tile-video { opacity: 1; filter: none; }
+.playback-tile:not([data-phase="ready"]) .tile-video { opacity: 0.35; }
+.playback-tile .tile-overlay { pointer-events: none; }
+
+.search-bar { display: flex; align-items: center; gap: var(--n-space-2); flex-wrap: wrap; min-width: 0; padding-block: 4px; font-size: 13px; }
+.search-field { display: flex; align-items: center; gap: var(--n-space-1); }
+.search-field label { display: flex; align-items: center; gap: var(--n-space-1); }
+.search-field input, .search-field select, .transport select {
+  height: 30px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel);
+}
+.search-bar[data-stale="true"] input { border-color: var(--n-warn); }
+.search-zone { font-size: 12px; }
+.search-stale { color: var(--n-warn); font-size: 12px; }
+.search-error, .field-error { margin: 0; color: var(--n-bad); font-size: 12px; }
+.search-error { flex-basis: 100%; }
+
+.transport { display: flex; align-items: center; gap: var(--n-space-2); min-height: 44px; padding: var(--n-space-1) var(--n-space-3); border-top: 1px solid var(--n-line); background: var(--n-panel); flex-wrap: wrap; }
+.transport-play { min-width: 72px; }
+.transport-speed { display: flex; align-items: center; gap: var(--n-space-1); font-size: 13px; }
+.transport-time { font-variant-numeric: tabular-nums; font-size: 13px; }
+.transport-timeline { margin-left: auto; }
+
+.timeline {
+  --label: 168px;
+  display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0;
+  max-height: clamp(110px, 28vh, 280px); border-top: 1px solid var(--n-line); background: var(--n-panel); font-size: 12px;
+}
+.timeline-tools { display: flex; align-items: center; gap: var(--n-space-1); padding: var(--n-space-1) var(--n-space-3); flex-wrap: wrap; }
+.timeline-tools .button { min-height: 26px; font-size: 12px; }
+.timeline-span { margin-inline: var(--n-space-2); font-variant-numeric: tabular-nums; }
+.timeline-legend { display: flex; gap: var(--n-space-3); margin: 0 0 0 auto; padding: 0; list-style: none; color: var(--n-muted); flex-wrap: wrap; }
+.timeline-legend li { display: flex; align-items: center; gap: 4px; }
+.timeline-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.timeline-body { overflow-y: auto; overflow-x: hidden; min-height: 0; padding: 0 var(--n-space-3) var(--n-space-2); overscroll-behavior: contain; }
+.timeline-row { display: grid; grid-template-columns: var(--label) minmax(0, 1fr); align-items: center; min-height: 22px; }
+.timeline-ruler-row { position: sticky; top: 0; z-index: 2; background: var(--n-panel); }
+.timeline-label { display: flex; align-items: center; gap: var(--n-space-1); min-width: 0; padding-right: var(--n-space-2); }
+.timeline-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-badge { flex: none; padding: 0 4px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); color: var(--n-muted); font-size: 11px; }
+.timeline-ruler { position: relative; height: 24px; border-bottom: 1px solid var(--n-line); cursor: pointer; touch-action: none; }
+.timeline-ruler:focus-visible { outline: 2px solid var(--n-focus); outline-offset: 1px; }
+.timeline-tick { position: absolute; bottom: 2px; transform: translateX(-50%); color: var(--n-muted); white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; }
+.timeline-tick::after { content: ""; position: absolute; left: 50%; bottom: -3px; height: 4px; border-left: 1px solid var(--n-line); }
+.timeline-track { position: relative; height: 16px; margin-block: 3px; border-radius: 2px; background: var(--n-raised); cursor: pointer; touch-action: none; overflow: hidden; }
+.timeline-mark { position: absolute; top: 0; bottom: 0; min-width: 1px; }
+.timeline-point { position: absolute; top: 1px; bottom: 1px; width: 3px; margin-left: -1px; border-radius: 1px; }
+.timeline-cursor, .timeline-cursor-head { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--n-accent); pointer-events: none; z-index: 1; }
+.timeline-cursor[hidden], .timeline-cursor-head[hidden] { display: none; }
+[data-mark="recording"] { background: color-mix(in srgb, var(--n-good) 70%, transparent); }
+[data-mark="missing"] { background: transparent; }
+.timeline-legend [data-mark="missing"] { border: 1px solid var(--n-line); background: var(--n-raised); }
+[data-mark="expected_idle"] { background: color-mix(in srgb, var(--n-muted) 22%, transparent); }
+[data-mark="failure"] { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--n-bad) 70%, transparent) 0 4px, transparent 4px 7px); }
+[data-mark="uncertain"] { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--n-warn) 70%, transparent) 0 4px, transparent 4px 7px); }
+[data-mark="unanalyzed"] { top: auto; height: 3px; background: var(--n-muted); }
+.timeline-legend [data-mark="unanalyzed"] { height: 3px; }
+[data-mark="motion"] { background: var(--n-warn); }
+[data-mark="ai"] { background: var(--n-accent); }
+
+@media (max-width: 900px) {
+  .playback-canvas { overflow-y: auto; grid-template-rows: auto minmax(180px, 1fr) auto auto; }
+  .timeline { --label: 104px; }
+  .timeline-legend { display: none; }
+}

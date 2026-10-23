@@ -83,6 +83,14 @@ def synchronized_playback_timeline(
                 **dict(row), "pre_roll_complete": bool(row["pre_roll_complete"]),
                 "media_url": f"/api/cameras/{camera_id}/segments/{row['segment_id']}/media" if row["segment_id"] else None,
             } for row in event_rows]
+            ai_detections = [dict(row) for row in db.execute(
+                "SELECT id,label,confidence,first_seen_at,last_seen_at FROM ai_observations "
+                "WHERE camera_id=? AND first_seen_at>=? AND first_seen_at<? ORDER BY first_seen_at LIMIT 1000",
+                (camera_id, start_text, end_text))]
+            ai_unanalyzed = [dict(row) for row in db.execute(
+                "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
+                "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
+                (camera_id, end_text, start_text))]
             spans = sorted((max(start, datetime.fromisoformat(row["starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)),
                             min(end, datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00")).astimezone(timezone.utc)))
                            for row in segment_rows)
@@ -117,7 +125,8 @@ def synchronized_playback_timeline(
                 append_gap(cursor, end)
             cameras.append({"camera_id": camera_id, "name": camera["name"], "recording_status": camera["recording_status"],
                             "audio_supported": None if camera["audio_supported"] is None else bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
-                            "segments": segments, "coverage": coverage, "motion_events": events, "gaps": gaps})
+                            "segments": segments, "coverage": coverage, "motion_events": events, "gaps": gaps,
+                            "ai_detections": ai_detections, "ai_unanalyzed": ai_unanalyzed})
     return {"start": start_text, "end": end_text, "cameras": cameras}
 
 
