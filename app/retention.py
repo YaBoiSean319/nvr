@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import sqlite3
 import shutil
@@ -12,48 +13,99 @@ from .store import connect
 
 DEFAULT_RETENTION_DAYS = 30
 _lease_lock = threading.Lock()
-_leased_paths: dict[Path, int] = {}
+# Each lease holds its own open file description with a shared flock on the file.
+# Locks are visible to every process on the host and vanish if the holder dies, so
+# cleanup in the recorder process respects playback and downloads in the web process.
+_leases: dict[Path, list[int]] = {}
+_NO_FILE = -1
 
 
 def acquire_playback(path: Path) -> None:
+    resolved = path.resolve()
+    descriptor = _shared_lock(resolved)
     with _lease_lock:
-        resolved = path.resolve()
-        _leased_paths[resolved] = _leased_paths.get(resolved, 0) + 1
+        _leases.setdefault(resolved, []).append(descriptor)
 
 
 def release_playback(path: Path) -> None:
+    resolved = path.resolve()
     with _lease_lock:
-        resolved = path.resolve()
-        count = _leased_paths.get(resolved, 0)
-        if count <= 1:
-            _leased_paths.pop(resolved, None)
-        else:
-            _leased_paths[resolved] = count - 1
+        descriptors = _leases.get(resolved)
+        if not descriptors:
+            return
+        descriptor = descriptors.pop()
+        if not descriptors:
+            _leases.pop(resolved, None)
+    if descriptor != _NO_FILE:
+        os.close(descriptor)
 
 
 def playback_is_leased(path: Path) -> bool:
-    with _lease_lock:
-        return path.resolve() in _leased_paths
+    """Whether any process currently holds a lease on the file."""
+    descriptors = _exclusive_locks([path.resolve()])
+    if descriptors is None:
+        return True
+    _close(descriptors)
+    return False
 
 
 def unlink_if_unleased(path: Path) -> bool:
-    """Atomically exclude cleanup while playback opens or reads a file."""
-    with _lease_lock:
-        if path.resolve() in _leased_paths:
-            return False
-        path.unlink(missing_ok=True)
-        return True
+    """Delete a file only while no process holds a lease on it."""
+    return unlink_many_if_unleased([path])
 
 
 def unlink_many_if_unleased(paths: list[Path]) -> bool:
-    """Delete a camera's footage only when none of it is currently leased."""
+    """Delete files only when none of them is currently leased by any process."""
     resolved = list(dict.fromkeys(path.resolve() for path in paths))
-    with _lease_lock:
-        if any(path in _leased_paths for path in resolved):
-            return False
+    descriptors = _exclusive_locks(resolved)
+    if descriptors is None:
+        return False
+    try:
         for path in resolved:
             path.unlink(missing_ok=True)
+    finally:
+        _close(descriptors)
     return True
+
+
+def _shared_lock(path: Path) -> int:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except (FileNotFoundError, NotADirectoryError):
+        return _NO_FILE
+    # Waits only while a deletion holds its brief exclusive lock.
+    fcntl.flock(descriptor, fcntl.LOCK_SH)
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        current = None
+    if current is None or current.st_ino != os.fstat(descriptor).st_ino:
+        # Deleted (or replaced) while we waited: there is nothing left to protect.
+        os.close(descriptor)
+        return _NO_FILE
+    return descriptor
+
+
+def _exclusive_locks(paths: list[Path]) -> list[int] | None:
+    """Exclusively lock every existing file, or return None if any is leased."""
+    held: list[int] = []
+    for path in paths:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        held.append(descriptor)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            _close(held)
+            return None
+    return held
+
+
+def _close(descriptors: list[int]) -> None:
+    for descriptor in descriptors:
+        os.close(descriptor)
 
 
 def effective_retention(db, camera_id: str) -> tuple[int, str]:
