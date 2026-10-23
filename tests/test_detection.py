@@ -14,7 +14,8 @@ from fastapi.testclient import TestClient
 
 from app.credentials import encrypt
 from app.detection import DetectionManager, MODEL_ID, MODEL_VERSION, point_in_zones, record_observations
-from app.main import administrator, app, current_user
+from app.main import app
+from app.principal import administrator, current_user
 from app.store import connect, initialize
 
 

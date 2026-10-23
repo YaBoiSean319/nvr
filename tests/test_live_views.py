@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 from app.credentials import encrypt
 from app.api.live_media import _acquire_live_view, _release_live_audio, _release_live_view, live_camera, live_camera_audio
-from app.main import app, current_user
+from app.main import app
+from app.principal import current_user
 from app.store import connect, initialize
 
 

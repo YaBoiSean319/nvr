@@ -22,7 +22,7 @@ from app.recording import probe_stream, safe_stream_url
 from app.discovery import discover_onvif, discover_onvif_ip_range
 from app import diagnostics
 from app.request_validation import normalize_group_name
-from app.api.cameras import CameraCreateRequest, CameraProbeRequest, MotionZoneRequest, _camera_view, _insert_camera, _record_discovery_failure, _record_discovery_probe, create_camera
+from app.api.cameras import CameraCreateRequest, CameraProbeRequest, MotionZoneRequest, camera_view, insert_camera, record_discovery_failure, record_discovery_probe, create_camera
 
 router = APIRouter()
 
@@ -229,11 +229,11 @@ async def apply_camera_import(
                         db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, item.group_name))
                 mode = item.recording_mode
                 try:
-                    camera_id = _insert_camera(
+                    camera_id = insert_camera(
                         db, name=item.name, stream_url=item.stream_url, recording_mode=mode,
                         capability=capability, onvif_uuid=item.onvif_uuid, group_id=group_id,
                     )
-                    _record_discovery_probe(db, item.onvif_uuid, capability)
+                    record_discovery_probe(db, item.onvif_uuid, capability)
                     if item.onvif_uuid:
                         db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE device_uuid=?",(camera_id,datetime.now(timezone.utc).isoformat(),item.onvif_uuid))
                     inserted.append((index,camera_id,mode))
@@ -457,7 +457,7 @@ async def add_discovered_camera(
     except HTTPException as exc:
         if exc.status_code == 422:
             with connect() as db:
-                _record_discovery_failure(db, candidate["device_uuid"])
+                record_discovery_failure(db, candidate["device_uuid"])
         _release_discovery_add(candidate_id, claim_token)
         raise
     except Exception:
@@ -548,8 +548,7 @@ async def bulk_update_cameras(
         if row is None:
             results.append({"camera_id": camera_id, "status": "unknown", "code": "outcome_unknown", "detail": "Settings were saved, but the camera is no longer available."})
             continue
-        camera_view = _camera_view(row)
-        updated.append(camera_view)
+        updated.append(camera_view(row))
         result: dict[str, object] = {"camera_id": camera_id, "status": "success", "code": None}
         if warnings:
             result["warning"] = " ".join(warnings)

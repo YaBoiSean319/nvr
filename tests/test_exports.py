@@ -19,7 +19,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.exports import ExportManager, create_export_record, expire_exports, recover_interrupted_exports
-from app.main import app, current_user
+from app.main import app
+from app.principal import current_user
 from app.retention import cleanup_expired_recordings, playback_is_leased
 from app.store import connect, initialize
 

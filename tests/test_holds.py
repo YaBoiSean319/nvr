@@ -10,7 +10,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
-from app.main import administrator, app, current_user
+from app.main import app
+from app.principal import administrator, current_user
 from app.retention import cleanup_expired_recordings
 from app.store import connect, initialize
 

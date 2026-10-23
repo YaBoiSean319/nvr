@@ -38,7 +38,7 @@ class AIRuntimeValidationRequest(BaseModel):
     model_id: str = Field(min_length=1, max_length=128)
 
 
-def _ensure_ai_settings(camera_id: str) -> sqlite3.Row:
+def ensure_ai_settings(camera_id: str) -> sqlite3.Row:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
@@ -47,7 +47,7 @@ def _ensure_ai_settings(camera_id: str) -> sqlite3.Row:
     return row
 
 
-def _ai_runtime_model_view() -> dict[str, object]:
+def ai_runtime_model_view() -> dict[str, object]:
     with connect() as db:
         runtime = db.execute("SELECT provider,model_id,model_version,validated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
     provider = str(runtime["provider"]) if runtime else "CPU"
@@ -74,7 +74,7 @@ def _ai_runtime_model_view() -> dict[str, object]:
 
 @router.get("/api/cameras/{camera_id}/ai")
 def get_ai_detection_config(camera_id: str, _: CurrentUser) -> dict[str, object]:
-    row = _ensure_ai_settings(camera_id)
+    row = ensure_ai_settings(camera_id)
     effective = effective_camera_config(camera_id) or {}
     return {
         "camera_id": camera_id,
@@ -89,7 +89,7 @@ def get_ai_detection_config(camera_id: str, _: CurrentUser) -> dict[str, object]
         "last_attempt_at": row["last_attempt_at"],
         "last_success_at": row["last_success_at"],
         "last_error": row["last_error"],
-        "model": _ai_runtime_model_view(),
+        "model": ai_runtime_model_view(),
         "coverage_note": "No detections do not prove an object was absent; inspect AI coverage status and model results.",
     }
 
@@ -101,9 +101,9 @@ async def update_ai_detection_config(
     request: Request,
     user: Administrator,
 ) -> dict[str, object]:
-    existing = _ensure_ai_settings(camera_id)
+    ensure_ai_settings(camera_id)
     zones = [zone.model_dump() for zone in payload.zones]
-    active_model = _ai_runtime_model_view()
+    active_model = ai_runtime_model_view()
     with connect() as db:
         camera = db.execute("SELECT group_id,live_substream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if payload.inherit_group and not camera["group_id"]:
@@ -137,7 +137,7 @@ def _group_ai_view(group_id: str) -> dict[str, object]:
         "use_substream": bool(config["use_substream"]) if config else True,
         "zones": json.loads(config["zones_json"]) if config else [],
         "camera_count": camera_count, "inherited_camera_count": inherited_count,
-        "model": _ai_runtime_model_view(),
+        "model": ai_runtime_model_view(),
     }
 
 
@@ -154,7 +154,7 @@ async def update_group_ai_config(
     user: Administrator,
 ) -> dict[str, object]:
     zones = [zone.model_dump() for zone in payload.zones]
-    active_model = _ai_runtime_model_view()
+    active_model = ai_runtime_model_view()
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
@@ -182,7 +182,7 @@ def get_ai_runtime_settings(_: CurrentUser) -> dict[str, object]:
         row = db.execute("SELECT max_active_cameras,updated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
     return {"max_active_cameras": int(row["max_active_cameras"]), "inflight_inferences": 1, "updated_at": row["updated_at"],
             "resource_note": "Inference calls run through one bounded slot to preserve headroom for recording. Cameras beyond the active limit are marked skipped; no unbounded analysis queue is maintained.",
-            "model": _ai_runtime_model_view()}
+            "model": ai_runtime_model_view()}
 
 
 @router.post("/api/ai/settings/validate")

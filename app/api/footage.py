@@ -8,8 +8,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
-from app.api.ai_settings import _ai_runtime_model_view, _ensure_ai_settings
-from app.api.cameras import _camera_view
+from app.api.ai_settings import ai_runtime_model_view, ensure_ai_settings
+from app.api.cameras import camera_view
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.health import recording_health
@@ -107,12 +107,12 @@ def search_ai_observations(
         item["box"] = json.loads(item.pop("box_json"))
         events.append(item)
     models_used = sorted({(str(item["model_id"]), str(item["model_version"])) for item in events})
-    return {"events": events, "model": _ai_runtime_model_view(), "models_used": [{"id": model_id, "version": version} for model_id, version in models_used], "coverage_note": "Search results describe analyzed frames only; empty results do not prove the scene was empty."}
+    return {"events": events, "model": ai_runtime_model_view(), "models_used": [{"id": model_id, "version": version} for model_id, version in models_used], "coverage_note": "Search results describe analyzed frames only; empty results do not prove the scene was empty."}
 
 
 @router.get("/api/cameras/{camera_id}/ai/coverage")
 def get_ai_detection_coverage(camera_id: str, _: CurrentUser) -> dict[str, object]:
-    _ensure_ai_settings(camera_id)
+    ensure_ai_settings(camera_id)
     with connect() as db:
         rows = db.execute("SELECT state,starts_at,ends_at,detail FROM ai_coverage WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500", (camera_id,)).fetchall()
         setting = db.execute("SELECT status,last_attempt_at,last_success_at,last_error FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
@@ -163,7 +163,7 @@ def restore_camera(
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "restore", "camera", camera_id, "{}"))
         updated = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return _camera_view(updated)
+    return camera_view(updated)
 
 
 @router.delete("/api/cameras/{camera_id}/footage", status_code=status.HTTP_204_NO_CONTENT)

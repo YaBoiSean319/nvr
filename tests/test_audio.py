@@ -15,7 +15,8 @@ from fastapi.testclient import TestClient
 
 from tests.test_support import patch_camera_probe
 from app.credentials import encrypt
-from app.main import administrator, app, current_user
+from app.main import app
+from app.principal import administrator, current_user
 from app.recording import audio_recording_args
 from app.store import connect, initialize
 

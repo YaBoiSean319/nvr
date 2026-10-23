@@ -20,7 +20,7 @@ from app.health import recording_health
 from app.onvif_stream import list_camera_stream_profiles, resolve_camera_stream
 from app import diagnostics
 from app.retention import coverage_summary, effective_retention
-from app.api.policies import _effective_schedule_view
+from app.api.policies import effective_schedule_view
 
 router = APIRouter()
 
@@ -207,7 +207,7 @@ async def camera_onvif_profiles(
     return {"device_service_url": service_url, "profiles": [profile.__dict__ for profile in profiles]}
 
 
-def _camera_view(row: sqlite3.Row) -> dict[str, object]:
+def camera_view(row: sqlite3.Row) -> dict[str, object]:
     try:
         visible_url = masked_stream_url(decrypt(row["stream_url_ciphertext"]))
     except RuntimeError:
@@ -255,7 +255,7 @@ def _camera_view(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def _insert_camera(
+def insert_camera(
     db: sqlite3.Connection,
     *,
     name: str,
@@ -310,7 +310,7 @@ def _insert_camera(
     return camera_id
 
 
-def _record_discovery_probe(db: sqlite3.Connection, device_uuid: str | None, capability: dict[str, object]) -> None:
+def record_discovery_probe(db: sqlite3.Connection, device_uuid: str | None, capability: dict[str, object]) -> None:
     if not device_uuid:
         return
     row = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device_uuid,)).fetchone()
@@ -323,7 +323,7 @@ def _record_discovery_probe(db: sqlite3.Connection, device_uuid: str | None, cap
     db.execute("UPDATE discovery_candidates SET capabilities=? WHERE id=?", (json.dumps(states), row["id"]))
 
 
-def _record_discovery_failure(db: sqlite3.Connection, device_uuid: str) -> None:
+def record_discovery_failure(db: sqlite3.Connection, device_uuid: str) -> None:
     row = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device_uuid,)).fetchone()
     if row is None:
         return
@@ -380,8 +380,8 @@ def list_cameras(_: CurrentUser) -> dict[str, object]:
         rows = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE").fetchall()
         cameras = []
         for row in rows:
-            camera = _camera_view(row)
-            schedule = _effective_schedule_view(db, row["id"])
+            camera = camera_view(row)
+            schedule = effective_schedule_view(db, row["id"])
             camera.update(schedule)
             retention_days, retention_source = effective_retention(db, row["id"])
             camera["retention_days"] = retention_days
@@ -443,7 +443,7 @@ async def create_camera(
             discovery_claim = getattr(request.state, "discovery_add_claim", None)
             if discovery_claim:
                 db.execute("BEGIN IMMEDIATE")
-            camera_id = _insert_camera(
+            camera_id = insert_camera(
                 db, name=name, stream_url=stream_url, recording_mode=payload.recording_mode,
                 capability=capability, onvif_uuid=payload.onvif_uuid,
                 camera_ip=payload.camera_ip, camera_brand=payload.camera_brand,
@@ -461,7 +461,7 @@ async def create_camera(
                 motion_sensitivity=payload.motion_sensitivity,
                 live_substream_url=live_substream_url,
             )
-            _record_discovery_probe(
+            record_discovery_probe(
                 db,
                 discovery_claim["device_uuid"] if discovery_claim else payload.onvif_uuid,
                 capability,
@@ -491,7 +491,7 @@ async def create_camera(
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return _camera_view(row)
+    return camera_view(row)
 
 
 def _reuse_source_credentials(current: sqlite3.Row, payload: CameraSourceUpdateRequest) -> CameraSourceUpdateRequest:
@@ -625,7 +625,7 @@ async def update_camera_source(
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return _camera_view(row)
+    return camera_view(row)
 
 
 @router.patch("/api/cameras/{camera_id}")
@@ -687,7 +687,7 @@ async def update_camera(
         await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return _camera_view(row)
+    return camera_view(row)
 
 
 @router.post("/api/cameras/{camera_id}/credentials")
@@ -718,7 +718,7 @@ async def rotate_camera_credentials(
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return _camera_view(row)
+    return camera_view(row)
 
 
 @router.post("/api/cameras/{camera_id}/audio/probe")
@@ -787,4 +787,4 @@ async def configure_motion_source(
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         camera = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return _camera_view(camera)
+    return camera_view(camera)

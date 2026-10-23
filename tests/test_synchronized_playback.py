@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
-from app.main import app, current_user
+from app.main import app
+from app.principal import current_user
 from app.retention import unlink_if_unleased
 from app.store import connect, initialize
 

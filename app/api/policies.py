@@ -271,7 +271,7 @@ def _schedule_document(timezone_name: str, intervals: list[dict[str, object]]) -
     return {"timezone": timezone_name, "intervals": intervals}
 
 
-def _effective_schedule_view(db: sqlite3.Connection, camera_id: str) -> dict[str, object]:
+def effective_schedule_view(db: sqlite3.Connection, camera_id: str) -> dict[str, object]:
     policy = effective_policy(db, camera_id, datetime.now(timezone.utc))
     return {
         "effective_recording_mode": policy["mode"],
