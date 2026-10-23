@@ -480,6 +480,7 @@ root.querySelector("#save-storage-volume").addEventListener("click",()=>void sav
     return {
       state: groupWorkspaceState,
       refresh: refreshGroups,
+      refreshTabStatuses: refreshGroupTabStatuses,
       render: renderGroupManagement,
       guardDrafts: guardGroupDrafts,
       resetSession() {

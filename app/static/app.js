@@ -837,6 +837,7 @@ function clearConfigDraft(scope){
   refreshCameraTabStatuses();
   refreshGroupTabStatuses();
 }
+function refreshGroupTabStatuses(){cameraGroupWorkspace?.refreshTabStatuses?.();}
 function guardDraftsIn(root){
   const candidates=[...(root?.matches?.('[data-config-dirty="true"]')?[root]:[]),...(root?.querySelectorAll?.('[data-config-dirty="true"]')||[])];
   const dirty=candidates.filter(scope=>!scope.closest("[data-settings-panel].hidden"));

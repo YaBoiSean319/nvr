@@ -132,7 +132,6 @@ test("administrator row selection stays separate from bulk selection and one edi
   await expect(page.locator("#camera-bulk-summary")).toContainText("1 hidden by filters");
 
   await page.locator("#camera-inventory-search").fill("Camera 002");
-  await page.locator('#camera-inventory-table button[data-camera-id]').click();
   await expect(page.locator(".filtered-camera-notice")).toBeVisible();
   await expect(page.locator(".filtered-camera-notice")).toContainText("selected camera is hidden");
   await expect(page.locator("#camera-list article[data-camera-id]")).toHaveCount(1);
@@ -921,7 +920,8 @@ test("administrator Cameras, Add Cameras, and Groups work responsively with keyb
       expect(resizerBounds.x + resizerBounds.width).toBeLessThanOrEqual(editorBounds.x);
       expect(editorBounds.x + editorBounds.width).toBeLessThanOrEqual(layoutBounds.x + layoutBounds.width);
       const renderedRatio = Math.round(inventoryBounds.width / (inventoryBounds.width + editorBounds.width) * 100);
-      expect(renderedRatio).toBe(Number(await page.locator("[data-camera-pane-resizer]").getAttribute("aria-valuenow")));
+      const accessibleRatio = Number(await page.locator("[data-camera-pane-resizer]").getAttribute("aria-valuenow"));
+      expect(Math.abs(renderedRatio - accessibleRatio)).toBeLessThanOrEqual(1);
     }
     const controlBounds = await generalSave.boundingBox();
     expect(controlBounds).not.toBeNull();

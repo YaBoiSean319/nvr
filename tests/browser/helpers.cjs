@@ -29,8 +29,9 @@ async function signIn(page, username = "camera-admin") {
   page.on("pageerror", onPageError);
   try {
     await page.goto("/");
-    const loginVisible = await page.locator("#login").isVisible().catch(() => false);
-    if (!loginVisible) {
+    try {
+      await page.locator("#login").waitFor({ state: "visible", timeout: 8_000 });
+    } catch {
       const setupResponse = await page.request.get(new URL("/api/setup/status", page.url()).toString()).catch(() => null);
       const setupStatus = setupResponse?.ok() ? await setupResponse.json().catch(() => null) : null;
       const setupRequired = setupStatus ? String(setupStatus.setup_required) : "unknown";
