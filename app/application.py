@@ -15,9 +15,9 @@ from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
 from .principal import secure_cookie
 from .store import initialize
+from .version import APP_VERSION
 from .webhooks import WebhookManager
 
-APP_VERSION = "0.1.0"
 
 STARTUP_ORDER = (
     ("exports", ExportManager),
