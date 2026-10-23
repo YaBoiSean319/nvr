@@ -1,5 +1,6 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { useSavePreferences, useSignOut } from "@/api/queries";
+import { guarded } from "@/features/admin/drafts";
 import type { Me, ThemePreference } from "@/api/types";
 import { applyTheme } from "@/lib/appearance";
 
@@ -40,7 +41,7 @@ export function UserMenu({ me, theme }: { me: Me; theme: ThemePreference }) {
           </Menu.RadioGroup>
           {save.isError ? <p className="menu-label error">Theme could not be saved.</p> : null}
           <Menu.Separator className="menu-separator" />
-          <Menu.Item className="menu-item" onSelect={() => signOut.mutate()}>Sign out</Menu.Item>
+          <Menu.Item className="menu-item" onSelect={() => void guarded(() => signOut.mutate())}>Sign out</Menu.Item>
         </Menu.Content>
       </Menu.Portal>
     </Menu.Root>

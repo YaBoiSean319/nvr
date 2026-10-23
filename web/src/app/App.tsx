@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, type ReactNode } from "react";
-import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
+import { createBrowserRouter, Navigate, Outlet, RouterProvider } from "react-router";
 import { onSessionExpired } from "@/api/client";
 import { keys, useMe, usePublicBranding, useSetupStatus } from "@/api/queries";
 import type { Me } from "@/api/types";
@@ -9,6 +9,8 @@ import { SignInPage } from "@/features/auth/SignInPage";
 import { AdministratorOnly, NotFound, WorkspacePlaceholder } from "@/features/placeholders/Pages";
 import { LiveWorkspace } from "@/features/live/LiveWorkspace";
 import { useLiveStore } from "@/features/live/store";
+import { CamerasInventory, CamerasShell } from "@/features/admin/cameras/CamerasWorkspace";
+import { useCamerasStore } from "@/features/admin/cameras/store";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
 import { Shell } from "@/features/shell/Shell";
@@ -28,7 +30,16 @@ function router(me: Me) {
           { index: true, element: <Navigate to="/live" replace /> },
           { path: "live/*", element: <LiveWorkspace /> },
           { path: "playback/*", element: <PlaybackWorkspace /> },
-          { path: "cameras/*", element: <AdminRoute me={me}><WorkspacePlaceholder title="Cameras" legacyHint="Camera administration is available in the current interface." /></AdminRoute> },
+          {
+            path: "cameras",
+            element: <CamerasShell admin={me.role === "administrator"}><Outlet /></CamerasShell>,
+            children: [
+              { index: true, element: <CamerasInventory /> },
+              { path: "add", element: <AdminRoute me={me}><WorkspacePlaceholder title="Add Cameras" legacyHint="Discovery, manual add and CSV import are available in the current interface." /></AdminRoute> },
+              { path: "groups", element: <AdminRoute me={me}><WorkspacePlaceholder title="Groups & Policies" legacyHint="Group policies are available in the current interface." /></AdminRoute> },
+              { path: "*", element: <NotFound /> },
+            ],
+          },
           { path: "settings/*", element: <AdminRoute me={me}><WorkspacePlaceholder title="Settings" legacyHint="Settings are available in the current interface." /></AdminRoute> },
           { path: "*", element: <NotFound /> },
         ],
@@ -43,9 +54,11 @@ function SignedIn({ me }: { me: Me }) {
   useEffect(() => {
     useLiveStore.getState().reset();
     usePlaybackStore.getState().reset();
+    useCamerasStore.getState().reset();
     return () => {
       useLiveStore.getState().reset();
       usePlaybackStore.getState().reset();
+      useCamerasStore.getState().reset();
     };
   }, [me.username]);
   // One router per signed-in identity, so a role change rebuilds the route table.

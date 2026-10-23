@@ -36,6 +36,36 @@ export interface Camera {
   audio_enabled: boolean;
   live_substream_available: boolean;
   recording_health: { state: RecordingHealthState; detail: string; video_fresh: boolean };
+  camera_brand: CameraBrand;
+  device_service_url: string | null;
+  onvif_profile_token: string | null;
+  live_substream_profile_token: string | null;
+  /** Masked: credentials are never returned. */
+  stream_url: string;
+  video: { codec: string | null; width: number | null; height: number | null };
+  audio_supported: boolean | null;
+  last_probe_at: string | null;
+  last_error: string | null;
+  last_footage_write_at: string | null;
+  effective_recording_mode?: "motion" | "continuous" | "disabled";
+  recording_policy_source?: string;
+}
+
+export type CameraBrand = "auto" | "acti" | "axis" | "bosch" | "dahua" | "hanwha" | "hikvision" | "reolink" | "samsung" | "uniview" | "other";
+
+export interface OnvifProfile {
+  token: string;
+  name: string;
+  encoding?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+export interface StreamProbe {
+  reachable: boolean;
+  reason?: string;
+  video?: { codec: string | null; width: number | null; height: number | null };
+  audio?: unknown;
 }
 
 export interface Incident {

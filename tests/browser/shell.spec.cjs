@@ -82,7 +82,8 @@ test("operators never see administrator destinations and the server refuses them
   seedFixtures(1);
   await signInNext(page, OPERATOR);
   const nav = page.getByRole("navigation", { name: "Workspaces" });
-  await expect(nav.getByRole("link")).toHaveText(["Live", "Playback"]);
+  // Operators get read-only camera details (#67) but no configuration destinations.
+  await expect(nav.getByRole("link")).toHaveText(["Live", "Playback", "Cameras"]);
   await page.goto(`${NEXT}settings`);
   await expect(page.getByRole("heading", { name: "Administrator access required" })).toBeVisible();
   const branding = await page.request.get("/api/settings/branding");

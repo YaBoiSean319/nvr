@@ -10,7 +10,7 @@ import { UserMenu } from "./UserMenu";
 const DESTINATIONS = [
   { to: "/live", label: "Live", admin: false },
   { to: "/playback", label: "Playback", admin: false },
-  { to: "/cameras", label: "Cameras", admin: true },
+  { to: "/cameras", label: "Cameras", admin: false },
   { to: "/settings", label: "Settings", admin: true },
 ];
 
