@@ -143,7 +143,6 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
             "discovery_unlinked_id": DISCOVERY_UNLINKED_ID,
             "discovery_linkable_id": DISCOVERY_LINKABLE_ID,
             "discovery_linked_id": DISCOVERY_LINKED_ID if linked_id else None,
-            "password": TEST_PASSWORD,
         }
     manifest_path = Path(os.environ.get(
         "NVR_BROWSER_FIXTURE_MANIFEST",
