@@ -270,13 +270,15 @@ class ControlChannelTests(unittest.TestCase):
             try:
                 self.assertEqual(control.socket_path("recorder").stat().st_mode & 0o777, 0o600)
                 await control.RecorderClient().sync_camera("c1", force_restart=True)
-                await asyncio.wait_for(arrived.wait(), 2)
+                # The client returns only after the worker has handled the nudge.
+                self.assertTrue(arrived.is_set())
+                self.assertTrue(await control.nudge("recorder", {"op": "noop"}))
             finally:
                 server.close()
                 await server.wait_closed()
             return received
 
-        self.assertEqual(asyncio.run(scenario()), [{"op": "sync_camera", "camera_id": "c1", "force_restart": True}])
+        self.assertEqual(asyncio.run(scenario()), [{"op": "sync_camera", "camera_id": "c1", "force_restart": True}, {"op": "noop"}])
 
 
 if __name__ == "__main__":

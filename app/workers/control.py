@@ -25,15 +25,21 @@ def socket_path(worker: str) -> Path:
     return control_directory() / f"{worker}.sock"
 
 
-async def nudge(worker: str, message: dict[str, object], timeout: float = 0.5) -> bool:
+async def nudge(worker: str, message: dict[str, object], connect_timeout: float = 0.5, completion_timeout: float = 10.0) -> bool:
+    """Ask a worker to act now; True once it reports having done so.
+
+    Waiting for completion keeps the in-process ordering callers relied on (for
+    example, recording has stopped before an archive request returns) while a
+    worker that is down or slow never blocks the caller for long.
+    """
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(socket_path(worker))), timeout)
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(socket_path(worker))), connect_timeout)
     except (OSError, asyncio.TimeoutError):
         return False
     try:
         writer.write(json.dumps(message, separators=(",", ":")).encode() + b"\n")
-        await asyncio.wait_for(writer.drain(), timeout)
-        return True
+        await asyncio.wait_for(writer.drain(), connect_timeout)
+        return await asyncio.wait_for(reader.readline(), completion_timeout) == b"ok\n"
     except (OSError, asyncio.TimeoutError):
         return False
     finally:
@@ -57,6 +63,8 @@ async def serve(worker: str, handler: Handler) -> asyncio.AbstractServer:
                 message = json.loads(line)
                 if isinstance(message, dict):
                     await handler(message)
+                    writer.write(b"ok\n")
+                    await writer.drain()
         except (asyncio.TimeoutError, ValueError, OSError):
             pass
         except Exception:  # noqa: BLE001 - a bad nudge must never stop the worker
