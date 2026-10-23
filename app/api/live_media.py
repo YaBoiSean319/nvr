@@ -6,12 +6,14 @@ import shutil
 import threading
 from datetime import datetime, timezone
 from typing import Literal
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_VIEWERS
-from app.principal import CurrentUser, requires_scope
+from app.live_hub import LiveHub, Viewer
+from app.principal import CurrentUser, current_user, requires_scope
 from app.store import connect
 from app.credentials import decrypt
 from app.recording import safe_stream_url, _manifest_bytes
@@ -20,14 +22,8 @@ router = APIRouter()
 
 
 _live_view_lock = threading.Lock()
-
-
 _live_view_count = 0
-
-
 _live_audio_count = 0
-
-
 _live_camera_status: dict[str, dict[str, object]] = {}
 
 
@@ -246,3 +242,129 @@ def live_camera(
             _release_live_view(camera_id)
 
     return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+# Close codes for the live WebSocket. 44xx mirror the HTTP status they stand for.
+CLOSE_UNAUTHORIZED, CLOSE_FORBIDDEN, CLOSE_NOT_FOUND, CLOSE_ARCHIVED = 4401, 4403, 4404, 4410
+CLOSE_UNSUPPORTED, CLOSE_BUSY, CLOSE_TOO_SLOW, CLOSE_STREAM_FAILED = 4415, 4429, 4408, 4502
+
+
+def _same_origin(websocket: WebSocket) -> bool:
+    """Refuse cross-site WebSocket handshakes; non-browser clients send no Origin."""
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return True
+    host = websocket.headers.get("host", "")
+    return urlsplit(origin).netloc.lower() == host.lower()
+
+
+async def _refuse(websocket: WebSocket, code: int, message: dict[str, object]) -> None:
+    await websocket.send_json(message)
+    await websocket.close(code=code)
+
+
+@router.websocket("/api/cameras/{camera_id}/live/stream")
+@requires_scope("media")
+async def live_stream(
+    websocket: WebSocket,
+    camera_id: str,
+    quality: Literal["low", "high"] = "low",
+    audio: bool = False,
+) -> None:
+    """Fragmented MP4 live video for Media Source Extensions.
+
+    Messages: a JSON ``init`` (MIME/codecs, profile, audio), the binary
+    initialization segment, then binary media fragments, starting at a keyframe.
+    Refusals send a JSON message with ``type`` and close with a 44xx/45xx code;
+    ``unsupported`` names the MJPEG ``fallback`` URL for codecs the browser cannot
+    play directly.
+    """
+    if not _same_origin(websocket):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    try:
+        current_user(websocket)
+    except HTTPException as exc:
+        code = CLOSE_UNAUTHORIZED if exc.status_code == 401 else CLOSE_FORBIDDEN
+        await _refuse(websocket, code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
+        return
+    with connect() as db:
+        camera = db.execute(
+            "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at FROM cameras WHERE id=?",
+            (camera_id,),
+        ).fetchone()
+    fallback = f"/api/cameras/{camera_id}/live?quality={quality}"
+    if camera is None:
+        await _refuse(websocket, CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
+        return
+    if camera["archived_at"]:
+        await _refuse(websocket, CLOSE_ARCHIVED, {"type": "archived", "detail": "Camera is archived"})
+        return
+    profile = "sub" if quality == "low" and camera["live_substream_url_ciphertext"] else "main"
+    codec = (camera["video_codec"] or "").lower()
+    if profile == "main" and codec and codec not in {"h264", "avc", "avc1"}:
+        await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback,
+                                                     "detail": f"{codec.upper()} video cannot be played directly; use the fallback stream"})
+        return
+    try:
+        source = decrypt(camera["live_substream_url_ciphertext"] if profile == "sub" else camera["stream_url_ciphertext"])
+        safe_stream_url(source)
+    except (RuntimeError, ValueError):
+        await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "Camera stream configuration is invalid"})
+        return
+    if not _acquire_live_view(camera_id):
+        await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
+        return
+    include_audio = bool(camera["audio_enabled"])
+    listening = audio and include_audio and _acquire_live_audio()
+    hub: LiveHub = websocket.app.state.live_hub
+    viewer = Viewer()
+
+    def mark_fresh() -> None:
+        with _live_view_lock:
+            status_data = _live_camera_status.get(camera_id)
+            if status_data:
+                status_data["last_frame_at"] = datetime.now(timezone.utc).isoformat()
+
+    stream = hub.join((camera_id, profile, "audio" if include_audio else "video"), source, include_audio, viewer, mark_fresh)
+    receiver = asyncio.create_task(websocket.receive())
+    try:
+        await asyncio.wait({receiver, asyncio.create_task(stream.ready.wait())}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
+        if receiver.done():
+            return
+        if not stream.ready.is_set() or stream.failed:
+            await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera did not start streaming in time"})
+            return
+        if "avc1" not in (stream.mime or ""):
+            await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": "unknown", "fallback": fallback,
+                                                         "detail": "This camera's video cannot be played directly; use the fallback stream"})
+            return
+        await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": include_audio, "listening": listening})
+        await websocket.send_bytes(stream.init)
+        while True:
+            getter = asyncio.create_task(viewer.queue.get())
+            done, _ = await asyncio.wait({getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
+            if receiver in done:
+                getter.cancel()
+                message = receiver.result()
+                if message["type"] == "websocket.disconnect":
+                    return
+                receiver = asyncio.create_task(websocket.receive())  # ignore client keep-alives
+                continue
+            item = getter.result()
+            if item is None:
+                if viewer.closed_reason == "too_slow":
+                    await _refuse(websocket, CLOSE_TOO_SLOW, {"type": "too_slow", "detail": "Video could not be delivered fast enough; reconnect to resume at live"})
+                else:
+                    await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera stream ended"})
+                return
+            await websocket.send_bytes(item)
+    except (WebSocketDisconnect, RuntimeError, OSError):
+        return
+    finally:
+        receiver.cancel()
+        hub.leave(stream, viewer)
+        if listening:
+            _release_live_audio()
+        _release_live_view(camera_id)

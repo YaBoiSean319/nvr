@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Callable, Literal, TypeVar
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
+from starlette.requests import HTTPConnection
 from fastapi.dependencies.models import Dependant
 
 from .api_tokens import TokenRejected, authenticate, grants, token_scopes
@@ -78,7 +79,8 @@ def scope_for(route: object, method: str) -> Scope:
     return "read" if method.upper() in {"GET", "HEAD"} else "admin"
 
 
-def current_user(request: Request) -> Principal:
+def current_user(request: HTTPConnection) -> Principal:
+    """Resolve the caller of an HTTP request or WebSocket handshake."""
     authorization = request.headers.get("authorization")
     if authorization is not None:
         return _token_principal(request, authorization)
@@ -102,7 +104,7 @@ def administrator(user: Annotated[Principal, Depends(current_user)]) -> Principa
     return user
 
 
-def _token_principal(request: Request, authorization: str) -> Principal:
+def _token_principal(request: HTTPConnection, authorization: str) -> Principal:
     scheme, _, value = authorization.partition(" ")
     if scheme.lower() != "bearer" or not value.strip():
         raise _unauthorized("Use an API token with the Bearer authorization scheme")
@@ -111,7 +113,8 @@ def _token_principal(request: Request, authorization: str) -> Principal:
     except TokenRejected as exc:
         raise _unauthorized(str(exc)) from exc
     scopes = token_scopes(row)
-    required = scope_for(request.scope.get("route"), request.method)
+    # A WebSocket handshake is a GET; its route says which scope it needs.
+    required = scope_for(request.scope.get("route"), getattr(request, "method", "GET"))
     if not grants(scopes, required):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"API token lacks the '{required}' scope")
     return Principal(

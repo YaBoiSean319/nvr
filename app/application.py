@@ -14,6 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import api
 from .backup import BackupManager
 from .detection import DetectionManager
+from .live_hub import LiveHub
 from .exports import ExportManager
 from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
@@ -54,6 +55,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         initialize()
         started = {}
         heartbeat = None
+        app.state.live_hub = LiveHub()
         try:
             if start_workers and supervised():
                 # Background work runs in supervised worker processes; the web
@@ -72,6 +74,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
                 heartbeat = asyncio.create_task(liveness.heartbeat_forever("web"), name="web-heartbeat")
             yield
         finally:
+            await app.state.live_hub.close()
             if heartbeat:
                 heartbeat.cancel()
             for name in SHUTDOWN_ORDER:

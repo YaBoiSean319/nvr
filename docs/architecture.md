@@ -22,6 +22,14 @@ Without the supervisor (tests, `uvicorn app.main:app --reload`), `create_app()` 
 
 Media leases for playback, snapshots and downloads are shared `flock` locks on the files themselves (`app.retention`). Retention cleanup and footage deletion in any process take a non-blocking exclusive lock before unlinking, and a crashed holder's locks disappear with it. Exports in progress are also protected by their `export_sources` reservation in the database.
 
+## Live video
+
+`/api/cameras/{id}/live/stream` is an authenticated WebSocket. It needs a session cookie or an API token with the `media` scope, and it refuses cross-origin browser handshakes. It delivers fragmented MP4 for Media Source Extensions: a JSON `init` message (MIME type with codecs, profile, audio), the binary initialization segment, then binary media fragments of about 300 ms each.
+
+FFmpeg copies the camera's H.264 video without re-encoding it. When an administrator has enabled the camera's audio, the audio is transcoded to mono AAC in the same stream. It is always transcoded, even when the camera already sends AAC, which keeps one code path for every camera audio codec. `app.live_hub` keeps one camera connection per camera, profile and audio combination, shared by every viewer. A late viewer starts at the most recent keyframe fragment, so it decodes immediately. The connection closes 5 seconds after the last viewer leaves. A viewer that cannot keep up is disconnected (`4408`) rather than holding the shared stream back.
+
+`quality=low` uses the configured substream and falls back to the main stream. Refusals send a JSON message and close with a code that mirrors HTTP: `4401`/`4403` authentication, `4404` unknown camera, `4410` archived, `4415` unsupported codec, `4429` no free viewer slot, `4502` camera stream failure. An unsupported-codec refusal (for example H.265, detected from the probed codec or the initialization segment) names the MJPEG `fallback` URL. The existing MJPEG and MP3 endpoints remain, and the sixteen video and sixteen audio slots are shared across both transports.
+
 ## Composition
 
 - `app.main` is the ASGI app the web worker serves. It only builds the application with `create_app()`.
