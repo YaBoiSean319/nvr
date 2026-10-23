@@ -81,12 +81,17 @@ class CameraArchiveTests(unittest.TestCase):
         self.assertEqual(timeline.json()["cameras"][0]["segments"][0]["id"], segment_id)
         self.assertEqual(self.client.get(f"/api/cameras/{self.camera_id}/segments").json()["segments"][0]["id"], segment_id)
         self.assertEqual(self.client.get(f"/api/cameras/{self.camera_id}/segments/{segment_id}/media").status_code, 200)
-        self.assertEqual(self.client.get(f"/api/cameras/{self.camera_id}/live/status").status_code, 410)
+        archived_status = self.client.get(f"/api/cameras/{self.camera_id}/live/status")
+        self.assertEqual(archived_status.status_code, 410)
+        self.assertEqual(archived_status.headers.get("cache-control"), "no-store")
         restored = self.client.post(f"/api/cameras/{self.camera_id}/restore")
         self.assertEqual(restored.status_code, 200, restored.text)
         self.assertIsNone(restored.json()["archived_at"])
         self.assertTrue(restored.json()["enabled"])
         self.assertFalse(restored.json()["recording_enabled"])
+        restored_status = self.client.get(f"/api/cameras/{self.camera_id}/live/status")
+        self.assertEqual(restored_status.status_code, 200, restored_status.text)
+        self.assertEqual(restored_status.headers.get("cache-control"), "no-store")
 
     def test_explicit_footage_deletion_refuses_preserved_segments_and_keeps_media(self):
         segment_id, media = self.add_segment()

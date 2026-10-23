@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from fastapi.testclient import TestClient
@@ -17,6 +18,31 @@ class ConsoleNavigationTests(unittest.TestCase):
         self.assertIn('data-screen="app-settings"', response.text)
         self.assertIn('id="console-sidebar"', response.text)
         self.assertIn('id="sidebar-search"', response.text)
+        self.assertIn('<script src="/camera-inventory.js" defer></script>', response.text)
+        self.assertIn('<script src="/camera-editor.js" defer></script>', response.text)
+        self.assertIn('<script src="/camera-admin-save.js" defer></script>', response.text)
+        self.assertIn('<script src="/camera-discovery.js" defer></script>', response.text)
+        self.assertLess(response.text.index('src="/camera-editor.js"'), response.text.index('src="/app.js"'))
+        self.assertLess(response.text.index('src="/camera-admin-save.js"'), response.text.index('src="/app.js"'))
+        self.assertLess(response.text.index('src="/camera-discovery.js"'), response.text.index('src="/app.js"'))
+        client = TestClient(app)
+        script_paths = re.findall(r'<script\s+src="(/[^\"]+\.js)"', response.text)
+        stylesheet_paths = re.findall(r'<link\s+[^>]*href="(/[^\"]+\.css)"', response.text)
+        self.assertTrue(script_paths)
+        for script_path in script_paths:
+            with self.subTest(script=script_path):
+                script = client.get(script_path)
+                self.assertEqual(script.status_code, 200)
+                self.assertIn("javascript", script.headers.get("content-type", ""))
+        for stylesheet_path in stylesheet_paths:
+            with self.subTest(stylesheet=stylesheet_path):
+                stylesheet = client.get(stylesheet_path)
+                self.assertEqual(stylesheet.status_code, 200)
+                self.assertIn("text/css", stylesheet.headers.get("content-type", ""))
+        inventory_script = client.get("/camera-inventory.js")
+        self.assertIn("filterAndSortCameras", inventory_script.text)
+        self.assertEqual(client.get("/unlisted.js").status_code, 404)
+        self.assertEqual(client.get("/unlisted.css").status_code, 404)
 
     def test_live_grid_offers_the_four_approved_capacities(self):
         response = TestClient(app).get("/")

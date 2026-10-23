@@ -325,6 +325,8 @@ def initialize() -> None:
                 scopes TEXT NOT NULL,
                 capabilities TEXT NOT NULL,
                 linked_camera_id TEXT REFERENCES cameras(id) ON DELETE SET NULL,
+                add_claim_token TEXT,
+                add_claimed_until TEXT,
                 first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 reviewed_at TEXT
@@ -421,6 +423,11 @@ def initialize() -> None:
         incident_event_columns = {row[1] for row in db.execute("PRAGMA table_info(incident_events)")}
         if "event_id" not in incident_event_columns:
             db.execute("ALTER TABLE incident_events ADD COLUMN event_id TEXT")
+        discovery_columns = {row[1] for row in db.execute("PRAGMA table_info(discovery_candidates)")}
+        if "add_claim_token" not in discovery_columns:
+            db.execute("ALTER TABLE discovery_candidates ADD COLUMN add_claim_token TEXT")
+        if "add_claimed_until" not in discovery_columns:
+            db.execute("ALTER TABLE discovery_candidates ADD COLUMN add_claimed_until TEXT")
         import uuid
         for row in db.execute("SELECT id FROM incident_events WHERE event_id IS NULL").fetchall():
             db.execute("UPDATE incident_events SET event_id=? WHERE id=?", (str(uuid.uuid4()), row["id"]))

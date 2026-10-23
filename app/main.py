@@ -91,6 +91,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Workplace NVR", version=APP_VERSION, lifespan=lifespan)
+@app.middleware("http")
+async def prevent_api_caching(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("NVR_OIDC_SESSION_SECRET") or secrets.token_urlsafe(48),
@@ -720,14 +727,42 @@ def index() -> FileResponse:
     return FileResponse(Path(__file__).with_name("static") / "index.html")
 
 
-@app.get("/app.js", include_in_schema=False)
-def javascript() -> FileResponse:
-    return FileResponse(Path(__file__).with_name("static") / "app.js", media_type="text/javascript")
+STATIC_JAVASCRIPT_ASSETS = frozenset({
+    "app.js",
+    "workspace-layout.js",
+    "camera-inventory.js",
+    "camera-editor.js",
+    "camera-admin-save.js",
+    "camera-discovery.js",
+    "camera-onboarding.js",
+    "camera-preview.js",
+    "camera-preview-ui.js",
+    "camera-bulk-actions.js",
+    "camera-groups.js",
+})
+STATIC_STYLESHEET_ASSETS = frozenset({"camera-groups.css"})
 
 
-@app.get("/workspace-layout.js", include_in_schema=False)
-def workspace_layout_javascript() -> FileResponse:
-    return FileResponse(Path(__file__).with_name("static") / "workspace-layout.js", media_type="text/javascript")
+@app.get("/{asset_name}.js", include_in_schema=False)
+def javascript_asset(asset_name: str) -> FileResponse:
+    filename = f"{asset_name}.js"
+    if filename not in STATIC_JAVASCRIPT_ASSETS:
+        raise HTTPException(status_code=404, detail="JavaScript asset not found")
+    path = Path(__file__).with_name("static") / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="JavaScript asset not found")
+    return FileResponse(path, media_type="text/javascript")
+
+
+@app.get("/{asset_name}.css", include_in_schema=False)
+def stylesheet_asset(asset_name: str) -> FileResponse:
+    filename = f"{asset_name}.css"
+    if filename not in STATIC_STYLESHEET_ASSETS:
+        raise HTTPException(status_code=404, detail="Stylesheet asset not found")
+    path = Path(__file__).with_name("static") / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Stylesheet asset not found")
+    return FileResponse(path, media_type="text/css")
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -2107,6 +2142,13 @@ async def apply_camera_import(
 
 
 def _candidate_view(row: sqlite3.Row) -> dict[str, object]:
+    claimed_until = row["add_claimed_until"]
+    add_in_progress = False
+    if row["add_claim_token"] and claimed_until:
+        try:
+            add_in_progress = datetime.fromisoformat(claimed_until.replace("Z", "+00:00")) > datetime.now(timezone.utc)
+        except ValueError:
+            add_in_progress = False
     return {
         "id": row["id"],
         "device_uuid": row["device_uuid"],
@@ -2114,10 +2156,52 @@ def _candidate_view(row: sqlite3.Row) -> dict[str, object]:
         "scopes": json.loads(row["scopes"]),
         "capabilities": json.loads(row["capabilities"]),
         "linked_camera_id": row["linked_camera_id"],
+        "add_in_progress": add_in_progress,
         "reviewed_at": row["reviewed_at"],
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
     }
+
+
+def _claim_discovery_add(candidate_id: str) -> tuple[sqlite3.Row, str]:
+    token = secrets.token_urlsafe(24)
+    now = datetime.now(timezone.utc)
+    claimed_until = (now + timedelta(minutes=5)).isoformat()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        candidate = db.execute("SELECT * FROM discovery_candidates WHERE id=?", (candidate_id,)).fetchone()
+        if candidate is None:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Discovery candidate not found")
+        if candidate["linked_camera_id"]:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="This discovered device is already linked to a camera")
+        if candidate["add_claim_token"] and candidate["add_claimed_until"]:
+            try:
+                another_add_is_active = datetime.fromisoformat(
+                    candidate["add_claimed_until"].replace("Z", "+00:00")
+                ) > now
+            except ValueError:
+                another_add_is_active = False
+            if another_add_is_active:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="This discovered device is already being added")
+        db.execute(
+            "UPDATE discovery_candidates SET add_claim_token=?,add_claimed_until=? WHERE id=? AND linked_camera_id IS NULL",
+            (token, claimed_until, candidate_id),
+        )
+        db.commit()
+        claimed = db.execute("SELECT * FROM discovery_candidates WHERE id=?", (candidate_id,)).fetchone()
+    return claimed, token
+
+
+def _release_discovery_add(candidate_id: str, token: str) -> None:
+    with connect() as db:
+        db.execute(
+            "UPDATE discovery_candidates SET add_claim_token=NULL,add_claimed_until=NULL "
+            "WHERE id=? AND add_claim_token=? AND linked_camera_id IS NULL",
+            (candidate_id, token),
+        )
 
 
 @app.post("/api/discovery/scan")
@@ -2230,12 +2314,12 @@ async def add_discovered_camera(
     request: Request,
     user: Annotated[sqlite3.Row, Depends(administrator)],
 ) -> dict[str, object]:
-    with connect() as db:
-        candidate = db.execute("SELECT * FROM discovery_candidates WHERE id=?", (candidate_id,)).fetchone()
-    if candidate is None:
-        raise HTTPException(status_code=404, detail="Discovery candidate not found")
-    if candidate["linked_camera_id"]:
-        raise HTTPException(status_code=409, detail="This discovered device is already linked to a camera")
+    candidate, claim_token = _claim_discovery_add(candidate_id)
+    request.state.discovery_add_claim = {
+        "candidate_id": candidate_id,
+        "device_uuid": candidate["device_uuid"],
+        "token": claim_token,
+    }
     try:
         camera = await create_camera(
             CameraCreateRequest(
@@ -2265,10 +2349,11 @@ async def add_discovered_camera(
         if exc.status_code == 422:
             with connect() as db:
                 _record_discovery_failure(db, candidate["device_uuid"])
+        _release_discovery_add(candidate_id, claim_token)
         raise
-    with connect() as db:
-        reviewed_at = datetime.now(timezone.utc).isoformat()
-        db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE id=?", (camera["id"], reviewed_at, candidate_id))
+    except Exception:
+        _release_discovery_add(candidate_id, claim_token)
+        raise
     return camera
 
 
@@ -2315,6 +2400,9 @@ async def create_camera(
         live_substream_url = substream.stream_url
     with connect() as db:
         try:
+            discovery_claim = getattr(request.state, "discovery_add_claim", None)
+            if discovery_claim:
+                db.execute("BEGIN IMMEDIATE")
             camera_id = _insert_camera(
                 db, name=name, stream_url=stream_url, recording_mode=payload.recording_mode,
                 capability=capability, onvif_uuid=payload.onvif_uuid,
@@ -2333,9 +2421,33 @@ async def create_camera(
                 motion_sensitivity=payload.motion_sensitivity,
                 live_substream_url=live_substream_url,
             )
-            _record_discovery_probe(db, payload.onvif_uuid, capability)
+            _record_discovery_probe(
+                db,
+                discovery_claim["device_uuid"] if discovery_claim else payload.onvif_uuid,
+                capability,
+            )
+            if discovery_claim:
+                claimed = db.execute(
+                    "UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=?,add_claim_token=NULL,add_claimed_until=NULL "
+                    "WHERE id=? AND add_claim_token=? AND linked_camera_id IS NULL",
+                    (
+                        camera_id,
+                        datetime.now(timezone.utc).isoformat(),
+                        discovery_claim["candidate_id"],
+                        discovery_claim["token"],
+                    ),
+                )
+                if claimed.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="This discovered device was linked or claimed by another request")
+                db.commit()
         except sqlite3.IntegrityError as exc:
+            if discovery_claim:
+                db.rollback()
             raise HTTPException(status_code=409, detail="A camera with that name or ONVIF identity already exists") from exc
+        except Exception:
+            if discovery_claim:
+                db.rollback()
+            raise
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
@@ -2548,49 +2660,87 @@ async def bulk_update_cameras(
         raise HTTPException(status_code=422, detail="Specify a group assignment, recording mode, or enablement")
     if len(set(payload.camera_ids)) != len(payload.camera_ids):
         raise HTTPException(status_code=422, detail="Camera IDs must be unique")
-    with connect() as db:
-        rows = db.execute(f"SELECT id FROM cameras WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", payload.camera_ids).fetchall()
-        if len(rows) != len(payload.camera_ids):
-            raise HTTPException(status_code=404, detail="One or more cameras were not found")
-        group_id = None
-        if "group_name" in payload.model_fields_set and payload.group_name:
-            group = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (payload.group_name,)).fetchone()
-            if group:
-                group_id = group["id"]
-            else:
-                group_id = str(uuid.uuid4())
-                db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, payload.group_name))
+    results: list[dict[str, object]] = []
+    updated: list[dict[str, object]] = []
+    for camera_id in payload.camera_ids:
+        try:
+            with connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT id,archived_at,recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
+                if current is None:
+                    results.append({"camera_id": camera_id, "status": "failed", "code": "missing", "detail": "Camera is no longer available."})
+                    continue
+                if current["archived_at"]:
+                    results.append({"camera_id": camera_id, "status": "failed", "code": "archived", "detail": "Archived cameras are excluded from bulk changes."})
+                    continue
 
-        assignments = []
-        values: list[object] = []
-        if "group_name" in payload.model_fields_set:
-            assignments.append("group_id=?")
-            values.append(group_id)
-        if payload.recording_mode is not None:
-            assignments.append("recording_mode=?")
-            values.append(payload.recording_mode)
-            if payload.recording_mode == "disabled":
-                assignments.extend(("recording_enabled=0", "recording_status='stopped'", "last_error=NULL"))
-        if payload.recording_enabled is not None:
-            assignments.append("recording_enabled=?")
-            values.append(int(payload.recording_enabled and payload.recording_mode != "disabled"))
-            assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL AND motion_fallback_enabled=0 THEN 'Configure an ONVIF event service or enable server motion fallback' ELSE NULL END"))
-            effective_enabled = int(payload.recording_enabled and payload.recording_mode != "disabled")
-            values.extend((effective_enabled, effective_enabled))
-        elif payload.recording_mode is not None and payload.recording_mode != "disabled":
-            assignments.extend(("recording_status=CASE WHEN recording_enabled=1 THEN 'connecting' ELSE 'stopped' END", "last_error=NULL"))
-        assignments.append("updated_at=?")
-        values.append(datetime.now(timezone.utc).isoformat())
-        values.extend(payload.camera_ids)
-        db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id IN ({','.join('?' for _ in payload.camera_ids)})", values)
-    if "group_name" in payload.model_fields_set or payload.recording_mode is not None or payload.recording_enabled is not None:
-        await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id, force_restart=True) for camera_id in payload.camera_ids))
-    with connect() as db:
-        updated = db.execute(
-            f"SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id IN ({','.join('?' for _ in payload.camera_ids)}) ORDER BY c.name COLLATE NOCASE",
-            payload.camera_ids,
-        ).fetchall()
-    return {"cameras": [_camera_view(row) for row in updated]}
+                group_id = None
+                if "group_name" in payload.model_fields_set and payload.group_name:
+                    group = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (payload.group_name,)).fetchone()
+                    if group:
+                        group_id = group["id"]
+                    else:
+                        group_id = str(uuid.uuid4())
+                        db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, payload.group_name))
+
+                assignments = []
+                values: list[object] = []
+                if "group_name" in payload.model_fields_set:
+                    assignments.append("group_id=?")
+                    values.append(group_id)
+                if payload.recording_mode is not None:
+                    assignments.append("recording_mode=?")
+                    values.append(payload.recording_mode)
+                    if payload.recording_mode == "disabled":
+                        assignments.extend(("recording_enabled=0", "recording_status='stopped'", "last_error=NULL"))
+                enablement_blocked_by_mode = False
+                if payload.recording_enabled is not None:
+                    assignments.append("recording_enabled=?")
+                    effective_mode = payload.recording_mode or current["recording_mode"]
+                    effective_enabled = int(payload.recording_enabled and effective_mode != "disabled")
+                    enablement_blocked_by_mode = payload.recording_enabled and effective_mode == "disabled"
+                    values.append(effective_enabled)
+                    assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL AND motion_fallback_enabled=0 THEN 'Configure an ONVIF event service or enable server motion fallback' ELSE NULL END"))
+                    values.extend((effective_enabled, effective_enabled))
+                elif payload.recording_mode is not None and payload.recording_mode != "disabled":
+                    assignments.extend(("recording_status=CASE WHEN recording_enabled=1 THEN 'connecting' ELSE 'stopped' END", "last_error=NULL"))
+                assignments.append("updated_at=?")
+                values.extend((datetime.now(timezone.utc).isoformat(), camera_id))
+                changed = db.execute(
+                    f"UPDATE cameras SET {','.join(assignments)} WHERE id=? AND archived_at IS NULL",
+                    values,
+                )
+                if changed.rowcount != 1:
+                    results.append({"camera_id": camera_id, "status": "failed", "code": "unavailable", "detail": "Camera became unavailable before the update."})
+                    continue
+        except Exception:
+            # A failed commit can leave the caller unable to know whether SQLite committed.
+            results.append({"camera_id": camera_id, "status": "unknown", "code": "outcome_unknown", "detail": "The server could not confirm whether this camera's changes were saved."})
+            continue
+
+        warnings = []
+        if enablement_blocked_by_mode:
+            warnings.append("Recording remains disabled because this camera's recording mode is disabled.")
+        try:
+            await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+        except Exception:
+            # Configuration is committed. Do not invite a retry that could duplicate side effects;
+            # make the operational warning visible while reporting the durable update as successful.
+            warnings.append("Settings were saved, but the recorder could not be refreshed. Check camera status.")
+        with connect() as db:
+            row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
+        if row is None:
+            results.append({"camera_id": camera_id, "status": "unknown", "code": "outcome_unknown", "detail": "Settings were saved, but the camera is no longer available."})
+            continue
+        camera_view = _camera_view(row)
+        updated.append(camera_view)
+        result: dict[str, object] = {"camera_id": camera_id, "status": "success", "code": None}
+        if warnings:
+            result["warning"] = " ".join(warnings)
+        results.append(result)
+
+    updated.sort(key=lambda camera: (str(camera["name"]).casefold(), str(camera["id"])))
+    return {"cameras": updated, "results": results}
 
 
 @app.post("/api/cameras/{camera_id}/credentials")

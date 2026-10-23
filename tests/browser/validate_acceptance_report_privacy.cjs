@@ -1,0 +1,72 @@
+const fs = require("node:fs");
+const path = require("node:path");
+const { FIXTURE_DIRECTORY, FIXTURE_ENVIRONMENT_PATH } = require("./fixture_environment.cjs");
+
+const reportPath = path.resolve("test-results/camera-browser-acceptance.json");
+const allowedWebServerEnvironment = new Set([
+  "PATH",
+  "NVR_DB_PATH",
+  "NVR_RECORDINGS_PATH",
+  "NVR_CREDENTIAL_KEY_PATH",
+  "NVR_COOKIE_SECURE",
+  "NVR_STORAGE_VOLUMES",
+  "NVR_BROWSER_FIXTURE_MANIFEST",
+  "NVR_BROWSER_FIXTURE_PASSWORD_PATH",
+  "NVR_BROWSER_HOST",
+  "NVR_BROWSER_PORT",
+  "NVR_SEGMENT_SECONDS",
+  "NVR_DISCOVERY_INTERFACE",
+]);
+
+if (!fs.existsSync(reportPath)) throw new Error("Playwright JSON report is missing; privacy validation cannot run.");
+if (fs.existsSync(FIXTURE_ENVIRONMENT_PATH) || fs.existsSync(FIXTURE_DIRECTORY)) {
+  throw new Error("Temporary browser fixtures must not be retained in CI artifacts.");
+}
+const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+const sentinel = process.env.NVR_BROWSER_REPORT_PRIVACY_SENTINEL;
+function findSentinelPaths(value, parentPath = []) {
+  if (typeof value === "string") return value.includes(sentinel) ? [parentPath.join(".")] : [];
+  if (Array.isArray(value)) return value.flatMap((item, index) => findSentinelPaths(item, [...parentPath, String(index)]));
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, child]) => findSentinelPaths(child, [...parentPath, key]));
+}
+if (sentinel) {
+  const paths = findSentinelPaths(report).slice(0, 10);
+  if (paths.length) {
+    throw new Error(`Playwright JSON report contains the browser-runner privacy sentinel at: ${paths.join(", ")}`);
+  }
+}
+
+const playwrightOutputDirectory = path.resolve("test-results/playwright");
+function assertNoTraceArchives(directory) {
+  if (!fs.existsSync(directory)) return;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      assertNoTraceArchives(entryPath);
+    } else if (entry.isFile() && entry.name === "trace.zip") {
+      throw new Error("Playwright trace archives can contain authenticated request bodies and must not be uploaded.");
+    }
+  }
+}
+assertNoTraceArchives(playwrightOutputDirectory);
+
+let checkedServerEnvironment = false;
+function inspect(value, parentPath = []) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => inspect(item, [...parentPath, String(index)]));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  if (parentPath.at(-1) === "webServer" && Object.hasOwn(value, "env")) {
+    if (!value.env || typeof value.env !== "object" || Array.isArray(value.env)) {
+      throw new Error("Playwright JSON report has an invalid webServer.env value.");
+    }
+    const unexpected = Object.keys(value.env).filter(key => !allowedWebServerEnvironment.has(key));
+    if (unexpected.length) throw new Error(`Playwright JSON report contains unexpected webServer.env keys: ${unexpected.join(", ")}`);
+    checkedServerEnvironment = true;
+  }
+  for (const [key, child] of Object.entries(value)) inspect(child, [...parentPath, key]);
+}
+inspect(report);
+process.stdout.write(`Playwright JSON privacy validation passed${checkedServerEnvironment ? " (webServer.env checked)" : " (no webServer.env serialized)"}.\n`);
