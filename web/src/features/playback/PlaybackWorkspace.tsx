@@ -100,10 +100,11 @@ export function PlaybackWorkspace() {
     const data = query.data;
     if (!seekToEarliest || !applied || !data || query.isPlaceholderData) return;
     if (Date.parse(data.start) !== Date.parse(applied.start) || Date.parse(data.end) !== Date.parse(applied.end)) return;
-    const starts = data.cameras.flatMap(row => row.segments.map(segment => Math.max(Date.parse(segment.starts_at), Date.parse(applied.start))));
-    playbackClock.pause();
-    playbackClock.seek(starts.length ? Math.min(...starts) : Date.parse(applied.start));
     searchLoaded();
+    // Someone who already moved the playhead or pressed Play keeps their choice.
+    if (playbackClock.playing || playbackClock.time() !== Date.parse(applied.start)) return;
+    const starts = data.cameras.flatMap(row => row.segments.map(segment => Math.max(Date.parse(segment.starts_at), Date.parse(applied.start))));
+    playbackClock.seek(starts.length ? Math.min(...starts) : Date.parse(applied.start));
   }, [query.data, query.isPlaceholderData, applied, seekToEarliest, searchLoaded]);
 
   const camerasError = cameras.error instanceof ApiError ? cameras.error.detail : cameras.error ? "Cameras could not be loaded." : null;

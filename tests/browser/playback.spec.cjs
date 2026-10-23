@@ -273,6 +273,7 @@ test("Playback remembers its own investigation separately from Live", async ({ p
   await openPlayback(page);
   await add(page, 1, 3);
   await search(page);
+  await expect.poll(() => clockTime(page)).toBe(Date.parse(fixtures.footage.anchor));
   await page.getByLabel("Speed").selectOption("4");
   const ruler = page.getByRole("slider", { name: "Playback position" });
   await ruler.focus();

@@ -58,8 +58,8 @@ test("search → marks → export → authenticated download of individual and g
   // Completing the range opens the drawer beside Playback without touching the players.
   const drawer = page.getByRole("complementary", { name: "Export footage" });
   await expect(drawer).toBeVisible();
-  expect(await samePlayers(page)).toBe(true);
-  expect(await clockTime(page)).toBe(anchor + 40_000);
+  expect(await samePlayers(page), "players were remounted when the drawer opened").toBe(true);
+  expect(await clockTime(page), "the playhead moved when the drawer opened").toBe(anchor + 40_000);
   const timeline = page.getByRole("region", { name: "Timeline" });
   await expect(timeline).toHaveAttribute("data-mark-in", String(anchor + 30_000));
   await expect(timeline).toHaveAttribute("data-mark-out", String(anchor + 40_000));
@@ -84,7 +84,7 @@ test("search → marks → export → authenticated download of individual and g
   await file.saveAs(target);
   const names = JSON.parse(execFileSync("python", ["-c", "import json,sys,zipfile; print(json.dumps(zipfile.ZipFile(sys.argv[1]).namelist()))", target], { encoding: "utf8" }));
   fs.rmSync(directory, { recursive: true, force: true });
-  expect(names).toContain("grid.mp4");
+  expect(names, "package contents").toContain("grid.mp4");
   expect(names.filter(name => /^camera-.*\.mp4$/.test(name))).toHaveLength(2);
   expect(names).toContain("integrity.json");
 
@@ -116,7 +116,7 @@ test("opening and closing the drawer keeps range, playhead, play state, layout a
   await expect(drawer.getByRole("checkbox", { name: "Camera 002" })).not.toBeChecked();
   await expect(drawer.getByRole("checkbox", { name: "Camera 001" })).toBeChecked();
 
-  expect(await samePlayers(page)).toBe(true);
+  expect(await samePlayers(page), "players were remounted by the drawer").toBe(true);
   await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
   expect(await clockTime(page)).toBeGreaterThan(anchor + 35_000);
   await expect(page.locator(".playback-video .grid")).toHaveAttribute("data-columns", columns);
