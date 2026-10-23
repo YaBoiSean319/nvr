@@ -162,6 +162,8 @@ class CameraArchiveTests(unittest.TestCase):
     def test_existing_camera_databases_migrate_archive_state(self):
         with connect() as db:
             db.execute("ALTER TABLE cameras DROP COLUMN archived_at")
+            # Databases created before archiving existed also predate versioned migrations.
+            db.execute("DROP TABLE schema_migrations")
         initialize()
         with connect() as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}

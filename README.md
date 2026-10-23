@@ -73,6 +73,12 @@ The software tests include a local ONVIF PullPoint fixture and generated playabl
 
 The application encrypts camera URLs before database storage, keeps the key on a separate Docker volume, suppresses FFmpeg diagnostics that could contain credentials, and passes the URL to the media process over stdin rather than exposing it in process arguments. Protect both volumes and restrict access to the Docker host.
 
+### Upgrades and schema migrations
+
+The database schema is versioned. On startup the application applies any pending migrations in order and records each one in the `schema_migrations` table. An installation created before versioning is recognised, converged onto the baseline schema and stamped as version 1 without changing its records. Before migrating a database that holds data, the application writes an owner-only copy beside it in the data volume (`nvr.sqlite3.pre-migration-v<from>-to-v<to>-<timestamp>`) and keeps the three most recent copies. If a migration fails, startup stops with the failing version and the copy's location; the failed migration's changes are rolled back and it is not recorded.
+
+Migrations are forward-only. An image older than the database's recorded schema version refuses to start rather than run against a schema it does not understand, so downgrading requires restoring the pre-upgrade copy (or configuration backup) together with the older image. Recordings are not affected by schema migrations.
+
 Use `docker compose restart` to restart the service. The account remains in the `nvr-data` volume and the health check returns healthy after startup. To intentionally reset the test installation, run `docker compose down -v`; this permanently deletes the local database and any volume data.
 
 ## Development
