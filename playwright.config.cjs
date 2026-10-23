@@ -1,12 +1,20 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { FIXTURE_ENVIRONMENT_PATH } = require("./tests/browser/fixture_environment.cjs");
+const {
+  FIXTURE_DIRECTORY,
+  FIXTURE_ENVIRONMENT_PATH,
+  FIXTURE_PASSWORD_PATH,
+} = require("./tests/browser/fixture_environment.cjs");
 
-const fixtureDirectory = path.join(os.tmpdir(), `nvr-camera-browser-${process.pid}`);
-fs.mkdirSync(fixtureDirectory, { recursive: true, mode: 0o700 });
-const fixturePasswordPath = path.join(fixtureDirectory, "browser-fixture-password");
-fs.writeFileSync(fixturePasswordPath, require("node:crypto").randomBytes(32).toString("base64url"), { mode: 0o600 });
+fs.mkdirSync(FIXTURE_DIRECTORY, { recursive: true, mode: 0o700 });
+fs.chmodSync(FIXTURE_DIRECTORY, 0o700);
+try {
+  fs.writeFileSync(FIXTURE_PASSWORD_PATH, require("node:crypto").randomBytes(32).toString("base64url"), { flag: "wx", mode: 0o600 });
+} catch (error) {
+  if (error.code !== "EEXIST") throw error;
+}
+fs.chmodSync(FIXTURE_PASSWORD_PATH, 0o600);
 
 const artifactDirectory = path.join(process.cwd(), "test-results");
 fs.mkdirSync(artifactDirectory, { recursive: true });
@@ -37,13 +45,13 @@ fs.writeFileSync(testReportPath, `${JSON.stringify({
 }, null, 2)}\n`, { mode: 0o600 });
 
 const fixtureEnvironment = {
-  NVR_DB_PATH: path.join(fixtureDirectory, "state.sqlite3"),
-  NVR_RECORDINGS_PATH: path.join(fixtureDirectory, "recordings"),
-  NVR_CREDENTIAL_KEY_PATH: path.join(fixtureDirectory, "credentials.key"),
+  NVR_DB_PATH: path.join(FIXTURE_DIRECTORY, "state.sqlite3"),
+  NVR_RECORDINGS_PATH: path.join(FIXTURE_DIRECTORY, "recordings"),
+  NVR_CREDENTIAL_KEY_PATH: path.join(FIXTURE_DIRECTORY, "credentials.key"),
   NVR_COOKIE_SECURE: "false",
   NVR_STORAGE_VOLUMES: JSON.stringify({ default: "", archive: "archive" }),
-  NVR_BROWSER_FIXTURE_MANIFEST: path.join(fixtureDirectory, "fixtures.json"),
-  NVR_BROWSER_FIXTURE_PASSWORD_PATH: fixturePasswordPath,
+  NVR_BROWSER_FIXTURE_MANIFEST: path.join(FIXTURE_DIRECTORY, "fixtures.json"),
+  NVR_BROWSER_FIXTURE_PASSWORD_PATH: FIXTURE_PASSWORD_PATH,
   NVR_BROWSER_HOST: "127.0.0.1",
   NVR_BROWSER_PORT: "8765",
   NVR_SEGMENT_SECONDS: "10",
@@ -58,11 +66,6 @@ const serverEnvironment = {
   PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
   ...fixtureEnvironment,
 };
-
-process.on("exit", () => {
-  fs.rmSync(fixtureDirectory, { recursive: true, force: true });
-  fs.rmSync(FIXTURE_ENVIRONMENT_PATH, { force: true });
-});
 
 module.exports = {
   testDir: "./tests/browser",

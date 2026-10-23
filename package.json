@@ -2,7 +2,7 @@
   "name": "nvr-camera-browser-acceptance",
   "private": true,
   "scripts": {
-    "test:browser": "playwright test"
+    "test:browser": "node tests/browser/run_playwright.cjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"
