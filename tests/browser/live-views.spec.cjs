@@ -102,6 +102,18 @@ test("a group larger than a view opens a subset chooser instead of truncating", 
   await expect(tile(page, "Camera 001")).toHaveCount(0);
 });
 
+test("opening a group while the camera list is still loading waits for it", async ({ page }) => {
+  seedFixtures(40);
+  await page.route("**/api/cameras", async route => {
+    await new Promise(resolve => setTimeout(resolve, 1_500));
+    await route.continue().catch(() => undefined);
+  });
+  await signInNext(page);
+  await page.getByRole("tab", { name: "Groups" }).click();
+  await row(page, "Operations").click();
+  await expect(page.getByRole("dialog", { name: "Choose cameras from Operations" })).toBeVisible();
+});
+
 test("dragging replaces or swaps without duplicating, with keyboard alternatives", async ({ page }) => {
   seedFixtures(4);
   await signInNext(page);

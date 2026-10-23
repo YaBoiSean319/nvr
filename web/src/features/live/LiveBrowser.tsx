@@ -15,6 +15,8 @@ export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | u
   const groups = useCameraGroups();
   const views = useLiveViews();
   const [chooser, setChooser] = useState<{ title: string; cameras: Camera[] } | null>(null);
+  // Groups and views name camera IDs; opening one before the cameras are known would drop them all.
+  const ready = cameras !== undefined;
   const available = new Map((cameras ?? []).filter(camera => !camera.archived_at).map(camera => [camera.id, camera]));
 
   function openGroup(group: CameraGroup) {
@@ -49,7 +51,7 @@ export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | u
           <ul className="browser-list" role="list">
             {(groups.data ?? []).map(group => (
               <li key={group.id}>
-                <button type="button" className="browser-row" onClick={() => openGroup(group)}>
+                <button type="button" className="browser-row" disabled={!ready} onClick={() => openGroup(group)}>
                   <span />
                   <span />
                   <span className="browser-name">{group.name}</span>
@@ -64,7 +66,7 @@ export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | u
           <ul className="browser-list" role="list">
             {(views.data ?? []).map(view => (
               <li key={`${view.scope}:${view.name}`}>
-                <button type="button" className="browser-row" onClick={() => openView(view)}>
+                <button type="button" className="browser-row" disabled={!ready} onClick={() => openView(view)}>
                   <span />
                   <span />
                   <span className="browser-name">{view.name}</span>
