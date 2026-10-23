@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "@/api/client";
 import { useCameras, useDisplaySettings, useMe, usePlaybackTimeline } from "@/api/queries";
 import type { TimelineCamera } from "@/api/types";
@@ -6,6 +6,8 @@ import { BrowserFrame, CameraList } from "@/features/cameras/CameraBrowser";
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
 import { toLocalInput } from "@/lib/zonedTime";
 import { playbackClock } from "./clock";
+import { FullChooser } from "./FullChooser";
+import { Investigation } from "./Investigation";
 import { PlaybackGrid } from "./PlaybackGrid";
 import { SearchBar } from "./SearchBar";
 import { savePlaybackState, usePlaybackStore } from "./store";
@@ -47,7 +49,9 @@ export function PlaybackWorkspace() {
   const sidebarOpen = usePlaybackStore(store => store.sidebarOpen);
   const timelineOpen = usePlaybackStore(store => store.timelineOpen);
   const notice = usePlaybackStore(store => store.notice);
+  const pendingOpen = usePlaybackStore(store => store.pendingOpen);
   const { toggle, setSidebarOpen, clearNotice, searchLoaded } = usePlaybackStore.getState();
+  const [incoming, setIncoming] = useState<string | null>(null);
   const byId = useMemo(() => new Map((cameras.data ?? []).filter(camera => !camera.archived_at).map(camera => [camera.id, camera])), [cameras.data]);
   const shownIds = useMemo(() => cameraIds.filter(id => byId.has(id)), [cameraIds, byId]);
   const query = usePlaybackTimeline(shownIds, applied);
@@ -67,6 +71,24 @@ export function PlaybackWorkspace() {
 
   usePlaybackPersistence(ready);
 
+  // Open in Playback from Live: join the current investigation, or start a past-hour one.
+  useEffect(() => {
+    if (!ready || !pendingOpen || !display.data) return;
+    const store = usePlaybackStore.getState();
+    store.clearPendingOpen();
+    if (!byId.has(pendingOpen)) return;
+    const shown = store.cameraIds.filter(id => byId.has(id));
+    if (shown.includes(pendingOpen)) store.setActive(pendingOpen);
+    else if (shown.length >= MAX_DISPLAYED_CAMERAS) setIncoming(pendingOpen); // ask before replacing anything
+    else store.toggle(pendingOpen);
+    if (!store.applied) {
+      const now = Date.now(), zone = display.data.time_zone;
+      const draft = { start: toLocalInput(now - 3_600_000, zone), end: toLocalInput(now, zone), startFold: "", endFold: "" };
+      store.setDraft(draft);
+      store.apply({ start: new Date(now - 3_600_000).toISOString(), end: new Date(now).toISOString(), draft });
+    }
+  }, [ready, pendingOpen, byId, display.data]);
+
   // Leaving Playback stops the clock; the position is remembered.
   useEffect(() => () => playbackClock.pause(), []);
 
@@ -83,7 +105,8 @@ export function PlaybackWorkspace() {
 
   const camerasError = cameras.error instanceof ApiError ? cameras.error.detail : cameras.error ? "Cameras could not be loaded." : null;
   const timelineError = query.error instanceof ApiError ? query.error.detail : query.error ? "The timeline could not be loaded." : null;
-  const range = applied ? { start: Date.parse(applied.start), end: Date.parse(applied.end) } : null;
+  const range = useMemo(() => (applied ? { start: Date.parse(applied.start), end: Date.parse(applied.end) } : null), [applied]);
+  const names = useMemo(() => new Map([...byId].map(([id, camera]) => [id, camera.name])), [byId]);
 
   return (
     <div className="workspace playback-workspace" data-sidebar={sidebarOpen ? "open" : "closed"}>
@@ -110,11 +133,19 @@ export function PlaybackWorkspace() {
           {timelineError ? <p className="notice playback-error" data-tone="bad" role="alert">{timelineError}</p> : null}
           {ready ? <PlaybackGrid cameras={byId} timeline={timeline} /> : <div className="grid-empty"><span className="spinner" aria-label="Restoring your investigation" /></div>}
         </div>
-        {display.data ? <Transport settings={display.data} ready={ready && Boolean(applied)} /> : null}
+        {display.data ? (
+          <Transport settings={display.data} ready={ready && Boolean(applied)}>
+            <Investigation settings={display.data} range={range} names={names}
+                           rows={shownIds.map(id => timeline.get(id)).filter((row): row is TimelineCamera => row !== undefined)} />
+          </Transport>
+        ) : null}
         {timelineOpen && display.data && range ? (
           <Timeline settings={display.data} range={range} cameraIds={shownIds} cameras={byId} timeline={timeline} loading={query.isFetching} />
         ) : null}
       </section>
+      <FullChooser incoming={incoming ? byId.get(incoming) : undefined} current={shownIds.map(id => byId.get(id)!)}
+                   onClose={() => setIncoming(null)}
+                   onReplace={target => { if (incoming) usePlaybackStore.getState().replaceCamera(target, incoming); setIncoming(null); }} />
     </div>
   );
 }

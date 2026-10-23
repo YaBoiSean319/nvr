@@ -35,6 +35,12 @@ interface PlaybackState {
   sidebarOpen: boolean;
   timelineOpen: boolean;
   notice: string | null;
+  /** Outcome of the last investigation step (no further event, no frame, snapshot saved…). */
+  message: string | null;
+  eventScope: "all" | "active";
+  skipEmpty: boolean;
+  /** A camera sent from Live with Open in Playback, handled once Playback is restored. */
+  pendingOpen: string | null;
   restoredFor: string | null;
 
   toggle: (id: string) => void;
@@ -49,6 +55,12 @@ interface PlaybackState {
   setSidebarOpen: (open: boolean) => void;
   setTimelineOpen: (open: boolean) => void;
   clearNotice: () => void;
+  setMessage: (message: string | null) => void;
+  setEventScope: (scope: "all" | "active") => void;
+  setSkipEmpty: (skip: boolean) => void;
+  replaceCamera: (target: string, incoming: string) => void;
+  openInPlayback: (id: string) => void;
+  clearPendingOpen: () => void;
   restore: (username: string, available: Set<string>, defaults: SearchDraft) => void;
   reset: () => void;
 }
@@ -64,6 +76,10 @@ const initial = {
   sidebarOpen: true,
   timelineOpen: true,
   notice: null,
+  message: null,
+  eventScope: "all" as const,
+  skipEmpty: false,
+  pendingOpen: null,
   restoredFor: null,
 };
 
@@ -95,7 +111,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     playbackClock.pause();
     playbackClock.setRange(Date.parse(search.start), Date.parse(search.end));
     playbackClock.seek(Date.parse(search.start));
-    set({ applied: search, window: null, seekToEarliest: true });
+    set({ applied: search, window: null, seekToEarliest: true, message: null });
   },
   searchLoaded: () => set({ seekToEarliest: false }),
   setWindow: window => set({ window }),
@@ -105,6 +121,17 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   setSidebarOpen: open => set({ sidebarOpen: open }),
   setTimelineOpen: open => set({ timelineOpen: open }),
   clearNotice: () => set({ notice: null }),
+  setMessage: message => set({ message }),
+  setEventScope: eventScope => set({ eventScope }),
+  setSkipEmpty: skipEmpty => set({ skipEmpty }),
+  replaceCamera: (target, incoming) =>
+    set(state => ({
+      cameraIds: state.cameraIds.map(id => (id === target ? incoming : id)),
+      activeId: incoming,
+      enlargedId: state.enlargedId === target ? null : state.enlargedId,
+    })),
+  openInPlayback: id => set({ pendingOpen: id }),
+  clearPendingOpen: () => set({ pendingOpen: null }),
   restore: (username, available, defaults) => {
     const saved = readSaved(username);
     const cameraIds = (saved?.cameraIds ?? []).filter(id => available.has(id)).slice(0, MAX_DISPLAYED_CAMERAS);
@@ -117,6 +144,8 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       activeId: cameraIds[0] ?? null,
       sidebarOpen: saved?.sidebarOpen ?? true,
       timelineOpen: saved?.timelineOpen ?? true,
+      eventScope: saved?.eventScope === "active" ? "active" : "all",
+      skipEmpty: saved?.skipEmpty === true,
       restoredFor: username,
     });
     if (saved?.applied) {
@@ -143,6 +172,8 @@ interface Saved {
   rate: Speed;
   sidebarOpen: boolean;
   timelineOpen: boolean;
+  eventScope: "all" | "active";
+  skipEmpty: boolean;
 }
 
 const storageKey = (username: string) => `nvr-next-playback:${username}`;
@@ -163,6 +194,7 @@ export function savePlaybackState(): void {
     cameraIds: state.cameraIds, draft: state.draft, applied: state.applied, window: state.window,
     time: state.applied ? playbackClock.time() : null, rate: playbackClock.rate,
     sidebarOpen: state.sidebarOpen, timelineOpen: state.timelineOpen,
+    eventScope: state.eventScope, skipEmpty: state.skipEmpty,
   };
   try {
     localStorage.setItem(storageKey(state.restoredFor), JSON.stringify(saved));

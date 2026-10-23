@@ -225,7 +225,7 @@ test("every tile follows one clock across speeds and gaps show No recording whil
     for (const time of times) expect(Math.abs(time - clock), `tile drift at ${speed}×`).toBeLessThan(tolerance + Number(speed) * 100);
   }
 
-  // Camera 001 has a failure gap from +60 s to +120 s; the clock keeps moving through it.
+  // Camera 001 has a failure gap from +60 s to +150 s; the clock keeps moving through it.
   await page.getByLabel("Speed").selectOption("16");
   await page.getByRole("button", { name: "Play", exact: true }).click();
   await expect(tile(page, "Camera 001")).toHaveAttribute("data-phase", "no-recording", { timeout: 10_000 });
@@ -248,7 +248,7 @@ test("adding a camera mid-investigation keeps time, play state and the zoomed ti
   await page.getByRole("button", { name: "Zoom in" }).click();
   const timeline = page.getByRole("region", { name: "Timeline" });
   const window = [await timeline.getAttribute("data-window-start"), await timeline.getAttribute("data-window-end")];
-  await expect(page.locator(".timeline-row [data-mark='motion']")).toHaveCount(1);
+  await expect(page.locator(".timeline-row [data-mark='motion']")).toHaveCount(2);
   await page.getByRole("button", { name: "Play", exact: true }).click();
   await page.waitForTimeout(1_000);
   const before = await clockTime(page);
@@ -260,7 +260,7 @@ test("adding a camera mid-investigation keeps time, play state and the zoomed ti
   expect(await clockTime(page)).toBeLessThan(before + 5_000);
   await expect(timeline).toHaveAttribute("data-window-start", window[0]);
   await expect(timeline).toHaveAttribute("data-window-end", window[1]);
-  await expect(page.locator(".timeline-row [data-mark='motion']")).toHaveCount(1);
+  await expect(page.locator(".timeline-row [data-mark='motion']")).toHaveCount(4);
   await expect(page.locator(".timeline-row[data-camera-id]")).toHaveCount(2);
 
   await page.getByRole("button", { name: "Fit range" }).click();

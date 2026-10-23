@@ -1,8 +1,10 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useNavigate } from "react-router";
 import type { Camera } from "@/api/types";
 import { LivePlayer, type PlayerSnapshot } from "./LivePlayer";
 import { CAMERA_DRAG_TYPE } from "@/features/cameras/CameraBrowser";
+import { usePlaybackStore } from "@/features/playback/store";
 import { useLiveStore, type Quality } from "./store";
 
 interface TileProps {
@@ -35,6 +37,7 @@ function resolveQuality(override: Quality | undefined, enlarged: boolean, substr
 }
 
 export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, onReplaceRequest }: TileProps) {
+  const navigate = useNavigate();
   const video = useRef<HTMLVideoElement>(null);
   const image = useRef<HTMLImageElement>(null);
   const player = useRef<LivePlayer | null>(null);
@@ -173,6 +176,10 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
               <Menu.Item className="menu-item" onSelect={() => move(camera.id, -1)}>Move earlier</Menu.Item>
               <Menu.Item className="menu-item" onSelect={() => move(camera.id, 1)}>Move later</Menu.Item>
               <Menu.Item className="menu-item" onSelect={onReplaceRequest}>Replace with…</Menu.Item>
+              <Menu.Separator className="menu-separator" />
+              <Menu.Item className="menu-item" onSelect={() => { usePlaybackStore.getState().openInPlayback(camera.id); navigate("/playback"); }}>
+                Open in Playback
+              </Menu.Item>
             </Menu.Content>
           </Menu.Portal>
         </Menu.Root>

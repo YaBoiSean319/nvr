@@ -42,17 +42,17 @@ LONG_NAME_SUFFIX = " - North loading dock exterior entrance overlooking the deli
 FOOTAGE_CLIP_SECONDS = 60
 
 
-def _footage_clip() -> Path:
-    """One generated minute of video, reused for every fixture interval."""
+def _footage_clip(fps: int) -> Path:
+    """One generated minute of video at `fps`, reused for every fixture interval at that rate."""
     recordings = Path(os.environ["NVR_RECORDINGS_PATH"])
-    clip = recordings.parent / "fixture-footage" / f"clip-{FOOTAGE_CLIP_SECONDS}s.mp4"
+    clip = recordings.parent / "fixture-footage" / f"clip-{FOOTAGE_CLIP_SECONDS}s-{fps}fps.mp4"
     if not clip.is_file():
         clip.parent.mkdir(parents=True, exist_ok=True)
         partial = clip.with_suffix(".partial.mp4")
         subprocess.run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-            "-i", f"testsrc=s=320x180:r=15:d={FOOTAGE_CLIP_SECONDS}", "-c:v", "libx264", "-preset", "ultrafast",
-            "-pix_fmt", "yuv420p", "-g", "15", "-movflags", "+faststart", str(partial),
+            "-i", f"testsrc=s=320x180:r={fps}:d={FOOTAGE_CLIP_SECONDS}", "-c:v", "libx264", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", "-g", str(fps), "-movflags", "+faststart", str(partial),
         ], check=True, timeout=120)
         partial.replace(clip)
     return clip
@@ -61,14 +61,16 @@ def _footage_clip() -> Path:
 def _seed_footage(db: sqlite3.Connection, cameras: list[str]) -> dict[str, object]:
     """Recorded intervals relative to a recent anchor, so the default past-hour search finds them.
 
-    Camera 1: two minutes of footage with a one-minute failure gap between them, a motion event.
-    Camera 2: one minute overlapping both, a person detection and an unanalyzed AI interval.
-    Every other camera has no footage.
+    Offsets in seconds from the anchor:
+    Camera 1 (15 fps): 0-60 and 150-210, a failure gap between them; motion at 40 and 160.
+    Camera 2 (10 fps): 30-90; motion at 40 (simultaneous with camera 1) and 75; a person
+    detection at 50 and an unanalyzed AI interval 60-90.
+    90-150 is empty on both cameras. Every other camera has no footage.
     """
-    clip = _footage_clip()
+    clips = {0: _footage_clip(15), 1: _footage_clip(10)}
     anchor = (datetime.now(timezone.utc) - timedelta(minutes=30)).replace(second=0, microsecond=0)
     at = lambda seconds: (anchor + timedelta(seconds=seconds)).isoformat()
-    plan = {0: [0, 120], 1: [30]}
+    plan = {0: [0, 150], 1: [30]}
     recordings = Path(os.environ["NVR_RECORDINGS_PATH"])
     segments: list[dict[str, object]] = []
     for index, offsets in plan.items():
@@ -79,18 +81,26 @@ def _seed_footage(db: sqlite3.Connection, cameras: list[str]) -> dict[str, objec
             relative = f"{camera_id}/fixture-{offset:04d}.mp4"
             target = recordings / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(clip, target)
+            shutil.copyfile(clips[index], target)
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
                        (camera_id, relative, at(offset), at(offset + FOOTAGE_CLIP_SECONDS), target.stat().st_size))
             segments.append({"camera_id": camera_id, "starts_at": at(offset), "ends_at": at(offset + FOOTAGE_CLIP_SECONDS)})
     first = cameras[0]
     db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at,ends_at) VALUES(?,?,?,?,?)",
-               (first, "failure", "Camera offline", at(60), at(120)))
-    db.execute("INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,status) "
-               "VALUES(?,?,?,?,?,?,?,?,?)",
-               (str(uuid.uuid5(NAMESPACE, "motion-1")), first, "onvif", "motion", at(40), at(40), at(35), at(50), "complete"))
+               (first, "failure", "Camera offline", at(60), at(150)))
+
+    def motion(camera_id: str, seconds: int) -> None:
+        db.execute("INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,status) "
+                   "VALUES(?,?,?,?,?,?,?,?,?)",
+                   (str(uuid.uuid5(NAMESPACE, f"motion-{camera_id}-{seconds}")), camera_id, "onvif", "motion", at(seconds), at(seconds),
+                    at(seconds - 5), at(seconds + 10), "complete"))
+
+    motion(first, 40)
+    motion(first, 160)
     if len(cameras) > 1:
         second = cameras[1]
+        motion(second, 40)
+        motion(second, 75)
         db.execute("INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) "
                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                    (str(uuid.uuid5(NAMESPACE, "person-1")), second, "person", 0.9, "[0.2,0.2,0.4,0.6]", at(50), at(52), 320, 180, "fixture", "1"))

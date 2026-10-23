@@ -292,3 +292,11 @@
   .timeline { --label: 104px; }
   .timeline-legend { display: none; }
 }
+
+.investigation { display: contents; }
+.investigation select { height: 30px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); font-size: 13px; }
+.investigation-skip { display: flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
+.investigation-message {
+  display: flex; align-items: center; gap: var(--n-space-1); flex-basis: 100%; order: 10; margin: 0;
+  color: var(--n-muted); font-size: 12px;
+}

@@ -21,6 +21,11 @@ export class PlaybackClock {
   private end = 0;
   playing = false;
   rate: Speed = 1;
+  /**
+   * While playing, maps a time to where playback should be instead (Skip Empty Periods):
+   * the same time, a later one, or null when nothing remains before the end.
+   */
+  skip: ((time: number) => number | null) | null = null;
   /** The time at the most recent notification; stable between notifications for React snapshots. */
   current = 0;
 
@@ -52,7 +57,7 @@ export class PlaybackClock {
     if (this.playing || this.end <= this.start) return;
     const at = this.time() >= this.end ? this.start : this.time();
     this.playing = true;
-    this.reanchor(at);
+    this.reanchor(this.skip?.(at) ?? at);
     this.ticker = setInterval(() => this.tick(), TICK_MS);
     this.emit();
   }
@@ -92,11 +97,14 @@ export class PlaybackClock {
   }
 
   private tick(): void {
-    if (this.time() >= this.end) {
+    const time = this.time();
+    const next = this.skip ? this.skip(time) : time;
+    if (time >= this.end || next === null) {
       this.pause();
       this.seek(this.end);
       return;
     }
+    if (next > time) this.reanchor(Math.min(this.end, next));
     this.emit();
   }
 
