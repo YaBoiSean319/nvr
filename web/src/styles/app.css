@@ -461,3 +461,30 @@
 .day-toggle span { display: inline-grid; place-content: center; min-width: 34px; height: 28px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); font-size: 11px; }
 .day-toggle input:checked + span { background: var(--n-accent); border-color: var(--n-accent); color: var(--n-on-accent); }
 .day-toggle input:focus-visible + span { outline: 2px solid var(--n-focus); outline-offset: 1px; }
+
+/* --- add cameras -------------------------------------------------------------------- */
+.add-cameras { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.add-modes { padding: var(--n-space-2) var(--n-space-3) 0; border-bottom: 1px solid var(--n-line); background: var(--n-panel); }
+.add-panel { min-height: 0; outline: none; }
+.add-panel-scroll { overflow-y: auto; padding: var(--n-space-3); }
+.add-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); min-height: 0; height: 100%; }
+.add-list { display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr); min-height: 0; background: var(--n-panel); border-right: 1px solid var(--n-line); }
+.add-detail { min-height: 0; overflow-y: auto; padding: var(--n-space-3); }
+.discovery-scan { display: flex; flex-wrap: wrap; align-items: center; gap: var(--n-space-2); padding: var(--n-space-2) var(--n-space-3); }
+.inline-field { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+.inline-field input { width: 120px; height: 32px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); }
+.inline-field input[type="number"] { width: 64px; }
+.discovery-status { padding: 0 var(--n-space-3); min-height: 20px; font-size: 13px; }
+.discovery-status .field-error { display: inline-flex; align-items: center; gap: var(--n-space-2); }
+.setup-title { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.add-list .tab-form { padding: var(--n-space-3); }
+.csv-input { width: 100%; min-height: 120px; padding: var(--n-space-2); border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); resize: vertical; }
+.csv-results tr[data-status="invalid"] td, .csv-results tr[data-status="failed"] td { color: var(--n-bad); }
+.csv-results tr[data-status="duplicate"] td { color: var(--n-warn); }
+.file-button { position: relative; overflow: hidden; }
+.file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.field-actions select { height: 32px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); }
+@media (max-width: 760px) {
+  .add-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; overflow-y: auto; }
+  .add-list { border-right: 0; border-bottom: 1px solid var(--n-line); min-height: 360px; }
+}
