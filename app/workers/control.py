@@ -82,3 +82,29 @@ class RecorderClient:
 
     async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
         await nudge("recorder", {"op": "sync_camera", "camera_id": camera_id, "force_restart": force_restart})
+
+
+class ExportClient:
+    """Stands in for the in-process export manager inside the supervised web process."""
+
+    def __init__(self) -> None:
+        self._nudges: set[asyncio.Task[bool]] = set()
+
+    def enqueue(self, job_id: str) -> None:
+        # The job is already committed as queued; the exporter also polls for it.
+        task = asyncio.get_running_loop().create_task(nudge("exporter", {"op": "enqueue", "job_id": job_id}))
+        self._nudges.add(task)
+        task.add_done_callback(self._nudges.discard)
+
+    async def cancel(self, job_id: str) -> None:
+        await nudge("exporter", {"op": "cancel", "job_id": job_id})
+
+
+class DetectionClient:
+    """Stands in for the in-process detection manager inside the supervised web process."""
+
+    async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
+        await nudge("ai", {"op": "sync_camera", "camera_id": camera_id, "force_restart": force_restart})
+
+    async def reconcile(self) -> None:
+        await nudge("ai", {"op": "reconcile"})

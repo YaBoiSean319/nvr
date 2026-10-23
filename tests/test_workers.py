@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import socket
 import sqlite3
@@ -141,7 +142,10 @@ class SupervisorTests(unittest.TestCase):
         status, system = self.nvr.request("GET", "/api/system/status")
         self.assertEqual(status, 200)
         self.assertEqual(system["application_status"], "healthy")
-        self.assertEqual({worker["name"]: worker["alive"] for worker in system["workers"]}, {"web": True, "recorder": True})
+        for name in ("exporter", "ai", "background"):
+            _wait(lambda: self.nvr.running_pid(name), 15, f"{name} never reported liveness")
+        status, system = self.nvr.request("GET", "/api/system/status")
+        self.assertEqual({worker["name"]: worker["alive"] for worker in system["workers"]}, {name: True for name in ("web", "recorder", "exporter", "ai", "background")})
 
         os.kill(recorder, signal.SIGKILL)
         raised = _wait(lambda: self.nvr.incident("worker_recorder"), 10, "recorder crash raised no incident")
@@ -196,17 +200,107 @@ class SupervisorTests(unittest.TestCase):
         self.nvr.execute("UPDATE cameras SET recording_enabled=0 WHERE id='cam-1'")
         _wait(lambda: status() == "stopped", 15, "reconciliation did not apply an un-nudged change")
 
+    def _footage(self, camera_id: str, seconds: int) -> Path:
+        recordings = Path(self.nvr.environment["NVR_RECORDINGS_PATH"])
+        source = recordings / camera_id / "clip.mp4"
+        source.parent.mkdir(parents=True)
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=640x360:r=15",
+            "-t", str(seconds), "-an", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-y", str(source),
+        ], check=True, timeout=120)
+        self.nvr.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')", (camera_id, f"Yard {camera_id}"))
+        self.nvr.execute(
+            "INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
+            (camera_id, f"{camera_id}/clip.mp4", "2026-10-20T10:00:00+00:00", f"2026-10-20T10:{seconds // 60:02d}:{seconds % 60:02d}+00:00", source.stat().st_size),
+        )
+        return source
+
+    def _export(self, camera_id: str, seconds: int, **options) -> dict:
+        created, job = self.nvr.request("POST", "/api/exports", {
+            "camera_ids": [camera_id], "start": "2026-10-20T10:00:00Z",
+            "end": f"2026-10-20T10:{seconds // 60:02d}:{seconds % 60:02d}Z", **options,
+        })
+        self.assertEqual(created, 202, job)
+        return job
+
+    def _export_status(self, job_id: str) -> str:
+        return self.nvr.query("SELECT status FROM exports WHERE id=?", (job_id,))[0]["status"]
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required to render an export")
+    def test_exports_complete_and_cancel_through_the_export_worker(self):
+        _wait(lambda: self.nvr.running_pid("exporter"), 15, "exporter never reported liveness")
+        self._footage("cam-short", 2)
+        done = self._export("cam-short", 2)
+        _wait(lambda: self._export_status(done["id"]) in {"completed", "failed"}, 60, "the export never finished")
+        status, finished = self.nvr.request("GET", f"/api/exports/{done['id']}")
+        self.assertEqual(finished["status"], "completed", finished)
+
+        self._footage("cam-long", 240)
+        running = self._export("cam-long", 240, grid_resolution="4k")
+        _wait(lambda: self._export_status(running["id"]) == "running", 20, "the export never started rendering")
+        cancelled, _ = self.nvr.request("POST", f"/api/exports/{running['id']}/cancel")
+        self.assertEqual(cancelled, 200)
+        _wait(lambda: self._export_status(running["id"]) == "cancelled", 20, "the running export was not cancelled")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required to render an export")
+    def test_exporter_crash_fails_a_running_export_truthfully_and_releases_its_sources(self):
+        _wait(lambda: self.nvr.running_pid("exporter"), 15, "exporter never reported liveness")
+        source = self._footage("cam-x", 240)
+        recordings = Path(self.nvr.environment["NVR_RECORDINGS_PATH"])
+        job = self._export("cam-x", 240, grid_resolution="4k")
+        _wait(lambda: self._export_status(job["id"]) == "running", 20, "the export never started rendering")
+        exporter = self.nvr.worker("exporter")["pid"]
+        os.kill(exporter, signal.SIGKILL)
+        _wait(lambda: self.nvr.running_pid("exporter", other_than=exporter), 20, "exporter was not restarted")
+        row = _wait(lambda: (rows := self.nvr.query("SELECT * FROM exports WHERE id=?", (job["id"],))) and rows[0]["status"] != "running" and rows[0], 10, "the interrupted export stayed running")
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("interrupted", row["error"])
+        self.assertIsNone(row["output_relative_path"])
+        self.assertFalse(list((recordings / "exports").glob(f"*{job['id']}*")))
+        from app.retention import playback_is_leased
+
+        self.assertFalse(playback_is_leased(source))
+        self.assertIsNotNone(self.nvr.incident("worker_exporter"))
+
+    def test_ai_crash_marks_analysis_interrupted_without_touching_recording(self):
+        recorder = _wait(lambda: self.nvr.running_pid("recorder"), 15, "recorder never reported liveness")
+        ai = _wait(lambda: self.nvr.running_pid("ai"), 15, "ai never reported liveness")
+        self.nvr.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES('cam-a','Gate',X'01','disabled')")
+        self.nvr.execute("INSERT INTO ai_camera_settings(camera_id,status) VALUES('cam-a','analyzed')")
+        os.kill(ai, signal.SIGKILL)
+        incident = _wait(lambda: self.nvr.incident("ai_worker"), 10, "AI crash raised no incident")
+        self.assertIn("AI analysis process stopped", incident["summary"])
+        setting = self.nvr.query("SELECT status,last_error FROM ai_camera_settings WHERE camera_id='cam-a'")[0]
+        self.assertEqual(setting["status"], "interrupted")
+        coverage = self.nvr.query("SELECT state FROM ai_coverage WHERE camera_id='cam-a' AND ends_at IS NULL")
+        self.assertEqual([row["state"] for row in coverage], ["unanalyzed"])
+        _wait(lambda: self.nvr.running_pid("ai", other_than=ai), 20, "ai was not restarted")
+        self.assertEqual(self.nvr.worker("recorder")["pid"], recorder)
+
+    def test_background_worker_attempts_webhook_deliveries(self):
+        _wait(lambda: self.nvr.running_pid("background"), 15, "background never reported liveness")
+        created, body = self.nvr.request("POST", "/api/webhooks", {
+            "name": "Unroutable receiver", "url": "http://192.0.2.1:9/hook", "events": ["system.failure"], "allow_private_receiver": True,
+        })
+        self.assertEqual(created, 201, body)
+        self.assertEqual(self.nvr.request("POST", f"/api/webhooks/{body['webhook']['id']}/test")[0], 202)
+        attempted = _wait(
+            lambda: (rows := self.nvr.query("SELECT attempt_count FROM webhook_deliveries")) and rows[0]["attempt_count"] >= 1 and rows,
+            30, "the background worker never attempted the delivery",
+        )
+        self.assertEqual(len(attempted), 1)
+
     def test_stop_drains_every_worker(self):
         pids = [
-            _wait(lambda: self.nvr.running_pid("recorder"), 15, "recorder never reported liveness"),
-            _wait(lambda: self.nvr.running_pid("web"), 15, "web never reported liveness"),
+            _wait(lambda name=name: self.nvr.running_pid(name), 15, f"{name} never reported liveness")
+            for name in ("recorder", "exporter", "ai", "background", "web")
         ]
         started = time.monotonic()
         self.assertEqual(self.nvr.stop(), 0)
         self.assertLess(time.monotonic() - started, 15)
         for pid in pids:
             self.assertFalse(self._pid_alive(pid))
-        self.assertEqual({row["name"]: row["state"] for row in self.nvr.query("SELECT name,state FROM worker_status")}, {"web": "stopped", "recorder": "stopped"})
+        self.assertEqual({row["name"]: row["state"] for row in self.nvr.query("SELECT name,state FROM worker_status")}, {name: "stopped" for name in ("web", "recorder", "exporter", "ai", "background")})
 
 
 @unittest.skipUnless(os.environ.get("NVR_RTSP_TEST_URL"), "A simulated RTSP publisher is required")

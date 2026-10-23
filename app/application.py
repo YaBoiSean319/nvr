@@ -21,7 +21,7 @@ from .store import initialize
 from .version import APP_VERSION
 from .webhooks import WebhookManager
 from .workers import liveness, supervised
-from .workers.control import RecorderClient
+from .workers.control import DetectionClient, ExportClient, RecorderClient
 
 
 STARTUP_ORDER = (
@@ -42,8 +42,8 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     environment, so tests isolate an instance by pointing those variables at
     temporary paths before entering its lifespan. ``start_workers=False`` serves the
     API without recording, export, webhook, heartbeat or detection loops. Under the
-    supervisor (``NVR_SUPERVISED=1``) recording runs in a separate process and the
-    web process reaches it through ``RecorderClient`` nudges.
+    supervisor (``NVR_SUPERVISED=1``) all of that runs in separate worker
+    processes and the web process reaches them through control-channel clients.
     """
 
     @asynccontextmanager
@@ -53,12 +53,14 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         started = {}
         heartbeat = None
         try:
-            if start_workers:
+            if start_workers and supervised():
+                # Background work runs in supervised worker processes; the web
+                # process only nudges them.
+                app.state.recorders = RecorderClient()
+                app.state.exports = ExportClient()
+                app.state.detectors = DetectionClient()
+            elif start_workers:
                 for name, factory in STARTUP_ORDER:
-                    if name == "recorders" and supervised():
-                        # Recording runs in its own supervised process; nudge it instead.
-                        app.state.recorders = RecorderClient()
-                        continue
                     manager = factory()
                     setattr(app.state, name, manager)
                     await manager.start()

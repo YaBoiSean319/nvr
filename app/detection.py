@@ -266,6 +266,14 @@ def record_observations(
     return count
 
 
+def mark_analysis_interrupted(reason: str) -> None:
+    """Record that no analysis is happening while the AI process is down."""
+    with connect() as db:
+        cameras = [row[0] for row in db.execute("SELECT camera_id FROM ai_camera_settings WHERE status NOT IN ('disabled','interrupted')")]
+    for camera_id in cameras:
+        set_camera_state(camera_id, "interrupted", reason)
+
+
 def set_camera_state(camera_id: str, state: str, error: str | None = None, at: datetime | None = None) -> None:
     stamp = (at or datetime.now(timezone.utc)).isoformat()
     with connect() as db:

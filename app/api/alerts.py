@@ -18,7 +18,7 @@ router = APIRouter()
 class WebhookCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=8, max_length=2048)
-    events: list[str] = Field(min_length=1, max_length=8)
+    events: list[str] = Field(min_length=1, max_length=16)
     allow_private_receiver: bool = False
 
     @field_validator("events")
@@ -32,7 +32,7 @@ class WebhookCreateRequest(BaseModel):
 class WebhookUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     url: str | None = Field(default=None, min_length=8, max_length=2048)
-    events: list[str] | None = Field(default=None, min_length=1, max_length=8)
+    events: list[str] | None = Field(default=None, min_length=1, max_length=16)
     allow_private_receiver: bool | None = None
     enabled: bool | None = None
 

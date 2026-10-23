@@ -10,7 +10,7 @@ from app.store import connect
 
 HEARTBEAT_SECONDS = 5
 STALE_AFTER = timedelta(seconds=30)
-SUPERVISED_WORKERS = ("web", "recorder")
+SUPERVISED_WORKERS = ("web", "recorder", "exporter", "ai", "background")
 
 
 def record(name: str, *, state: str, pid: int | None = None, started: bool = False,

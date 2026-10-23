@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+# Process faults that do not stop recording or analysis.
+SYSTEM_FAULT_TYPES = {"worker_web", "worker_exporter", "worker_background"}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -25,6 +29,8 @@ def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: d
         return
     if str(incident["fault_type"]).startswith("ai_"):
         webhook_type = "ai.recovered" if event_type == "recovered" else "ai.failure"
+    elif incident["fault_type"] in SYSTEM_FAULT_TYPES:
+        webhook_type = "system.recovered" if event_type == "recovered" else "system.failure"
     else:
         category = "storage" if incident["fault_type"] == "storage" else "recording"
         if event_type == "recovered":

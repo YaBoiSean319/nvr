@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
 from app.workers import liveness
@@ -31,7 +32,12 @@ STOP_GRACE_SECONDS = float(os.environ.get("NVR_STOP_GRACE_SECONDS", "25"))
 SUMMARIES = {
     "web": "The web interface process stopped unexpectedly; recording continues in its own process",
     "recorder": "The recorder process stopped unexpectedly; footage is not being written until it restarts",
+    "exporter": "The export process stopped unexpectedly; running exports failed and queued exports wait for it to restart",
+    "ai": "The AI analysis process stopped unexpectedly; recording continues but no analysis happens until it restarts",
+    "background": "The webhook and heartbeat process stopped unexpectedly; notifications are queued until it restarts",
 }
+# AI worker faults use the ai_ prefix so they notify as ai.failure/ai.recovered.
+FAULT_TYPES = {"ai": "ai_worker"}
 
 
 @dataclass
@@ -104,6 +110,11 @@ class Supervisor:
         except Exception:  # noqa: BLE001 - keep supervising even if the database is unavailable
             logger.exception("Could not record %s worker exit", worker.name)
         self._incident(worker, active=True, details={"exit_code": code, "restart_in_seconds": round(delay)})
+        if worker.name == "ai":
+            try:
+                mark_analysis_interrupted("AI analysis process stopped; analysis resumes when it restarts")
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not mark AI analysis interrupted")
 
     def _hung(self, worker: Worker, now: float) -> bool:
         if now - worker.started_at < liveness.STALE_AFTER.total_seconds():
@@ -126,7 +137,7 @@ class Supervisor:
                     db,
                     incident_key=f"worker:{worker.name}",
                     camera_id=None,
-                    fault_type=f"worker_{worker.name}",
+                    fault_type=FAULT_TYPES.get(worker.name, f"worker_{worker.name}"),
                     summary=SUMMARIES[worker.name] if active else f"The {worker.name} process is running again",
                     active=active,
                     details={"worker": worker.name, "observed_at": datetime.now(timezone.utc).isoformat(), **(details or {})},
@@ -137,7 +148,7 @@ class Supervisor:
 
     def _stop_all(self) -> None:
         # Stop accepting requests first; recording stops last.
-        for worker in sorted(self.workers, key=lambda item: item.name == "recorder"):
+        for worker in sorted(self.workers, key=lambda item: (item.name != "web", item.name == "recorder")):
             if worker.process and worker.process.poll() is None:
                 liveness.record(worker.name, state="stopping")
                 worker.process.send_signal(signal.SIGTERM)
@@ -156,6 +167,9 @@ def main() -> int:
     initialize()
     supervisor = Supervisor([
         Worker("recorder", "app.workers.recorder"),
+        Worker("exporter", "app.workers.exporter"),
+        Worker("ai", "app.workers.ai"),
+        Worker("background", "app.workers.background"),
         Worker("web", "app.workers.web"),
     ])
     signal.signal(signal.SIGTERM, supervisor.request_stop)
