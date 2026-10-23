@@ -2,7 +2,7 @@
 
 Triage: `ready-for-agent`. Extends #1, #33, #49 and #67; incorporates open tickets #77 and #78.
 
-> Publishing to GitHub Issues failed on 2026-10-23 (integration lacks issue write permission). This file is the authoritative copy until it is published.
+> Published as https://github.com/YaBoiSean319/nvr/issues/80.
 
 ## Problem Statement
 
