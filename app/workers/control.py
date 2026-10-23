@@ -108,3 +108,10 @@ class DetectionClient:
 
     async def reconcile(self) -> None:
         await nudge("ai", {"op": "reconcile"})
+
+
+class BackupClient:
+    """Stands in for the in-process backup manager inside the supervised web process."""
+
+    def nudge(self) -> None:
+        asyncio.get_running_loop().create_task(nudge("background", {"op": "backup"}))

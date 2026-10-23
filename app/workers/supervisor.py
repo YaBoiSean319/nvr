@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from app import backup, migrations
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
@@ -34,7 +35,7 @@ SUMMARIES = {
     "recorder": "The recorder process stopped unexpectedly; footage is not being written until it restarts",
     "exporter": "The export process stopped unexpectedly; running exports failed and queued exports wait for it to restart",
     "ai": "The AI analysis process stopped unexpectedly; recording continues but no analysis happens until it restarts",
-    "background": "The webhook and heartbeat process stopped unexpectedly; notifications are queued until it restarts",
+    "background": "The webhook, heartbeat and backup process stopped unexpectedly; notifications and backups wait until it restarts",
 }
 # AI worker faults use the ai_ prefix so they notify as ai.failure/ai.recovered.
 FAULT_TYPES = {"ai": "ai_worker"}
@@ -164,7 +165,10 @@ class Supervisor:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     os.umask(0o077)
+    if backup.pre_migration_backup not in migrations.pre_migration_hooks:
+        migrations.pre_migration_hooks.append(backup.pre_migration_backup)
     initialize()
+    backup.reconcile_after_restore()
     supervisor = Supervisor([
         Worker("recorder", "app.workers.recorder"),
         Worker("exporter", "app.workers.exporter"),

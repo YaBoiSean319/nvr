@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import ai_settings, alerts, automation, cameras, export_jobs, footage, identity, live_media, live_views, onboarding, operations, playback, policies, site_settings, system, web_ui
+from . import ai_settings, alerts, automation, backups, cameras, export_jobs, footage, identity, live_media, live_views, onboarding, operations, playback, policies, site_settings, system, web_ui
 
 ROUTERS: tuple[APIRouter, ...] = (
     system.router,
@@ -21,6 +21,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     export_jobs.router,
     alerts.router,
     operations.router,
+    backups.router,
     # Last: its catch-all asset paths must not shadow API routes.
     web_ui.router,
 )

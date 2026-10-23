@@ -636,7 +636,7 @@ class ExportManager:
                         raise RuntimeError("A selected camera was removed before export started")
                     segments = [dict(item) for item in db.execute(
                         "SELECT id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments "
-                        "WHERE camera_id=? AND starts_at<? AND ends_at>? ORDER BY starts_at",
+                        "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
                         (camera_id, end.isoformat(), start.isoformat()),
                     ).fetchall()]
                     per_camera.append({"camera_id": camera_id, "name": camera["name"], "index": index, "segments": segments,
@@ -982,7 +982,7 @@ def create_export_record(
                 if source is None or source["audio_supported"] != 1 or source["audio_enabled"] != 1:
                     raise ValueError("Grid audio source must have administrator-enabled audio")
         segments = db.execute(
-            f"SELECT id,size_bytes FROM recording_segments WHERE camera_id IN ({placeholders}) AND starts_at<? AND ends_at>?",
+            f"SELECT id,size_bytes FROM recording_segments WHERE camera_id IN ({placeholders}) AND starts_at<? AND ends_at>? AND unavailable_at IS NULL",
             (*camera_ids, end.isoformat(), start.isoformat()),
         ).fetchall()
         count = len(segments)

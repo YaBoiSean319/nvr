@@ -12,6 +12,7 @@ from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import api
+from .backup import BackupManager
 from .detection import DetectionManager
 from .exports import ExportManager
 from .heartbeat import HeartbeatManager
@@ -21,7 +22,7 @@ from .store import initialize
 from .version import APP_VERSION
 from .webhooks import WebhookManager
 from .workers import liveness, supervised
-from .workers.control import DetectionClient, ExportClient, RecorderClient
+from .workers.control import BackupClient, DetectionClient, ExportClient, RecorderClient
 
 
 STARTUP_ORDER = (
@@ -30,9 +31,10 @@ STARTUP_ORDER = (
     ("heartbeat", HeartbeatManager),
     ("recorders", RecordingManager),
     ("detectors", DetectionManager),
+    ("backups", BackupManager),
 )
 # Detection reads recorder state, and recording should outlive everything else.
-SHUTDOWN_ORDER = ("detectors", "exports", "webhooks", "heartbeat", "recorders")
+SHUTDOWN_ORDER = ("backups", "detectors", "exports", "webhooks", "heartbeat", "recorders")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:
@@ -59,6 +61,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
                 app.state.recorders = RecorderClient()
                 app.state.exports = ExportClient()
                 app.state.detectors = DetectionClient()
+                app.state.backups = BackupClient()
             elif start_workers:
                 for name, factory in STARTUP_ORDER:
                     manager = factory()

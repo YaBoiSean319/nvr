@@ -81,6 +81,22 @@ The database schema is versioned. On startup the application applies any pending
 
 Migrations are forward-only. An image older than the database's recorded schema version refuses to start rather than run against a schema it does not understand, so downgrading requires restoring the pre-upgrade copy (or configuration backup) together with the older image. Recordings are not affected by schema migrations.
 
+### Configuration backups and restore
+
+Set `NVR_BACKUP_PASSPHRASE` (at least 16 characters) to enable encrypted configuration backups. Keep a copy of the passphrase off the NVR host. Without it, backups are disabled, the Settings status says so, and nothing is written. A backup contains the database (users, cameras and encrypted camera credentials, groups and policies, saved views, branding, webhooks, and the footage index) and the credential key. It is encrypted with AES-256-GCM using a key derived from the passphrase with scrypt. **Footage is never included**, so protect recordings separately; losing the only recordings disk loses that footage permanently.
+
+Backups run daily at 02:17 in the site time zone, before every schema migration, and on demand (`POST /api/backups`, administrators only). They are written to `NVR_BACKUP_PATH` (`/backups` in Compose), and the newest `NVR_BACKUP_KEEP` (default 14) are kept. Mount `/backups` on a different disk or host than the NVR data. `GET /api/backups` reports backup age, the last success and failure, and the stored files. A failed backup, or no success for 26 hours, raises an incident (`system.failure` webhook) that recovers on the next success.
+
+To restore, stop the NVR, then run the restore command in a one-off container with the same volumes and passphrase:
+
+```sh
+docker compose stop nvr
+docker compose run --rm nvr python -m app.backup restore /backups/<file>.nvrbackup
+docker compose up -d
+```
+
+Restore verifies the archive's integrity and the database before replacing anything, and keeps the replaced files beside the originals as `*.before-restore-<timestamp>`. It refuses to run while NVR workers are reporting liveness unless `--force` is given. On the next start, indexed footage whose file no longer exists is marked unavailable and shown as a failure gap rather than as recorded footage. Segments on a storage volume that is not mounted are left alone and checked again on the following start.
+
 Use `docker compose restart` to restart the service. The account remains in the `nvr-data` volume and the health check returns healthy after startup. To intentionally reset the test installation, run `docker compose down -v`; this permanently deletes the local database and any volume data.
 
 ## Development

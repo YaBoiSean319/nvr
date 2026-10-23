@@ -45,6 +45,12 @@ def _fernet() -> Fernet:
     return Fernet(key)
 
 
+def ensure_key() -> Path:
+    """Create the credential key if this installation has none yet, and return its path."""
+    _fernet()
+    return key_path()
+
+
 def derived_key(purpose: str) -> bytes:
     """A key for one named purpose, derived from the protected credential key."""
     _fernet()

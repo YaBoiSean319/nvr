@@ -17,8 +17,8 @@ RUN apt-get update \
     && echo 'de10beb5a811bd1b38c828b4060898c32502c4919488fd7100269cbdc7595e08  /opt/nvr/models/person-vehicle-bike-detection-2004.bin' | sha256sum -c - \
     && groupadd --system --gid 10001 nvr \
     && useradd --system --uid 10001 --gid nvr --home-dir /nonexistent nvr \
-    && mkdir -p /data /secrets /recordings \
-    && chown -R nvr:nvr /app /data /secrets /recordings /opt/nvr/models
+    && mkdir -p /data /secrets /recordings /backups \
+    && chown -R nvr:nvr /app /data /secrets /recordings /backups /opt/nvr/models
 COPY --chown=nvr:nvr app ./app
 COPY --chown=nvr:nvr scripts ./scripts
 USER nvr

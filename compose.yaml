@@ -23,11 +23,19 @@ services:
       NVR_OIDC_ADMIN_ROLES: ${NVR_OIDC_ADMIN_ROLES:-}
       NVR_OIDC_OPERATOR_ROLES: ${NVR_OIDC_OPERATOR_ROLES:-}
       NVR_DISCOVERY_INTERFACE: ${NVR_DISCOVERY_INTERFACE:-}
+      # Encrypted configuration backups (database and credential key, never footage).
+      # Backups stay disabled until a passphrase of at least 16 characters is set.
+      NVR_BACKUP_PASSPHRASE: ${NVR_BACKUP_PASSPHRASE:-}
+      NVR_BACKUP_PATH: /backups
+      NVR_BACKUP_KEEP: ${NVR_BACKUP_KEEP:-14}
     volumes:
       - nvr-data:/data
       - nvr-secrets:/secrets
       - nvr-recordings:/recordings
       - nvr-archive:/recordings/archive
+      # Point this at storage on a different disk or host, for example
+      # "- /mnt/offsite/nvr-backups:/backups", so a host or disk loss does not take the backups too.
+      - nvr-backups:/backups
     healthcheck:
       test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('NVR_LISTEN_PORT','8280')+'/healthz', timeout=3)"]
       interval: 30s
@@ -40,3 +48,4 @@ volumes:
   nvr-secrets:
   nvr-recordings:
   nvr-archive:
+  nvr-backups:

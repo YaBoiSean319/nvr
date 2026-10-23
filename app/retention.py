@@ -126,7 +126,7 @@ def coverage_summary(db, camera_id: str, root: Path | None = None, now: datetime
     root = (root or recordings_path()).resolve()
     now = now or datetime.now(timezone.utc)
     days, source = effective_retention(db, camera_id)
-    rows = db.execute("SELECT starts_at,ends_at,size_bytes FROM recording_segments WHERE camera_id=? ORDER BY starts_at", (camera_id,)).fetchall()
+    rows = db.execute("SELECT starts_at,ends_at,size_bytes FROM recording_segments WHERE camera_id=? AND unavailable_at IS NULL ORDER BY starts_at", (camera_id,)).fetchall()
     total_bytes = sum(max(0, int(row["size_bytes"])) for row in rows)
     def parse_time(value: str) -> datetime:
         result = datetime.fromisoformat(value.replace("Z", "+00:00"))

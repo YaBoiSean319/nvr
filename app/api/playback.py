@@ -53,7 +53,7 @@ def synchronized_playback_timeline(
                 raise HTTPException(status_code=422, detail="Playback request contains an unknown camera")
             segment_rows = db.execute(
                 "SELECT id,starts_at,ends_at,size_bytes FROM recording_segments "
-                "WHERE camera_id=? AND starts_at<? AND ends_at>? ORDER BY starts_at LIMIT 500",
+                "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at LIMIT 500",
                 (camera_id, end_text, start_text),
             ).fetchall()
             segments = [{
@@ -67,6 +67,12 @@ def synchronized_playback_timeline(
                 (camera_id, end_text, start_text),
             ).fetchall()
             coverage = [dict(row) for row in coverage_rows]
+            # Indexed footage whose file is gone (for example after a restore) is a known failure, not footage.
+            coverage += [{"coverage_kind": "failure", "reason": row["unavailable_reason"], "starts_at": row["starts_at"], "ends_at": row["ends_at"]}
+                         for row in db.execute(
+                             "SELECT starts_at,ends_at,unavailable_reason FROM recording_segments "
+                             "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NOT NULL ORDER BY starts_at LIMIT 500",
+                             (camera_id, end_text, start_text))]
             event_rows = db.execute(
                 "SELECT id,source_event_at,requested_start,requested_end,actual_start,actual_end,"
                 "pre_roll_complete,status,failure_reason,segment_id FROM motion_events "

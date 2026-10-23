@@ -165,14 +165,18 @@ class CameraArchiveTests(unittest.TestCase):
         with connect() as db:
             db.execute("ALTER TABLE cameras DROP COLUMN archived_at")
             # Databases created before archiving existed also predate versioned
-            # migrations and every table added after the baseline.
+            # migrations and everything they add after the baseline.
             reference = sqlite3.connect(":memory:", isolation_level=None)
             m0001_baseline.upgrade(reference)
-            baseline = {row[0] for row in reference.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            baseline = m0001_baseline._shape(reference)
             reference.close()
-            current = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-            for table in sorted(current - baseline):
-                db.execute(f"DROP TABLE {table}")
+            for table, columns in m0001_baseline._shape(db).items():
+                if table not in baseline:
+                    db.execute(f"DROP TABLE {table}")
+                    continue
+                for column in sorted(columns - baseline[table]):
+                    db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            db.execute("DROP TABLE IF EXISTS schema_migrations")
         initialize()
         with connect() as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}

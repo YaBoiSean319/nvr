@@ -226,26 +226,27 @@ def list_camera_segments(
             raise HTTPException(status_code=422, detail="Provide both from and to, or neither")
         if start is None or end is None:
             rows = db.execute(
-                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500",
+                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,s.unavailable_at,s.unavailable_reason,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s WHERE camera_id=? ORDER BY starts_at DESC LIMIT 500",
                 (camera_id,),
             ).fetchall()
         else:
             if start.tzinfo is None or end.tzinfo is None or end <= start:
                 raise HTTPException(status_code=422, detail="from and to must be timezone-aware and form a positive interval")
             rows = db.execute(
-                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s "
+                "SELECT s.id,s.starts_at,s.ends_at,s.size_bytes,s.unavailable_at,s.unavailable_reason,(SELECT h.id FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_id,(SELECT h.expires_at FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY h.created_at DESC LIMIT 1) AS hold_expires_at FROM recording_segments s "
                 "WHERE camera_id=? AND starts_at<? AND ends_at>? ORDER BY starts_at",
                 (camera_id, end.astimezone(timezone.utc).isoformat(), start.astimezone(timezone.utc).isoformat()),
             ).fetchall()
     segments = [
         {"id": row["id"], "starts_at": row["starts_at"], "ends_at": row["ends_at"], "size_bytes": row["size_bytes"], "preserved":row["hold_id"] is not None,"hold_expires_at":row["hold_expires_at"],
-         "media_url": f"/api/cameras/{camera_id}/segments/{row['id']}/media"}
+         "available": row["unavailable_at"] is None, "unavailable_reason": row["unavailable_reason"],
+         "media_url": f"/api/cameras/{camera_id}/segments/{row['id']}/media" if row["unavailable_at"] is None else None}
         for row in rows
     ]
     return {
         "camera_id": camera_id,
         "recording_status": camera["recording_status"],
-        "availability": "available" if segments else "none",
+        "availability": "available" if any(segment["available"] for segment in segments) else "unavailable" if segments else "none",
         "reason": None if segments else "No indexed footage covers this interval",
         "segments": segments,
     }
