@@ -3,7 +3,7 @@ import { ApiError, latestOnly } from "@/api/client";
 import type { DisplaySettings, TimelineCamera } from "@/api/types";
 import { formatSiteDateTime } from "@/lib/zonedTime";
 import { playbackClock } from "./clock";
-import { eventDestination, eventTimes, frameNeighbour, intervalAt, skipEmpty, toMicroIso, type Direction } from "./investigation";
+import { eventDestination, eventTimes, frameNeighbour, intervalAt, skipEmpty, toMicroIso, type Direction } from "./investigationRules";
 import { usePlaybackStore } from "./store";
 
 interface Props {
