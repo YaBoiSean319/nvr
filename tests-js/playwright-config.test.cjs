@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const test = require("node:test");
+const { childEnvironment } = require("../tests/browser/launch_server.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const EXPECTED_SERVER_ENV_KEYS = [
@@ -50,6 +51,16 @@ test("browser server, fallback reports, and failure diagnostics protect credenti
   for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "NVR_DB_PASSWORD", "AWS_SECRET_ACCESS_KEY"]) {
     assert.equal(Object.hasOwn(output.serverEnv, name), false);
   }
+  const childEnv = childEnvironment({
+    ...output.serverEnv,
+    HTTP_PROXY: sentinels[0],
+    NVR_DB_PASSWORD: sentinels[1],
+    AWS_SECRET_ACCESS_KEY: sentinels[2],
+    NVR_BROWSER_REPORT_PRIVACY_SENTINEL: "report-sentinel",
+  });
+  assert.deepEqual(Object.keys(childEnv).sort(), EXPECTED_SERVER_ENV_KEYS);
+  const serializedChildEnv = JSON.stringify(childEnv);
+  for (const sentinel of [...sentinels, "report-sentinel"]) assert.equal(serializedChildEnv.includes(sentinel), false);
   assert.equal(output.report.report_status, "not-collected");
   assert.equal(output.measurements.measurement_status, "not-collected");
 });

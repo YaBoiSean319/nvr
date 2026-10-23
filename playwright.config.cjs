@@ -48,9 +48,9 @@ const fixtureEnvironment = {
   NVR_SEGMENT_SECONDS: "10",
   NVR_DISCOVERY_INTERFACE: "127.0.0.1",
 };
-// The server needs the executable search path and these isolated fixture
-// settings only. Inheriting the complete runner environment can expose proxy,
-// credential, or CI metadata through webServer configuration serialization.
+// The server only needs PATH and these isolated fixture settings. Playwright
+// merges process.env into webServer children, so launch_server.cjs enforces this
+// allowlist at the actual Python server boundary.
 const serverEnvironment = {
   PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
   ...fixtureEnvironment,
@@ -91,7 +91,7 @@ module.exports = {
     navigationTimeout: 10_000,
   },
   webServer: {
-    command: "python tests/browser/server.py",
+    command: "node tests/browser/launch_server.cjs",
     url: "http://127.0.0.1:8765/healthz",
     timeout: 60_000,
     reuseExistingServer: false,

@@ -18,11 +18,19 @@ const allowedWebServerEnvironment = new Set([
 ]);
 
 if (!fs.existsSync(reportPath)) throw new Error("Playwright JSON report is missing; privacy validation cannot run.");
-const reportText = fs.readFileSync(reportPath, "utf8");
-const report = JSON.parse(reportText);
+const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
 const sentinel = process.env.NVR_BROWSER_REPORT_PRIVACY_SENTINEL;
-if (sentinel && reportText.includes(sentinel)) {
-  throw new Error("Playwright JSON report contains the browser-runner privacy sentinel.");
+function findSentinelPaths(value, parentPath = []) {
+  if (typeof value === "string") return value.includes(sentinel) ? [parentPath.join(".")] : [];
+  if (Array.isArray(value)) return value.flatMap((item, index) => findSentinelPaths(item, [...parentPath, String(index)]));
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, child]) => findSentinelPaths(child, [...parentPath, key]));
+}
+if (sentinel) {
+  const paths = findSentinelPaths(report).slice(0, 10);
+  if (paths.length) {
+    throw new Error(`Playwright JSON report contains the browser-runner privacy sentinel at: ${paths.join(", ")}`);
+  }
 }
 
 const playwrightOutputDirectory = path.resolve("test-results/playwright");

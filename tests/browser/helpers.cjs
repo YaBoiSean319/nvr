@@ -35,13 +35,32 @@ function seedFixtures(count, options = {}) {
 }
 
 async function signIn(page, username = "camera-admin") {
-  await page.goto("/");
-  await expect(page.locator("#login")).toBeVisible();
-  await page.locator("#login-user").fill(username);
-  await page.locator("#login-pass").fill(FIXTURE_PASSWORD);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.locator("#status")).toBeVisible();
-  await expect(page.locator('#console-nav [data-screen="camera-settings"]')).toBeVisible();
+  const pageErrors = [];
+  const onPageError = error => pageErrors.push(error.message);
+  page.on("pageerror", onPageError);
+  try {
+    await page.goto("/");
+    await expect(page.locator("#login")).toBeVisible();
+    await page.locator("#login-user").fill(username);
+    await page.locator("#login-pass").fill(FIXTURE_PASSWORD);
+    const loginResponsePromise = page.waitForResponse(response => {
+      try { return new URL(response.url()).pathname === "/api/auth/login"; }
+      catch { return false; }
+    }, { timeout: 8_000 }).catch(() => null);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    const loginResponse = await loginResponsePromise;
+    const message = (await page.locator("#message").innerText().catch(() => "")).trim();
+    if (!loginResponse) {
+      throw new Error(`No /api/auth/login response. Message: ${message || "(empty)"}. Page errors: ${pageErrors.join("; ") || "(none)"}`);
+    }
+    if (!loginResponse.ok()) {
+      throw new Error(`Fixture login returned HTTP ${loginResponse.status()}. Message: ${message || "(empty)"}.`);
+    }
+    await expect(page.locator("#status"), `Login returned HTTP ${loginResponse.status()}, but the workspace stayed hidden. Message: ${message || "(empty)"}. Page errors: ${pageErrors.join("; ") || "(none)"}`).toBeVisible();
+    await expect(page.locator('#console-nav [data-screen="camera-settings"]')).toBeVisible();
+  } finally {
+    page.off("pageerror", onPageError);
+  }
 }
 
 async function openCameraSettings(page) {
