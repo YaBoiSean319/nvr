@@ -4,7 +4,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
+from datetime import datetime, timedelta, timezone
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +35,68 @@ def _camera_id(index: int) -> str:
 def _reset_site_appearance(db: sqlite3.Connection) -> None:
     db.execute("UPDATE site_branding SET app_name='Workplace NVR',primary_color='#17212b',accent_color='#69a1ff' WHERE singleton_id=1")
     db.execute("DELETE FROM site_branding_assets")
+    db.execute("UPDATE site_display_settings SET time_zone='UTC',date_format='friendly',clock_format='12' WHERE singleton_id=1")
+
+
+LONG_NAME_SUFFIX = " - North loading dock exterior entrance overlooking the delivery yard"
+FOOTAGE_CLIP_SECONDS = 60
+
+
+def _footage_clip() -> Path:
+    """One generated minute of video, reused for every fixture interval."""
+    recordings = Path(os.environ["NVR_RECORDINGS_PATH"])
+    clip = recordings.parent / "fixture-footage" / f"clip-{FOOTAGE_CLIP_SECONDS}s.mp4"
+    if not clip.is_file():
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        partial = clip.with_suffix(".partial.mp4")
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+            "-i", f"testsrc=s=320x180:r=15:d={FOOTAGE_CLIP_SECONDS}", "-c:v", "libx264", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", "-g", "15", "-movflags", "+faststart", str(partial),
+        ], check=True, timeout=120)
+        partial.replace(clip)
+    return clip
+
+
+def _seed_footage(db: sqlite3.Connection, cameras: list[str]) -> dict[str, object]:
+    """Recorded intervals relative to a recent anchor, so the default past-hour search finds them.
+
+    Camera 1: two minutes of footage with a one-minute failure gap between them, a motion event.
+    Camera 2: one minute overlapping both, a person detection and an unanalyzed AI interval.
+    Every other camera has no footage.
+    """
+    clip = _footage_clip()
+    anchor = (datetime.now(timezone.utc) - timedelta(minutes=30)).replace(second=0, microsecond=0)
+    at = lambda seconds: (anchor + timedelta(seconds=seconds)).isoformat()
+    plan = {0: [0, 120], 1: [30]}
+    recordings = Path(os.environ["NVR_RECORDINGS_PATH"])
+    segments: list[dict[str, object]] = []
+    for index, offsets in plan.items():
+        if index >= len(cameras):
+            continue
+        camera_id = cameras[index]
+        for offset in offsets:
+            relative = f"{camera_id}/fixture-{offset:04d}.mp4"
+            target = recordings / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(clip, target)
+            db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
+                       (camera_id, relative, at(offset), at(offset + FOOTAGE_CLIP_SECONDS), target.stat().st_size))
+            segments.append({"camera_id": camera_id, "starts_at": at(offset), "ends_at": at(offset + FOOTAGE_CLIP_SECONDS)})
+    first = cameras[0]
+    db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at,ends_at) VALUES(?,?,?,?,?)",
+               (first, "failure", "Camera offline", at(60), at(120)))
+    db.execute("INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,status) "
+               "VALUES(?,?,?,?,?,?,?,?,?)",
+               (str(uuid.uuid5(NAMESPACE, "motion-1")), first, "onvif", "motion", at(40), at(40), at(35), at(50), "complete"))
+    if len(cameras) > 1:
+        second = cameras[1]
+        db.execute("INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   (str(uuid.uuid5(NAMESPACE, "person-1")), second, "person", 0.9, "[0.2,0.2,0.4,0.6]", at(50), at(52), 320, 180, "fixture", "1"))
+        db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,?,?,?,?)",
+                   (second, "failed", at(60), at(90), "Detector unavailable"))
+    return {"anchor": anchor.isoformat(), "segments": segments}
 
 
 def seed_fresh_install() -> dict[str, object]:
@@ -56,7 +121,8 @@ def _write_manifest(manifest: dict[str, object]) -> dict[str, object]:
 
 
 def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False, extra_group: bool = False,
-                  streams: dict[int, str] | None = None, audio_cameras: set[int] | None = None) -> dict[str, object]:
+                  streams: dict[int, str] | None = None, audio_cameras: set[int] | None = None,
+                  footage: bool = False, long_names: bool = False) -> dict[str, object]:
     initialize()
     with connect() as db:
         _reset_site_appearance(db)
@@ -76,6 +142,9 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DROP TRIGGER IF EXISTS camera_browser_fixture_reject_bulk_update")
         db.execute("DROP TRIGGER IF EXISTS camera_browser_fixture_reject_name_save")
         db.execute("DELETE FROM discovery_candidates")
+        db.execute("DELETE FROM live_workspace_states")
+        db.execute("DELETE FROM viewer_layouts")
+        db.execute("DELETE FROM shared_viewer_layouts")
         db.execute("DELETE FROM cameras")
         db.execute("DELETE FROM camera_groups")
         db.execute("DELETE FROM recording_policy_overrides")
@@ -97,7 +166,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
                 "VALUES(?,?,?,?,?,?,NULL,'continuous',0,'stopped',?,?,?)",
                 (
                     camera_id,
-                    f"Camera {index:03d}",
+                    f"Camera {index:03d}{LONG_NAME_SUFFIX if long_names else ''}",
                     GROUP_ID if index % 2 else None,
                     ip,
                     "axis" if metadata_known else "auto",
@@ -165,6 +234,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
             )
 
         manifest = {
+            "footage": _seed_footage(db, cameras) if footage and cameras else None,
             "camera_count": count,
             "camera_ids": cameras,
             "primary_camera_id": cameras[0] if cameras else None,
@@ -188,6 +258,8 @@ def main() -> None:
     parser.add_argument("--fresh-install", action="store_true", help="remove every account so first-run setup is required")
     parser.add_argument("--stream", action="append", default=[], metavar="INDEX=URL", help="give camera INDEX this RTSP URL")
     parser.add_argument("--audio", action="append", type=int, default=[], metavar="INDEX", help="enable audio on camera INDEX")
+    parser.add_argument("--footage", action="store_true", help="give cameras 1 and 2 generated recorded intervals in the past hour")
+    parser.add_argument("--long-names", action="store_true", help="give every camera a long name")
     arguments = parser.parse_args()
     if arguments.fresh_install:
         seed_fresh_install()
@@ -196,7 +268,7 @@ def main() -> None:
         parser.error("camera fixture count must be between 0 and 200")
     streams = {int(index): url for index, url in (item.split("=", 1) for item in arguments.stream)}
     seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save, extra_group=arguments.extra_group,
-                  streams=streams, audio_cameras=set(arguments.audio))
+                  streams=streams, audio_cameras=set(arguments.audio), footage=arguments.footage, long_names=arguments.long_names)
 
 
 if __name__ == "__main__":

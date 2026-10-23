@@ -59,3 +59,52 @@ export interface ExportJob {
   error: string | null;
   created_at: string;
 }
+
+export interface SavedView {
+  name: string;
+  scope: "personal" | "shared";
+  camera_ids: string[];
+  grid_size: number;
+  tile_camera_ids: (string | null)[];
+  layout_mode: "auto" | "manual";
+}
+
+export interface CameraGroup {
+  id: string;
+  name: string;
+  camera_ids: string[];
+  camera_count: number;
+}
+
+export interface LiveWorkspaceState {
+  camera_ids: string[] | null;
+  tile_camera_ids: (string | null)[];
+  grid_size: number;
+  layout_mode: "auto" | "manual";
+  sidebar_collapsed: boolean;
+}
+
+export interface DisplaySettings {
+  time_zone: string;
+  date_format: "friendly" | "long" | "iso" | "day-month" | "month-day";
+  clock_format: "12" | "24";
+}
+
+export type GapState = "failure" | "uncertain" | "expected_idle" | "missing";
+
+export interface TimelineCamera {
+  camera_id: string;
+  name: string;
+  recording_status: string;
+  segments: { id: number; starts_at: string; ends_at: string; size_bytes: number; media_url: string }[];
+  gaps: { starts_at: string; ends_at: string; state: GapState; reason: string }[];
+  motion_events: { id: string; source_event_at: string; status: string }[];
+  ai_detections: { id: string; label: "person" | "vehicle"; confidence: number; first_seen_at: string; last_seen_at: string }[];
+  ai_unanalyzed: { state: string; starts_at: string; ends_at: string | null; detail: string }[];
+}
+
+export interface PlaybackTimeline {
+  start: string;
+  end: string;
+  cameras: TimelineCamera[];
+}

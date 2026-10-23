@@ -1,6 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
-import type { Branding, Camera, ExportJob, Incident, Me, ThemePreference } from "./types";
+import type { Branding, Camera, CameraGroup, DisplaySettings, ExportJob, Incident, LiveWorkspaceState, Me, PlaybackTimeline, SavedView, ThemePreference } from "./types";
 
 export const keys = {
   setup: ["setup"] as const,
@@ -141,5 +141,78 @@ export function useExportJobs(enabled = true) {
     enabled,
     queryFn: ({ signal }) => api<{ exports: ExportJob[] }>("/api/exports", { signal }).then(result => result.exports),
     refetchInterval: STATUS_REFRESH_MS,
+  });
+}
+
+export const viewKeys = {
+  views: ["live", "views"] as const,
+  groups: ["camera-groups"] as const,
+  workspace: ["live", "workspace"] as const,
+};
+
+export function useLiveViews() {
+  return useQuery({
+    queryKey: viewKeys.views,
+    queryFn: async ({ signal }) => {
+      const result = await api<{ layouts: SavedView[]; shared_views: SavedView[] }>("/api/live/views", { signal });
+      return [...result.shared_views, ...result.layouts];
+    },
+  });
+}
+
+export function useCameraGroups() {
+  return useQuery({
+    queryKey: viewKeys.groups,
+    queryFn: ({ signal }) => api<{ groups: CameraGroup[] }>("/api/camera-groups", { signal }).then(result => result.groups),
+  });
+}
+
+export function useSaveView() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, scope, layout }: { name: string; scope: SavedView["scope"]; layout: Omit<SavedView, "name" | "scope"> }) =>
+      api(`/api/live/${scope === "shared" ? "shared-layouts" : "layouts"}/${encodeURIComponent(name)}`, { method: "PUT", body: layout }),
+    onSuccess: () => client.invalidateQueries({ queryKey: viewKeys.views }),
+  });
+}
+
+export function useDeleteView() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, scope }: { name: string; scope: SavedView["scope"] }) =>
+      api<void>(`/api/live/${scope === "shared" ? "shared-layouts" : "layouts"}/${encodeURIComponent(name)}`, { method: "DELETE" }),
+    onSuccess: () => client.invalidateQueries({ queryKey: viewKeys.views }),
+  });
+}
+
+export function fetchLiveWorkspace(signal?: AbortSignal) {
+  return api<LiveWorkspaceState>("/api/live/workspace", { signal });
+}
+
+export function saveLiveWorkspace(state: Omit<LiveWorkspaceState, "camera_ids"> & { camera_ids: string[] }) {
+  return api<LiveWorkspaceState>("/api/live/workspace", { method: "PUT", body: state });
+}
+
+export function useDisplaySettings() {
+  return useQuery({
+    queryKey: ["settings", "display"] as const,
+    queryFn: ({ signal }) => api<DisplaySettings>("/api/settings/display", { signal }),
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * The aligned timeline for a search. Changing the cameras keeps showing the previous
+ * result until the new one arrives, so adding a camera never blanks the investigation.
+ */
+export function usePlaybackTimeline(cameraIds: string[], range: { start: string; end: string } | null) {
+  return useQuery({
+    queryKey: ["playback", "timeline", range?.start, range?.end, cameraIds] as const,
+    enabled: Boolean(range && cameraIds.length),
+    queryFn: ({ signal }) => api<PlaybackTimeline>("/api/playback/timeline", {
+      method: "POST", signal, body: { camera_ids: cameraIds, start: range!.start, end: range!.end },
+    }),
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
   });
 }

@@ -14,6 +14,8 @@ function seedFixtures(count, options = {}) {
   if (options.failNameSave) args.push("--fail-name-save");
   if (options.extraGroup) args.push("--extra-group");
   if (options.freshInstall) args.push("--fresh-install");
+  if (options.footage) args.push("--footage");
+  if (options.longNames) args.push("--long-names");
   for (const [index, url] of Object.entries(options.streams ?? {})) args.push("--stream", `${index}=${url}`);
   for (const index of options.audio ?? []) args.push("--audio", String(index));
   const result = spawnSync("python", args, {

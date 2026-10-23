@@ -8,6 +8,7 @@ import { SetupPage } from "@/features/auth/SetupPage";
 import { SignInPage } from "@/features/auth/SignInPage";
 import { AdministratorOnly, NotFound, WorkspacePlaceholder } from "@/features/placeholders/Pages";
 import { LiveWorkspace } from "@/features/live/LiveWorkspace";
+import { useLiveStore } from "@/features/live/store";
 import { Shell } from "@/features/shell/Shell";
 import { applyBranding, applyTheme, storedTheme } from "@/lib/appearance";
 
@@ -36,6 +37,11 @@ function router(me: Me) {
 }
 
 function SignedIn({ me }: { me: Me }) {
+  // Workspace state belongs to one person: start clean and forget it on sign-out.
+  useEffect(() => {
+    useLiveStore.getState().reset();
+    return () => useLiveStore.getState().reset();
+  }, [me.username]);
   // One router per signed-in identity, so a role change rebuilds the route table.
   const routes = useMemo(() => router(me), [me.username, me.role]); // eslint-disable-line react-hooks/exhaustive-deps
   return <RouterProvider router={routes} />;

@@ -1,6 +1,8 @@
+import * as Menu from "@radix-ui/react-dropdown-menu";
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Camera } from "@/api/types";
 import { LivePlayer, type PlayerSnapshot } from "./LivePlayer";
+import { CAMERA_DRAG_TYPE } from "@/features/cameras/CameraBrowser";
 import { useLiveStore, type Quality } from "./store";
 
 interface TileProps {
@@ -9,6 +11,7 @@ interface TileProps {
   enlarged: boolean;
   /** Hidden behind an enlarged tile: release the stream but keep membership. */
   suspended: boolean;
+  onReplaceRequest: () => void;
 }
 
 const PHASE_LABEL: Record<PlayerSnapshot["phase"], string> = {
@@ -31,7 +34,7 @@ function resolveQuality(override: Quality | undefined, enlarged: boolean, substr
   return enlarged || !substream ? "high" : "low";
 }
 
-export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended }: TileProps) {
+export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, onReplaceRequest }: TileProps) {
   const video = useRef<HTMLVideoElement>(null);
   const image = useRef<HTMLImageElement>(null);
   const player = useRef<LivePlayer | null>(null);
@@ -39,7 +42,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
   const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
   const override = useLiveStore(store => store.quality[camera.id]);
   const listeningId = useLiveStore(store => store.listeningId);
-  const { setActive, enlarge, restore, remove, setQuality, setListening } = useLiveStore.getState();
+  const { setActive, enlarge, unenlarge: restore, remove, setQuality, setListening, move } = useLiveStore.getState();
   const quality = resolveQuality(override, enlarged, Boolean(camera.live_substream_available));
 
   useEffect(() => {
@@ -101,6 +104,10 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
     if (event.target !== event.currentTarget) return;
     if (event.key === "Enter") enlarged ? restore() : enlarge(camera.id);
     if (event.key === "Delete" || event.key === "Backspace") remove(camera.id);
+    if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      move(camera.id, event.key === "ArrowLeft" ? -1 : 1);
+    }
   }
 
   return (
@@ -117,6 +124,11 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       onPointerDown={() => setActive(camera.id)}
       onDoubleClick={() => (enlarged ? restore() : enlarge(camera.id))}
       onKeyDown={onKeyDown}
+      draggable={!enlarged}
+      onDragStart={event => {
+        event.dataTransfer.setData(CAMERA_DRAG_TYPE, camera.id);
+        event.dataTransfer.effectAllowed = "move";
+      }}
     >
       <video ref={video} className="tile-video" muted playsInline hidden={Boolean(fallbackUrl)} />
       {fallbackUrl && !suspended ? <img ref={image} className="tile-video" src={fallbackUrl} alt="" onError={() => player.current?.retry()} /> : null}
@@ -154,6 +166,16 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
           <option value="main">Main</option>
           <option value="sub" disabled={!camera.live_substream_available}>Sub{camera.live_substream_available ? "" : " (none)"}</option>
         </select>
+        <Menu.Root>
+          <Menu.Trigger className="button icon-button tile-action" aria-label={`More actions for ${camera.name}`} title="More">⋯</Menu.Trigger>
+          <Menu.Portal>
+            <Menu.Content className="menu" align="end" sideOffset={4}>
+              <Menu.Item className="menu-item" onSelect={() => move(camera.id, -1)}>Move earlier</Menu.Item>
+              <Menu.Item className="menu-item" onSelect={() => move(camera.id, 1)}>Move later</Menu.Item>
+              <Menu.Item className="menu-item" onSelect={onReplaceRequest}>Replace with…</Menu.Item>
+            </Menu.Content>
+          </Menu.Portal>
+        </Menu.Root>
         <button type="button" className="button icon-button tile-action" onClick={() => remove(camera.id)} aria-label={`Remove ${camera.name} from view`} title="Remove">✕</button>
       </div>
     </div>
