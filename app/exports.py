@@ -279,8 +279,11 @@ def _union_source_time(seconds: float, intervals: list[dict[str, Any]]) -> datet
 
 
 def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, Any]], intervals: list[dict[str, Any]],
-                          duration: float, display_settings: dict[str, str]) -> dict[str, Any]:
-    safe_name = " ".join(camera_name.replace("<", "[").replace(">", "]").splitlines()) or "Selected camera"
+                          duration: float, display_settings: dict[str, str], tile_width: int,
+                          tile_height: int) -> dict[str, Any]:
+    font_size = _subtitle_font_size(tile_height)
+    bounded_width = round(tile_width * min(1.0, 1080 / tile_height))
+    safe_name, name_details = _bounded_camera_name(camera_name, bounded_width, font_size)
     cues: list[tuple[float, float, list[str]]] = []
     events = [{"start": _union_output_time(span["source_start"], intervals),
                "end": _union_output_time(span["source_end"], intervals), "span": span} for span in spans]
@@ -333,7 +336,8 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
     return {"source_to_output_intervals": [{"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
              "output_start_seconds": round(_union_output_time(span["source_start"], intervals), 6),
              "output_end_seconds": round(_union_output_time(span["source_end"], intervals), 6)} for span in spans],
-            "missing_tile_cues": missing_cues}
+            "first_source_labels": [display(span["source_start"]) for span in spans],
+            "missing_tile_cues": missing_cues, "camera_name_overlay": name_details}
 
 
 async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, cameras: list[dict[str, Any]],
@@ -354,7 +358,10 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
         camera = by_id.get(camera_id) if camera_id else None
         spans = camera["spans"] if camera else []
         subtitle_path = work_dir / f"grid-tile-{tile_index}.srt"
-        overlay_mapping = _write_grid_subtitles(subtitle_path, camera["name"] if camera else "Selected camera", spans, intervals, duration, display_settings)
+        overlay_mapping = _write_grid_subtitles(
+            subtitle_path, camera["name"] if camera else "Selected camera", spans, intervals, duration,
+            display_settings, tile_width, tile_height,
+        )
         if camera:
             camera["grid_overlay"] = overlay_mapping
         offsets = [(_union_output_time(span["source_start"], intervals), _union_output_time(span["source_end"], intervals)) for span in spans]
@@ -371,21 +378,25 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
             current = composed
             next_input += 1
         subbed = f"tile{tile_index}_subbed"
-        graph.append(f"[{current}]{_subtitle_filter_path(subtitle_path)}[{subbed}]")
+        graph.append(f"[{current}]{_subtitle_filter_path(subtitle_path, tile_height)}[{subbed}]")
         tile_outputs.append(f"[{subbed}]")
     layout = "|".join(f"{index % columns * tile_width}_{index // columns * tile_height}" for index in range(len(tile_outputs)))
     gaps = work_dir / "grid-gaps.srt"
     with gaps.open("w", encoding="utf-8") as subtitle:
         cue = 1
-        for item in intervals:
-            if not item["skipped"] or item["source_start"] == item["source_end"]:
-                continue
-            left, right = max(0.0, item["output_start"] - 0.4), min(duration, item["output_start"] + 1.6)
+        transitions = sorted({item["output_start"] for item in intervals
+                              if item["skipped"] and item["source_start"] != item["source_end"]})
+        for index, transition in enumerate(transitions):
+            left, right = max(0.0, transition - 0.4), min(duration, transition + 1.6)
+            if index:
+                left = max(left, (transitions[index - 1] + transition) / 2)
+            if index + 1 < len(transitions):
+                right = min(right, (transition + transitions[index + 1]) / 2)
             if right > left:
-                subtitle.write(f"{cue}\n{_srt_time(left)} --> {_srt_time(right)}\nRecording gap skipped\n{format_display_datetime(item['source_start'], display_settings['time_zone'], display_settings['date_format'], display_settings['clock_format'])} – {format_display_datetime(item['source_end'], display_settings['time_zone'], display_settings['date_format'], display_settings['clock_format'])}\n\n")
+                subtitle.write(f"{cue}\n{_srt_time(left)} --> {_srt_time(right)}\n{{\\an2}}Recording gap skipped\n\n")
                 cue += 1
     final_filter = f"{tile_outputs[0]}null" if len(tile_outputs) == 1 else "".join(tile_outputs) + f"xstack=inputs={len(tile_outputs)}:layout={layout}:fill=black"
-    graph.append(f"{final_filter},{_subtitle_filter_path(gaps)}[out]")
+    graph.append(f"{final_filter},{_subtitle_filter_path(gaps, height, font_size=_subtitle_font_size(height), alignment=2)}[out]")
     output = work_dir / "grid.mp4"
     args.extend(["-filter_complex", ";".join(graph), "-map", "[out]", "-an", "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-t", f"{duration:.6f}", "-y", str(output)])
     await manager._run_ffmpeg(job_id, args)
@@ -404,9 +415,10 @@ def _srt_time(seconds: float) -> str:
 
 def _write_source_time_subtitles(
     path: Path, camera_name: str, spans: list[dict[str, Any]], display_settings: dict[str, str],
+    font_size: int,
 ) -> list[str]:
     """Write once-per-second source-clock labels on the compressed output clock."""
-    safe_name = " ".join(camera_name.replace("<", "[").replace(">", "]").replace("{", "(").replace("}", ")").splitlines())
+    safe_name, _ = _bounded_camera_name(camera_name, 1280, font_size)
     time_zone = display_settings["time_zone"]
     date_format = display_settings["date_format"]
     clock_format = display_settings["clock_format"]
@@ -422,19 +434,66 @@ def _write_source_time_subtitles(
             while elapsed < duration:
                 cue_end = min(duration, elapsed + 1.0)
                 source_time = span["source_start"] + timedelta(seconds=elapsed)
-                lines = ["{\\an7}" + safe_name, format_display_datetime(source_time, time_zone, date_format, clock_format)]
-                if span["gap_before"] and elapsed < 2.0:
-                    lines.append("Recording gap skipped")
+                lines = ["{\\an7}" + safe_name, "{\\fs11}" + format_display_datetime(source_time, time_zone, date_format, clock_format)]
                 subtitle.write(f"{cue_number}\n{_srt_time(span['output_start'] + elapsed)} --> {_srt_time(span['output_start'] + cue_end)}\n")
                 subtitle.write("\n".join(lines) + "\n\n")
                 cue_number += 1
                 elapsed = cue_end
+            if span["gap_before"]:
+                gap_start = span["output_start"]
+                gap_end = min(span["output_end"], gap_start + 1.6)
+                if gap_end > gap_start:
+                    subtitle.write(
+                        f"{cue_number}\n{_srt_time(gap_start)} --> {_srt_time(gap_end)}\n"
+                        "{\\an2}Recording gap skipped\n\n"
+                    )
+                    cue_number += 1
     return first_samples
 
 
-def _subtitle_filter_path(path: Path) -> str:
+def _subtitle_font_size(frame_height: int) -> int:
+    """Return a grid caption size for 24–30 px glyphs in a full-frame 1080p output."""
+    # libass scales the same script font with the output frame. Feeding it a
+    # 2160p height would scale the caption twice, so cap the design height at
+    # 1080p and let the renderer double its pixel size for 4K output.
+    # Keep the captions legible in dense grids. The tile-local subtitle render
+    # means the full-frame font scale becomes much smaller in a 4x4 layout; a
+    # modest floor preserves a readable label while still scaling with 4K tile
+    # dimensions.
+    return max(9, round(min(frame_height, 1080) / 108))
+
+
+def _individual_subtitle_font_size() -> int:
+    """Size individual 720p captions for a rendered glyph height near 18 px."""
+    return 9
+
+
+def _bounded_camera_name(camera_name: str, frame_width: int, font_size: int) -> tuple[str, dict[str, Any]]:
+    safe_name = " ".join(
+        camera_name.replace("<", "[").replace(">", "]").replace("{", "(").replace("}", ")").splitlines()
+    ) or "Selected camera"
+    max_characters = max(12, int(frame_width * 0.62 / (font_size * 1.8)))
+    truncated = len(safe_name) > max_characters
+    if truncated:
+        limit = max_characters - 1
+        shortened = safe_name[:limit]
+        word_boundary = shortened.rfind(" ")
+        if word_boundary >= max_characters * 0.6:
+            shortened = shortened[:word_boundary]
+        safe_name = shortened.rstrip() + "…"
+    return safe_name, {
+        "rule": "Long names are truncated with an ellipsis to fit within about 62% of the video or tile width; camera_name retains the full identity.",
+        "max_characters": max_characters,
+        "truncated": truncated,
+    }
+
+
+def _subtitle_filter_path(path: Path, frame_height: int = 720, *, font_size: int | None = None,
+                          alignment: int = 7) -> str:
     rendered = path.as_posix().replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-    return f"subtitles=filename='{rendered}':force_style='Alignment=7,Fontsize=24,BorderStyle=3,Outline=1,Shadow=0,MarginL=18,MarginV=14,PrimaryColour=&H00FFFFFF,BackColour=&H80000000'"
+    font_size = font_size or _subtitle_font_size(frame_height)
+    margin = max(6, round(font_size * 0.7))
+    return f"subtitles=filename='{rendered}':force_style='Alignment={alignment},Fontsize={font_size},BorderStyle=3,Outline=1,Shadow=0,MarginL={margin},MarginV={margin},PrimaryColour=&H00FFFFFF,BackColour=&H80000000'"
 
 
 def _parse_time(value: str) -> datetime:
@@ -701,6 +760,8 @@ class ExportManager:
                     video_file = _camera_video_filename(camera["name"], camera["camera_id"], camera["index"])
                     clip_path = work_dir / video_file
                     subtitle_path = work_dir / f"camera-{camera['index']}.srt"
+                    individual_font_size = _individual_subtitle_font_size()
+                    _, camera_name_display = _bounded_camera_name(camera["name"], 1280, individual_font_size)
                     lines = ["ffconcat version 1.0\n"]
                     for span in spans:
                         segment = span["segment"]
@@ -709,10 +770,12 @@ class ExportManager:
                         lines.append(f"inpoint {(span['source_start'] - segment_start).total_seconds():.6f}\n")
                         lines.append(f"outpoint {(span['source_end'] - segment_start).total_seconds():.6f}\n")
                     manifest.write_text("".join(lines), encoding="utf-8")
-                    first_overlay_samples = _write_source_time_subtitles(subtitle_path, camera["name"], spans, display_settings)
+                    first_overlay_samples = _write_source_time_subtitles(
+                        subtitle_path, camera["name"], spans, display_settings, individual_font_size,
+                    )
                     await self._run_ffmpeg(job_id, [
                         "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
-                        "-map", "0:v:0", "-an", "-vf", f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path)}",
+                        "-map", "0:v:0", "-an", "-vf", f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 720, font_size=individual_font_size)}",
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-y", str(clip_path),
                     ])
                     if job_id in self._cancelled:
@@ -732,6 +795,7 @@ class ExportManager:
                         ]
                     entry["overlay"] = {"time_zone": display_settings["time_zone"], "date_format": display_settings["date_format"],
                                          "clock_format": display_settings["clock_format"], "first_source_labels": first_overlay_samples,
+                                         "camera_name_display": camera_name_display,
                                          "gap_indicator": "Recording gap skipped"}
                     entry["video_file"] = video_file
                 metadata["cameras"].append(entry)

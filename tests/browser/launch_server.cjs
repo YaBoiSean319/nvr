@@ -3,6 +3,7 @@ const { loadFixtureEnvironment } = require("./fixture_environment.cjs");
 
 const SERVER_ENVIRONMENT_KEYS = Object.freeze([
   "PATH",
+  "PYTHON",
   "NVR_DB_PATH",
   "NVR_RECORDINGS_PATH",
   "NVR_CREDENTIAL_KEY_PATH",
@@ -25,9 +26,10 @@ function childEnvironment(source = process.env) {
 }
 
 function run() {
-  const server = spawn("python", ["tests/browser/server.py"], {
+  const python = process.env.PYTHON || "python";
+  const server = spawn(python, ["tests/browser/server.py"], {
     cwd: process.cwd(),
-    env: childEnvironment({ PATH: process.env.PATH, ...loadFixtureEnvironment() }),
+    env: childEnvironment({ PATH: process.env.PATH, PYTHON: python, ...loadFixtureEnvironment() }),
     stdio: "inherit",
   });
   for (const signal of ["SIGINT", "SIGTERM"]) {

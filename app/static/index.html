@@ -35,6 +35,13 @@
     #console-sidebar li button:hover,#console-sidebar li button[aria-pressed="true"] { background:var(--panel-hover); border-color:var(--line); }
     #console-workspace { min-width:0; padding:clamp(.8rem,2vw,1.6rem); }
     .console-page { min-width:0; max-width:100%; } .console-page > h2 { margin:0 0 1rem; font-size:1.05rem; color:var(--muted); }
+    #status.playback-screen-active { display:flex; flex-direction:column; height:100dvh; min-height:0; overflow:hidden; }
+    #status.playback-screen-active > .console-layout { flex:1 1 0; height:0; min-height:0; overflow:hidden; }
+    #status.playback-screen-active #console-sidebar { top:0; height:100%; }
+    #status.playback-screen-active #console-workspace { height:100%; min-height:0; overflow:hidden; }
+    #status.playback-screen-active .console-page[data-page="footage"] { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; }
+    #status.playback-screen-active .console-page[data-page="footage"] > h2 { flex:none; margin:0 0 .45rem; }
+    #status.playback-screen-active #footage-page-content { display:flex; flex-direction:column; flex:1 1 0; height:0; min-height:0; }
     #live-page-content > section,#footage-page-content > section,#camera-settings-content > section,#app-settings-content > section { min-width:0; }
     #live-page-content > section:first-of-type,#footage-page-content > section:first-of-type { padding:0; border:0; background:transparent; }
     #live-camera-picker { display:flex; flex-wrap:wrap; gap:.35rem; max-height:9rem; overflow:auto; margin:.75rem 0; }
@@ -46,9 +53,42 @@
     .live-tile img { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#05070a; margin:.45rem 0 0; }
     .live-tile button { min-height:2rem; margin:.3rem .25rem 0 0; padding:.35rem .55rem; font-size:.8rem; } .live-tile .live-state { display:inline-block; margin-left:.5rem; color:#c3d0dd; font-size:.78rem; }
     .live-placeholder { display:grid; place-items:center; min-height:10rem; border:1px dashed var(--line); border-radius:.55rem; color:var(--muted); }
-    .playback-grid { display:grid; grid-template-columns:repeat(var(--playback-grid-columns,2),minmax(0,1fr)); gap:.65rem; margin-top:1rem; }
-    .playback-camera { min-width:0; padding:.65rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); } .playback-camera.expanded { grid-column:1 / -1; } .playback-camera.selected { outline:2px solid var(--accent); }
-    .playback-grid.expanded { grid-template-columns:minmax(0,1fr)!important; } .playback-camera video,video { display:block; width:100%; aspect-ratio:16/9; margin-top:.5rem; background:#05070a; }
+    .playback-workspace { display:flex; flex-direction:column; gap:.55rem; height:100%; min-height:0; }
+    .playback-workspace > h3 { flex:none; margin:.15rem 0; }
+    #playback-search-row,#playback-transport-row,#playback-timeline-tools { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; min-width:0; }
+    #playback-search-row { flex:none; padding:.5rem; border:1px solid var(--line); border-radius:.7rem; background:var(--panel); }
+    .playback-range-fields { display:flex; align-items:end; gap:.4rem; min-width:0; flex:1 1 26rem; }
+    .playback-range-fields label { margin:0; color:var(--muted); font-size:.78rem; }
+    .playback-range-fields input { min-width:9rem; padding:.43rem .55rem; }
+    .playback-search-field { display:grid; gap:.1rem; min-width:0; }
+    #playback-grid-size-label { display:grid; gap:.1rem; margin:0; color:var(--muted); font-size:.78rem; }
+    #playback-grid-size { padding:.42rem .55rem; }
+    #playback-advanced { position:relative; flex:none; }
+    #playback-advanced > summary,.keyboard-help > summary { cursor:pointer; color:var(--muted); }
+    #playback-advanced[open] { width:100%; }
+    #playback-advanced[open] #playback-camera-picker { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,20rem),1fr)); gap:.5rem; max-height:35vh; overflow:auto; margin-top:.5rem; }
+    #playback-camera-picker fieldset { min-width:0; max-height:30vh; overflow:auto; }
+    #playback-camera-picker fieldset label { display:flex; align-items:center; gap:.35rem; margin:.2rem 0; }
+    #playback-context { flex:none; }
+    #playback-context summary { cursor:pointer; color:var(--muted); }
+    #site-time-context { display:inline; margin-left:.4rem; font-size:.82rem; }
+    #playback-transport-row { flex:none; }
+    #playback-transport-row button { min-height:2.15rem; padding:.38rem .58rem; font-size:.82rem; }
+    #playback-transport-row label { margin:0; color:var(--muted); font-size:.78rem; }
+    #playback-rate,#playback-event-scope { padding:.38rem .5rem; font-size:.82rem; }
+    #playback-skip-empty-label { display:inline-flex; align-items:center; gap:.3rem; }
+    #playback-export-open { margin-left:auto; }
+    #playback-export-job-summary { color:inherit; font-size:.72rem; font-weight:500; }
+    #playback-status { flex:none; min-height:1.3em; margin:0; font-size:.8rem; }
+    #playback-stale { flex:none; min-height:0; margin:0; font-size:.82rem; }
+    #playback-empty { flex:none; padding:.6rem .8rem; border:1px dashed var(--line); border-radius:.55rem; color:var(--muted); }
+    .playback-grid { display:grid; grid-template-columns:repeat(var(--playback-grid-columns,1),minmax(0,1fr)); grid-auto-rows:minmax(0,1fr); gap:.4rem; flex:1 1 auto; min-height:8rem; overflow:auto; align-content:stretch; }
+    .playback-camera { display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden; padding:.35rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); } .playback-camera.expanded { grid-column:1 / -1; } .playback-camera.selected { outline:2px solid var(--accent); }
+    .playback-camera h4 { flex:none; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin:.1rem 0; font-size:.82rem; }
+    .playback-grid.expanded { grid-template-columns:minmax(0,1fr)!important; } .playback-camera video,video { display:block; width:100%; height:auto; min-height:0; max-height:100%; aspect-ratio:16/9; object-fit:contain; margin:.15rem 0; background:#05070a; }
+    .playback-camera .playback-status { flex:none; min-height:1rem; margin:0; font-size:.72rem; }
+    .playback-camera-actions { display:flex; flex:none; flex-wrap:wrap; gap:.2rem; }
+    .playback-camera-actions button { min-height:1.8rem; padding:.22rem .38rem; font-size:.7rem; }
     .playback-track { position:relative; height:2rem; margin:.65rem 0; border-radius:.35rem; background:color-mix(in srgb,var(--muted) 16%,transparent); }
     .playback-recording { position:absolute; top:.25rem; bottom:.25rem; border:1px solid var(--good); border-radius:.2rem; background:color-mix(in srgb,var(--good) 42%,transparent); }
     .playback-gap { position:absolute; top:0; bottom:0; border:1px solid var(--bad); background:color-mix(in srgb,var(--bad) 24%,transparent); } .playback-gap.expected_idle { border-color:var(--muted); background:color-mix(in srgb,var(--muted) 22%,transparent); }
@@ -56,12 +96,33 @@
     .playback-export-selection { position:absolute; top:0; bottom:0; border:1px solid var(--warn); background:color-mix(in srgb,var(--warn) 30%,transparent); pointer-events:none; }
     .playback-status { color:var(--muted); min-height:1.5em; } .playback-ruler { position:relative; height:2.5rem; margin:1rem 0 .4rem; border-bottom:1px solid var(--line); cursor:grab; touch-action:none; user-select:none; }
     .playback-ruler:active { cursor:grabbing; } .playback-ruler-tick { position:absolute; bottom:.2rem; transform:translateX(-50%); white-space:nowrap; font-size:.78rem; color:var(--muted); }
-    .playback-motion-list { display:grid; gap:.2rem; margin-top:.5rem; } .playback-motion-event { margin:0; padding:.35rem .5rem; text-align:left; font-size:.82rem; }
+    .playback-motion-list { display:grid; gap:.2rem; min-width:0; } .playback-motion-event { margin:0; padding:.2rem .35rem; text-align:left; font-size:.72rem; }
+    #playback-timeline-panel { flex:none; min-height:0; padding:.35rem .45rem; border:1px solid var(--line); border-radius:.6rem; background:var(--panel); }
+    #playback-timeline-tools { flex-wrap:nowrap; }
+    #playback-timeline-tools button { flex:none; min-height:1.9rem; padding:.25rem .45rem; font-size:.74rem; }
+    #playback-ruler { flex:1 1 auto; min-width:5rem; height:2rem; margin:0 .2rem; }
+    #playback-ruler .playback-ruler-tick { bottom:.08rem; font-size:.65rem; }
+    #playback-cursor { flex:1 1 6rem; width:100%; min-width:4rem; margin:0; padding:0; }
+    #playback-time-label { flex:none; margin:0; color:var(--muted); font-size:.7rem; }
+    #playback-timeline-rows { max-height:clamp(3.5rem,14vh,8rem); overflow:auto; overscroll-behavior:contain; }
+    .playback-timeline-row { display:grid; grid-template-columns:minmax(6rem,12rem) minmax(8rem,1fr) minmax(7rem,30%); align-items:center; gap:.4rem; min-height:2.2rem; border-top:1px solid var(--line); }
+    .playback-timeline-row > strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.72rem; }
+    .playback-timeline-row .playback-track { height:1.2rem; margin:0; }
+    .playback-timeline-row .playback-motion-list { display:flex; overflow:auto; max-width:100%; }
+    .playback-timeline-row .playback-motion-event { flex:none; max-width:18rem; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
     #playback-camera-picker fieldset,#playback-export-selection,#webhooks-admin fieldset,#camera-form,#bulk-admin,#discovery-admin,#display-settings-admin,#diagnostics-admin,#heartbeat-admin,#session-admin,#incidents-list,#camera-list > article { border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); padding:.8rem; }
     #playback-camera-picker fieldset label { display:inline-flex; align-items:center; gap:.35rem; margin:.2rem .7rem .2rem 0; }
     #playback-export-selection { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr)); gap:.45rem .8rem; margin:.8rem 0; }
     #playback-export-selection legend,#camera-list legend { padding:0 .25rem; color:var(--muted); font-weight:650; }
     #playback-export-selection label { margin:.3rem 0; } #export-camera-selection,#playback-export-selection fieldset { min-width:0; border:1px solid var(--line); border-radius:.55rem; padding:.55rem; }
+    #playback-export-dialog { width:min(56rem,calc(100vw - 2rem)); max-height:90vh; overflow:auto; border:1px solid var(--line); border-radius:var(--radius); padding:1rem; color:var(--ink); background:var(--panel); box-shadow:0 1.5rem 5rem #0008; }
+    #playback-export-dialog::backdrop { background:#0009; }
+    #playback-export-dialog > .toolbar-row { align-items:center; justify-content:space-between; }
+    #playback-export-dialog > .toolbar-row h2 { margin:.2rem 0; }
+    #export-jobs { display:grid; gap:.35rem; max-height:22vh; overflow:auto; overscroll-behavior:contain; padding:.2rem 0 .2rem 1.4rem; }
+    #export-jobs li { padding:.35rem .4rem; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+    #playback-transport-options > summary { cursor:pointer; color:var(--muted); font-size:.78rem; }
+    #playback-transport-options label { display:flex; align-items:center; gap:.3rem; }
     .settings-category-nav { display:flex; flex-wrap:wrap; gap:.3rem; margin:0 0 1rem; padding-bottom:.75rem; border-bottom:1px solid var(--line); }
     .settings-category-nav button { min-height:2.15rem; padding:.35rem .6rem; font-size:.85rem; } .settings-category-nav button[aria-current="true"] { border-color:var(--accent); color:var(--accent); }
     .settings-panel { display:grid; gap:.75rem; } .settings-panel > section { padding:.8rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
@@ -193,7 +254,8 @@
     #logout { margin:1rem; } .console-tools #logout { margin:0; } .live-grid-controls,.playback-controls,.toolbar-row { display:flex; flex-wrap:wrap; align-items:center; gap:.45rem; } .live-grid-controls label,.playback-controls label { margin:.35rem 0; }
     .live-grid-controls > *, .playback-controls > * { margin-top:.3rem; }
     @media(max-width:960px) { .console-layout,.console-layout.sidebar-collapsed { grid-template-columns:minmax(13rem,17rem) minmax(0,1fr); } .console-layout.sidebar-collapsed { grid-template-columns:3.25rem minmax(0,1fr); } .console-header { flex-wrap:wrap; } #console-nav { order:3; width:100%; justify-content:flex-start; overflow:auto; } }
-    @media(max-width:600px) { .console-header { gap:.5rem; padding:.55rem .7rem; } .console-header h1 { max-width:40vw; overflow:hidden; text-overflow:ellipsis; } .console-tools { margin-left:auto; } .console-tools label { display:none; } .console-layout,.console-layout.sidebar-collapsed { display:block; min-height:0; } #console-sidebar { position:relative; top:auto; width:auto!important; height:auto; max-height:40vh; border-right:0; border-bottom:1px solid var(--line); } .sidebar-collapsed #console-sidebar { height:2.8rem; max-height:2.8rem; } #console-workspace { padding:.75rem; } #live-grid,.playback-grid { grid-template-columns:minmax(0,1fr)!important; } #live-camera-picker { max-height:7rem; } #playback-export-selection { grid-template-columns:1fr; } .camera-add-mode-panel { max-height:none; padding:.5rem; } .camera-import-results-scroll { max-height:17rem; } .camera-import-results-table th,.camera-import-results-table td { padding:.35rem; } button,select { min-height:2.65rem; } }
+    @media(max-width:960px) { .playback-range-fields { flex-basis:100%; } #playback-search-row > #playback-search { flex:1 1 auto; } #playback-transport-row { gap:.25rem; } #playback-transport-row button { padding:.3rem .42rem; } }
+    @media(max-width:600px) { #status.playback-screen-active { height:auto; min-height:100dvh; overflow:visible; } #status.playback-screen-active > .console-layout { display:block; flex:none; height:auto; min-height:calc(100dvh - 4.3rem); overflow:visible; } #status.playback-screen-active #console-sidebar { position:relative; top:auto; width:auto!important; height:auto; max-height:28vh; border-right:0; border-bottom:1px solid var(--line); } #status.playback-screen-active #console-workspace { height:auto; min-height:72vh; overflow:visible; padding:.75rem; } #status.playback-screen-active .console-page[data-page="footage"] { height:auto; min-height:72vh; overflow:visible; } #status.playback-screen-active #footage-page-content { height:auto; min-height:72vh; } #status.playback-screen-active .playback-workspace { height:auto; min-height:72vh; } .console-header { gap:.5rem; padding:.55rem .7rem; } .console-header h1 { max-width:40vw; overflow:hidden; text-overflow:ellipsis; } .console-tools { margin-left:auto; } .console-tools label { display:none; } .console-layout,.console-layout.sidebar-collapsed { display:block; min-height:0; overflow:auto; } #console-sidebar { position:relative; top:auto; width:auto!important; height:auto; max-height:40vh; border-right:0; border-bottom:1px solid var(--line); } .sidebar-collapsed #console-sidebar { height:2.8rem; max-height:2.8rem; } #console-workspace { padding:.75rem; } #live-grid,.playback-grid { grid-template-columns:minmax(0,1fr)!important; } #live-camera-picker { max-height:7rem; } #playback-export-selection { grid-template-columns:1fr; } .camera-add-mode-panel { max-height:none; padding:.5rem; } .camera-import-results-scroll { max-height:17rem; } .camera-import-results-table th,.camera-import-results-table td { padding:.35rem; } #playback-search-row { align-items:stretch; } .playback-range-fields { flex-wrap:wrap; } .playback-range-fields > .playback-search-field { flex:1 1 8rem; } #playback-grid { flex:none; min-height:18rem; max-height:56vh; grid-auto-rows:auto; } .playback-camera { min-height:11rem; } #playback-timeline-rows { max-height:18vh; } .playback-timeline-row { grid-template-columns:minmax(5rem,28%) minmax(7rem,1fr); } .playback-timeline-row .playback-motion-list { grid-column:1/-1; } #playback-transport-row { overflow-x:auto; flex-wrap:nowrap; max-width:100%; padding:.15rem 0 .3rem; } #playback-export-open { margin-left:0; } #playback-timeline-tools { flex-wrap:wrap; } #playback-ruler { flex-basis:100%; order:5; } button,select { min-height:2.65rem; } }
     @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
     .brand-logo { display:inline-block; max-width:12rem; max-height:2.4rem; width:auto; height:auto; object-fit:contain; vertical-align:middle; } .console-header .brand-logo { max-width:7rem; max-height:2rem; margin-right:.45rem; }
     .console-header h1 { display:flex; align-items:center; gap:.35rem; } #brand-page-title { display:flex; align-items:center; gap:.7rem; }
@@ -407,52 +469,64 @@
           <p id="live-message" role="status" aria-live="polite"></p>
           <div id="live-grid" class="live-grid"></div>
         </section>
-        <section aria-labelledby="playback-heading">
+        <section class="playback-workspace" aria-labelledby="playback-heading">
           <h3 id="playback-heading">Synchronized playback</h3>
-          <p>Search up to sixteen cameras across a 24-hour window. New searches start with the past hour; results load when you search. The shared timeline distinguishes expected idle, recording failure, uncertain coverage and unindexed footage.</p>
-          <div id="playback-camera-picker"></div>
-          <label for="playback-grid-size">Playback layout</label><select id="playback-grid-size"><option value="auto" selected>Auto</option><option value="1">1 × 1</option><option value="4">2 × 2</option><option value="9">3 × 3</option><option value="16">4 × 4</option></select>
-          <label for="playback-start">From</label><input id="playback-start" type="datetime-local">
-          <label id="playback-start-fold-label" for="playback-start-fold" class="hidden">This local time occurs twice; choose which occurrence</label><select id="playback-start-fold" class="hidden"><option value="">Choose occurrence</option></select>
-          <label for="playback-end">To</label><input id="playback-end" type="datetime-local">
-          <label id="playback-end-fold-label" for="playback-end-fold" class="hidden">This local time occurs twice; choose which occurrence</label><select id="playback-end-fold" class="hidden"><option value="">Choose occurrence</option></select>
-          <p id="site-time-context" role="note"></p>
-          <div class="playback-transport" aria-label="Playback transport">
-            <button id="playback-play" type="button" disabled>Play</button><button id="playback-pause" type="button" disabled>Pause</button>
-            <button id="playback-prev-frame" type="button" disabled>Previous Frame</button><button id="playback-next-frame" type="button" disabled>Next Frame</button>
-            <button id="playback-prev-event" type="button" disabled>Previous Event</button><button id="playback-next-event" type="button" disabled>Next Event</button>
-            <label for="playback-event-scope">Event cameras</label><select id="playback-event-scope"><option value="all">All searched cameras</option><option value="selected">Selected camera</option></select>
-            <label for="playback-rate">Playback speed</label><select id="playback-rate"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option></select>
-            <label><input id="playback-skip-empty" type="checkbox"> Skip periods with no footage on any searched camera</label>
+          <div id="playback-search-row" aria-label="Playback search">
+            <div class="playback-range-fields">
+              <div class="playback-search-field"><label for="playback-start">From</label><input id="playback-start" type="datetime-local" step="1"></div>
+              <div class="playback-search-field"><label id="playback-start-fold-label" for="playback-start-fold" class="hidden">Choose first or second From occurrence</label><select id="playback-start-fold" class="hidden"><option value="">Choose occurrence</option></select></div>
+              <div class="playback-search-field"><label for="playback-end">To</label><input id="playback-end" type="datetime-local" step="1"></div>
+              <div class="playback-search-field"><label id="playback-end-fold-label" for="playback-end-fold" class="hidden">Choose first or second To occurrence</label><select id="playback-end-fold" class="hidden"><option value="">Choose occurrence</option></select></div>
+              <label id="playback-grid-size-label" for="playback-grid-size">Layout<select id="playback-grid-size"><option value="auto" selected>Auto</option><option value="1">1 × 1</option><option value="4">2 × 2</option><option value="9">3 × 3</option><option value="16">4 × 4</option></select></label>
+            </div>
+            <button id="playback-search" class="primary" type="button">Search</button>
+            <details id="playback-advanced"><summary>Camera selection & archived cameras</summary><div id="playback-camera-picker"></div></details>
+            <details id="playback-context"><summary>Search guidance and time zone</summary><span>Search up to sixteen cameras across a 24-hour window. New searches start with the past hour. Coverage distinguishes expected idle, failure, uncertain coverage and unindexed footage.</span><p id="site-time-context" role="note"></p></details>
+          </div>
+          <p id="playback-stale" class="hidden" role="alert">Search inputs changed. Existing results are stale until you search again.</p>
+          <p id="playback-status" class="playback-status" role="status" aria-live="polite">Choose cameras in the left sidebar, then search footage.</p>
+          <div id="playback-transport-row" aria-label="Playback transport">
+            <button id="playback-play" type="button" disabled aria-label="Play synchronized footage">Play</button><button id="playback-pause" type="button" disabled aria-label="Pause synchronized footage">Pause</button><button id="playback-stop" type="button">Stop</button>
+            <button id="playback-prev-frame" type="button" disabled aria-label="Previous frame">◀ Frame</button><button id="playback-next-frame" type="button" disabled aria-label="Next frame">Frame ▶</button>
+            <button id="playback-prev-event" type="button" disabled aria-label="Previous motion event">◀ Event</button><button id="playback-next-event" type="button" disabled aria-label="Next motion event">Event ▶</button>
+            <label for="playback-rate">Speed</label><select id="playback-rate"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option></select>
+            <label for="playback-event-scope" class="hidden">Motion event navigation camera</label><select id="playback-event-scope" aria-label="Motion event navigation camera"><option value="all">All cameras</option><option value="selected">Selected camera</option></select>
+            <button id="playback-mark-in" type="button" disabled>Mark In</button><button id="playback-mark-out" type="button" disabled>Mark Out</button><button id="playback-clear-marks" type="button" disabled>Clear marks</button>
+            <button id="playback-export-open" type="button" aria-haspopup="dialog" aria-controls="playback-export-dialog">Export &amp; jobs <span id="playback-export-job-summary">0 active</span></button>
+            <details id="playback-transport-options"><summary>Playback options</summary><label id="playback-skip-empty-label"><input id="playback-skip-empty" type="checkbox">Skip empty coverage</label></details>
           </div>
           <details class="keyboard-help"><summary>Keyboard shortcuts</summary><p>Playback: Space toggles play or pause, Left and Right seek five seconds, Shift + Left and Right move between events, and I/O set export marks. Shortcuts are disabled while typing in a field.</p></details>
-          <button id="playback-search" type="button">Search footage</button><button id="playback-stop" type="button">Stop playback</button>
-          <fieldset id="playback-export-selection">
-            <legend>Export selection</legend>
-            <button id="playback-mark-in" type="button" disabled>Mark In at playhead</button><button id="playback-mark-out" type="button" disabled>Mark Out at playhead</button><button id="playback-clear-marks" type="button" disabled>Clear Marks</button>
-            <label for="export-start">Export from</label><input id="export-start" type="datetime-local" disabled><select id="export-start-fold" class="hidden" disabled><option value="">Choose occurrence</option></select>
-            <label for="export-end">Export to</label><input id="export-end" type="datetime-local" disabled><select id="export-end-fold" class="hidden" disabled><option value="">Choose occurrence</option></select>
+          <div id="playback-empty">No cameras selected. Add cameras from the sidebar to compare synchronized footage.</div>
+          <div id="playback-grid" class="playback-grid" aria-label="Synchronized camera playback"></div>
+          <section id="playback-timeline-panel" aria-label="Shared playback timeline">
+            <div id="playback-timeline-tools" class="playback-timeline-controls">
+              <button id="playback-zoom-in" type="button" aria-label="Zoom in">Zoom +</button>
+              <button id="playback-zoom-out" type="button" aria-label="Zoom out">Zoom −</button>
+              <button id="playback-fit-range" type="button">Fit range</button>
+              <div id="playback-ruler" class="playback-ruler" role="slider" aria-label="Shared timeline ruler"></div>
+              <label id="playback-time-label" for="playback-cursor">Time</label><input id="playback-cursor" type="range" min="0" max="1000" value="0" disabled>
+            </div>
+            <div id="playback-timeline-rows" aria-label="Camera coverage and motion rows"></div>
+          </section>
+          <dialog id="playback-export-dialog" aria-labelledby="playback-export-heading">
+            <div class="toolbar-row"><h2 id="playback-export-heading">Export footage</h2><button id="playback-export-close" type="button" aria-label="Close export settings">Close</button></div>
+            <p>Choose the marked range, cameras and outputs. Exports continue in the background; active and failed jobs stay available here.</p>
+            <fieldset id="playback-export-selection">
+              <legend>Export options</legend>
+              <label for="export-start">Export from</label><input id="export-start" type="datetime-local" step="1" disabled><select id="export-start-fold" class="hidden" disabled><option value="">Choose occurrence</option></select>
+              <label for="export-end">Export to</label><input id="export-end" type="datetime-local" step="1" disabled><select id="export-end-fold" class="hidden" disabled><option value="">Choose occurrence</option></select>
             <fieldset id="export-camera-selection"><legend>Cameras to export</legend><p>Search footage to choose cameras.</p></fieldset>
             <fieldset><legend>Include output</legend><label><input type="checkbox" data-export-mode="individual" checked>Individual camera videos</label><label><input type="checkbox" data-export-mode="grid" checked>Synchronized grid video</label></fieldset>
             <label for="export-grid-resolution">Grid video resolution</label><select id="export-grid-resolution"><option value="1080p" selected>1080p</option><option value="4k">4K</option></select>
             <label><input id="export-include-audio" type="checkbox">Include recorded audio (off by default)</label>
             <label for="export-grid-audio-source">Grid audio source</label><select id="export-grid-audio-source" disabled></select>
             <p id="export-preflight" role="status">Search footage to preview recording coverage and gaps.</p>
-          </fieldset>
-          <button id="playback-export" type="button" disabled>Export selected footage</button>
-          <p>Exports run as bounded background jobs. Completed downloads contain the selected videos, metadata, and integrity checks. Audio is off by default and can only use administrator-enabled camera audio. Downloads expire after seven days.</p>
-          <p id="export-message" role="status" aria-live="polite"></p>
-          <ul id="export-jobs" aria-live="polite"></ul>
-          <p id="playback-stale" class="hidden" role="alert">Search inputs changed. Existing results are stale until you search again.</p>
-          <div class="playback-timeline-controls" aria-label="Timeline controls">
-            <button id="playback-zoom-in" type="button" aria-label="Zoom in">Zoom in</button>
-            <button id="playback-zoom-out" type="button" aria-label="Zoom out">Zoom out</button>
-            <button id="playback-fit-range" type="button">Fit Search Range</button>
-          </div>
-          <div id="playback-ruler" class="playback-ruler" role="slider" aria-label="Shared timeline ruler"></div>
-          <label for="playback-cursor">Shared time</label><input id="playback-cursor" type="range" min="0" max="1000" value="0" disabled>
-          <p id="playback-status" class="playback-status" role="status" aria-live="polite"></p>
-          <div id="playback-grid" class="playback-grid"></div>
+            </fieldset>
+            <button id="playback-export" type="button" disabled>Export selected footage</button>
+            <p>Completed downloads contain the selected videos, metadata and integrity checks. Audio is off by default and limited to administrator-enabled cameras. Downloads expire after seven days.</p>
+            <p id="export-message" role="status" aria-live="polite"></p>
+            <ul id="export-jobs" aria-live="polite"></ul>
+          </dialog>
         </section>
         <section id="discovery-admin" class="hidden" aria-labelledby="discovery-heading">
           <h3 id="discovery-heading">Discover cameras</h3>

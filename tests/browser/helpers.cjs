@@ -7,13 +7,19 @@ const { loadFixtureEnvironment } = require("./fixture_environment.cjs");
 const FIXTURE_ENVIRONMENT = loadFixtureEnvironment();
 const FIXTURE_PASSWORD = fs.readFileSync(FIXTURE_ENVIRONMENT.NVR_BROWSER_FIXTURE_PASSWORD_PATH, "utf8").trim();
 const MANIFEST_PATH = FIXTURE_ENVIRONMENT.NVR_BROWSER_FIXTURE_MANIFEST;
+const PYTHON = process.env.PYTHON || "python";
 
 function seedFixtures(count, options = {}) {
   const args = ["-m", "tests.browser.seed_fixtures", "--count", String(count)];
   if (options.bulkTrigger) args.push("--bulk-trigger");
   if (options.failNameSave) args.push("--fail-name-save");
   if (options.extraGroup) args.push("--extra-group");
-  const result = spawnSync("python", args, {
+  if (options.playback) args.push("--playback");
+  if (options.playbackJobs) args.push("--playback-jobs");
+  if (options.archivedPlayback) args.push("--archived-playback");
+  if (options.longCameraName) args.push("--long-camera-name");
+  if (options.savedPlaybackView) args.push("--saved-playback-view");
+  const result = spawnSync(PYTHON, args, {
     cwd: process.cwd(),
     env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT },
     encoding: "utf8",
@@ -21,6 +27,10 @@ function seedFixtures(count, options = {}) {
   });
   assert.equal(result.status, 0, `fixture seed failed: ${result.stderr || result.stdout}`);
   return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
+}
+
+function seedPlaybackFixtures(count = 1, options = {}) {
+  return seedFixtures(count, { ...options, playback: true });
 }
 
 async function signIn(page, username = "camera-admin") {
@@ -101,4 +111,4 @@ function writeAcceptanceMeasurements(record) {
   return output;
 }
 
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, signIn, openCameraSettings, selectCamera, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, seedPlaybackFixtures, signIn, openCameraSettings, selectCamera, median, percentile, writeAcceptanceMeasurements };

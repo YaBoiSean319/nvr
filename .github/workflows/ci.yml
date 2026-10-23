@@ -130,6 +130,14 @@ jobs:
         env:
           NVR_RTSP_TEST_URL: rtsp://127.0.0.1:8554/nvr-test
         run: python -m unittest discover -s tests -v
+      - name: Retain synthetic export overlay evidence
+        if: always() && hashFiles('test-results/export-overlay-evidence/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-overlay-evidence
+          path: test-results/export-overlay-evidence/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Compile Python
         run: python -m compileall -q app tests
       - name: Check browser JavaScript

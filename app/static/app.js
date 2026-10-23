@@ -88,13 +88,13 @@ function formatDateTime(value, compact=false, settings=displaySettings) {
   return `${dateText} ${time}`;
 }
 function localTimeCandidates(value) {
-  const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value||"");
+  const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value||"");
   if(!match)return [];
-  const expected=match.slice(1).map(Number),target=Date.UTC(expected[0],expected[1]-1,expected[2],expected[3],expected[4]);
-  const formatter=new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"});
+  const expected=match.slice(1,6).map(Number),second=Number(match[6]||0),target=Date.UTC(expected[0],expected[1]-1,expected[2],expected[3],expected[4],second);
+  const formatter=new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"});
   const offsets=new Set();
-  for(let hour=-36;hour<=36;hour+=6){const probe=target+hour*3600000;const p=Object.fromEntries(formatter.formatToParts(new Date(probe)).map(item=>[item.type,item.value]));offsets.add(Date.UTC(Number(p.year),Number(p.month)-1,Number(p.day),Number(p.hour),Number(p.minute))-probe);}
-  return [...new Set([...offsets].map(offset=>target-offset).filter(ms=>{const p=Object.fromEntries(formatter.formatToParts(new Date(ms)).map(item=>[item.type,item.value]));return Number(p.year)===expected[0]&&Number(p.month)===expected[1]&&Number(p.day)===expected[2]&&Number(p.hour)===expected[3]&&Number(p.minute)===expected[4];}))].sort((a,b)=>a-b);
+  for(let hour=-36;hour<=36;hour+=6){const probe=target+hour*3600000;const p=Object.fromEntries(formatter.formatToParts(new Date(probe)).map(item=>[item.type,item.value]));offsets.add(Date.UTC(Number(p.year),Number(p.month)-1,Number(p.day),Number(p.hour),Number(p.minute),Number(p.second))-probe);}
+  return [...new Set([...offsets].map(offset=>target-offset).filter(ms=>{const p=Object.fromEntries(formatter.formatToParts(new Date(ms)).map(item=>[item.type,item.value]));return Number(p.year)===expected[0]&&Number(p.month)===expected[1]&&Number(p.day)===expected[2]&&Number(p.hour)===expected[3]&&Number(p.minute)===expected[4]&&Number(p.second||0)===second;}))].sort((a,b)=>a-b);
 }
 function updateFoldChoices(field) {
   const input=document.querySelector(`#playback-${field}`),select=document.querySelector(`#playback-${field}-fold`),label=document.querySelector(`#playback-${field}-fold-label`),candidates=localTimeCandidates(input.value);
@@ -103,8 +103,8 @@ function updateFoldChoices(field) {
   else{select.classList.add("hidden");label.classList.add("hidden");}
 }
 function localInputForInstant(instant) {
-  const parts=Object.fromEntries(new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(instant).map(part=>[part.type,part.value]));
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  const parts=Object.fromEntries(new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn",{timeZone:displaySettings.time_zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).formatToParts(instant).map(part=>[part.type,part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
 }
 function initializePlaybackDefaultRange() {
   const start=document.querySelector("#playback-start"),end=document.querySelector("#playback-end");
@@ -511,6 +511,7 @@ function setupConsoleShell() {
     button.setAttribute("aria-expanded", String(!collapsed));
     button.setAttribute("aria-label", collapsed ? "Expand camera sidebar" : "Collapse camera sidebar");
     saveLiveWorkspace();
+    requestAnimationFrame(() => updatePlaybackGridLayout());
   });
   document.querySelector("#sidebar-search").addEventListener("input", filterSidebar);
   const inventorySearch=document.querySelector("#camera-inventory-search");let lastInventoryQuery=inventorySearch.value;
@@ -697,6 +698,7 @@ async function setScreen(screen) {
   if (activeScreen === "footage" && screen !== "footage") savePlaybackWorkspace();
   if (screen !== "footage") stopSynchronizedPlayback();
   activeScreen = screen;
+  document.querySelector("#status").classList.toggle("playback-screen-active", screen === "footage");
   if(changing&&screen==="camera-settings"&&!document.querySelector('#camera-settings-content [data-config-dirty="true"]')){
     renderCameras(latestCameras);renderGroupManagement(sidebarGroups);
   }
@@ -2100,8 +2102,11 @@ function stopSynchronizedPlayback() {
   playbackExpandedView=null;
   document.querySelector("#playback-grid")?.classList.remove("expanded");
   document.querySelector("#playback-grid")?.replaceChildren();
+  document.querySelector("#playback-timeline-rows")?.replaceChildren();
+  document.querySelector("#playback-empty")?.classList.remove("hidden");
   const cursor=document.querySelector("#playback-cursor"); if(cursor) cursor.disabled=true;
   ["#playback-play","#playback-pause","#playback-prev-frame","#playback-next-frame","#playback-prev-event","#playback-next-event"].forEach(selector=>{const button=document.querySelector(selector);if(button)button.disabled=true;});
+  updatePlaybackExportPreview();
 }
 function stopPlaybackClock() { if(playbackClockTimer){clearInterval(playbackClockTimer);playbackClockTimer=null;} playbackIsPlaying=false;playbackClockAnchor=null; }
 function playbackMilliseconds(value) { return new Date(value).getTime(); }
@@ -2185,10 +2190,17 @@ function setupPlaybackRulerGestures() {
 function renderPlaybackTracks() {
   if(!playbackViews.length)return;
   for(const view of playbackViews){
-    const track=view.tile?.querySelector(".playback-track");if(!track)continue;
-    const next=renderPlaybackTrack(view);track.replaceWith(next);
-    const list=view.tile.querySelector(".playback-motion-list");if(list)list.replaceWith(renderPlaybackMotionList(view));
+    if(!view.timelineRow)continue;
+    const track=view.timelineRow.querySelector(".playback-track");
+    if(track)track.replaceWith(renderPlaybackTrack(view));
+    const list=view.timelineRow.querySelector(".playback-motion-list");
+    if(list)list.replaceWith(renderPlaybackMotionList(view));
   }
+}
+function renderPlaybackTimelineRow(view) {
+  const row=document.createElement("div");row.className="playback-timeline-row";
+  const name=document.createElement("strong");name.textContent=view.name;name.title=view.name;
+  row.append(name,renderPlaybackTrack(view),renderPlaybackMotionList(view));view.timelineRow=row;return row;
 }
 function renderPlaybackTrack(view) {
   const track=document.createElement("div");track.className="playback-track";track.setAttribute("aria-label",`Recording coverage and motion timeline for ${view.name}`);
@@ -2363,10 +2375,10 @@ function updatePlaybackDrift() {
 }
 function renderPlaybackCamera(view) {
   const tile=document.createElement("article"); tile.className="playback-camera";
-  const heading=document.createElement("h4"); heading.textContent=view.name;
+  const heading=document.createElement("h4"); heading.textContent=view.name; heading.title=view.name;
   const state=document.createElement("p"); state.className="playback-status"; state.textContent=view.segments.length?"Ready":"No indexed footage in this interval";
   const video=document.createElement("video"); video.controls=true; video.playsInline=true; video.preload="metadata"; video.setAttribute("aria-label",`Synchronized playback for ${view.name}`);
-  const controls=document.createElement("div");
+  const controls=document.createElement("div");controls.className="playback-camera-actions";
   const select=document.createElement("button");select.type="button";select.textContent="Select camera";select.addEventListener("click",()=>{playbackMaster=view;playbackViews.forEach(item=>{item.video.muted=item!==view;item.tile.classList.toggle("selected",item===view);});});
   const snapshot=document.createElement("button"); snapshot.type="button"; snapshot.textContent="Download snapshot";
   snapshot.addEventListener("click",async()=>{
@@ -2380,9 +2392,6 @@ function renderPlaybackCamera(view) {
   fullscreen.addEventListener("click",()=>{if(!tile.requestFullscreen){state.textContent="Fullscreen is not supported by this browser.";return;}tile.requestFullscreen().catch(()=>{state.textContent="Fullscreen was blocked by the browser.";});});
   const expand=document.createElement("button");expand.type="button";expand.textContent="Expand";expand.addEventListener("click",()=>expandPlaybackView(view));
   controls.append(select,snapshot,fullscreen,expand); tile.append(heading,state,video,controls);
-  const track=renderPlaybackTrack(view),motionList=renderPlaybackMotionList(view);
-  tile.append(track);
-  tile.append(motionList);
   view.video=video;view.state=state;view.tile=tile;view.expandButton=expand;
   video.addEventListener("play",()=>{if(view.programmaticPlay){view.programmaticPlay=false;return;}if(playbackSyncGuard)return;playbackMaster=view;playbackViews.forEach(other=>{other.video.muted=other!==view;});startPlaybackClock();});
   video.addEventListener("pause",()=>{
@@ -2425,6 +2434,8 @@ async function loadSynchronizedPlayback(options={}) {
     playbackViews=result.cameras.map(camera=>({cameraId:camera.camera_id,name:camera.name,audio_supported:camera.audio_supported,audio_enabled:camera.audio_enabled,segments:camera.segments,gaps:camera.gaps,motion_events:camera.motion_events,coverage:camera.coverage,video:null,state:null,segment:null}));
     updatePlaybackGridLayout(playbackViews.length);
     grid.replaceChildren(...playbackViews.map(renderPlaybackCamera));
+    document.querySelector("#playback-empty").classList.toggle("hidden",playbackViews.length>0);
+    document.querySelector("#playback-timeline-rows").replaceChildren(...playbackViews.map(renderPlaybackTimelineRow));
     renderPlaybackRuler();
     const earliest=playbackViews.flatMap(view=>view.segments.map(segment=>playbackMilliseconds(segment.starts_at))).filter(Number.isFinite);
     const firstAvailable=earliest.length?Math.min(...earliest):playbackMilliseconds(result.start);
@@ -2455,6 +2466,8 @@ async function refreshExports() {
     const failedJobs=exports.filter(job=>job.status==="failed").length;
     latestExportProblemCount=failedJobs;
     const completedJobs=exports.filter(job=>job.status==="completed").length;
+    const jobSummary=document.querySelector("#playback-export-job-summary");
+    if(jobSummary){jobSummary.textContent=`${activeJobs} active · ${failedJobs} failed`;jobSummary.setAttribute("aria-label",`${activeJobs} active and ${failedJobs} failed export jobs`);}
     document.querySelector("#ops-job-summary").textContent=`Exports: ${activeJobs} active · ${failedJobs} failed · ${completedJobs} completed.`;
     updateOperationalSummary();
     target.replaceChildren(...exports.map(job=>{
@@ -2904,6 +2917,10 @@ document.querySelector("#live-delete-layout").addEventListener("click",async()=>
 });
 window.addEventListener("pagehide",()=>{stopLiveViews();cameraPreviewWorkspace.leave();});
 window.addEventListener("resize",()=>requestAnimationFrame(()=>{updateLiveGridLayout();updatePlaybackGridLayout();}));
+if("ResizeObserver" in window){
+  const playbackGridObserver=new ResizeObserver(()=>updatePlaybackGridLayout());
+  playbackGridObserver.observe(document.querySelector("#playback-grid"));
+}
 window.addEventListener("keydown",event=>{
   const editable=event.target instanceof HTMLElement&&(event.target.isContentEditable||["INPUT","TEXTAREA","SELECT"].includes(event.target.tagName));
   if(editable||document.querySelector("#camera-subset-dialog")?.open)return;
@@ -2925,6 +2942,10 @@ window.addEventListener("keydown",event=>{
   }
 });
 document.querySelector("#playback-search").addEventListener("click",loadSynchronizedPlayback);
+const playbackExportDialog=document.querySelector("#playback-export-dialog"),playbackExportOpen=document.querySelector("#playback-export-open");
+playbackExportOpen.addEventListener("click",()=>{if(!playbackExportDialog.open)playbackExportDialog.showModal();refreshExports();document.querySelector("#playback-export-close").focus();});
+document.querySelector("#playback-export-close").addEventListener("click",()=>playbackExportDialog.close());
+playbackExportDialog.addEventListener("close",()=>playbackExportOpen.focus());
 document.querySelector("#playback-grid-size").addEventListener("change",event=>{
   updatePlaybackGridLayout();
   markPlaybackResultsStale();
