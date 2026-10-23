@@ -281,7 +281,7 @@ def _union_source_time(seconds: float, intervals: list[dict[str, Any]]) -> datet
 
 def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, Any]], intervals: list[dict[str, Any]],
                           duration: float, display_settings: dict[str, str]) -> dict[str, Any]:
-    safe_name = " ".join(camera_name.replace("<", "[").replace(">", "]").splitlines()) or "Selected camera"
+    safe_name = _overlay_name(camera_name) or "Selected camera"
     cues: list[tuple[float, float, list[str]]] = []
     events = [{"start": _union_output_time(span["source_start"], intervals),
                "end": _union_output_time(span["source_end"], intervals), "span": span} for span in spans]
@@ -293,7 +293,7 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
     for event in events:
         while cursor < event["start"]:
             cue_end = min(event["start"], cursor + 1.0)
-            lines = [safe_name, "{\\an5}No video available"]
+            lines = ["{\\an5}" + safe_name, "No video available"]
             shared_time = _union_source_time(cursor, intervals)
             if shared_time:
                 lines.append(f"Shared source time: {display(shared_time)}")
@@ -316,7 +316,7 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
         last_capture = span["source_end"]
     while cursor < duration:
         cue_end = min(duration, cursor + 1.0)
-        lines = [safe_name, "{\\an5}No video available"]
+        lines = ["{\\an5}" + safe_name, "No video available"]
         shared_time = _union_source_time(cursor, intervals)
         if shared_time:
             lines.append(f"Shared source time: {display(shared_time)}")
@@ -372,7 +372,7 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
             current = composed
             next_input += 1
         subbed = f"tile{tile_index}_subbed"
-        graph.append(f"[{current}]{_subtitle_filter_path(subtitle_path)}[{subbed}]")
+        graph.append(f"[{current}]{_subtitle_filter_path(subtitle_path, tile_width, tile_height, OVERLAY_MIN_TILE_TEXT_PX)}[{subbed}]")
         tile_outputs.append(f"[{subbed}]")
     layout = "|".join(f"{index % columns * tile_width}_{index // columns * tile_height}" for index in range(len(tile_outputs)))
     gaps = work_dir / "grid-gaps.srt"
@@ -383,10 +383,11 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
                 continue
             left, right = max(0.0, item["output_start"] - 0.4), min(duration, item["output_start"] + 1.6)
             if right > left:
-                subtitle.write(f"{cue}\n{_srt_time(left)} --> {_srt_time(right)}\nRecording gap skipped\n{format_display_datetime(item['source_start'], display_settings['time_zone'], display_settings['date_format'], display_settings['clock_format'])} – {format_display_datetime(item['source_end'], display_settings['time_zone'], display_settings['date_format'], display_settings['clock_format'])}\n\n")
+                subtitle.write(f"{cue}\n{_srt_time(left)} --> {_srt_time(right)}\n{{\\an2}}Recording gap skipped\n{format_display_datetime(item['source_start'], display_settings['time_zone'], display_settings['date_format'], display_settings['clock_format'])} – {format_display_datetime(item['source_end'], display_settings['time_zone'], display_settings['date_format'], display_settings['clock_format'])}\n\n")
                 cue += 1
     final_filter = f"{tile_outputs[0]}null" if len(tile_outputs) == 1 else "".join(tile_outputs) + f"xstack=inputs={len(tile_outputs)}:layout={layout}:fill=black"
-    graph.append(f"{final_filter},{_subtitle_filter_path(gaps)}[out]")
+    # Gap notices sit bottom-centre of the whole frame, apart from every tile's top-left label.
+    graph.append(f"{final_filter},{_subtitle_filter_path(gaps, width, height)}[out]")
     output = work_dir / "grid.mp4"
     args.extend(["-filter_complex", ";".join(graph), "-map", "[out]", "-an", "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-t", f"{duration:.6f}", "-y", str(output)])
     await manager._run_ffmpeg(job_id, args)
@@ -407,7 +408,7 @@ def _write_source_time_subtitles(
     path: Path, camera_name: str, spans: list[dict[str, Any]], display_settings: dict[str, str],
 ) -> list[str]:
     """Write once-per-second source-clock labels on the compressed output clock."""
-    safe_name = " ".join(camera_name.replace("<", "[").replace(">", "]").replace("{", "(").replace("}", ")").splitlines())
+    safe_name = _overlay_name(camera_name)
     time_zone = display_settings["time_zone"]
     date_format = display_settings["date_format"]
     clock_format = display_settings["clock_format"]
@@ -424,25 +425,65 @@ def _write_source_time_subtitles(
                 cue_end = min(duration, elapsed + 1.0)
                 source_time = span["source_start"] + timedelta(seconds=elapsed)
                 lines = ["{\\an7}" + safe_name, format_display_datetime(source_time, time_zone, date_format, clock_format)]
-                if span["gap_before"] and elapsed < 2.0:
-                    lines.append("Recording gap skipped")
                 subtitle.write(f"{cue_number}\n{_srt_time(span['output_start'] + elapsed)} --> {_srt_time(span['output_start'] + cue_end)}\n")
                 subtitle.write("\n".join(lines) + "\n\n")
                 cue_number += 1
+                if span["gap_before"] and elapsed < 2.0:
+                    # Separate bottom-centre cue: never stacked into the name/time label.
+                    subtitle.write(f"{cue_number}\n{_srt_time(span['output_start'] + elapsed)} --> {_srt_time(span['output_start'] + cue_end)}\n")
+                    subtitle.write("{\\an2}Recording gap skipped\n\n")
+                    cue_number += 1
                 elapsed = cue_end
     return first_samples
 
 
-def _subtitle_filter_path(path: Path) -> str:
+# Burned-in overlays are sized from the frame they are drawn on. FFmpeg converts SRT
+# to ASS with a 384x288 script, and libass renders text about 0.72 x Fontsize x H/288
+# pixels tall, so Fontsize = text_px x 400 / H. 2.5% of the frame height gives about
+# 18 px at 720p, 27 px at 1080p and 54 px at 4K; dense grid tiles keep a readable floor.
+OVERLAY_TEXT_RATIO = 0.025
+OVERLAY_MIN_TILE_TEXT_PX = 12
+MAX_OVERLAY_NAME_CHARACTERS = 40
+
+
+def _overlay_text_px(height: int, minimum: int = 0) -> float:
+    return max(OVERLAY_TEXT_RATIO * height, minimum)
+
+
+def _subtitle_filter_path(path: Path, width: int, height: int, minimum_text_px: int = 0) -> str:
     """The burn-in filter for a subtitle file, or a pass-through when it has no cues.
 
     FFmpeg's subtitles filter refuses an empty file, which would fail an export
-    whose interval simply has no skipped gaps.
+    whose interval simply has no skipped gaps. Placement comes from each cue's
+    \\an override; the style only sets size, padding and colours.
     """
     if not path.is_file() or path.stat().st_size == 0:
         return "null"
+    text_px = _overlay_text_px(height, minimum_text_px)
+    font = text_px * 400 / height
+    margin_px = text_px * 0.6
+    margin_horizontal = margin_px * 384 / width
+    margin_vertical = margin_px * 288 / height
+    padding = text_px * 0.2 * 288 / height
+    style = (
+        f"Fontsize={font:.2f},BorderStyle=3,Outline={padding:.2f},Shadow=0,"
+        f"MarginL={margin_horizontal:.2f},MarginR={margin_horizontal:.2f},MarginV={margin_vertical:.2f},"
+        "PrimaryColour=&H00FFFFFF,BackColour=&H80000000"
+    )
     rendered = path.as_posix().replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-    return f"subtitles=filename='{rendered}':force_style='Alignment=7,Fontsize=24,BorderStyle=3,Outline=1,Shadow=0,MarginL=18,MarginV=14,PrimaryColour=&H00FFFFFF,BackColour=&H80000000'"
+    return f"subtitles=filename='{rendered}':force_style='{style}'"
+
+
+def _overlay_name(camera_name: str) -> str:
+    """A camera name safe for subtitle markup and short enough for a corner label.
+
+    Names longer than MAX_OVERLAY_NAME_CHARACTERS are cut with an ellipsis; the
+    full name stays in the package metadata.
+    """
+    safe = " ".join(camera_name.replace("<", "[").replace(">", "]").replace("{", "(").replace("}", ")").replace("\\", "/").split())
+    if len(safe) > MAX_OVERLAY_NAME_CHARACTERS:
+        safe = safe[:MAX_OVERLAY_NAME_CHARACTERS - 1].rstrip() + "…"
+    return safe
 
 
 def _parse_time(value: str) -> datetime:
@@ -746,7 +787,7 @@ class ExportManager:
                     first_overlay_samples = _write_source_time_subtitles(subtitle_path, camera["name"], spans, display_settings)
                     await self._run_ffmpeg(job_id, [
                         "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
-                        "-map", "0:v:0", "-an", "-vf", f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path)}",
+                        "-map", "0:v:0", "-an", "-vf", f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}",
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-y", str(clip_path),
                     ])
                     if job_id in self._cancelled:
