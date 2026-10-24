@@ -288,3 +288,25 @@ test("Open in Playback asks before replacing a camera when Playback is full", as
   await expect(page.locator(".playback-tile")).toHaveCount(16);
   expect(await clockTime(page)).toBe(anchor + 10_000);
 });
+
+test("cameras chosen while Playback is still restoring are kept", async ({ page }) => {
+  const fixtures = seedFixtures(3, { footage: true });
+  const anchor = Date.parse(fixtures.footage.anchor);
+  await signInNext(page);
+  // Hold the site display settings back, so the investigation restores after the list appears.
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route("**/api/settings/display", async route => { await held; await route.continue(); });
+  await page.goto("/playback");
+  const first = row(page, "Camera 001");
+  await expect(first).toBeVisible();
+  await first.click();
+  release();
+  await row(page, "Camera 002").click();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(tile(page, "Camera 002")).toBeVisible();
+  // The choice made before the investigation was restored still counts.
+  await expect(first).toHaveAttribute("aria-pressed", "true");
+  await expect(tile(page, "Camera 001")).toBeVisible();
+  await expect.poll(() => clockTime(page)).toBe(anchor);
+});
