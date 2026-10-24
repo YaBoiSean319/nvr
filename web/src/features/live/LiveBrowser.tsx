@@ -8,6 +8,9 @@ import { fromSaved } from "./arrangement";
 import { SubsetChooser } from "./dialogs";
 import { useCameraIds, useLiveStore } from "./store";
 
+/** Matches the stylesheet's phone breakpoint, where the browser overlays the grid. */
+const PHONE_LAYOUT = "(max-width: 760px)";
+
 export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | undefined; loading: boolean; error: string | null }) {
   const selected = useCameraIds();
   const activeId = useLiveStore(store => store.activeId);
@@ -18,6 +21,16 @@ export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | u
   // Groups and views name camera IDs; opening one before the cameras are known would drop them all.
   const ready = cameras !== undefined;
   const available = new Map((cameras ?? []).filter(camera => !camera.archived_at).map(camera => [camera.id, camera]));
+  // On a phone the browser covers the grid; once something is added to Live, get out of its way.
+  const reveal = () => {
+    if (window.matchMedia(PHONE_LAYOUT).matches) setSidebarOpen(false);
+  };
+
+  function toggleCamera(id: string) {
+    const adding = !selected.includes(id);
+    toggle(id);
+    if (adding) reveal();
+  }
 
   function openGroup(group: CameraGroup) {
     const members = [...new Set(group.camera_ids)]
@@ -29,10 +42,12 @@ export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | u
       return;
     }
     load({ mode: "auto", order: members.map(camera => camera.id), slots: [] }, null);
+    reveal();
   }
 
   function openView(view: SavedView) {
     load(fromSaved(view, new Set(available.keys())), { name: view.name, scope: view.scope });
+    reveal();
   }
 
   return (
@@ -44,7 +59,7 @@ export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | u
           <Tabs.Trigger className="tab" value="views">Views</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content className="tab-panel" value="cameras">
-          <CameraList cameras={cameras} loading={loading} error={error} selected={selected} onToggle={toggle}
+          <CameraList cameras={cameras} loading={loading} error={error} selected={selected} onToggle={toggleCamera}
                       onReplaceActive={id => activeId && replace(activeId, id)} capacity={MAX_DISPLAYED_CAMERAS} />
         </Tabs.Content>
         <Tabs.Content className="tab-panel" value="groups">

@@ -54,6 +54,8 @@ Open `http://<server>:8280/` in a current Chromium, Firefox or Safari browser. T
 
 The status area's **Alarms** chip opens the alarm inbox from every workspace: acknowledge, assign, comment on and resolve the alarms rules raise, with a snapshot, a clip and Open in Playback (see [alarms](docs/alarms.md)).
 
+The interface installs as an app on desktops and phones, named and iconed from the site's branding; its service worker keeps only the application shell, never API responses or footage (see [installable app](docs/installable-app.md)).
+
 Every editor saves explicitly. Leaving with unsaved changes asks whether to save, discard or stay, and a refresh never overwrites what you are editing. The interface used to be previewed at `/next/`; those addresses now redirect to the same page at `/`. Keyboard use, screen-reader names, reduced motion and widths from 320 px are covered by the browser suite.
 
 ## Health and setup
