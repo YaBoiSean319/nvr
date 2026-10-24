@@ -19,12 +19,13 @@ from .live_hub import LiveHub
 from .exports import ExportManager
 from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
+from .rules import RulesManager
 from .principal import COOKIE_NAME, current_user, depends_on, scope_for, secure_cookie
 from .store import initialize
 from .version import APP_VERSION
 from .webhooks import WebhookManager
 from .workers import liveness, supervised
-from .workers.control import BackupClient, DetectionClient, ExportClient, RecorderClient
+from .workers.control import BackupClient, DetectionClient, ExportClient, RecorderClient, RulesClient
 
 
 STARTUP_ORDER = (
@@ -33,10 +34,11 @@ STARTUP_ORDER = (
     ("heartbeat", HeartbeatManager),
     ("recorders", RecordingManager),
     ("detectors", DetectionManager),
+    ("rules", RulesManager),
     ("backups", BackupManager),
 )
 # Detection reads recorder state, and recording should outlive everything else.
-SHUTDOWN_ORDER = ("backups", "detectors", "exports", "webhooks", "heartbeat", "recorders")
+SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "webhooks", "heartbeat", "recorders")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:
@@ -45,7 +47,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     Configuration (database, recordings, key and identity settings) comes from the
     environment, so tests isolate an instance by pointing those variables at
     temporary paths before entering its lifespan. ``start_workers=False`` serves the
-    API without recording, export, webhook, heartbeat or detection loops. Under the
+    API without recording, export, webhook, heartbeat, detection or rules loops. Under the
     supervisor (``NVR_SUPERVISED=1``) all of that runs in separate worker
     processes and the web process reaches them through control-channel clients.
     """
@@ -64,6 +66,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
                 app.state.recorders = RecorderClient()
                 app.state.exports = ExportClient()
                 app.state.detectors = DetectionClient()
+                app.state.rules = RulesClient()
                 app.state.backups = BackupClient()
             elif start_workers:
                 for name, factory in STARTUP_ORDER:
