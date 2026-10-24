@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
-import { useCameras, useDisplaySettings, useMe } from "@/api/queries";
+import { useCameras, useCreateExport, useDisplaySettings, useMe } from "@/api/queries";
 import { Modal } from "@/components/Modal";
 import { failureText } from "@/features/admin/tabDraft";
 import { usePlaybackStore } from "@/features/playback/store";
+import { useStatusPanel } from "@/features/status/StatusArea";
 import { formatSiteDateTime } from "@/lib/zonedTime";
 import {
   ACTION_LABEL, FILTER_LABEL, STATE_LABEL, useAlarm, useAlarmAction, useAlarms, useAssignees,
@@ -70,6 +71,7 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
   const me = useMe();
   const alarm = useAlarm(id);
   const action = useAlarmAction(id);
+  const exporting = useCreateExport();
   const assignees = useAssignees(true);
   const navigate = useNavigate();
   const when = useWhen();
@@ -106,6 +108,19 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
     navigate("/playback");
   }
 
+  // The quick clip export people use away from the desk: this camera, the alarm's clip, one file.
+  function exportClip() {
+    exporting.mutate({
+      camera_ids: [data.camera_id], start: data.clip.starts_at, end: data.clip.ends_at, output_modes: ["individual"],
+      tile_camera_ids: [], grid_resolution: "1080p", include_audio: false, audio_camera_id: null,
+    });
+  }
+
+  function showJobs() {
+    onNavigate();
+    useStatusPanel.getState().show("jobs");
+  }
+
   const first = data.clip.segments[0];
   const offset = first ? Math.max(0, (Date.parse(data.clip.starts_at) - Date.parse(first.starts_at)) / 1000) : 0;
   return (
@@ -122,7 +137,12 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
       <div className="field-actions">
         <button type="button" className="button" onClick={() => openInPlayback(data)}>Open in Playback</button>
         {data.state === "new" ? <button type="button" className="button" data-variant="primary" disabled={action.isPending} onClick={() => run({ kind: "acknowledge" })}>Acknowledge</button> : null}
+        {first ? <button type="button" className="button" disabled={exporting.isPending || exporting.isSuccess} onClick={exportClip}>Export clip</button> : null}
       </div>
+      {exporting.isSuccess ? (
+        <p className="notice" data-tone="good" role="status">Clip export queued. <button type="button" className="button" data-variant="ghost" onClick={showJobs}>View export jobs</button></p>
+      ) : null}
+      {exporting.error ? <p className="notice" data-tone="bad" role="alert">Clip not exported: {failureText(exporting.error)}.</p> : null}
       {action.error && !deleting ? <p className="notice" data-tone="bad" role="alert">{failureText(action.error)}</p> : null}
 
       {open ? (

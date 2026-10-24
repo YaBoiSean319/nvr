@@ -185,8 +185,9 @@
   opacity: 0; transition: opacity 120ms ease;
 }
 .tile:hover .tile-actions, .tile:focus-within .tile-actions, .tile[data-active="true"] .tile-actions { opacity: 1; }
-@media (hover: none) { .tile-actions { opacity: 1; } }
 .tile-action { min-width: 28px; min-height: 28px; color: #fff; background: transparent; border-color: transparent; }
+/* Touch screens: actions always visible and large enough to tap. */
+@media (hover: none) { .tile-actions { opacity: 1; } .tile-action { min-width: 40px; min-height: 40px; } }
 .tile-action:hover:not(:disabled) { border-color: rgb(255 255 255 / 0.35); }
 .tile-quality { height: 28px; border: 1px solid rgb(255 255 255 / 0.25); border-radius: var(--n-radius-small); background: transparent; color: #fff; font-size: 12px; }
 .tile-quality option { color: #000; }

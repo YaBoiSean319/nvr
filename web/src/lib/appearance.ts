@@ -40,4 +40,8 @@ export function applyBranding(branding: Branding, workspace?: string): void {
   document.title = workspace ? `${workspace} · ${branding.app_name}` : branding.app_name;
   const icon = document.querySelector<HTMLLinkElement>("link[data-brand-icon]");
   if (icon) icon.href = branding.assets.icon?.url ?? "data:,";
+  // The installed app follows branding: a new manifest URL makes the browser fetch it again.
+  const manifest = document.querySelector<HTMLLinkElement>("link[data-brand-manifest]");
+  if (manifest) manifest.href = `/manifest.webmanifest?v=${encodeURIComponent(branding.updated_at ?? "default")}`;
+  document.querySelector<HTMLMetaElement>("meta[data-brand-theme]")?.setAttribute("content", branding.primary_color);
 }
