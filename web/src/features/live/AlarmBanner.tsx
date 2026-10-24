@@ -1,6 +1,6 @@
 import { useDisplaySettings } from "@/api/queries";
 import { formatSiteTime } from "@/lib/zonedTime";
-import { useLiveStore, type PopIn } from "./store";
+import { useLiveStore, type AlarmLayout, type PopIn } from "./store";
 
 const capitalised = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
@@ -11,9 +11,13 @@ export function popInSummary(alarm: PopIn, time: string): string {
 /** Shown over Live while an alarm layout replaces the person's own: what it is, what waits, and the way back. */
 export function AlarmBanner() {
   const layout = useLiveStore(store => store.alarmLayout);
+  // Display settings are only needed while an alarm is shown; Live itself never loads them.
+  return layout ? <ShownAlarm layout={layout} /> : null;
+}
+
+function ShownAlarm({ layout }: { layout: AlarmLayout }) {
   const display = useDisplaySettings();
   const { nextAlarm, returnToMyView } = useLiveStore.getState();
-  if (!layout) return null;
   const time = display.data ? formatSiteTime(Date.parse(layout.current.occurred_at), display.data, true) : "";
   return (
     <div className="alarm-banner" role="region" aria-label="Alarm layout">
