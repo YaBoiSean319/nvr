@@ -135,5 +135,36 @@ class IncidentApiTests(unittest.TestCase):
         self.assertEqual(incident["state"], "recovered")
 
 
+class WorkerIncidentWebhookTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.previous = os.environ.get("NVR_DB_PATH")
+        os.environ["NVR_DB_PATH"] = str(Path(self.temporary.name) / "state.sqlite3")
+        initialize()
+        with connect() as db:
+            db.execute("INSERT INTO webhook_endpoints(id,name,target_url_ciphertext,signing_secret_ciphertext,events_json,enabled,created_at,updated_at) "
+                       "VALUES('w','Receiver',X'00',X'00',?,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                       (json.dumps(["system.failure", "system.recovered", "recording.failure", "recording.recovered"]),))
+
+    def tearDown(self):
+        if self.previous is None:
+            os.environ.pop("NVR_DB_PATH", None)
+        else:
+            os.environ["NVR_DB_PATH"] = self.previous
+        self.temporary.cleanup()
+
+    def test_process_faults_that_do_not_stop_recording_notify_as_system_events(self):
+        from app.incidents import sync_incident
+
+        for worker in ("web", "exporter", "background", "rules"):
+            with self.subTest(worker=worker), connect() as db:
+                for active in (True, False):
+                    sync_incident(db, incident_key=f"worker:{worker}", camera_id=None, fault_type=f"worker_{worker}",
+                                  summary="stopped" if active else "running", active=active, details={})
+                kinds = [row[0] for row in db.execute("SELECT event_type FROM webhook_deliveries WHERE payload_json LIKE ? ORDER BY created_at",
+                                                     (f'%"fault_type":"worker_{worker}"%',))]
+                self.assertEqual(kinds, ["system.failure", "system.recovered"])
+
+
 if __name__ == "__main__":
     unittest.main()

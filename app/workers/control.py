@@ -115,3 +115,10 @@ class BackupClient:
 
     def nudge(self) -> None:
         asyncio.get_running_loop().create_task(nudge("background", {"op": "backup"}))
+
+
+class RulesClient:
+    """Stands in for the in-process rules manager inside the supervised web process."""
+
+    def nudge(self) -> None:
+        asyncio.get_running_loop().create_task(nudge("rules", {"op": "evaluate"}))

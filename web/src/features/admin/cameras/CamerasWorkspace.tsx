@@ -9,15 +9,16 @@ import { InventoryTable } from "./InventoryTable";
 import { matches, revealing } from "./inventory";
 import { useCamerasStore } from "./store";
 
-export type CamerasSection = "inventory" | "add" | "groups";
+export type CamerasSection = "inventory" | "add" | "groups" | "rules";
 
-/** Section navigation shared by Cameras, Add Cameras and Groups & Policies. */
+/** Section navigation shared by Cameras, Add Cameras, Groups & Policies and Rules. */
 function Sections({ admin }: { admin: boolean }) {
   return (
     <nav className="section-nav" aria-label="Camera administration">
       <NavLink to="/cameras" end className="section-link">Cameras</NavLink>
       {admin ? <NavLink to="/cameras/add" className="section-link">Add Cameras</NavLink> : null}
       {admin ? <NavLink to="/cameras/groups" className="section-link">Groups &amp; Policies</NavLink> : null}
+      {admin ? <NavLink to="/cameras/rules" className="section-link">Rules</NavLink> : null}
     </nav>
   );
 }
