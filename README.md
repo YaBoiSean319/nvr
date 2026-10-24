@@ -52,7 +52,7 @@ Open `http://<server>:8280/` in a current Chromium, Firefox or Safari browser. T
 - **Cameras**: the inventory, a per-camera editor (General & Connection, Recording, Motion, AI, Schedule & Retention, Health & History) with an on-request preview, **Add Cameras** (Discover, Manual Add, CSV Import), reviewed bulk changes, **Groups & Policies**, and **Rules** (people or vehicles entering a zone, crossing a line, staying too long or moving the wrong way, with a 24-hour test mode; see [rules](docs/rules.md)). Operators see read-only details.
 - **Settings** (administrators): General, Appearance & branding, Users & access (sessions and API tokens), Recording & storage (volumes and configuration backups), Notifications (webhooks and heartbeat), Integrations, and Diagnostics.
 
-The status area's **Alarms** chip opens the alarm inbox from every workspace: acknowledge, assign, comment on and resolve the alarms rules raise, with a snapshot, a clip and Open in Playback (see [alarms](docs/alarms.md)).
+The status area's **Alarms** chip opens the alarm inbox from every workspace: acknowledge, assign, comment on and resolve the alarms rules raise, with a snapshot, a clip and Open in Playback (see [alarms](docs/alarms.md)). Each person can turn on push notifications for alarms on their own devices, with per-rule choices and quiet hours; set `NVR_VAPID_SUBJECT` to a contact address push services can use.
 
 The interface installs as an app on desktops and phones, named and iconed from the site's branding; its service worker keeps only the application shell, never API responses or footage (see [installable app](docs/installable-app.md)).
 
