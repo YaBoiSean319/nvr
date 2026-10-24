@@ -54,11 +54,11 @@ export const CONDITION_LABEL: Record<Condition["type"], string> = {
 
 export const TRAVEL_LABEL: Record<TravelDirection, string> = { right: "Rightwards", left: "Leftwards", down: "Downwards", up: "Upwards" };
 
-const FULL_FRAME: Zone = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };
+const DEFAULT_ZONE: Zone = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };
 
 /** A condition of another type that keeps whatever geometry the two share. */
 export function switchCondition(current: Condition, type: Condition["type"]): Condition {
-  const zone = "zone" in current ? current.zone : FULL_FRAME;
+  const zone = "zone" in current ? current.zone : DEFAULT_ZONE;
   if (type === "line_crossing") return { type, line: current.type === "line_crossing" ? current.line : { x1: 0.5, y1: 0.1, x2: 0.5, y2: 0.9 }, direction: "both" };
   if (type === "loitering") return { type, zone, dwell_seconds: current.type === "loitering" ? current.dwell_seconds : 30 };
   if (type === "wrong_way") return { type, zone, direction: current.type === "wrong_way" ? current.direction : "right" };
@@ -66,7 +66,7 @@ export function switchCondition(current: Condition, type: Condition["type"]): Co
 }
 
 export const newRule = (): RuleDefinition => ({
-  name: "", enabled: true, camera_ids: [], group_ids: [], condition: { type: "zone_entry", zone: FULL_FRAME },
+  name: "", enabled: true, camera_ids: [], group_ids: [], condition: { type: "zone_entry", zone: DEFAULT_ZONE },
   classes: ["person"], schedule: null, cooldown_seconds: 0,
 });
 
@@ -80,6 +80,8 @@ export function definitionProblem(definition: RuleDefinition): string | null {
   if (!definition.name.trim()) return "The rule needs a name.";
   if (!definition.camera_ids.length && !definition.group_ids.length) return "Choose at least one camera or group.";
   if (!definition.classes.length) return "Choose people, vehicles or both.";
+  if (definition.condition.type === "loitering" && !(definition.condition.dwell_seconds >= 1)) return "Enter how many seconds an object must stay.";
+  if (!(definition.cooldown_seconds >= 0)) return "Enter a cooldown of 0 seconds or more.";
   if (definition.schedule && !definition.schedule.intervals.length) return "Add a schedule interval, or make the rule always active.";
   return null;
 }

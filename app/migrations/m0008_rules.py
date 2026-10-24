@@ -1,7 +1,8 @@
 """Rules over detections and tracks, and the rule events they produce.
 
 A rule event is unique per rule and track: one event for each object that meets a
-rule, however many frames it meets it in. ``rules_cursor`` records the last
+rule, however many frames it meets it in. Events outlive a deleted rule (they keep
+its name) so alarm and audit history stays complete. ``rules_cursor`` records the last
 detection the rules worker has evaluated.
 """
 from __future__ import annotations
@@ -32,7 +33,7 @@ _STATEMENTS = (
     """
     CREATE TABLE rule_events (
         id TEXT PRIMARY KEY,
-        rule_id TEXT NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+        rule_id TEXT REFERENCES rules(id) ON DELETE SET NULL,
         rule_name TEXT NOT NULL,
         camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
         track_id TEXT NOT NULL,

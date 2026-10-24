@@ -91,6 +91,35 @@ class RulesEngineTests(SceneTestCase):
         self.assertEqual(len(self.events(rule_id=cooled["id"])), 1)
         self.assertEqual(self.events(rule_id=off_hours["id"]), [])
 
+    def test_a_group_rule_watches_policy_and_browsing_members(self):
+        group = self.client.post("/api/camera-groups", json={"name": "Dock"})
+        self.assertEqual(group.status_code, 201, group.text)
+        # The camera is only a browsing member; it keeps no policy group of its own.
+        members = self.client.put(f"/api/camera-groups/{group.json()['id']}/members", json={"camera_ids": [self.camera_id]})
+        self.assertEqual(members.status_code, 200, members.text)
+        rule = self.rule({"type": "zone_entry", "zone": BOTTOM_ROW}, camera_ids=[], group_ids=[group.json()["id"]], classes=["vehicle"])
+        self.run_rules_over_scene()
+        self.assertEqual(self.colors(self.events(rule_id=rule["id"])), ["blue"])
+
+    def test_deleting_a_rule_keeps_its_event_history(self):
+        rule = self.rule({"type": "zone_entry", "zone": BOTTOM_LEFT}, name="Gate entry")
+        self.run_rules_over_scene()
+        self.assertEqual(self.client.delete(f"/api/rules/{rule['id']}").status_code, 204)
+        kept = self.events(camera_id=self.camera_id)
+        self.assertEqual([(event["rule_name"], event["rule_id"]) for event in kept], [("Gate entry", None)])
+
+    def test_wrong_way_counts_travel_back_from_the_furthest_point_reached(self):
+        from datetime import datetime, timedelta, timezone
+        from app.rules import PathPoint, Rule, condition_moments
+
+        start = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        # Forward (rightwards) to 0.6, then back: the event is where it is 0.1 short of 0.6.
+        xs = [0.2, 0.4, 0.6, 0.55, 0.52, 0.49, 0.45]
+        path = [PathPoint(index, start + timedelta(seconds=index), x, 0.5, {"x": x, "y": 0.5, "width": 0.01, "height": 0.01}) for index, x in enumerate(xs)]
+        rule = Rule("r", "r", True, frozenset(), frozenset(), "wrong_way", {"zone": {"x": 0, "y": 0, "width": 1, "height": 1}, "direction": "right"},
+                    frozenset({"person"}), None, timedelta(0), start)
+        self.assertEqual([point.detection_id for point in condition_moments(rule, path)], [5])
+
     def test_test_mode_lists_would_be_events_for_the_last_day_and_creates_nothing(self):
         self.run_rules_over_scene()  # no rules yet: detections are stored, nothing fires
         self.move_scene_into_past()

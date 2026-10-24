@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.principal import Administrator
-from app.rules import DIRECTIONS, Rule, replay
+from app.rules import Rule, replay
 from app.scheduling import validate_schedule
 from app.store import connect
 
@@ -27,7 +27,8 @@ class Zone(BaseModel):
 
     @model_validator(mode="after")
     def inside_frame(self) -> "Zone":
-        if self.x + self.width > 1.0001 or self.y + self.height > 1.0001:
+        # Tolerates only floating-point error from rounded editor values.
+        if self.x + self.width > 1 + 1e-9 or self.y + self.height > 1 + 1e-9:
             raise ValueError("A zone must stay inside the frame")
         return self
 
@@ -163,7 +164,7 @@ def _now() -> str:
 def list_rules(_: Administrator) -> dict[str, object]:
     with connect() as db:
         rows = db.execute("SELECT * FROM rules ORDER BY name COLLATE NOCASE,id").fetchall()
-    return {"rules": [rule_view(row) for row in rows], "directions": list(DIRECTIONS)}
+    return {"rules": [rule_view(row) for row in rows]}
 
 
 @router.post("/api/rules", status_code=status.HTTP_201_CREATED)
@@ -241,9 +242,11 @@ def test_rule(definition: RuleDefinition, _: Administrator) -> dict[str, object]
     start = end - TEST_WINDOW
     with connect() as db:
         _check_scope(db, definition)
-    columns = dict(zip(("name", "enabled", "camera_ids_json", "group_ids_json", "condition_type", "condition_json", "classes_json", "schedule_json", "cooldown_seconds"),
-                       _columns(definition)))
-    rule = Rule.from_row({**columns, "id": "test", "active_from": start.isoformat()})
+    rule = Rule(
+        id="test", name=definition.name, enabled=definition.enabled, camera_ids=frozenset(definition.camera_ids), group_ids=frozenset(definition.group_ids),
+        condition_type=definition.condition.type, condition=definition.condition.model_dump(exclude={"type"}), classes=frozenset(definition.classes),
+        schedule=definition.schedule.model_dump() if definition.schedule else None, cooldown=timedelta(seconds=definition.cooldown_seconds), active_from=start,
+    )
     events = replay(rule, start, end)
     return {"start": start.isoformat(), "end": end.isoformat(), "events": events, "count": len(events),
             "coverage_note": "Test mode replays analysed frames only; time a camera was not analysed cannot match."}

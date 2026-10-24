@@ -4,21 +4,21 @@ A rule watches cameras for people or vehicles doing one thing, and records a **r
 
 ## What a rule contains
 
-- **Cameras.** Individual cameras, and policy groups: a group includes every camera whose policy group it is, now and later.
+- **Cameras.** Individual cameras, and groups: a group includes every camera that uses it as its policy group or appears in it in Live, now and later.
 - **Condition**, evaluated on the centre of each object's box:
   - **Enters a zone.** The object is inside the zone. An object that first appears inside it counts as entering.
   - **Crosses a line.** The object crosses the drawn line segment between A and B. Choose *either direction*, *forward* (the direction of the arrow the editor draws) or *reverse*. Crossing the line's extension beyond A or B does not count.
   - **Stays in a zone.** The object stays inside the zone for at least the dwell time. Leaving and coming back starts the time again.
-  - **Moves the wrong way.** Inside the zone, the object travels a tenth of the frame against the expected direction (rightwards, leftwards, downwards or upwards).
+  - **Moves the wrong way.** Inside the zone, the object travels back a tenth of the frame against the expected direction (rightwards, leftwards, downwards or upwards) from the furthest point it reached.
 - **Objects**: people, vehicles or both.
 - **When** (optional): weekly intervals in a time zone, using the same rules as recording schedules. Outside them the rule does not fire.
-- **Cooldown** (optional): after an event on a camera, the rule waits this long before its next event on that camera.
+- **Cooldown** (optional): no two of the rule's events on the same camera are closer together than this.
 
 Zones and lines use fractions of the frame and are drawn over a recorded frame from the first camera the rule watches. Every coordinate can be typed. With the keyboard, arrows move a zone or a line end (Shift for larger steps), and Alt+arrows resize a zone.
 
 ## One event per object
 
-The rules worker evaluates each object's whole track, so an object produces at most one event per rule, however many frames it meets the condition in. The event is the earliest moment that meets the condition, falls inside the schedule and is outside the cooldown. It records the rule, camera, track, object class, time and box.
+The rules worker evaluates each object's whole track, so an object produces at most one event per rule, however many frames it meets the condition in. The event is the earliest moment that meets the condition, falls inside the schedule and is not within the cooldown of another event on that camera. It records the rule, camera, track, object class, time and box.
 
 A saved rule never fires for moments before it was saved. Editing, enabling or disabling a rule applies to the running worker within a second, without a restart. Upgrading an installation does not evaluate detections stored before the upgrade.
 
@@ -55,7 +55,7 @@ A rule body:
 }
 ```
 
-The other conditions are `{"type": "zone_entry", "zone": {"x", "y", "width", "height"}}`, `{"type": "loitering", "zone": {...}, "dwell_seconds": 30}` and `{"type": "wrong_way", "zone": {...}, "direction": "right"}`. Creating, changing and deleting a rule is recorded in the audit log.
+The other conditions are `{"type": "zone_entry", "zone": {"x", "y", "width", "height"}}`, `{"type": "loitering", "zone": {...}, "dwell_seconds": 30}` and `{"type": "wrong_way", "zone": {...}, "direction": "right"}`. Creating, changing and deleting a rule is recorded in the audit log. Deleting a rule keeps its past events, which still carry the rule's name.
 
 ## Reliability
 

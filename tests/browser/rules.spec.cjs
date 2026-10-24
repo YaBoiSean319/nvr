@@ -81,13 +81,22 @@ test("unsaved rule edits are protected and invalid rules cannot be saved", async
   await editor(page).getByRole("checkbox", { name: "Group: Operations" }).check();
   await editor(page).getByLabel("When an object").selectOption("loitering");
   await expect(editor(page).getByLabel("For at least (seconds)")).toHaveValue("30");
+  await editor(page).getByLabel("For at least (seconds)").fill("");
+  await expect(settings(page).getByRole("alert")).toHaveText("Enter how many seconds an object must stay.");
+  await editor(page).getByLabel("For at least (seconds)").fill("45");
+  // A test result goes away as soon as the rule it describes changes.
+  const testing = page.getByRole("region", { name: "Test mode" });
+  await testing.getByRole("button", { name: "Test against the last 24 hours" }).click();
+  await expect(testing.getByRole("status")).toContainText("The rule would not have fired.");
+  await editor(page).getByLabel("For at least (seconds)").fill("60");
+  await expect(testing.getByRole("status")).toHaveCount(0);
   await page.getByRole("navigation", { name: "Camera administration" }).getByRole("link", { name: "Groups & Policies" }).click();
   const leave = page.getByRole("dialog");
   await expect(leave).toContainText("the new rule");
   await leave.getByRole("button", { name: "Save" }).click();
   await expect(page).toHaveURL(/\/cameras\/groups$/);
   const saved = await rules(page);
-  expect(saved.map(rule => [rule.name, rule.condition.type, rule.group_ids.length])).toEqual([["Gate dwell", "loitering", 1]]);
+  expect(saved.map(rule => [rule.name, rule.condition.type, rule.condition.dwell_seconds, rule.group_ids.length])).toEqual([["Gate dwell", "loitering", 60, 1]]);
 });
 
 test("operators do not see Rules and cannot open it", async ({ page }) => {

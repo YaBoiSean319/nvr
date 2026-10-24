@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useCameraGroups, useCameras, useDisplaySettings } from "@/api/queries";
 import { Modal } from "@/components/Modal";
 import { formatSiteDateTime } from "@/lib/zonedTime";
@@ -38,7 +38,7 @@ export function RulesWorkspace() {
         <div className="inventory-tools">
           <button type="button" className="button" data-variant="primary" onClick={() => open(NEW)}>New rule</button>
         </div>
-        <p className="inventory-meta">{rules.data?.length ?? 0} rules</p>
+        <p className="inventory-meta">{rules.data?.length ?? 0} {rules.data?.length === 1 ? "rule" : "rules"}</p>
         <div className="inventory-scroll">
           {rules.isPending ? <p className="muted inventory-empty">Loading rules…</p> : null}
           {rules.error ? <p className="notice inventory-empty" data-tone="bad" role="alert">{failureText(rules.error, "Rules could not be loaded.")}</p> : null}
@@ -102,6 +102,9 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
     },
   });
   const draft = tab.draft!;
+  // A test result describes the rule as it was tested; any change makes it out of date.
+  const draftKey = JSON.stringify(draft);
+  useEffect(() => setTest(null), [draftKey]);
   const live = (cameras.data ?? []).filter(camera => !camera.archived_at);
   // Zones and lines are drawn over a frame from the first camera the rule watches.
   const previewCamera = draft.camera_ids[0]
@@ -183,8 +186,8 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
             ) : null}
             {condition.type === "loitering" ? (
               <label className="field"><span>For at least (seconds)</span>
-                <input type="number" min={1} max={3600} value={condition.dwell_seconds}
-                       onChange={event => setCondition({ ...condition, dwell_seconds: Number(event.target.value) })} />
+                <input type="number" min={1} max={3600} value={Number.isNaN(condition.dwell_seconds) ? "" : condition.dwell_seconds}
+                       onChange={event => setCondition({ ...condition, dwell_seconds: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
               </label>
             ) : null}
             {condition.type === "wrong_way" ? (
@@ -229,7 +232,8 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
             </>
           ) : <p className="muted field-hint">The rule is always active.</p>}
           <label className="field"><span>Cooldown per camera (seconds)</span>
-            <input type="number" min={0} max={86400} value={draft.cooldown_seconds} onChange={event => tab.change({ cooldown_seconds: Number(event.target.value) })} />
+            <input type="number" min={0} max={86400} value={Number.isNaN(draft.cooldown_seconds) ? "" : draft.cooldown_seconds}
+                   onChange={event => tab.change({ cooldown_seconds: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
           </label>
           <p className="muted field-hint">Each object fires a rule at most once. A cooldown also waits this long after an event on a camera before the next.</p>
         </fieldset>
@@ -268,7 +272,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
             <button type="button" className="button" data-variant="danger" onClick={() => setDeleting(true)}>Delete rule…</button>
           </div>
           <Modal open={deleting} onOpenChange={setDeleting} title={`Delete ${rule.name}?`}
-                 description="The rule stops watching its cameras, and its past events are removed."
+                 description="The rule stops watching its cameras. Its past events are kept."
                  footer={<><button type="button" className="button" onClick={() => setDeleting(false)}>Cancel</button><button type="button" className="button" data-variant="danger" onClick={() => void remove()}>Delete rule</button></>}>
             {deleteError ? <p className="notice" data-tone="bad" role="alert">{deleteError}</p> : null}
           </Modal>

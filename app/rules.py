@@ -1,7 +1,7 @@
 """Rules over detections and tracks.
 
-A rule watches cameras (listed directly or through their group) for objects of
-chosen classes meeting one condition:
+A rule watches cameras (listed directly, or as members of a chosen group) for
+objects of chosen classes meeting one condition:
 
 - ``zone_entry``: the object's centre is inside the zone (appearing inside counts);
 - ``line_crossing``: the centre crosses the line segment, in the chosen direction.
@@ -9,13 +9,13 @@ chosen classes meeting one condition:
   line drawn top to bottom, upwards for a line drawn left to right;
 - ``loitering``: the centre stays inside the zone for the dwell time;
 - ``wrong_way``: inside the zone, the centre travels at least ``WRONG_WAY_DISTANCE``
-  of the frame against the expected direction.
+  of the frame against the expected direction from the furthest point it reached.
 
 A condition is evaluated over a whole track, so each object produces at most one
 rule event per rule. The earliest moment that meets the condition, falls inside
-the rule's schedule and is outside its cooldown becomes the event. A saved rule
-never fires for moments before it was last saved. Test mode replays the same
-evaluation over stored tracks without writing anything.
+the rule's schedule and is not within the cooldown of another event on the same
+camera becomes the event. A saved rule never fires for moments before it was last
+saved. Test mode replays the same evaluation over stored tracks without writing.
 """
 from __future__ import annotations
 
@@ -26,17 +26,20 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .scheduling import mode_at
 from .store import connect
 
 logger = logging.getLogger("nvr.rules")
 
-CONDITION_TYPES = ("zone_entry", "line_crossing", "loitering", "wrong_way")
 WRONG_WAY_DISTANCE = 0.1
 DIRECTIONS = {"right": (1.0, 0.0), "left": (-1.0, 0.0), "down": (0.0, 1.0), "up": (0.0, -1.0)}
 BATCH_SIZE = 5000
+
+# A camera's groups: its policy group and every group it browses in.
+CAMERA_GROUPS_SQL = ("SELECT group_id FROM cameras WHERE id=? AND group_id IS NOT NULL "
+                     "UNION SELECT group_id FROM camera_group_memberships WHERE camera_id=?")
 
 
 def _parse(value: str) -> datetime:
@@ -69,8 +72,8 @@ class Rule:
             cooldown=timedelta(seconds=int(row["cooldown_seconds"])), active_from=_parse(row["active_from"]),
         )
 
-    def watches(self, camera_id: str, group_id: str | None, label: str) -> bool:
-        in_scope = camera_id in self.camera_ids or (group_id is not None and group_id in self.group_ids)
+    def watches(self, camera_id: str, groups: Iterable[str], label: str) -> bool:
+        in_scope = camera_id in self.camera_ids or not self.group_ids.isdisjoint(groups)
         return in_scope and label in self.classes
 
     def scheduled(self, at: datetime) -> bool:
@@ -153,14 +156,15 @@ def _wrong_way(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoi
     zone = condition["zone"]
     ex, ey = DIRECTIONS[condition["direction"]]
     moments: list[PathPoint] = []
-    anchor: PathPoint | None = None
+    furthest: float | None = None
     reported = False
     for point in path:
         if not _inside(zone, point):
-            anchor, reported = None, False
+            furthest, reported = None, False
             continue
-        anchor = anchor or point
-        if not reported and (point.x - anchor.x) * ex + (point.y - anchor.y) * ey <= -WRONG_WAY_DISTANCE:
+        progress = point.x * ex + point.y * ey
+        furthest = progress if furthest is None else max(furthest, progress)
+        if not reported and furthest - progress >= WRONG_WAY_DISTANCE:
             moments.append(point)
             reported = True
     return moments
@@ -174,26 +178,25 @@ def condition_moments(rule: Rule, path: list[PathPoint]) -> list[PathPoint]:
     return _CONDITIONS[rule.condition_type](rule.condition, path)
 
 
-def choose_moment(rule: Rule, path: list[PathPoint], last_event_before: Any, *, replay: bool = False) -> PathPoint | None:
-    """The moment that becomes the track's event, or None.
+def eligible_moments(rule: Rule, path: list[PathPoint], *, since: datetime | None, until: datetime | None = None) -> list[PathPoint]:
+    """Moments that meet the condition inside the schedule and [since, until); the cooldown is applied after."""
+    return [point for point in condition_moments(rule, path)
+            if (since is None or point.at >= since) and (until is None or point.at < until) and rule.scheduled(point.at)]
 
-    ``last_event_before(at)`` returns the rule's latest event on this camera at or
-    before ``at``, so the cooldown can be applied.
-    """
-    for point in condition_moments(rule, path):
-        if not replay and point.at < rule.active_from:
-            continue
-        if not rule.scheduled(point.at):
-            continue
-        previous = last_event_before(point.at) if rule.cooldown else None
-        if previous is not None and point.at - previous < rule.cooldown:
-            continue
-        return point
-    return None
+
+def choose_moment(rule: Rule, moments: list[PathPoint], cooled: Callable[[datetime], bool]) -> PathPoint | None:
+    """The first moment no other event on the camera is within the cooldown of."""
+    return next((point for point in moments if not (rule.cooldown and cooled(point.at))), None)
 
 
 def load_rules(db: sqlite3.Connection) -> list[Rule]:
-    return [Rule.from_row(row) for row in db.execute("SELECT * FROM rules WHERE enabled=1 ORDER BY created_at,id")]
+    rules = []
+    for row in db.execute("SELECT * FROM rules WHERE enabled=1 ORDER BY created_at,id"):
+        try:
+            rules.append(Rule.from_row(row))
+        except (ValueError, KeyError, TypeError):
+            logger.exception("Rule %s cannot be read; it is skipped", row["id"])
+    return rules
 
 
 def _track_path(db: sqlite3.Connection, track_id: str) -> list[PathPoint]:
@@ -201,43 +204,61 @@ def _track_path(db: sqlite3.Connection, track_id: str) -> list[PathPoint]:
         "SELECT id,detected_at,box_x,box_y,box_width,box_height FROM ai_detections WHERE track_id=? ORDER BY detected_at,id", (track_id,)))
 
 
+def _camera_groups(db: sqlite3.Connection, camera_id: str) -> set[str]:
+    return {row[0] for row in db.execute(CAMERA_GROUPS_SQL, (camera_id, camera_id))}
+
+
 def process_pending(batch_size: int = BATCH_SIZE) -> int:
-    """Evaluate rules over detections stored since the last pass; return how many were evaluated."""
+    """Evaluate rules over detections stored since the last pass; return how many were evaluated.
+
+    Evaluation reads without holding the write lock, so detection writes are never
+    held up; only recording the resulting events and advancing the cursor takes it.
+    """
     with connect() as db:
+        cursor = db.execute("SELECT last_detection_id FROM rules_cursor WHERE singleton_id=1").fetchone()[0]
+        fresh = db.execute("SELECT id,track_id FROM ai_detections WHERE id>? ORDER BY id LIMIT ?", (cursor, batch_size)).fetchall()
+        if not fresh:
+            return 0
+        rules = load_rules(db)
+        pending: list[tuple[Rule, sqlite3.Row, list[PathPoint]]] = []
+        for track_id in dict.fromkeys(row["track_id"] for row in fresh) if rules else ():
+            track = db.execute("SELECT id,camera_id,label FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
+            if track is None:
+                continue
+            groups = _camera_groups(db, track["camera_id"])
+            watching = [rule for rule in rules if rule.watches(track["camera_id"], groups, track["label"])
+                        and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND track_id=?", (rule.id, track_id)).fetchone() is None]
+            if not watching:
+                continue
+            path = _track_path(db, track_id)
+            for rule in watching:
+                try:
+                    moments = eligible_moments(rule, path, since=rule.active_from)
+                except Exception:  # noqa: BLE001 - one unreadable rule must not stop the others
+                    logger.exception("Rule %s could not be evaluated; it is skipped", rule.id)
+                    continue
+                if moments:
+                    pending.append((rule, track, moments))
+
         db.execute("BEGIN IMMEDIATE")
         try:
-            cursor = db.execute("SELECT last_detection_id FROM rules_cursor WHERE singleton_id=1").fetchone()[0]
-            fresh = db.execute("SELECT id,track_id FROM ai_detections WHERE id>? ORDER BY id LIMIT ?", (cursor, batch_size)).fetchall()
-            if not fresh:
-                db.execute("COMMIT")
-                return 0
-            rules = load_rules(db)
-            touched = list(dict.fromkeys(row["track_id"] for row in fresh))
-            for track_id in touched if rules else ():
-                track = db.execute(
-                    "SELECT t.id,t.camera_id,t.label,c.group_id FROM ai_tracks t JOIN cameras c ON c.id=t.camera_id WHERE t.id=?", (track_id,)
-                ).fetchone()
-                if track is None:
-                    continue
-                watching = [rule for rule in rules if rule.watches(track["camera_id"], track["group_id"], track["label"])
-                            and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND track_id=?", (rule.id, track_id)).fetchone() is None]
-                if not watching:
-                    continue
-                path = _track_path(db, track_id)
-                for rule in watching:
-                    def last_event_before(at: datetime, rule: Rule = rule) -> datetime | None:
-                        row = db.execute("SELECT max(occurred_at) FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at<=?",
-                                         (rule.id, track["camera_id"], at.isoformat())).fetchone()
-                        return _parse(row[0]) if row[0] else None
+            if db.execute("SELECT last_detection_id FROM rules_cursor WHERE singleton_id=1").fetchone()[0] != cursor:
+                db.execute("ROLLBACK")
+                return 0  # another pass already took this batch
+            for rule, track, moments in pending:
+                def cooled(at: datetime, rule: Rule = rule, camera_id: str = track["camera_id"]) -> bool:
+                    return db.execute(
+                        "SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                        (rule.id, camera_id, (at - rule.cooldown).isoformat(), (at + rule.cooldown).isoformat())).fetchone() is not None
 
-                    moment = choose_moment(rule, path, last_event_before)
-                    if moment is not None:
-                        db.execute(
-                            "INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) "
-                            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (str(uuid.uuid4()), rule.id, rule.name, track["camera_id"], track_id, moment.detection_id, track["label"],
-                             rule.condition_type, moment.at.isoformat(), json.dumps(moment.box, separators=(",", ":"))),
-                        )
+                moment = choose_moment(rule, moments, cooled)
+                if moment is not None:
+                    db.execute(
+                        "INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (str(uuid.uuid4()), rule.id, rule.name, track["camera_id"], track["id"], moment.detection_id, track["label"],
+                         rule.condition_type, moment.at.isoformat(), json.dumps(moment.box, separators=(",", ":"))),
+                    )
             db.execute("UPDATE rules_cursor SET last_detection_id=? WHERE singleton_id=1", (fresh[-1]["id"],))
         except BaseException:
             db.execute("ROLLBACK")
@@ -251,21 +272,23 @@ def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
         tracks = db.execute(
-            "SELECT t.id,t.camera_id,t.label,c.name AS camera_name,c.group_id FROM ai_tracks t JOIN cameras c ON c.id=t.camera_id "
+            "SELECT t.id,t.camera_id,t.label,c.name AS camera_name FROM ai_tracks t JOIN cameras c ON c.id=t.camera_id "
             "WHERE t.first_seen_at<? AND t.last_seen_at>=? ORDER BY t.first_seen_at,t.id", (end_text, start_text)).fetchall()
+        groups: dict[str, set[str]] = {}
         candidates = []
         for track in tracks:
-            if not rule.watches(track["camera_id"], track["group_id"], track["label"]):
+            camera_groups = groups.setdefault(track["camera_id"], _camera_groups(db, track["camera_id"]))
+            if not rule.watches(track["camera_id"], camera_groups, track["label"]):
                 continue
-            path = [point for point in _track_path(db, track["id"]) if start <= point.at < end]
-            moments = condition_moments(rule, path)
+            # The whole track, as the worker sees it; only moments inside the window count.
+            moments = eligible_moments(rule, _track_path(db, track["id"]), since=start, until=end)
             if moments:
-                candidates.append((moments[0].at, track, path))
+                candidates.append((track, moments))
     fired: dict[str, list[datetime]] = {}
     events = []
-    for _, track, path in sorted(candidates, key=lambda item: (item[0], item[1]["id"])):
+    for track, moments in sorted(candidates, key=lambda item: (item[1][0].at, item[0]["id"])):
         times = fired.setdefault(track["camera_id"], [])
-        moment = choose_moment(rule, path, lambda at: max((time for time in times if time <= at), default=None), replay=True)
+        moment = choose_moment(rule, moments, lambda at: any(abs(at - time) < rule.cooldown for time in times))
         if moment is None:
             continue
         times.append(moment.at)
@@ -314,4 +337,3 @@ class RulesManager:
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
-
