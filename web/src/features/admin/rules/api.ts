@@ -34,6 +34,8 @@ export interface ActionDraft {
   /** From the server: where a saved action delivers, without its secret parts. */
   target?: string | null;
   has_signing_secret?: boolean;
+  /** Identifies an unsaved action in the form; the server ignores it. */
+  key?: string;
 }
 
 export interface RuleDefinition {
@@ -81,7 +83,7 @@ export const ACTION_LABEL: Record<ActionType, string> = {
 };
 
 export function newAction(type: ActionType): ActionDraft {
-  const base = { type, name: ACTION_LABEL[type], enabled: true };
+  const base = { type, name: ACTION_LABEL[type], enabled: true, key: `new-${Date.now()}-${Math.random().toString(36).slice(2)}` };
   if (type === "mqtt") return { ...base, url: "", topic: "", retain: false, allow_private: false };
   if (type === "relay") return { ...base, camera_id: null, relay_token: null, duration_seconds: 1 };
   if (type === "webhook") return { ...base, url: "", signing_secret: "", allow_private: false };

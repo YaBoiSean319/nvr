@@ -25,7 +25,6 @@ from .credentials import decrypt, encrypt
 from .store import connect
 from .webhooks import signed_headers, validate_target_url
 
-TYPES = ("webhook", "mqtt", "slack", "teams", "relay")
 SECRET_TYPES = {"webhook", "mqtt", "slack", "teams"}
 MAX_ACTIONS = 10
 MAX_ATTEMPTS = 8
@@ -34,15 +33,31 @@ KEEP_DELIVERIES = timedelta(days=30)
 REQUEST_TIMEOUT_SECONDS = 10
 MIN_SIGNING_SECRET = 16
 MAX_RELAY_SECONDS = 60
+# Deliveries run side by side, so a relay held for a minute or a slow receiver never holds up the rest.
+WORKERS = 4
 
 
 class ActionError(ValueError):
     """An action cannot be saved as given."""
 
 
+class DestinationUnresolved(Exception):
+    """The destination's host name did not resolve: worth retrying, unlike a refused address."""
+
+
 def validate_destination(url: str, allow_private: bool) -> str:
     """The webhook destination rules: public HTTPS, or an authorised literal private IP."""
     return validate_target_url(url, allow_private)
+
+
+def _checked(url: str, allow_private: bool) -> str:
+    """``validate_destination`` at delivery time, telling a DNS failure apart from a refused destination."""
+    try:
+        return validate_destination(url, allow_private)
+    except ValueError as exc:
+        if "could not be resolved" in str(exc):
+            raise DestinationUnresolved() from exc
+        raise
 
 
 def _origin(url: str) -> str:
@@ -52,10 +67,11 @@ def _origin(url: str) -> str:
     return f"{parsed.scheme}://{host}" + (f":{parsed.port}" if parsed.port else "")
 
 
-def _check_broker(url: str, allow_private: bool) -> mqtt.Broker:
+def _check_broker(url: str, allow_private: bool, *, delivering: bool = False) -> mqtt.Broker:
     broker = mqtt.parse_broker(url)
+    host = f"[{broker.host}]" if ":" in broker.host else broker.host
     # Same address rules as webhooks; a public broker must use TLS, as a public webhook must use HTTPS.
-    validate_destination(f"{'https' if broker.tls else 'http'}://{broker.host}:{broker.port}/", allow_private)
+    (_checked if delivering else validate_destination)(f"{'https' if broker.tls else 'http'}://{host}:{broker.port}/", allow_private)
     return broker
 
 
@@ -93,8 +109,8 @@ def _secret(kind: str, action: dict[str, Any], current: dict[str, str] | None, s
         raise ActionError(f"Enter a signing secret of at least {MIN_SIGNING_SECRET} characters for {action['name']}")
     try:
         if kind == "mqtt":
-            broker = _check_broker(secret["url"], settings["allow_private"])
-            return secret, f"{'mqtts' if broker.tls else 'mqtt'}://{broker.host}:{broker.port}"
+            _check_broker(secret["url"], settings["allow_private"])
+            return secret, mqtt_target(secret["url"])
         target = validate_destination(secret["url"], settings.get("allow_private", False))
     except ValueError as exc:
         raise ActionError(f"{action['name']}: {exc}") from exc
@@ -138,10 +154,10 @@ def save_actions(db: sqlite3.Connection, rule_id: str, actions: list[dict[str, A
 
 def _view(row: sqlite3.Row) -> dict[str, Any]:
     settings = json.loads(row["settings_json"])
-    secret_keys = set(json.loads(decrypt(row["secret_ciphertext"]))) if row["secret_ciphertext"] else set()
     view: dict[str, Any] = {"id": row["id"], "type": row["type"], "name": row["name"], "enabled": bool(row["enabled"]), "target": row["target"], **settings}
     if row["type"] == "webhook":
-        view["has_signing_secret"] = "signing_secret" in secret_keys
+        # Saving a webhook action requires a signing secret, so a saved one always has it.
+        view["has_signing_secret"] = row["secret_ciphertext"] is not None
     return view
 
 
@@ -167,7 +183,8 @@ def describe(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def mqtt_target(url: str) -> str:
     broker = mqtt.parse_broker(url)
-    return f"{'mqtts' if broker.tls else 'mqtt'}://{broker.host}:{broker.port}"
+    host = f"[{broker.host}]" if ":" in broker.host else broker.host
+    return f"{'mqtts' if broker.tls else 'mqtt'}://{host}:{broker.port}"
 
 
 def _public_url() -> str:
@@ -266,7 +283,7 @@ def _message(payload: dict[str, Any]) -> str:
 
 
 async def _post(url: str, body: bytes, headers: dict[str, str], allow_private: bool) -> int:
-    target = await asyncio.wait_for(asyncio.to_thread(validate_destination, url, allow_private), timeout=5)
+    target = await asyncio.wait_for(asyncio.to_thread(_checked, url, allow_private), timeout=5)
     async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
         response = await client.post(target, content=body, headers=headers)
     return int(response.status_code)
@@ -296,7 +313,7 @@ async def _perform(delivery: dict[str, Any]) -> tuple[int | None, str | None, bo
                 return status, None, False
             return status, f"http_{status}", status == 429 or status >= 500
         if kind == "mqtt":
-            broker = await asyncio.wait_for(asyncio.to_thread(_check_broker, secret["url"], bool(settings.get("allow_private"))), timeout=5)
+            broker = await asyncio.wait_for(asyncio.to_thread(lambda: _check_broker(secret["url"], bool(settings.get("allow_private")), delivering=True)), timeout=5)
             await mqtt.publish(broker, settings["topic"], json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
                                qos=1, retain=bool(settings.get("retain")))
             return None, None, False
@@ -314,15 +331,23 @@ async def _perform(delivery: dict[str, Any]) -> tuple[int | None, str | None, bo
         return None, "unknown_action", False
     except mqtt.MqttRefused as exc:
         return None, f"mqtt_refused_{exc.code}", False
+    except DestinationUnresolved:
+        return None, "dns_unresolved", True
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         return code, f"relay_http_{code}", code not in {400, 401, 403, 404}
-    except LookupError:
-        return None, "relay_no_outputs", False
-    except ValueError:
-        return None, "invalid_destination", False
-    except (OSError, asyncio.TimeoutError, httpx.TransportError, ConnectionError) as exc:
+    except (OSError, asyncio.TimeoutError, httpx.TransportError, ConnectionError, asyncio.IncompleteReadError) as exc:
         return None, f"transport_{type(exc).__name__}", True
+    except Exception as exc:  # Classified by name only: a message might quote a secret.
+        from .onvif_relay import NoRelayOutputs, RelayNotReleased
+
+        if isinstance(exc, NoRelayOutputs):
+            return None, "relay_no_outputs", False
+        if isinstance(exc, RelayNotReleased):
+            return None, "relay_not_released", False
+        if isinstance(exc, ValueError):
+            return None, "invalid_destination", False
+        return None, f"failed_{type(exc).__name__}", False
 
 
 async def deliver_one() -> bool:
@@ -348,17 +373,17 @@ async def deliver_due() -> int:
 class RuleActionManager:
     def __init__(self, poll_seconds: float = 1.0) -> None:
         self.poll_seconds = poll_seconds
-        self.task: asyncio.Task[None] | None = None
+        self.tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         await asyncio.to_thread(recover_inflight)
-        self.task = asyncio.create_task(self._run(), name="rule-action-worker")
+        self.tasks = [asyncio.create_task(self._run(), name=f"rule-action-worker-{index}") for index in range(WORKERS)]
 
     async def stop(self) -> None:
-        if self.task and not self.task.done():
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
-        self.task = None
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks = []
 
     async def _run(self) -> None:
         while True:

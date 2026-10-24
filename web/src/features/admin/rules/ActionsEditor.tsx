@@ -73,7 +73,7 @@ export function ActionsEditor({ actions, cameras, onChange }: { actions: ActionD
       <legend>Actions</legend>
       <p className="muted field-hint">Each event also runs these, from the background worker, with retries. Test mode lists them without running them.</p>
       {actions.map((action, index) => (
-        <section key={action.id ?? `new-${index}`} className="rule-action" aria-label={`Action: ${action.name || ACTION_LABEL[action.type]}`}>
+        <section key={action.id ?? action.key ?? index} className="rule-action" aria-label={`Action: ${action.name || ACTION_LABEL[action.type]}`}>
           <header className="rule-action-head">
             <strong>{ACTION_LABEL[action.type]}</strong>
             {action.target ? <span className="muted mono">{action.target}</span> : null}

@@ -61,6 +61,7 @@ class MqttBroker:
     """Enough MQTT 3.1.1 to accept a client: CONNECT with credentials, PUBLISH at QoS 0/1, DISCONNECT."""
 
     def __init__(self, username: str = "", password: str = "") -> None:
+        self.hang_up = False  # Close the connection instead of acknowledging it.
         self.messages: list[dict] = []
         self.connections: list[dict] = []
         broker = self
@@ -74,6 +75,8 @@ class MqttBroker:
                             return
                         kind, flags = header[0] >> 4, header[0] & 0x0F
                         data = self.rfile.read(_read_remaining_length(self.rfile))
+                        if kind == 1 and broker.hang_up:
+                            return
                         if kind == 1:  # CONNECT
                             _, offset = _string(data, 0)
                             connect_flags = data[offset + 1]
@@ -120,6 +123,7 @@ class RelayDevice:
 
     def __init__(self) -> None:
         self.changes: list[dict] = []
+        self.failing_releases = 0  # Answer this many "inactive" requests with a 500 before obeying.
         device = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -133,6 +137,12 @@ class RelayDevice:
                 elif "SetRelayOutputState" in body:
                     token = body.split("RelayOutputToken>", 1)[1].split("<", 1)[0]
                     state = body.split("LogicalState>", 1)[1].split("<", 1)[0]
+                    if state == "inactive" and device.failing_releases:
+                        device.failing_releases -= 1
+                        self.send_response(500)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
                     device.changes.append({"token": token, "state": state, "at": time.monotonic()})
                     reply = "<tds:SetRelayOutputStateResponse/>"
                 else:

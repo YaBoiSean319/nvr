@@ -36,9 +36,9 @@ Besides raising an alarm, each event can run up to 10 actions. Add them in the r
 
 - **Destinations** follow the webhook rules: public HTTPS (or `mqtts://` for brokers), or a literal private IP address when you tick **Allow a private IP address**. Loopback and link-local addresses are always refused. Destinations are checked when saved and again before each delivery.
 - **Secrets** are write-only: webhook, Slack and Teams URLs, broker credentials and signing secrets. They are encrypted with the credential key, like camera credentials, and never returned by the API, written to logs or included in diagnostics bundles. A saved action shows only where it delivers (for example `https://hooks.slack.com` or `mqtts://broker:8883`). Leave a secret empty when editing to keep it.
-- **Delivery.** The background worker delivers each action once per event.
+- **Delivery.** The background worker queues each action once per event and runs deliveries side by side, so a long relay hold never delays a message. Delivery is at least once: a receiver that answers too late may get a retry, so use `event_id` to ignore repeats.
   - **Retries:** connection failures, `429` and `5xx` answers are retried with backoff (2 s, 5 s, 15 s, 1 min, 5 min, 30 min, then hourly; 8 attempts in all).
-  - **No retry:** other refusals fail at once, for example a `404`, a broker that rejects the credentials (`mqtt_refused_5`) or a camera with no relay outputs.
+  - **No retry:** other refusals fail at once, for example a `404`, a broker that rejects the credentials (`mqtt_refused_5`) or a camera with no relay outputs. A relay is always switched off again (retried a few times); one that cannot be is reported as `relay_not_released` and never switched on again by a retry.
   - **Log:** the rule's **Action deliveries** log shows each delivery's status, attempts and last error code for 30 days.
 - **Test mode** lists the actions each event would run and runs none of them.
 

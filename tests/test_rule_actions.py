@@ -145,6 +145,41 @@ class RuleActionTests(SceneTestCase):
         self.deliver()
         self.assertEqual((self.log(broker_rule["id"])[0]["status"], self.log(broker_rule["id"])[0]["last_error"]), ("failed", "mqtt_refused_5"))
 
+    def test_a_relay_is_always_switched_off_and_never_pulsed_twice(self):
+        rule = self.rule([{"type": "relay", "name": "Siren", "camera_id": self.camera_id, "relay_token": "relay-2", "duration_seconds": 0.1}])
+        self.relay.failing_releases = 2  # Switching off fails twice, then works.
+        self.raise_event(rule["id"])
+        self.deliver()
+        self.assertEqual([(change["token"], change["state"]) for change in self.relay.changes], [("relay-2", "active"), ("relay-2", "inactive")])
+        self.assertEqual(self.log(rule["id"])[0]["status"], "delivered")
+
+        # A relay that cannot be switched off is reported, never switched on again by a retry.
+        self.relay.changes.clear()
+        self.relay.failing_releases = 10
+        self.raise_event(rule["id"])
+        self.deliver()
+        self.assertEqual([change["state"] for change in self.relay.changes], ["active"])
+        latest = self.log(rule["id"])[0]
+        self.assertEqual((latest["status"], latest["last_error"]), ("failed", "relay_not_released"))
+
+    def test_a_broker_that_hangs_up_is_retried(self):
+        self.broker.hang_up = True
+        rule = self.rule([{"type": "mqtt", "name": "Bus", "url": f"mqtt://nvr:{MQTT_PASSWORD}@127.0.0.1:{self.broker.port}", "topic": "nvr/x"}])
+        self.raise_event(rule["id"])
+        self.deliver()
+        [entry] = self.log(rule["id"])
+        self.assertEqual((entry["status"], entry["last_error"]), ("queued", "transport_IncompleteReadError"))
+
+    def test_slack_and_teams_messages_link_the_snapshot_and_alarm(self):
+        with patch.dict("os.environ", {"NVR_PUBLIC_URL": "https://nvr.example"}):
+            rule = self.rule([{"type": "slack", "name": "Slack", "url": f"{self.receiver.origin}/slack/{SLACK_TOKEN}"},
+                              {"type": "teams", "name": "Teams", "url": f"{self.receiver.origin}/teams/{TEAMS_TOKEN}"}])
+            self.raise_event(rule["id"])
+        self.deliver()
+        texts = {request["path"].split("/")[1]: json.loads(request["body"])["text"] for request in self.receiver.requests}
+        self.assertRegex(texts["slack"], r"<https://nvr\.example/api/push/thumbnails/[^|]+\|Snapshot> · <https://nvr\.example/\?alarm=[0-9a-f-]+\|Open alarm>")
+        self.assertRegex(texts["teams"], r"\[Snapshot\]\(https://nvr\.example/api/push/thumbnails/[^)]+\) · \[Open alarm\]\(https://nvr\.example/\?alarm=")
+
     def test_action_secrets_never_leave_the_server(self):
         records: list[str] = []
 
@@ -192,6 +227,11 @@ class RuleActionTests(SceneTestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM rule_actions WHERE secret_ciphertext IS NOT NULL").fetchone()[0], 4)
         refused = self.client.put(f"/api/rules/{created['id']}", json={**payload, "actions": [*kept, {"type": "slack", "name": "No URL"}]})
         self.assertEqual(refused.status_code, 422)
+        # A request the schema rejects says what is wrong without echoing what was sent.
+        invalid = self.client.put(f"/api/rules/{created['id']}", json={**payload, "actions": [{"type": "slack", "url": f"https://hooks.example/{SLACK_TOKEN}"}]})
+        self.assertEqual(invalid.status_code, 422)
+        self.assertNotIn(SLACK_TOKEN, invalid.text)
+        self.assertEqual(invalid.json()["detail"][0]["loc"], ["body", "actions", 0, "name"])
 
     def test_test_mode_lists_the_actions_without_running_them(self):
         definition = {

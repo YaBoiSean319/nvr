@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
 TIMEOUT_SECONDS = 10
+MAX_REPLY_BYTES = 256  # CONNACK and PUBACK are 2 bytes; anything large is not a broker we understand.
 DEFAULT_PORTS = {"mqtt": 1883, "mqtts": 8883}
 
 
@@ -69,12 +70,16 @@ def _packet(kind: int, body: bytes) -> bytes:
 async def _read_packet(reader: asyncio.StreamReader) -> tuple[int, bytes]:
     header = (await reader.readexactly(1))[0]
     multiplier, length = 1, 0
-    while True:
+    for _ in range(4):
         byte = (await reader.readexactly(1))[0]
         length += (byte & 0x7F) * multiplier
         if not byte & 0x80:
             break
         multiplier *= 128
+    else:
+        raise ConnectionError("MQTT reply length is invalid")
+    if length > MAX_REPLY_BYTES:
+        raise ConnectionError("MQTT reply is too large")
     return header, await reader.readexactly(length)
 
 
@@ -111,6 +116,6 @@ async def publish(broker: Broker, topic: str, payload: bytes, *, qos: int = 1, r
     finally:
         writer.close()
         try:
-            await writer.wait_closed()
-        except (ConnectionError, ssl.SSLError):
+            await asyncio.wait_for(writer.wait_closed(), 2)
+        except (ConnectionError, ssl.SSLError, asyncio.TimeoutError):
             pass
