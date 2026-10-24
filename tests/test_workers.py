@@ -142,10 +142,10 @@ class SupervisorTests(unittest.TestCase):
         status, system = self.nvr.request("GET", "/api/system/status")
         self.assertEqual(status, 200)
         self.assertEqual(system["application_status"], "healthy")
-        for name in ("exporter", "ai", "background"):
+        for name in ("exporter", "ai", "rules", "background"):
             _wait(lambda: self.nvr.running_pid(name), 15, f"{name} never reported liveness")
         status, system = self.nvr.request("GET", "/api/system/status")
-        self.assertEqual({worker["name"]: worker["alive"] for worker in system["workers"]}, {name: True for name in ("web", "recorder", "exporter", "ai", "background")})
+        self.assertEqual({worker["name"]: worker["alive"] for worker in system["workers"]}, {name: True for name in ("web", "recorder", "exporter", "ai", "rules", "background")})
 
         os.kill(recorder, signal.SIGKILL)
         raised = _wait(lambda: self.nvr.incident("worker_recorder"), 10, "recorder crash raised no incident")
@@ -277,6 +277,14 @@ class SupervisorTests(unittest.TestCase):
         _wait(lambda: self.nvr.running_pid("ai", other_than=ai), 20, "ai was not restarted")
         self.assertEqual(self.nvr.worker("recorder")["pid"], recorder)
 
+    def test_rules_crash_raises_an_incident_and_the_worker_recovers(self):
+        rules = _wait(lambda: self.nvr.running_pid("rules"), 15, "rules never reported liveness")
+        os.kill(rules, signal.SIGKILL)
+        incident = _wait(lambda: self.nvr.incident("worker_rules"), 10, "rules crash raised no incident")
+        self.assertIn("rules process stopped", incident["summary"])
+        _wait(lambda: self.nvr.running_pid("rules", other_than=rules), 20, "rules was not restarted")
+        _wait(lambda: (row := self.nvr.incident("worker_rules")) and row["state"] == "recovered", 20, "the incident stayed active after recovery")
+
     def test_background_worker_attempts_webhook_deliveries(self):
         _wait(lambda: self.nvr.running_pid("background"), 15, "background never reported liveness")
         created, body = self.nvr.request("POST", "/api/webhooks", {
@@ -293,14 +301,14 @@ class SupervisorTests(unittest.TestCase):
     def test_stop_drains_every_worker(self):
         pids = [
             _wait(lambda name=name: self.nvr.running_pid(name), 15, f"{name} never reported liveness")
-            for name in ("recorder", "exporter", "ai", "background", "web")
+            for name in ("recorder", "exporter", "ai", "rules", "background", "web")
         ]
         started = time.monotonic()
         self.assertEqual(self.nvr.stop(), 0)
         self.assertLess(time.monotonic() - started, 15)
         for pid in pids:
             self.assertFalse(self._pid_alive(pid))
-        self.assertEqual({row["name"]: row["state"] for row in self.nvr.query("SELECT name,state FROM worker_status")}, {name: "stopped" for name in ("web", "recorder", "exporter", "ai", "background")})
+        self.assertEqual({row["name"]: row["state"] for row in self.nvr.query("SELECT name,state FROM worker_status")}, {name: "stopped" for name in ("web", "recorder", "exporter", "ai", "rules", "background")})
 
 
 @unittest.skipUnless(os.environ.get("NVR_RTSP_TEST_URL"), "A simulated RTSP publisher is required")

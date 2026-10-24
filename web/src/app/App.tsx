@@ -13,6 +13,7 @@ import { CamerasInventory, CamerasShell } from "@/features/admin/cameras/Cameras
 import { useCamerasStore } from "@/features/admin/cameras/store";
 import { AddCameras } from "@/features/admin/cameras/add/AddCameras";
 import { GroupsWorkspace } from "@/features/admin/groups/GroupsWorkspace";
+import { RulesWorkspace } from "@/features/admin/rules/RulesWorkspace";
 import { SettingsWorkspace } from "@/features/settings/SettingsWorkspace";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
@@ -40,6 +41,7 @@ function router(me: Me) {
               { index: true, element: <CamerasInventory /> },
               { path: "add", element: <AdminRoute me={me}><AddCameras /></AdminRoute> },
               { path: "groups", element: <AdminRoute me={me}><GroupsWorkspace /></AdminRoute> },
+              { path: "rules", element: <AdminRoute me={me}><RulesWorkspace /></AdminRoute> },
               { path: "*", element: <NotFound /> },
             ],
           },

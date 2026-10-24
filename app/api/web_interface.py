@@ -7,10 +7,11 @@ unknown /api paths still answer with JSON 404s. The former /next preview paths r
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 router = APIRouter()
 DIST_DIRECTORY = Path(__file__).resolve().parent.parent / "web_dist"
@@ -24,7 +25,7 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "same-origin",
 }
 # Paths owned by the server, never by client routing.
-SERVER_PREFIXES = ("api/", "assets/")
+SERVER_PREFIXES = ("api/", "assets/", "sw.js", "manifest.webmanifest")
 
 
 def _page() -> FileResponse:
@@ -39,6 +40,17 @@ def _page() -> FileResponse:
 def preview_redirect(request: Request, path: str = "") -> RedirectResponse:
     query = f"?{request.url.query}" if request.url.query else ""
     return RedirectResponse(f"/{path}{query}", status_code=308)
+
+
+@router.get("/sw.js", include_in_schema=False)
+def service_worker() -> Response:
+    """The installable app's service worker (web/public/sw.js), versioned by the built page."""
+    page, worker = DIST_DIRECTORY / "index.html", DIST_DIRECTORY / "sw.js"
+    if not page.is_file() or not worker.is_file():
+        raise HTTPException(status_code=503, detail="The web interface has not been built")
+    version = hashlib.sha256(page.read_bytes()).hexdigest()[:16]
+    return Response(worker.read_text(encoding="utf-8").replace("__VERSION__", version), media_type="text/javascript; charset=utf-8",
+                    headers={**SECURITY_HEADERS, "Cache-Control": "no-cache"})
 
 
 @router.get("/assets/{path:path}", include_in_schema=False)

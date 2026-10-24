@@ -17,6 +17,8 @@ import { Timeline } from "./Timeline";
 import { Transport } from "./Transport";
 
 const SAVE_DELAY_MS = 750;
+// An alarm opens the minutes either side of its moment.
+const ALARM_CONTEXT_MS = 5 * 60_000;
 
 /** Remember the investigation in this browser at most once per short interval, and when leaving. */
 function usePlaybackPersistence(enabled: boolean) {
@@ -74,21 +76,30 @@ export function PlaybackWorkspace() {
 
   usePlaybackPersistence(ready);
 
-  // Open in Playback from Live: join the current investigation, or start a past-hour one.
+  // Open in Playback from Live: join the current investigation, or start a past-hour one. From an
+  // alarm: search the minutes around its moment and wait there, paused, with the camera selected.
   useEffect(() => {
     if (!ready || !pendingOpen || !display.data) return;
     const store = usePlaybackStore.getState();
+    const { cameraId, at } = pendingOpen;
     store.clearPendingOpen();
-    if (!byId.has(pendingOpen)) return;
+    if (!byId.has(cameraId)) return;
     const shown = store.cameraIds.filter(id => byId.has(id));
-    if (shown.includes(pendingOpen)) store.setActive(pendingOpen);
-    else if (shown.length >= MAX_DISPLAYED_CAMERAS) setIncoming(pendingOpen); // ask before replacing anything
-    else store.toggle(pendingOpen);
-    if (!store.applied) {
-      const now = Date.now(), zone = display.data.time_zone;
-      const draft = { start: toLocalInput(now - 3_600_000, zone), end: toLocalInput(now, zone), startFold: "", endFold: "" };
+    if (shown.includes(cameraId)) store.setActive(cameraId);
+    else if (shown.length >= MAX_DISPLAYED_CAMERAS) setIncoming(cameraId); // ask before replacing anything
+    else store.toggle(cameraId);
+    const zone = display.data.time_zone;
+    const search = (start: number, end: number) => {
+      const draft = { start: toLocalInput(start, zone), end: toLocalInput(end, zone), startFold: "", endFold: "" };
       store.setDraft(draft);
-      store.apply({ start: new Date(now - 3_600_000).toISOString(), end: new Date(now).toISOString(), draft });
+      store.apply({ start: new Date(start).toISOString(), end: new Date(end).toISOString(), draft });
+    };
+    if (at !== null) {
+      search(at - ALARM_CONTEXT_MS, at + ALARM_CONTEXT_MS);
+      playbackClock.seek(at);
+    } else if (!store.applied) {
+      const now = Date.now();
+      search(now - 3_600_000, now);
     }
   }, [ready, pendingOpen, byId, display.data]);
 

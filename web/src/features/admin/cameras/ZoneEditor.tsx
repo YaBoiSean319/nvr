@@ -16,22 +16,11 @@ export function normalize(zone: Zone): Zone {
 
 type Drag = { kind: "draw" | "move" | "resize"; index: number; startX: number; startY: number; origin: Zone };
 
-/**
- * Normalized rectangles over a representative recorded frame. Coordinates are fractions of the
- * frame, so a missing frame or a resolution change never moves a zone. Draw on empty space,
- * drag a zone to move it, drag its corner to resize; arrows move and Alt+arrows resize the
- * selected zone, and every value can be typed.
- */
-export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false }: {
-  /** A camera to borrow a representative frame from; groups may have none. */
-  cameraId: string | null; zones: Zone[]; onChange: (zones: Zone[]) => void; label: string; readOnly?: boolean;
-}) {
-  const stage = useRef<HTMLDivElement>(null);
-  const drag = useRef<Drag | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+/** A recorded frame from the camera to draw zones and lines over, with its aspect ratio. */
+export function useRepresentativeFrame(cameraId: string | null) {
   const [frame, setFrame] = useState<{ url: string; ratio: string } | null>(null);
-
   useEffect(() => {
+    setFrame(null);
     if (!cameraId) return;
     const controller = new AbortController();
     latestSegment(cameraId, controller.signal).then(segment => {
@@ -43,6 +32,26 @@ export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false 
     }).catch(() => undefined);
     return () => controller.abort();
   }, [cameraId]);
+  return frame;
+}
+
+/**
+ * Normalized rectangles over a representative recorded frame. Coordinates are fractions of the
+ * frame, so a missing frame or a resolution change never moves a zone. Draw on empty space,
+ * drag a zone to move it, drag its corner to resize; arrows move and Alt+arrows resize the
+ * selected zone, and every value can be typed.
+ */
+export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false, max = MAX_ZONES, emptyHint = "No zones: the whole frame is used." }: {
+  /** A camera to borrow a representative frame from; groups may have none. */
+  cameraId: string | null; zones: Zone[]; onChange: (zones: Zone[]) => void; label: string; readOnly?: boolean;
+  /** How many zones may be drawn. */
+  max?: number;
+  emptyHint?: string;
+}) {
+  const stage = useRef<HTMLDivElement>(null);
+  const drag = useRef<Drag | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const frame = useRepresentativeFrame(cameraId);
 
   const point = (event: PointerEvent) => {
     const rect = stage.current!.getBoundingClientRect();
@@ -54,7 +63,7 @@ export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false 
   }
 
   function onStageDown(event: PointerEvent<HTMLDivElement>) {
-    if (readOnly || event.button !== 0 || zones.length >= MAX_ZONES || event.target !== stage.current) return;
+    if (readOnly || event.button !== 0 || zones.length >= max || event.target !== stage.current) return;
     const at = point(event);
     const zone = { x: at.x, y: at.y, width: MIN_SIZE, height: MIN_SIZE };
     onChange([...zones, normalize(zone)]);
@@ -132,7 +141,7 @@ export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false 
         ))}
       </div>
       <p className="muted field-hint">
-        {zones.length ? `${zones.length} zone${zones.length === 1 ? "" : "s"}.` : "No zones: the whole frame is used."}
+        {zones.length ? `${zones.length} zone${zones.length === 1 ? "" : "s"}.` : emptyHint}
         {!readOnly ? " Drag on the frame to draw. Select a zone and use arrows to move, Alt+arrows to resize, Delete to remove." : ""}
       </p>
       {zones.length ? (
@@ -155,7 +164,7 @@ export function ZoneEditor({ cameraId, zones, onChange, label, readOnly = false 
           </tbody>
         </table>
       ) : null}
-      {!readOnly ? <button type="button" className="button" onClick={add} disabled={zones.length >= MAX_ZONES}>Add zone</button> : null}
+      {!readOnly ? <button type="button" className="button" onClick={add} disabled={zones.length >= max}>Add zone</button> : null}
     </div>
   );
 }

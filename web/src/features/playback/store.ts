@@ -44,8 +44,8 @@ interface PlaybackState {
   message: string | null;
   eventScope: "all" | "active";
   skipEmpty: boolean;
-  /** A camera sent from Live with Open in Playback, handled once Playback is restored. */
-  pendingOpen: string | null;
+  /** A camera (and optionally a moment) sent with Open in Playback, handled once Playback is restored. */
+  pendingOpen: { cameraId: string; at: number | null } | null;
   /** Export range marks; a missing mark means the matching search boundary. */
   marks: Marks;
   exportOpen: boolean;
@@ -69,7 +69,7 @@ interface PlaybackState {
   setEventScope: (scope: "all" | "active") => void;
   setSkipEmpty: (skip: boolean) => void;
   replaceCamera: (target: string, incoming: string) => void;
-  openInPlayback: (id: string) => void;
+  openInPlayback: (id: string, at?: number) => void;
   clearPendingOpen: () => void;
   setMark: (kind: keyof Marks, time: number | null) => void;
   clearMarks: () => void;
@@ -148,7 +148,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       activeId: incoming,
       enlargedId: state.enlargedId === target ? null : state.enlargedId,
     })),
-  openInPlayback: id => set({ pendingOpen: id }),
+  openInPlayback: (id, at) => set({ pendingOpen: { cameraId: id, at: at ?? null } }),
   clearPendingOpen: () => set({ pendingOpen: null }),
   setMark: (kind, time) =>
     set(state => {
@@ -162,7 +162,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   setExportCameraIds: exportCameraIds => set({ exportCameraIds }),
   restore: (username, available, defaults) => {
     const saved = readSaved(username);
-    const cameraIds = (saved?.cameraIds ?? []).filter(id => available.has(id)).slice(0, MAX_DISPLAYED_CAMERAS);
+    // Cameras someone chose while the investigation was still being restored are kept too.
+    const chosen = get().cameraIds.filter(id => available.has(id));
+    const restored = (saved?.cameraIds ?? []).filter(id => available.has(id) && !chosen.includes(id));
+    const cameraIds = [...restored, ...chosen].slice(0, MAX_DISPLAYED_CAMERAS);
     set({
       cameraIds,
       draft: saved?.draft ?? defaults,

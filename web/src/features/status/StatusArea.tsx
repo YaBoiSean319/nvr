@@ -3,6 +3,8 @@ import { ApiError } from "@/api/client";
 import { useAcknowledgeIncident, useCameras, useExportJobs, useOpenIncidents } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { Drawer } from "@/components/Drawer";
+import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
+import { useAlarms } from "@/features/alarms/api";
 import { ExportJobs } from "@/features/exports/ExportJobs";
 import { formatRelative } from "@/lib/time";
 import { summarize, type StatusSummary, type Tone } from "./summary";
@@ -13,6 +15,12 @@ type Section = "video" | "recording" | "incidents" | "jobs";
 export const useStatusPanel = create<{ section: Section | null; show: (section: Section | null) => void }>(set => ({
   section: null,
   show: section => set({ section }),
+}));
+
+/** Whether the alarm inbox is open. */
+export const useAlarmInbox = create<{ open: boolean; setOpen: (open: boolean) => void }>(set => ({
+  open: false,
+  setOpen: open => set({ open }),
 }));
 
 function Chip({ tone, label, onClick }: { tone: Tone; label: string; onClick: () => void }) {
@@ -33,6 +41,11 @@ export function StatusArea() {
   const setSection = useStatusPanel(state => state.show);
   const summary = summarize(cameras.data, incidents.data, jobs.data);
   const unreachable = cameras.isError || incidents.isError;
+  const alarms = useAlarms({ state: "open", camera_id: "", rule_id: "" });
+  const inbox = useAlarmInbox();
+  const counts = alarms.data?.counts;
+  const openAlarms = counts ? counts.new + counts.acknowledged + counts.assigned : 0;
+  const alarmLabel = !counts ? "Alarms" : counts.new ? `${counts.new} new alarm${counts.new === 1 ? "" : "s"}` : openAlarms ? `${openAlarms} open alarm${openAlarms === 1 ? "" : "s"}` : "No open alarms";
   return (
     <>
       <div className="status-area" role="status" aria-label="Operational status">
@@ -41,7 +54,12 @@ export function StatusArea() {
         <Chip tone={summary.video.tone} label={summary.video.label} onClick={() => setSection("video")} />
         <Chip tone={summary.incidents.tone} label={summary.incidents.label} onClick={() => setSection("incidents")} />
         <Chip tone={summary.jobs.tone} label={summary.jobs.label} onClick={() => setSection("jobs")} />
+        <Chip tone={counts?.new ? "bad" : openAlarms ? "warn" : "good"} label={alarmLabel} onClick={() => inbox.setOpen(true)} />
       </div>
+      <Drawer open={inbox.open} onOpenChange={inbox.setOpen} title="Alarms"
+              description="What rules saw. Acknowledge, assign, comment and resolve; everyone signed in sees changes within seconds.">
+        <AlarmsInbox onNavigate={() => inbox.setOpen(false)} />
+      </Drawer>
       <Drawer open={section !== null} onOpenChange={open => !open && setSection(null)} title="Operational status"
               description="Live video health and recording health are reported separately; a live picture does not prove footage is being written.">
         <StatusDetails summary={summary} focus={section} />

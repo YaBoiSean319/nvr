@@ -53,8 +53,10 @@ function bands(intervals: ScheduleInterval[]) {
   return result;
 }
 
-export function ScheduleEditor({ intervals, onChange, readOnly = false }: {
+export function ScheduleEditor({ intervals, onChange, readOnly = false, withModes = true }: {
   intervals: ScheduleInterval[]; onChange: (intervals: ScheduleInterval[]) => void; readOnly?: boolean;
+  /** Recording schedules choose a mode per interval; other schedules are simply active inside their intervals. */
+  withModes?: boolean;
 }) {
   const set = (index: number, change: Partial<ScheduleInterval>) => onChange(intervals.map((interval, position) => (position === index ? { ...interval, ...change } : interval)));
   const toggleDay = (index: number, day: number) => {
@@ -63,14 +65,14 @@ export function ScheduleEditor({ intervals, onChange, readOnly = false }: {
   };
   return (
     <div className="schedule-editor">
-      <div className="schedule-week" role="img" aria-label="Weekly schedule overview; times outside every interval are not recorded">
+      <div className="schedule-week" role="img" aria-label={withModes ? "Weekly schedule overview; times outside every interval are not recorded" : "Weekly schedule overview; the schedule is active only inside its intervals"}>
         <div className="schedule-hours" aria-hidden="true">{[0, 6, 12, 18, 24].map(hour => <span key={hour} style={{ left: `${(hour / 24) * 100}%` }}>{String(hour).padStart(2, "0")}</span>)}</div>
         {DAYS.map((day, dayIndex) => (
           <div key={day} className="schedule-day">
             <span className="schedule-day-name">{day}</span>
             <div className="schedule-track">
               {bands(intervals).filter(band => band.day === dayIndex).map((band, position) => (
-                <span key={position} className="schedule-band" data-mode={band.mode} title={`Interval ${band.index + 1}: ${MODE_LABEL[band.mode]}${band.continued ? " (continued overnight)" : ""}`}
+                <span key={position} className="schedule-band" data-mode={withModes ? band.mode : "continuous"} title={`Interval ${band.index + 1}${withModes ? `: ${MODE_LABEL[band.mode]}` : ""}${band.continued ? " (continued overnight)" : ""}`}
                       style={{ left: `${(band.start / MINUTES_PER_DAY) * 100}%`, width: `${((band.end - band.start) / MINUTES_PER_DAY) * 100}%` }}>
                   {band.index + 1}
                 </span>
@@ -79,8 +81,8 @@ export function ScheduleEditor({ intervals, onChange, readOnly = false }: {
           </div>
         ))}
         <ul className="schedule-legend" aria-hidden="true">
-          {(Object.keys(MODE_LABEL) as ScheduleMode[]).map(mode => <li key={mode}><i data-mode={mode} />{MODE_LABEL[mode]}</li>)}
-          <li><i data-mode="none" />Not scheduled (not recorded)</li>
+          {withModes ? (Object.keys(MODE_LABEL) as ScheduleMode[]).map(mode => <li key={mode}><i data-mode={mode} />{MODE_LABEL[mode]}</li>) : <li><i data-mode="continuous" />Active</li>}
+          <li><i data-mode="none" />{withModes ? "Not scheduled (not recorded)" : "Not active"}</li>
         </ul>
       </div>
       <ol className="schedule-list">
@@ -98,11 +100,13 @@ export function ScheduleEditor({ intervals, onChange, readOnly = false }: {
               </div>
               <label>From <input type="time" value={interval.start} onChange={event => set(index, { start: event.target.value })} aria-label={`Interval ${index + 1} start`} /></label>
               <label>To <input type="time" value={interval.end} onChange={event => set(index, { end: event.target.value })} aria-label={`Interval ${index + 1} end`} /></label>
-              <label>Mode
-                <select value={interval.mode} onChange={event => set(index, { mode: event.target.value as ScheduleMode })} aria-label={`Interval ${index + 1} mode`}>
-                  {(Object.keys(MODE_LABEL) as ScheduleMode[]).map(mode => <option key={mode} value={mode}>{MODE_LABEL[mode]}</option>)}
-                </select>
-              </label>
+              {withModes ? (
+                <label>Mode
+                  <select value={interval.mode} onChange={event => set(index, { mode: event.target.value as ScheduleMode })} aria-label={`Interval ${index + 1} mode`}>
+                    {(Object.keys(MODE_LABEL) as ScheduleMode[]).map(mode => <option key={mode} value={mode}>{MODE_LABEL[mode]}</option>)}
+                  </select>
+                </label>
+              ) : null}
               {!readOnly ? <button type="button" className="button" data-variant="ghost" onClick={() => onChange(intervals.filter((_, position) => position !== index))}>Remove interval {index + 1}</button> : null}
             </fieldset>
           </li>
