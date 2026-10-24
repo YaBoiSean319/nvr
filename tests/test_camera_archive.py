@@ -171,6 +171,8 @@ class CameraArchiveTests(unittest.TestCase):
             baseline = m0001_baseline._shape(reference)
             baseline_triggers = {row[0] for row in reference.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
             reference.close()
+            # Strip the newer schema as a whole, without firing its foreign-key actions on the way.
+            db.execute("PRAGMA foreign_keys = OFF")
             for (trigger,) in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
                 if trigger not in baseline_triggers:
                     db.execute(f"DROP TRIGGER {trigger}")
