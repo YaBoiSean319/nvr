@@ -25,6 +25,11 @@ test.use({ viewport: PHONE, hasTouch: true, isMobile: true });
 test("on a phone an operator handles an alarm and exports its clip", async ({ page }) => {
   seedFixtures(2, { alarm: true });
   await signInNext(page, "camera-operator");
+  // Live opens with its camera browser over the grid; the status chips must stay reachable.
+  const browser = page.getByRole("complementary", { name: "Camera browser" });
+  await expect(browser).toBeVisible();
+  const header = await page.locator(".shell-header").boundingBox();
+  expect((await browser.boundingBox()).y, "the camera browser starts below the whole header").toBeGreaterThanOrEqual(header.y + header.height - 0.5);
   const chip = page.getByRole("status", { name: "Operational status" }).getByRole("button", { name: /alarm/i });
   await chip.scrollIntoViewIfNeeded();
   await chip.tap();

@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation } from "react-router";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { usePreferences, usePublicBranding } from "@/api/queries";
 import type { Me } from "@/api/types";
 import { BrandMark } from "@/components/BrandMark";
@@ -21,7 +21,19 @@ export function Shell({ me }: { me: Me }) {
   const theme = preferences.data?.theme ?? storedTheme();
   const workspace = DESTINATIONS.find(destination => location.pathname.startsWith(destination.to))?.label;
 
+  const header = useRef<HTMLElement>(null);
+
   useEffect(() => applyTheme(theme), [theme]);
+  // Overlays start below the header; on phones it wraps onto more rows, so publish its real height.
+  useEffect(() => {
+    const element = header.current;
+    if (!element) return;
+    const publish = () => document.documentElement.style.setProperty("--n-header-actual", `${Math.ceil(element.getBoundingClientRect().height)}px`);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     if (branding.data) applyBranding(branding.data, workspace);
   }, [branding.data, workspace]);
@@ -29,7 +41,7 @@ export function Shell({ me }: { me: Me }) {
   const destinations = DESTINATIONS.filter(destination => !destination.admin || me.role === "administrator");
   return (
     <div className="shell">
-      <header className="shell-header">
+      <header className="shell-header" ref={header}>
         <a className="shell-brand" href="#main" aria-label="Skip to workspace">
           <BrandMark branding={branding.data} />
           <span className="shell-app-name">{branding.data?.app_name ?? "Workplace NVR"}</span>

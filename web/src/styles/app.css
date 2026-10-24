@@ -194,7 +194,7 @@
 
 @media (max-width: 900px) {
   .workspace { grid-template-columns: minmax(0, 1fr); }
-  .workspace[data-sidebar="open"] .browser { position: fixed; z-index: 30; top: var(--n-header); bottom: 0; left: 0; width: min(300px, 85vw); box-shadow: var(--n-shadow); }
+  .workspace[data-sidebar="open"] .browser { position: fixed; z-index: 30; top: var(--n-header-actual, var(--n-header)); bottom: 0; left: 0; width: min(300px, 85vw); box-shadow: var(--n-shadow); }
 }
 
 /* --- browser tabs, views, dialogs -------------------------------------------- */
@@ -349,7 +349,7 @@
 .export-actions:empty { display: none; }
 @media (max-width: 900px) {
   .workspace[data-export="open"], .workspace[data-export="open"][data-sidebar="closed"] { grid-template-columns: minmax(0, 1fr); }
-  .export-drawer { position: fixed; z-index: 30; top: var(--n-header); right: 0; bottom: 0; width: min(340px, 92vw); box-shadow: var(--n-shadow); }
+  .export-drawer { position: fixed; z-index: 30; top: var(--n-header-actual, var(--n-header)); right: 0; bottom: 0; width: min(340px, 92vw); box-shadow: var(--n-shadow); }
 }
 
 /* --- camera administration ----------------------------------------------------- */
