@@ -5,14 +5,9 @@ import uuid
 
 from pydantic import ValidationError
 
-from app.main import (
-    CameraBulkUpdateRequest,
-    CameraGroupCreateRequest,
-    CameraGroupUpdateRequest,
-    CameraImportRow,
-    LiveWorkspaceRequest,
-    ViewerLayoutRequest,
-)
+from app.api.onboarding import CameraBulkUpdateRequest, CameraImportRow
+from app.api.policies import CameraGroupCreateRequest, CameraGroupUpdateRequest
+from app.api.live_views import LiveWorkspaceRequest, ViewerLayoutRequest
 
 
 class SharedRequestValidationTests(unittest.TestCase):

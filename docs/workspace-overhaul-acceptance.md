@@ -1,5 +1,7 @@
 # Workspace overhaul acceptance report
 
+> **Superseded.** This records the previous interface. It was removed at the cutover (#104); see the [rebuild acceptance report](acceptance/rebuild.md) for current results and the open post-merge items.
+
 Date: 2026-10-22  
 Candidate: `codex/nvr-workspace-overhaul`, based on `088ed9e`  
 Scope: NVR issues #10–24 and workspace issues #50–65

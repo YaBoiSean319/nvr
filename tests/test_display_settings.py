@@ -9,7 +9,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.display_settings import format_display_datetime, local_time_candidates
-from app.main import app, current_user
+from app.main import app
+from app.principal import current_user
 from app.store import connect, initialize
 
 

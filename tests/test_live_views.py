@@ -11,7 +11,9 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from app.credentials import encrypt
-from app.main import _acquire_live_view, _release_live_audio, _release_live_view, app, current_user, live_camera, live_camera_audio
+from app.api.live_media import _acquire_live_view, _release_live_audio, _release_live_view, live_camera, live_camera_audio
+from app.main import app
+from app.principal import current_user
 from app.store import connect, initialize
 
 
@@ -100,7 +102,7 @@ class LiveViewTests(unittest.TestCase):
             observed.append((camera_id, source, quality))
             yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 2\r\n\r\nxx\r\n"
 
-        with patch("app.main.shutil.which", return_value="/usr/bin/ffmpeg"), patch("app.main._mjpeg_frames", side_effect=fake_frames):
+        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch("app.api.live_media._mjpeg_frames", side_effect=fake_frames):
             response = self.client.get(f"/api/cameras/{self.camera}/live?quality=low")
             self.assertEqual(response.status_code, 200, response.text)
             self.assertIn("multipart/x-mixed-replace", response.headers["content-type"])
@@ -133,7 +135,7 @@ class LiveViewTests(unittest.TestCase):
         video_acquired = False
         audio_acquired = 0
         try:
-            with patch("app.main.shutil.which", return_value="/usr/bin/ffmpeg"):
+            with patch("shutil.which", return_value="/usr/bin/ffmpeg"):
                 video = live_camera(self.camera, {}, "low")
                 video_acquired = True
                 self.assertEqual(video.media_type, "multipart/x-mixed-replace; boundary=frame")

@@ -46,12 +46,20 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
+      - name: Build the browser interface
+        run: |
+          npm ci --prefix web --no-audit --no-fund
+          npm run build --prefix web
       - name: Start simulated RTSP camera
         run: |
           nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 600 -an \
-            -c:v libx264 -preset ultrafast -tune zerolatency -g 10 \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 10 \
             -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-test \
             >/tmp/nvr-browser-rtsp-publisher.log 2>&1 &
+          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -f lavfi -i sine=frequency=440:sample_rate=16000 -t 600 \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 10 -c:a aac -b:a 32k \
+            -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-audio \
+            >/tmp/nvr-browser-rtsp-publisher-audio.log 2>&1 &
           for attempt in $(seq 1 30); do
             if ffprobe -v error -rtsp_transport tcp -show_entries stream=codec_type \
               -of csv=p=0 rtsp://127.0.0.1:8554/nvr-test | grep -q video; then
@@ -114,9 +122,13 @@ jobs:
       - name: Start simulated RTSP camera
         run: |
           nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 600 -an \
-            -c:v libx264 -preset ultrafast -tune zerolatency -g 10 \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 10 \
             -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-test \
             >/tmp/nvr-rtsp-publisher.log 2>&1 &
+          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -f lavfi -i sine=frequency=440:sample_rate=16000 -t 600 \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 10 -c:a aac -b:a 32k \
+            -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-audio \
+            >/tmp/nvr-rtsp-publisher-audio.log 2>&1 &
           for attempt in $(seq 1 30); do
             if ffprobe -v error -rtsp_transport tcp -show_entries stream=codec_type \
               -of csv=p=0 rtsp://127.0.0.1:8554/nvr-test | grep -q video; then
@@ -129,12 +141,15 @@ jobs:
       - name: Run API and media tests
         env:
           NVR_RTSP_TEST_URL: rtsp://127.0.0.1:8554/nvr-test
+          NVR_RTSP_AUDIO_TEST_URL: rtsp://127.0.0.1:8554/nvr-audio
         run: python -m unittest discover -s tests -v
       - name: Compile Python
         run: python -m compileall -q app tests
-      - name: Check browser JavaScript
-        run: node --check app/static/app.js
-      - name: Test workspace layout behavior
+      - name: Typecheck and build the browser interface
+        run: |
+          npm ci --prefix web --no-audit --no-fund
+          npm run build --prefix web
+      - name: Test browser harness configuration
         run: node --test tests-js/*.test.cjs
       - name: Validate Compose configuration
         run: |

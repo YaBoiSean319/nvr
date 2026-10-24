@@ -28,6 +28,8 @@ EVENT_TYPES = {
     "ai.detection",
     "ai.failure",
     "ai.recovered",
+    "system.failure",
+    "system.recovered",
     "webhook.test",
 }
 MAX_ATTEMPTS = 8

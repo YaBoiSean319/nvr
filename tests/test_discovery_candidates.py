@@ -14,7 +14,7 @@ from app.discovery import DiscoveredDevice, DiscoveryResult
 from app.main import app
 from app.onvif_stream import CameraStreamSource
 from app.store import connect
-from tests.test_support import TEST_CAMERA_PASSWORD, TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_CAMERA_PASSWORD, TEST_PASSWORD
 
 
 class DiscoveryCandidateTests(unittest.TestCase):
@@ -46,7 +46,7 @@ class DiscoveryCandidateTests(unittest.TestCase):
             (f"http://{address}/onvif/device_service",),
             ("onvif://www.onvif.org/name/Test%20Camera",),
         )
-        with patch("app.main.discover_onvif", new=AsyncMock(return_value=DiscoveryResult((device,), 0, 1))):
+        with patch("app.api.onboarding.discover_onvif", new=AsyncMock(return_value=DiscoveryResult((device,), 0, 1))):
             response = self.client.post("/api/discovery/scan", json={"timeout_seconds": 0.5})
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["candidates"][0]
@@ -68,7 +68,7 @@ class DiscoveryCandidateTests(unittest.TestCase):
 
     def test_linking_identity_keeps_existing_camera_and_history(self):
         good = {"reachable": True, "video": {"codec": "h264", "width": 1280, "height": 720}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=good)):
+        with patch_camera_probe(new=AsyncMock(return_value=good)):
             existing = self.client.post("/api/cameras", json={"name": "Existing Camera", "stream_url": "rtsp://192.0.2.41/main"})
         self.assertEqual(existing.status_code, 201, existing.text)
         camera_id = existing.json()["id"]
@@ -97,8 +97,7 @@ class DiscoveryCandidateTests(unittest.TestCase):
     def test_failed_add_can_be_retried_and_keeps_safe_recording_defaults(self):
         candidate = self.scan()
         source = CameraStreamSource("rtsp://192.0.2.21:554/main", "http://192.0.2.21/onvif/device_service")
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(return_value=source)), patch(
-            "app.main.probe_stream",
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(return_value=source)), patch_camera_probe(
             new=AsyncMock(side_effect=[
                 {"reachable": False, "reason": "Fixture stream unavailable"},
                 {"reachable": True, "video": {"codec": "h264", "width": 1280, "height": 720}},
@@ -151,8 +150,8 @@ class DiscoveryCandidateTests(unittest.TestCase):
                     second.post(f"/api/discovery/candidates/{candidate['id']}/add", json=second_payload),
                 )
 
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(side_effect=slow_resolve)), patch(
-            "app.main.probe_stream", new=AsyncMock(side_effect=slow_probe)
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(side_effect=slow_resolve)), patch_camera_probe(
+            new=AsyncMock(side_effect=slow_probe)
         ):
             responses = asyncio.run(submit_twice())
 

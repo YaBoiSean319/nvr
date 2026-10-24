@@ -13,8 +13,10 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from tests.test_support import patch_camera_probe
 from app.credentials import encrypt
-from app.main import administrator, app, current_user
+from app.main import app
+from app.principal import administrator, current_user
 from app.recording import audio_recording_args
 from app.store import connect, initialize
 
@@ -68,7 +70,7 @@ class CameraAudioApiTests(unittest.TestCase):
         self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
         unsupported = self.client.patch(f"/api/cameras/{self.camera_id}", json={"audio_enabled": True})
         self.assertEqual(unsupported.status_code, 422)
-        with patch("app.main.probe_stream", new=AsyncMock(return_value={"reachable": True, "audio": True, "video": {"codec": "h264", "width": 64, "height": 64}})):
+        with patch_camera_probe(new=AsyncMock(return_value={"reachable": True, "audio": True, "video": {"codec": "h264", "width": 64, "height": 64}})):
             probe = self.client.post(f"/api/cameras/{self.camera_id}/audio/probe")
         self.assertEqual(probe.status_code, 200, probe.text)
         self.assertTrue(probe.json()["audio_supported"])
@@ -81,12 +83,12 @@ class CameraAudioApiTests(unittest.TestCase):
         self.assertEqual(camera["audio_status"], "enabled")
         denied = self.client.patch(f"/api/cameras/{self.camera_id}", json={"audio_enabled": False})
         self.assertEqual(denied.status_code, 403)
-        with patch("app.main.shutil.which", return_value=None):
+        with patch("shutil.which", return_value=None):
             live = self.client.get(f"/api/cameras/{self.camera_id}/audio/live")
         self.assertEqual(live.status_code, 503, live.text)
 
         self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value={"reachable": True, "audio": False, "video": {"codec": "h264", "width": 64, "height": 64}})):
+        with patch_camera_probe(new=AsyncMock(return_value={"reachable": True, "audio": False, "video": {"codec": "h264", "width": 64, "height": 64}})):
             lost = self.client.post(f"/api/cameras/{self.camera_id}/audio/probe")
         self.assertEqual(lost.status_code, 200, lost.text)
         self.assertFalse(lost.json()["audio_enabled"])

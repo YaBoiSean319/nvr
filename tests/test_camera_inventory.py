@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.test_support import TEST_CAMERA_PASSWORD, TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_CAMERA_PASSWORD, TEST_PASSWORD
 
 
 class CameraInventoryTests(unittest.TestCase):
@@ -38,7 +38,7 @@ class CameraInventoryTests(unittest.TestCase):
     def test_admin_can_edit_camera_name_without_exposing_stream_credentials(self):
         probe = {"reachable": True, "video": {"codec": "h264", "width": 640, "height": 360}}
         secret_url = f"rtsp://fixture-user:{TEST_CAMERA_PASSWORD}@camera.example.test/stream"
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=probe)):
+        with patch_camera_probe(new=AsyncMock(return_value=probe)):
             created = self.client.post("/api/cameras", json={"name": "Loading Dock", "stream_url": secret_url})
         self.assertEqual(created.status_code, 201, created.text)
 
@@ -54,7 +54,7 @@ class CameraInventoryTests(unittest.TestCase):
 
     def test_camera_name_edit_rejects_blank_or_duplicate_names_without_changing_inventory(self):
         probe = {"reachable": True, "video": {"codec": "h264", "width": 640, "height": 360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=probe)):
+        with patch_camera_probe(new=AsyncMock(return_value=probe)):
             first = self.client.post("/api/cameras", json={"name": "North Entrance", "stream_url": "rtsp://127.0.0.1/one"})
             second = self.client.post("/api/cameras", json={"name": "South Entrance", "stream_url": "rtsp://127.0.0.1/two"})
         self.assertEqual(first.status_code, 201)
@@ -74,10 +74,10 @@ class CameraInventoryTests(unittest.TestCase):
 
         high = {"reachable": True, "audio": False, "video": {"codec": "h264", "width": 1920, "height": 1080}}
         low = {"reachable": True, "audio": False, "video": {"codec": "h264", "width": 640, "height": 360}}
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(side_effect=[
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(side_effect=[
             CameraStreamSource(f"rtsp://fixture-old-user:{TEST_CAMERA_PASSWORD}@198.51.100.10:554/main", "http://198.51.100.10/onvif/device_service"),
             CameraStreamSource(f"rtsp://fixture-old-user:{TEST_CAMERA_PASSWORD}@198.51.100.10:554/sub", "http://198.51.100.10/onvif/device_service"),
-        ])), patch("app.main.probe_stream", new=AsyncMock(side_effect=[high, low])):
+        ])), patch_camera_probe(new=AsyncMock(side_effect=[high, low])):
             created = self.client.post("/api/cameras", json={
                 "name": "Lobby", "camera_ip": "198.51.100.10", "camera_username": "fixture-old-user", "camera_password": TEST_CAMERA_PASSWORD,
                 "camera_brand": "axis", "onvif_profile_token": "main-profile", "live_substream_profile_token": "sub-profile",
@@ -90,10 +90,10 @@ class CameraInventoryTests(unittest.TestCase):
         self.assertEqual(created.json().get("live_substream_profile_token"), "sub-profile")
         camera_id = created.json()["id"]
 
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(side_effect=[
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(side_effect=[
             CameraStreamSource(f"rtsp://fixture-new-user:{TEST_CAMERA_PASSWORD}@198.51.100.11:554/main", "http://198.51.100.11:8899/custom/service"),
             CameraStreamSource(f"rtsp://fixture-new-user:{TEST_CAMERA_PASSWORD}@198.51.100.11:554/sub", "http://198.51.100.11:8899/custom/service"),
-        ])) as resolve, patch("app.main.probe_stream", new=AsyncMock(side_effect=[high, low])):
+        ])) as resolve, patch_camera_probe(new=AsyncMock(side_effect=[high, low])):
             updated = self.client.put(f"/api/cameras/{camera_id}/source", json={
                 "camera_ip": "198.51.100.11", "camera_username": "fixture-new-user", "camera_password": TEST_CAMERA_PASSWORD,
                 "camera_brand": "hikvision", "onvif_profile_token": "replacement-main", "live_substream_profile_token": "replacement-sub",
@@ -115,7 +115,7 @@ class CameraInventoryTests(unittest.TestCase):
         self.assertEqual(inventory.json()["cameras"][0]["camera_ip"], "198.51.100.11")
 
         from app.onvif_stream import OnvifStreamProfile
-        with patch("app.main.list_camera_stream_profiles", new=AsyncMock(return_value=(
+        with patch("app.api.cameras.list_camera_stream_profiles", new=AsyncMock(return_value=(
             "http://198.51.100.11:8899/custom/service", (OnvifStreamProfile("replacement-main", "Main stream"),)
         ))) as profiles:
             loaded = self.client.post(f"/api/cameras/{camera_id}/source/profiles", json={
@@ -127,9 +127,9 @@ class CameraInventoryTests(unittest.TestCase):
         self.assertEqual(profiles.await_args.args[1:3], ("fixture-new-user", TEST_CAMERA_PASSWORD))
         self.assertNotIn(TEST_CAMERA_PASSWORD, loaded.text)
 
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
             f"rtsp://fixture-new-user:{TEST_CAMERA_PASSWORD}@198.51.100.11:554/main", "http://198.51.100.11:8899/custom/service"
-        ))) as resolve, patch("app.main.probe_stream", new=AsyncMock(return_value=high)):
+        ))) as resolve, patch_camera_probe(new=AsyncMock(return_value=high)):
             tested = self.client.post(f"/api/cameras/{camera_id}/source/test", json={
                 "camera_ip": "198.51.100.11", "camera_brand": "hikvision", "onvif_profile_token": "replacement-main",
                 "device_service_url": "http://198.51.100.11:8899/custom/service",
@@ -148,18 +148,18 @@ class CameraInventoryTests(unittest.TestCase):
         from app.onvif_stream import CameraStreamSource
 
         good = {"reachable": True, "video": {"codec": "h264", "width": 1280, "height": 720}}
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
             f"rtsp://viewer:{TEST_CAMERA_PASSWORD}@198.51.100.20:554/main", "http://198.51.100.20/onvif/device_service"
-        ))), patch("app.main.probe_stream", new=AsyncMock(return_value=good)):
+        ))), patch_camera_probe(new=AsyncMock(return_value=good)):
             created = self.client.post("/api/cameras", json={
                 "name": "Gate", "camera_ip": "198.51.100.20", "camera_username": "fixture-user", "camera_password": TEST_CAMERA_PASSWORD,
                 "onvif_profile_token": "main", "recording_mode": "disabled",
             })
         self.assertEqual(created.status_code, 201, created.text)
 
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
             f"rtsp://viewer:{TEST_CAMERA_PASSWORD}@198.51.100.21:554/main", "http://198.51.100.21/onvif/device_service"
-        ))), patch("app.main.probe_stream", new=AsyncMock(return_value={"reachable": False, "reason": "Stream unavailable"})):
+        ))), patch_camera_probe(new=AsyncMock(return_value={"reachable": False, "reason": "Stream unavailable"})):
             rejected = self.client.put(f"/api/cameras/{created.json()['id']}/source", json={
                 "camera_ip": "198.51.100.21", "camera_username": "fixture-user", "camera_password": TEST_CAMERA_PASSWORD,
                 "onvif_profile_token": "replacement", "device_service_url": "http://198.51.100.21/onvif/device_service",
@@ -175,18 +175,18 @@ class CameraInventoryTests(unittest.TestCase):
         from app.onvif_stream import CameraStreamSource
 
         capability = {"reachable": True, "video": {"codec": "h264", "width": 1280, "height": 720}}
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
             f"rtsp://fixture-old-user:{TEST_CAMERA_PASSWORD}@198.51.100.40:554/main", "http://198.51.100.40/onvif/device_service"
-        ))), patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        ))), patch_camera_probe(new=AsyncMock(return_value=capability)):
             created = self.client.post("/api/cameras", json={
                 "name": "Side Entrance", "camera_ip": "198.51.100.40", "camera_username": "fixture-old-user",
                 "camera_password": TEST_CAMERA_PASSWORD, "onvif_profile_token": "main", "recording_mode": "disabled",
             })
         self.assertEqual(created.status_code, 201, created.text)
 
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
             f"rtsp://renamed:{TEST_CAMERA_PASSWORD}@198.51.100.40:554/main", "http://198.51.100.40/onvif/device_service"
-        ))) as resolve, patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        ))) as resolve, patch_camera_probe(new=AsyncMock(return_value=capability)):
             updated = self.client.put(f"/api/cameras/{created.json()['id']}/source", json={
                 "camera_ip": "198.51.100.40", "camera_username": "renamed", "onvif_profile_token": "main",
             })
@@ -196,9 +196,9 @@ class CameraInventoryTests(unittest.TestCase):
         self.assertNotIn(TEST_CAMERA_PASSWORD, updated.text)
         self.assertNotIn("renamed", updated.text)
 
-        with patch("app.main.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
+        with patch("app.api.cameras.resolve_camera_stream", new=AsyncMock(return_value=CameraStreamSource(
             f"rtsp://renamed:{TEST_CAMERA_PASSWORD}@198.51.100.40:554/main", "http://198.51.100.40/onvif/device_service"
-        ))) as resolve, patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        ))) as resolve, patch_camera_probe(new=AsyncMock(return_value=capability)):
             tested = self.client.post(f"/api/cameras/{created.json()['id']}/source/test", json={
                 "camera_ip": "198.51.100.40", "onvif_profile_token": "main",
             })

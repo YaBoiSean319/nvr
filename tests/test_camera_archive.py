@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -11,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import patch_camera_probe, TEST_PASSWORD
+from app.migrations import m0001_baseline
 from app.store import connect, initialize
 
 
@@ -43,7 +45,7 @@ class CameraArchiveTests(unittest.TestCase):
 
     def add_camera(self) -> str:
         capability = {"reachable": True, "video": {"codec": "h264", "width": 640, "height": 360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             response = self.client.post("/api/cameras", json={
                 "name": "Archive camera", "stream_url": "rtsp://camera.example/live", "recording_mode": "disabled",
             })
@@ -162,6 +164,19 @@ class CameraArchiveTests(unittest.TestCase):
     def test_existing_camera_databases_migrate_archive_state(self):
         with connect() as db:
             db.execute("ALTER TABLE cameras DROP COLUMN archived_at")
+            # Databases created before archiving existed also predate versioned
+            # migrations and everything they add after the baseline.
+            reference = sqlite3.connect(":memory:", isolation_level=None)
+            m0001_baseline.upgrade(reference)
+            baseline = m0001_baseline._shape(reference)
+            reference.close()
+            for table, columns in m0001_baseline._shape(db).items():
+                if table not in baseline:
+                    db.execute(f"DROP TABLE {table}")
+                    continue
+                for column in sorted(columns - baseline[table]):
+                    db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            db.execute("DROP TABLE IF EXISTS schema_migrations")
         initialize()
         with connect() as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(cameras)")}

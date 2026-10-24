@@ -5,3 +5,8 @@ __pycache__
 .pytest_cache
 .env
 recordings
+node_modules
+web/node_modules
+app/web_dist
+test-results
+playwright-report

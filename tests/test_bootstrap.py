@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from tests.test_support import TEST_CAMERA_PASSWORD, TEST_OIDC_CLIENT_SECRET, TEST_OIDC_SESSION_SECRET, TEST_PASSWORD, TEST_URL_TOKEN
+from tests.test_support import patch_camera_probe, TEST_CAMERA_PASSWORD, TEST_OIDC_CLIENT_SECRET, TEST_OIDC_SESSION_SECRET, TEST_PASSWORD, TEST_URL_TOKEN
 
 OIDC_TEST_TENANT = "11111111-1111-4111-8111-111111111111"
 
@@ -70,7 +70,7 @@ class BootstrapTests(unittest.TestCase):
         from app.discovery import DiscoveredDevice, DiscoveryResult
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         result=DiscoveryResult((DiscoveredDevice("ipscan:" + "a" * 32, ("http://198.51.100.25:80/onvif/device_service",), ()),), 0, 254)
-        with patch("app.main.discover_onvif_ip_range", new=AsyncMock(return_value=result)) as scan:
+        with patch("app.api.onboarding.discover_onvif_ip_range", new=AsyncMock(return_value=result)) as scan:
             response=self.client.post("/api/discovery/scan",json={"ip_range":"192.0.2.0/24"})
         self.assertEqual(response.status_code,200)
         self.assertEqual(response.json()["scan_mode"],"ip_range")
@@ -82,7 +82,7 @@ class BootstrapTests(unittest.TestCase):
         from app.onvif_stream import OnvifStreamProfile
         self.assertEqual(self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"198.51.100.25"}).status_code,401)
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
-        with patch("app.main.list_camera_stream_profiles",new=AsyncMock(return_value=("http://198.51.100.25:80/onvif/device_service",(OnvifStreamProfile("profile1","Main stream"),)))):
+        with patch("app.api.cameras.list_camera_stream_profiles",new=AsyncMock(return_value=("http://198.51.100.25:80/onvif/device_service",(OnvifStreamProfile("profile1","Main stream"),)))):
             response=self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"198.51.100.25","camera_brand":"hikvision","camera_username":"admin","camera_password":TEST_CAMERA_PASSWORD})
         self.assertEqual(response.status_code,200)
         self.assertEqual(response.json()["profiles"],[{"token":"profile1","name":"Main stream"}])
@@ -143,7 +143,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/setup/admin", json={"username":"local-admin", "password":"longpasswordonly"}).status_code, 422)
 
     def test_session_lifetime_is_clamped_to_bounded_range(self):
-        from app.main import _session_hours
+        from app.api.identity import _session_hours
         os.environ["NVR_SESSION_HOURS"]="1000"
         self.assertEqual(_session_hours(),168)
         os.environ["NVR_SESSION_HOURS"]="0"
@@ -178,7 +178,7 @@ class BootstrapTests(unittest.TestCase):
         from app.discovery import DiscoveredDevice, DiscoveryResult
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         device=DiscoveredDevice("5a30e8d2-1108-4c1e-9b57-76a30b1d8087", ("http://198.51.100.30:80/onvif/device_service",), ("onvif://www.onvif.org/name/Loading Dock",))
-        with patch("app.main.discover_onvif", new=AsyncMock(return_value=DiscoveryResult((device,),1))):
+        with patch("app.api.onboarding.discover_onvif", new=AsyncMock(return_value=DiscoveryResult((device,),1))):
             first=self.client.post("/api/discovery/scan",json={"timeout_seconds":1})
         self.assertEqual(first.status_code,200,first.text)
         self.assertEqual(first.json()["discovered_count"],1)
@@ -187,14 +187,14 @@ class BootstrapTests(unittest.TestCase):
         candidate_id=first.json()["candidates"][0]["id"]
         self.assertEqual(self.client.get("/api/cameras").json()["cameras"],[])
 
-        with patch("app.main.probe_stream",new=AsyncMock(return_value={"reachable":False,"reason":"Camera stream could not be opened"})):
+        with patch_camera_probe(new=AsyncMock(return_value={"reachable":False,"reason":"Camera stream could not be opened"})):
             failed=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":"rtsp://198.51.100.30/stream"})
         self.assertEqual(failed.status_code,422)
         failed_candidate=self.client.get("/api/discovery/candidates").json()["candidates"][0]
         self.assertEqual(failed_candidate["capabilities"]["video_stream"],"unavailable")
 
         capability={"reachable":True,"audio":False,"video":{"codec":"h264","width":640,"height":360}}
-        with patch("app.main.probe_stream",new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             added=self.client.post(f"/api/discovery/candidates/{candidate_id}/add",json={"name":"Loading Dock","stream_url":f"rtsp://user:{TEST_CAMERA_PASSWORD}@198.51.100.30/stream"})
         self.assertEqual(added.status_code,201,added.text)
         self.assertNotIn(TEST_CAMERA_PASSWORD,added.text)
@@ -202,7 +202,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(added_candidate["capabilities"]["video_stream"],"supported")
         self.assertEqual(added_candidate["capabilities"]["audio"],"unsupported")
         self.assertEqual(added_candidate["capabilities"]["ptz"],"untested")
-        with patch("app.main.discover_onvif",new=AsyncMock(return_value=DiscoveryResult((device,),0))):
+        with patch("app.api.onboarding.discover_onvif",new=AsyncMock(return_value=DiscoveryResult((device,),0))):
             repeated=self.client.post("/api/discovery/scan",json={"timeout_seconds":0.5})
         self.assertEqual(repeated.status_code,200)
         candidates=repeated.json()["candidates"]
@@ -228,12 +228,12 @@ class BootstrapTests(unittest.TestCase):
         from app.discovery import DiscoveredDevice, DiscoveryResult
         self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         capability={"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
-        with patch("app.main.probe_stream",new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             camera=self.client.post("/api/cameras",json={"name":"Existing manual camera","stream_url":"rtsp://198.51.100.40/stream","recording_mode":"disabled"}).json()
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",(camera["id"],f"{camera['id']}/kept.mp4","2026-10-20T12:00:00+00:00","2026-10-20T12:01:00+00:00",123))
         device=DiscoveredDevice("9d153a1f-d693-4380-8410-0b2c47011ee2",("http://198.51.100.40/onvif/device_service",),())
-        with patch("app.main.discover_onvif",new=AsyncMock(return_value=DiscoveryResult((device,),0))):
+        with patch("app.api.onboarding.discover_onvif",new=AsyncMock(return_value=DiscoveryResult((device,),0))):
             candidates=self.client.post("/api/discovery/scan",json={"timeout_seconds":0.5}).json()["candidates"]
         linked=self.client.post(f"/api/discovery/candidates/{candidates[0]['id']}/link",json={"camera_id":camera["id"]})
         self.assertEqual(linked.status_code,200,linked.text)
@@ -268,7 +268,7 @@ class BootstrapTests(unittest.TestCase):
             if "unavailable" in url:
                 return {"reachable":False,"reason":"Camera stream could not be opened"}
             return {"reachable":True,"video":{"codec":"h264","width":1280,"height":720}}
-        with patch("app.main.probe_stream",new=AsyncMock(side_effect=probe)):
+        with patch_camera_probe(new=AsyncMock(side_effect=probe)):
             applied=self.client.post("/api/cameras/import/apply",json={"csv_text":text})
         self.assertEqual(applied.status_code,200,applied.text)
         result=applied.json()
@@ -289,15 +289,15 @@ class BootstrapTests(unittest.TestCase):
         from app.credentials import decrypt
         self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         good={"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
-        with patch("app.main.probe_stream",new=AsyncMock(return_value=good)):
+        with patch_camera_probe(new=AsyncMock(return_value=good)):
             created=self.client.post("/api/cameras",json={"name":"Rotating","stream_url":f"rtsp://old:{TEST_CAMERA_PASSWORD}@198.51.100.20/stream","recording_mode":"disabled"}).json()
         with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",(created["id"],f"{created['id']}/kept.mp4","2026-10-20T12:00:00+00:00","2026-10-20T12:01:00+00:00",123))
-        with patch("app.main.probe_stream",new=AsyncMock(return_value={"reachable":False,"reason":"Camera stream could not be opened"})):
+        with patch_camera_probe(new=AsyncMock(return_value={"reachable":False,"reason":"Camera stream could not be opened"})):
             rejected=self.client.post(f"/api/cameras/{created['id']}/credentials",json={"stream_url":f"rtsp://bad:{TEST_CAMERA_PASSWORD}@198.51.100.20/stream"})
         self.assertEqual(rejected.status_code,422)
         self.assertNotIn(TEST_CAMERA_PASSWORD,rejected.text)
-        with patch("app.main.probe_stream",new=AsyncMock(return_value=good)), patch.object(self.client_ctx.app.state.recorders,"sync_camera",new=AsyncMock()):
+        with patch_camera_probe(new=AsyncMock(return_value=good)), patch.object(self.client_ctx.app.state.recorders,"sync_camera",new=AsyncMock()):
             rotated=self.client.post(f"/api/cameras/{created['id']}/credentials",json={"stream_url":f"rtsp://new:{TEST_CAMERA_PASSWORD}@198.51.100.20/stream"})
         self.assertEqual(rotated.status_code,200,rotated.text)
         self.assertEqual(rotated.json()["id"],created["id"])
@@ -347,20 +347,20 @@ class BootstrapTests(unittest.TestCase):
     def test_oidc_maps_roles_denies_unmapped_users_and_keeps_local_login_available(self):
         self.configure_oidc("NVR-Operator")
         from unittest.mock import AsyncMock, patch
-        from app.main import _mapped_role
+        from app.api.identity import _mapped_role
         self.assertIsNone(_mapped_role({"roles":["Unmapped"]}))
         self.assertEqual(_mapped_role({"roles":["NVR-Operator"]}), "operator")
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         tenant_id=OIDC_TEST_TENANT
         claims={"sub":"object-123", "tid":tenant_id, "iss":f"https://login.microsoftonline.com/{tenant_id}/v2.0", "preferred_username":"operator@example.test", "roles":["NVR-Operator"]}
         fake=type("FakeOIDC", (), {"authorize_access_token":AsyncMock(return_value={"userinfo":claims})})()
-        with patch("app.main._oidc_client", return_value=fake):
+        with patch("app.api.identity._oidc_client", return_value=fake):
             callback=self.client.get("/api/auth/oidc/callback?code=fake&state=fake", follow_redirects=False)
         self.assertEqual(callback.status_code, 303)
         self.assertEqual(self.client.get("https://testserver.local/api/auth/me").json()["role"], "operator")
         self.client.post("/api/auth/logout")
         claims["roles"]=["Unmapped"]
-        with patch("app.main._oidc_client", return_value=fake):
+        with patch("app.api.identity._oidc_client", return_value=fake):
             denied=self.client.get("/api/auth/oidc/callback?code=fake&state=fake", follow_redirects=False)
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(self.client.post("/api/auth/login", json={"username":"local-admin", "password":TEST_PASSWORD}).status_code, 200)
@@ -458,7 +458,7 @@ class BootstrapTests(unittest.TestCase):
         from unittest.mock import AsyncMock, patch
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         fake=type("FakeOIDC", (), {"create_authorization_url":AsyncMock(side_effect=OSError("provider offline"))})()
-        with patch("app.main._oidc_client", return_value=fake):
+        with patch("app.api.identity._oidc_client", return_value=fake):
             unavailable=self.client.get("/api/auth/oidc/login?format=json", follow_redirects=False)
             self.assertEqual(unavailable.status_code, 503)
             self.assertIn("local administrator sign-in remains available", unavailable.json()["detail"])
@@ -468,7 +468,7 @@ class BootstrapTests(unittest.TestCase):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         stream_url = f"rtsp://fixture-user:{TEST_CAMERA_PASSWORD}@127.0.0.1:554/stream?token={TEST_URL_TOKEN}"
         probe = {"reachable": True, "video": {"codec":"h264", "width":640, "height":360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=probe)):
+        with patch_camera_probe(new=AsyncMock(return_value=probe)):
             added = self.client.post("/api/cameras", json={"name":"Test Camera", "stream_url":stream_url})
         self.assertEqual(added.status_code, 201)
         self.assertEqual(added.json()["recording_mode"], "motion")
@@ -491,7 +491,7 @@ class BootstrapTests(unittest.TestCase):
     def test_motion_recording_requires_enablement_and_encrypts_event_credentials(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             response = self.client.post("/api/cameras", json={
                 "name":"Motion policy camera", "stream_url":"rtsp://127.0.0.1/stream",
                 "recording_mode":"motion", "motion_service_url":"http://127.0.0.1/onvif/device_service",
@@ -525,7 +525,7 @@ class BootstrapTests(unittest.TestCase):
     def test_bulk_recording_enablement_updates_only_selected_cameras(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             first = self.client.post("/api/cameras", json={"name":"Bulk first","stream_url":"rtsp://127.0.0.1/one"}).json()
             second = self.client.post("/api/cameras", json={"name":"Bulk second","stream_url":"rtsp://127.0.0.1/two"}).json()
         updated = self.client.post("/api/cameras/bulk-update", json={"camera_ids":[first["id"]],"recording_enabled":True})
@@ -537,7 +537,7 @@ class BootstrapTests(unittest.TestCase):
     def test_group_schedule_inheritance_camera_override_and_restoration(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)), \
+        with patch_camera_probe(new=AsyncMock(return_value=capability)), \
              patch("app.main.app.state.recorders.sync_camera", new=AsyncMock()):
             camera = self.client.post("/api/cameras", json={
                 "name":"Scheduled camera", "stream_url":"rtsp://198.51.100.40/stream", "recording_mode":"continuous"
@@ -599,7 +599,7 @@ class BootstrapTests(unittest.TestCase):
         async def hold_recording(*_args):
             await asyncio.Event().wait()
         manager = self.client_ctx.app.state.recorders
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)), \
+        with patch_camera_probe(new=AsyncMock(return_value=capability)), \
              patch.object(manager, "_run", new=AsyncMock(side_effect=hold_recording)):
             camera = self.client.post("/api/cameras", json={
                 "name":"Scheduled runtime camera", "stream_url":"rtsp://198.51.100.41/stream", "recording_mode":"continuous"
@@ -621,7 +621,7 @@ class BootstrapTests(unittest.TestCase):
     def test_server_motion_fallback_configuration_is_validated_and_exposed(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable":True,"video":{"codec":"h264","width":640,"height":360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             camera = self.client.post("/api/cameras", json={
                 "name":"Fallback policy camera", "stream_url":"rtsp://127.0.0.1/stream"
             }).json()
@@ -668,7 +668,7 @@ class BootstrapTests(unittest.TestCase):
     def test_continuous_recorder_reconnects_after_stream_failure(self):
         self.client.post("/api/setup/admin", json={"username":"local-admin", "password":TEST_PASSWORD})
         capability = {"reachable": True, "video": {"codec":"h264", "width":640, "height":360}}
-        with patch("app.main.probe_stream", new=AsyncMock(return_value=capability)):
+        with patch_camera_probe(new=AsyncMock(return_value=capability)):
             created = self.client.post("/api/cameras", json={
                 "name":"Unavailable test feed",
                 "stream_url":f"rtsp://feed-user:{TEST_CAMERA_PASSWORD}@127.0.0.1:1/stream",

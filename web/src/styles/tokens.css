@@ -1,0 +1,38 @@
+/* Design tokens from the approved workspace preview. Status colours are fixed:
+   branding may change the accent but never the meaning of success/warning/failure. */
+:root {
+  color-scheme: light dark;
+  --n-bg: light-dark(#f4f5f7, #101216);
+  --n-panel: light-dark(#ffffff, #171a20);
+  --n-raised: light-dark(#f0f2f5, #22262e);
+  --n-text: light-dark(#19212d, #e7ebf1);
+  --n-muted: light-dark(#5d6878, #9ba6b6);
+  --n-line: light-dark(#dfe3e9, #2b303a);
+  --n-accent: light-dark(var(--n-accent-light, #2458cc), var(--n-accent-dark, #8baeff));
+  --n-on-accent: light-dark(var(--n-on-accent-light, #ffffff), var(--n-on-accent-dark, #0b1220));
+  --n-soft: light-dark(#e9efff, #26334d);
+  --n-good: light-dark(#157749, #82c99b);
+  --n-warn: light-dark(#9d5d00, #e8ba74);
+  --n-bad: light-dark(#ac3443, #f197a1);
+  --n-focus: light-dark(#1f4fbf, #a9c2ff);
+  --n-video: #000000;
+
+  --n-radius: 6px;
+  --n-radius-small: 4px;
+  --n-space-1: 4px;
+  --n-space-2: 8px;
+  --n-space-3: 12px;
+  --n-space-4: 16px;
+  --n-space-5: 24px;
+  --n-header: 48px;
+  --n-font: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --n-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --n-shadow: 0 8px 28px rgb(0 0 0 / 0.28);
+}
+
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

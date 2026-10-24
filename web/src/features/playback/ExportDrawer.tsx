@@ -1,0 +1,214 @@
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { ApiError } from "@/api/client";
+import { useCreateExport } from "@/api/queries";
+import type { Camera, DisplaySettings, TimelineCamera } from "@/api/types";
+import { useStatusPanel } from "@/features/status/StatusArea";
+import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
+import { formatSiteDateTime, localTimeCandidates, toLocalInput } from "@/lib/zonedTime";
+import { playbackClock } from "./clock";
+import { intervalsOf } from "./investigationRules";
+import { MAX_SEARCH_MS } from "./SearchBar";
+import { usePlaybackStore, type Marks } from "./store";
+
+interface Props {
+  settings: DisplaySettings;
+  range: { start: number; end: number };
+  /** Searched cameras in their Playback order; the grid follows this order. */
+  shownIds: string[];
+  cameras: Map<string, Camera>;
+  timeline: Map<string, TimelineCamera>;
+}
+
+function duration(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const hours = Math.floor(total / 3600), minutes = Math.floor((total % 3600) / 60), seconds = total % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+}
+
+function covered(row: TimelineCamera | undefined, start: number, end: number): number {
+  return (row ? intervalsOf(row) : []).reduce((sum, interval) => sum + Math.max(0, Math.min(end, interval.end) - Math.max(start, interval.start)), 0);
+}
+
+/** A precise, second-level editor for one mark, in the site time zone. */
+function MarkField({ kind, label, value, fallback, settings, range }: {
+  kind: keyof Marks; label: string; value: number | null; fallback: number; settings: DisplaySettings; range: { start: number; end: number };
+}) {
+  const { setMark } = usePlaybackStore.getState();
+  const zone = settings.time_zone;
+  const shown = value ?? fallback;
+  const [text, setText] = useState(() => toLocalInput(shown, zone, true));
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setText(toLocalInput(shown, zone, true));
+    setError(null);
+  }, [shown, zone]);
+
+  function commit(next: string) {
+    setText(next);
+    const candidates = localTimeCandidates(next, zone);
+    // A repeated wall time resolves to the occurrence inside the search; a skipped one cannot be used.
+    const inside = candidates.filter(instant => instant >= range.start && instant <= range.end);
+    const chosen = inside.length ? inside.reduce((best, instant) => (Math.abs(instant - shown) < Math.abs(best - shown) ? instant : best)) : candidates[0];
+    if (chosen === undefined) {
+      setError(next ? `This time does not exist in ${zone}.` : null);
+      return;
+    }
+    setError(null);
+    setMark(kind, chosen);
+  }
+
+  return (
+    <div className="export-mark">
+      <label>
+        <span>{label}</span>
+        <input type="datetime-local" step={1} value={text} onChange={event => commit(event.target.value)} />
+      </label>
+      <button type="button" className="button" onClick={() => setMark(kind, playbackClock.time())}>Use playhead</button>
+      {value === null ? <span className="muted">Search {kind === "in" ? "start" : "end"}</span> : null}
+      {error ? <span className="field-error" role="alert">{error}</span> : null}
+    </div>
+  );
+}
+
+/**
+ * Export the marked range. It sits beside Playback, so opening or closing it never
+ * restarts players or changes the investigation.
+ */
+export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: Props) {
+  const marks = usePlaybackStore(store => store.marks);
+  const chosenIds = usePlaybackStore(store => store.exportCameraIds);
+  const { setExportOpen, setExportCameraIds } = usePlaybackStore.getState();
+  const create = useCreateExport();
+  const showJobs = useStatusPanel(state => state.show);
+  const [individual, setIndividual] = useState(true);
+  const [grid, setGrid] = useState(true);
+  const [resolution, setResolution] = useState<"1080p" | "4k">("1080p");
+  const [audio, setAudio] = useState(false);
+  const [audioSource, setAudioSource] = useState<string>("");
+  const [submitted, setSubmitted] = useState(false);
+
+  const start = marks.in ?? range.start;
+  const end = marks.out ?? range.end;
+  const selected = useMemo(() => shownIds.filter(id => chosenIds === null || chosenIds.includes(id)), [shownIds, chosenIds]);
+  const audioCameras = selected.filter(id => cameras.get(id)?.audio_enabled);
+  const coverage = selected.map(id => ({ id, name: cameras.get(id)?.name ?? "Camera", covered: covered(timeline.get(id), start, end) }));
+  const span = end - start;
+
+  const problem = (() => {
+    if (end <= start) return "The export end must be after its start.";
+    if (start < range.start || end > range.end) return "Export marks must stay within the searched range.";
+    if (span > MAX_SEARCH_MS) return "Exports are limited to 24 hours.";
+    if (!selected.length) return "Choose at least one camera.";
+    if (!individual && !grid) return "Choose at least one output.";
+    if (coverage.every(item => item.covered <= 0)) return "There is no footage in this range for the selected cameras, so there is nothing to export.";
+    if (audio && grid && !audioSource) return "Choose which camera's audio the grid uses.";
+    return null;
+  })();
+
+  function toggleCamera(id: string, on: boolean) {
+    const next = on ? [...selected, id] : selected.filter(existing => existing !== id);
+    setExportCameraIds(next.length === shownIds.length ? null : next);
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (problem) return;
+    // The grid follows the arrangement at the moment of submission.
+    const size = [1, 4, 9, 16].find(value => value >= selected.length) ?? MAX_DISPLAYED_CAMERAS;
+    const tiles = [...selected, ...Array<null>(size - selected.length).fill(null)];
+    setSubmitted(true);
+    create.mutate({
+      camera_ids: selected,
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      output_modes: [...(individual ? ["individual" as const] : []), ...(grid ? ["grid" as const] : [])],
+      tile_camera_ids: tiles,
+      grid_resolution: resolution,
+      include_audio: audio && (grid ? Boolean(audioSource) : audioCameras.length > 0),
+      audio_camera_id: audio && grid ? audioSource || null : null,
+    });
+  }
+
+  const missing = coverage.filter(item => item.covered < span);
+  return (
+    <aside className="export-drawer" aria-label="Export footage">
+      <header className="export-head">
+        <h2>Export footage</h2>
+        <button type="button" className="button icon-button" data-variant="ghost" aria-label="Close export" onClick={() => setExportOpen(false)}>✕</button>
+      </header>
+      <form className="export-body" onSubmit={submit} noValidate>
+        <fieldset>
+          <legend>Range</legend>
+          <MarkField kind="in" label="From" value={marks.in} fallback={range.start} settings={settings} range={range} />
+          <MarkField kind="out" label="To" value={marks.out} fallback={range.end} settings={settings} range={range} />
+          <p className="muted export-span">{span > 0 ? `${duration(span)} · ${formatSiteDateTime(start, settings)} – ${formatSiteDateTime(end, settings)}` : ""}</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Cameras</legend>
+          <ul className="export-cameras">
+            {shownIds.map(id => (
+              <li key={id}>
+                <label>
+                  <input type="checkbox" checked={selected.includes(id)} onChange={event => toggleCamera(id, event.target.checked)} />
+                  <span>{cameras.get(id)?.name}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </fieldset>
+
+        <fieldset>
+          <legend>Outputs</legend>
+          <label><input type="checkbox" checked={individual} onChange={event => setIndividual(event.target.checked)} /> Individual camera files</label>
+          <label><input type="checkbox" checked={grid} onChange={event => setGrid(event.target.checked)} /> Synchronized grid</label>
+          {grid ? (
+            <div className="export-resolution" role="radiogroup" aria-label="Grid resolution">
+              <label><input type="radio" name="resolution" checked={resolution === "1080p"} onChange={() => setResolution("1080p")} /> 1080p</label>
+              <label><input type="radio" name="resolution" checked={resolution === "4k"} onChange={() => setResolution("4k")} /> 4K</label>
+            </div>
+          ) : null}
+          {audioCameras.length ? (
+            <>
+              <label><input type="checkbox" checked={audio} onChange={event => setAudio(event.target.checked)} /> Include audio</label>
+              {audio && grid ? (
+                <label className="export-audio">
+                  <span>Grid audio from</span>
+                  <select value={audioSource} onChange={event => setAudioSource(event.target.value)}>
+                    <option value="">Choose a camera…</option>
+                    {audioCameras.map(id => <option key={id} value={id}>{cameras.get(id)?.name}</option>)}
+                  </select>
+                </label>
+              ) : null}
+            </>
+          ) : <p className="muted">None of the selected cameras has audio enabled.</p>}
+        </fieldset>
+
+        {missing.length && span > 0 ? (
+          <div className="notice export-missing" data-tone="warn" role="status">
+            <strong>Known missing footage</strong>
+            <ul>
+              {missing.map(item => (
+                <li key={item.id}>{item.name}: {item.covered <= 0 ? "no footage, left out of the export" : `${duration(span - item.covered)} missing`}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {problem ? <p className="field-error" role="alert">{problem}</p> : null}
+        {create.error ? <p className="notice" data-tone="bad" role="alert">{create.error instanceof ApiError ? create.error.detail : "The export could not be started."}</p> : null}
+        {submitted && create.isSuccess ? (
+          <p className="notice" data-tone="good" role="status">
+            Export queued. It continues in the background.
+            <button type="button" className="button" onClick={() => showJobs("jobs")}>View export jobs</button>
+          </p>
+        ) : null}
+        <footer className="export-foot">
+          <button type="submit" className="button" data-variant="primary" disabled={Boolean(problem) || create.isPending}>
+            {create.isPending ? "Starting…" : "Export"}
+          </button>
+        </footer>
+      </form>
+    </aside>
+  );
+}

@@ -16,6 +16,8 @@ const allowedWebServerEnvironment = new Set([
   "NVR_BROWSER_PORT",
   "NVR_SEGMENT_SECONDS",
   "NVR_DISCOVERY_INTERFACE",
+  "NVR_BACKUP_PASSPHRASE_FILE",
+  "NVR_BACKUP_PATH",
 ]);
 
 if (!fs.existsSync(reportPath)) throw new Error("Playwright JSON report is missing; privacy validation cannot run.");

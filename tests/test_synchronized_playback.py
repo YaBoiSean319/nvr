@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
-from app.main import app, current_user
+from app.main import app
+from app.principal import current_user
 from app.retention import unlink_if_unleased
 from app.store import connect, initialize
 
@@ -78,6 +79,27 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         self.assertIsNotNone(second["motion_events"][0]["media_url"])
         self.assertEqual(first["gaps"][-1]["state"], "missing")
 
+    def test_timeline_reports_ai_detections_and_unanalyzed_intervals(self):
+        with connect() as db:
+            for label, seen in (("person", "12:00:10"), ("vehicle", "12:05:00")):
+                db.execute("INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) "
+                           "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                           (str(uuid.uuid4()), self.cameras[0], label, 0.82, "[0.1,0.1,0.5,0.5]", f"2026-10-20T{seen}+00:00", f"2026-10-20T{seen}+00:00", 320, 240, "fixture", "1"))
+            db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,?,?,?,?)",
+                       (self.cameras[0], "failed", "2026-10-20T12:01:00+00:00", "2026-10-20T12:02:00+00:00", "Detector unavailable"))
+            db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,?,?,?,?)",
+                       (self.cameras[0], "analyzed", "2026-10-20T12:00:00+00:00", "2026-10-20T12:01:00+00:00", ""))
+        response = self.client.post("/api/playback/timeline", json={
+            "camera_ids": self.cameras, "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:04:00Z",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        first, second = response.json()["cameras"]
+        self.assertEqual([(item["label"], item["first_seen_at"]) for item in first["ai_detections"]], [("person", "2026-10-20T12:00:10+00:00")])
+        self.assertEqual(first["ai_detections"][0]["confidence"], 0.82)
+        # Only intervals that were not analyzed are marks; analyzed time is the default.
+        self.assertEqual([(item["state"], item["detail"]) for item in first["ai_unanalyzed"]], [("failed", "Detector unavailable")])
+        self.assertEqual((second["ai_detections"], second["ai_unanalyzed"]), ([], []))
+
     def test_timeline_rejects_unknown_camera_and_oversized_window(self):
         unknown = self.client.post("/api/playback/timeline", json={
             "camera_ids": [str(uuid.uuid4())], "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",
@@ -142,7 +164,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
             self.assertFalse(unlink_if_unleased(path), "cleanup must not unlink footage while snapshot extraction is reading it")
             return b"\xff\xd8jpeg\xff\xd9", b""
         fake_process.communicate = AsyncMock(side_effect=read_snapshot)
-        with patch("app.main.shutil.which", return_value="/usr/bin/ffmpeg"), patch("app.main.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_process) as ffmpeg:
+        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_process) as ffmpeg:
             response = self.client.get(url)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["content-type"], "image/jpeg")
@@ -173,7 +195,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         def protected_probe(*args, **kwargs):
             self.assertFalse(unlink_if_unleased(path), "cleanup must not unlink footage while ffprobe reads frame timestamps")
             return ffprobe
-        with patch("app.main.shutil.which", return_value="/usr/bin/ffprobe"), patch("app.main.subprocess.run", side_effect=protected_probe) as probe:
+        with patch("shutil.which", return_value="/usr/bin/ffprobe"), patch("subprocess.run", side_effect=protected_probe) as probe:
             previous = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:20.020Z&direction=previous")
             following = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:20.020Z&direction=next")
         self.assertEqual(previous.status_code, 200, previous.text)
@@ -188,7 +210,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         with connect() as db:
             row = db.execute("SELECT id FROM recording_segments WHERE camera_id=? ORDER BY id LIMIT 1", (self.cameras[0],)).fetchone()
         result = Mock(returncode=0, stdout='{"frames":[{"best_effort_timestamp_time":"0.000"}]}')
-        with patch("app.main.shutil.which", return_value="/usr/bin/ffprobe"), patch("app.main.subprocess.run", return_value=result):
+        with patch("shutil.which", return_value="/usr/bin/ffprobe"), patch("subprocess.run", return_value=result):
             response = self.client.get(f"/api/cameras/{self.cameras[0]}/segments/{row['id']}/frame-neighbor?at=2026-10-20T12:00:00Z&direction=previous")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "No adjacent frame exists in this interval")

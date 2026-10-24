@@ -14,6 +14,8 @@ const SERVER_ENVIRONMENT_KEYS = Object.freeze([
   "NVR_BROWSER_PORT",
   "NVR_SEGMENT_SECONDS",
   "NVR_DISCOVERY_INTERFACE",
+  "NVR_BACKUP_PASSPHRASE_FILE",
+  "NVR_BACKUP_PATH",
 ]);
 
 function childEnvironment(source = process.env) {

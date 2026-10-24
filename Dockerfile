@@ -1,3 +1,11 @@
+# The browser interface is built in its own stage; only the static output ships.
+FROM node:22-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -17,9 +25,10 @@ RUN apt-get update \
     && echo 'de10beb5a811bd1b38c828b4060898c32502c4919488fd7100269cbdc7595e08  /opt/nvr/models/person-vehicle-bike-detection-2004.bin' | sha256sum -c - \
     && groupadd --system --gid 10001 nvr \
     && useradd --system --uid 10001 --gid nvr --home-dir /nonexistent nvr \
-    && mkdir -p /data /secrets /recordings \
-    && chown -R nvr:nvr /app /data /secrets /recordings /opt/nvr/models
+    && mkdir -p /data /secrets /recordings /backups \
+    && chown -R nvr:nvr /app /data /secrets /recordings /backups /opt/nvr/models
 COPY --chown=nvr:nvr app ./app
+COPY --from=web --chown=nvr:nvr /app/web_dist ./app/web_dist
 COPY --chown=nvr:nvr scripts ./scripts
 USER nvr
 EXPOSE 8280
