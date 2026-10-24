@@ -61,6 +61,27 @@ class BackupTests(unittest.TestCase):
             )
             db.execute("UPDATE site_branding SET app_name='North Hall' WHERE singleton_id=1")
 
+    def test_push_keys_survive_a_backup_and_restore(self):
+        from app import push
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        self._seed()
+        before = push.public_key()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        database = Path(os.environ["NVR_DB_PATH"])
+        for leftover in (database, Path(f"{database}-wal"), Path(f"{database}-shm"), Path(os.environ["NVR_CREDENTIAL_KEY_PATH"])):
+            leftover.unlink(missing_ok=True)
+        initialize()
+        self.assertNotEqual(push.public_key(), before)  # a new installation would have new keys
+
+        backup.restore(archive, force=True)
+        self.assertEqual(push.public_key(), before)
+        # The restored private key still signs for the same public key, so existing subscriptions keep working.
+        with connect() as db:
+            private, public = push._keys(db)
+        self.assertIsInstance(private, ec.EllipticCurvePrivateKey)
+        self.assertTrue(push.vapid_header("https://push.example.com/abc", private, public).startswith("vapid t="))
+
     def _files(self) -> list[Path]:
         return sorted(self.backups.glob("*.nvrbackup"))
 

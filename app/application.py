@@ -19,6 +19,7 @@ from .live_hub import LiveHub
 from .exports import ExportManager
 from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
+from .push import PushManager
 from .rules import RulesManager
 from .principal import COOKIE_NAME, current_user, depends_on, scope_for, secure_cookie
 from .store import initialize
@@ -31,6 +32,7 @@ from .workers.control import BackupClient, DetectionClient, ExportClient, Record
 STARTUP_ORDER = (
     ("exports", ExportManager),
     ("webhooks", WebhookManager),
+    ("push", PushManager),
     ("heartbeat", HeartbeatManager),
     ("recorders", RecordingManager),
     ("detectors", DetectionManager),
@@ -38,7 +40,7 @@ STARTUP_ORDER = (
     ("backups", BackupManager),
 )
 # Detection reads recorder state, and recording should outlive everything else.
-SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "webhooks", "heartbeat", "recorders")
+SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "push", "webhooks", "heartbeat", "recorders")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:

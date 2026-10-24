@@ -36,7 +36,7 @@ SUMMARIES = {
     "exporter": "The export process stopped unexpectedly; running exports failed and queued exports wait for it to restart",
     "ai": "The AI analysis process stopped unexpectedly; recording continues but no analysis happens until it restarts",
     "rules": "The rules process stopped unexpectedly; new detections are evaluated when it restarts",
-    "background": "The webhook, heartbeat and backup process stopped unexpectedly; notifications and backups wait until it restarts",
+    "background": "The webhook, push, heartbeat and backup process stopped unexpectedly; notifications and backups wait until it restarts",
 }
 # AI worker faults use the ai_ prefix so they notify as ai.failure/ai.recovered.
 FAULT_TYPES = {"ai": "ai_worker"}

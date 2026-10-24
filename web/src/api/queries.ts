@@ -1,5 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
+import { forgetThisDevice } from "@/features/alarms/pushDevice";
 import type { Branding, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, SavedView, ThemePreference } from "./types";
 
 export const keys = {
@@ -91,7 +92,11 @@ export function useCreateAdministrator() {
 export function useSignOut() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: () => api<void>("/api/auth/logout", { method: "POST" }),
+    mutationFn: async () => {
+      // A shared device should stop getting the previous person's alarms; never let this block signing out.
+      await forgetThisDevice().catch(() => undefined);
+      return api<void>("/api/auth/logout", { method: "POST" });
+    },
     onSettled: () => {
       // Drop everything that belonged to the session; keep what the sign-in screen needs.
       const keep = new Set<unknown>([keys.setup[0], keys.branding[0], keys.oidc[0], keys.me[0]]);

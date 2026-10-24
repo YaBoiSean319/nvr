@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { create } from "zustand";
 import { ApiError } from "@/api/client";
 import { useAcknowledgeIncident, useCameras, useExportJobs, useOpenIncidents } from "@/api/queries";
@@ -17,11 +18,25 @@ export const useStatusPanel = create<{ section: Section | null; show: (section: 
   show: section => set({ section }),
 }));
 
-/** Whether the alarm inbox is open. */
-export const useAlarmInbox = create<{ open: boolean; setOpen: (open: boolean) => void }>(set => ({
+/** Whether the alarm inbox is open, and on which alarm (for example one opened from a notification). */
+export const useAlarmInbox = create<{ open: boolean; alarmId: string | null; setOpen: (open: boolean) => void; openAlarm: (id: string) => void }>(set => ({
   open: false,
-  setOpen: open => set({ open }),
+  alarmId: null,
+  setOpen: open => set(open ? { open } : { open, alarmId: null }),
+  openAlarm: id => set({ open: true, alarmId: id }),
 }));
+
+/** A notification opens the app at /?alarm=<id>: show that alarm, and tidy the address. */
+function useAlarmFromAddress() {
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const id = url.searchParams.get("alarm");
+    if (!id) return;
+    useAlarmInbox.getState().openAlarm(id);
+    url.searchParams.delete("alarm");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+}
 
 function Chip({ tone, label, onClick }: { tone: Tone; label: string; onClick: () => void }) {
   return (
@@ -43,6 +58,7 @@ export function StatusArea() {
   const unreachable = cameras.isError || incidents.isError;
   const alarms = useAlarms({ state: "open", camera_id: "", rule_id: "" });
   const inbox = useAlarmInbox();
+  useAlarmFromAddress();
   const counts = alarms.data?.counts;
   const openAlarms = counts ? counts.new + counts.acknowledged + counts.assigned : 0;
   const alarmLabel = !counts ? "Alarms" : counts.new ? `${counts.new} new alarm${counts.new === 1 ? "" : "s"}` : openAlarms ? `${openAlarms} open alarm${openAlarms === 1 ? "" : "s"}` : "No open alarms";
@@ -58,7 +74,7 @@ export function StatusArea() {
       </div>
       <Drawer open={inbox.open} onOpenChange={inbox.setOpen} title="Alarms"
               description="What rules saw. Acknowledge, assign, comment and resolve; everyone signed in sees changes within seconds.">
-        <AlarmsInbox onNavigate={() => inbox.setOpen(false)} />
+        <AlarmsInbox key={inbox.alarmId ?? "inbox"} initialAlarmId={inbox.alarmId} onNavigate={() => inbox.setOpen(false)} />
       </Drawer>
       <Drawer open={section !== null} onOpenChange={open => !open && setSection(null)} title="Operational status"
               description="Live video health and recording health are reported separately; a live picture does not prove footage is being written.">

@@ -72,6 +72,8 @@ def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
     )
     _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"]})
     _notify(db, alarm_id, "alarm.created", None)
+    from .push import queue_for_alarm
+    queue_for_alarm(db, alarm_id)
     return alarm_id
 
 
