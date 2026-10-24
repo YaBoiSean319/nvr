@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import { useDisplaySettings } from "@/api/queries";
 import { failureText } from "@/features/admin/tabDraft";
+import { currentSubscription, deviceLabel, forgetThisDevice, pushSupported } from "./pushDevice";
 
 interface QuietHours { start: string; end: string; timezone: string }
 interface Preferences {
@@ -16,18 +17,11 @@ interface Preferences {
 type Choices = Pick<Preferences, "rule_ids" | "group_ids" | "quiet_hours">;
 
 const key = ["push", "preferences"] as const;
-const supported = () => typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const supported = pushSupported;
 
 function toKey(base64: string): Uint8Array {
   const padded = base64.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (base64.length % 4)) % 4);
   return Uint8Array.from(atob(padded), char => char.charCodeAt(0));
-}
-
-/** This device's subscription, if the browser has one for this site. */
-async function currentSubscription(): Promise<PushSubscription | null> {
-  if (!supported()) return null;
-  const registration = await navigator.serviceWorker.getRegistration("/");
-  return registration ? registration.pushManager.getSubscription() : null;
 }
 
 /**
@@ -51,10 +45,7 @@ export function NotificationSettings() {
     mutationFn: async (on: boolean) => {
       const existing = await currentSubscription();
       if (!on) {
-        if (existing) {
-          await api("/api/push/subscriptions/remove", { method: "POST", body: { endpoint: existing.endpoint } });
-          await existing.unsubscribe();
-        }
+        await forgetThisDevice();
         return false;
       }
       if ((await Notification.requestPermission()) !== "granted") throw new Error("Notifications are blocked for this site in the browser's settings.");
@@ -62,7 +53,7 @@ export function NotificationSettings() {
       const { public_key } = await api<{ public_key: string }>("/api/push/public-key");
       const subscription = existing ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: toKey(public_key) as BufferSource });
       const body = subscription.toJSON();
-      await api("/api/push/subscriptions", { method: "POST", body: { endpoint: body.endpoint, keys: body.keys, device_label: navigator.userAgent.slice(0, 120) } });
+      await api("/api/push/subscriptions", { method: "POST", body: { endpoint: body.endpoint, keys: body.keys, device_label: deviceLabel() } });
       return true;
     },
     onSuccess: on => {

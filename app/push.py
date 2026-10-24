@@ -42,11 +42,16 @@ from .store import connect
 
 logger = logging.getLogger("nvr.push")
 
-THUMBNAIL_LIFETIME = timedelta(minutes=30)
+# Long enough to outlive the message's time to live and every retry.
+THUMBNAIL_LIFETIME = timedelta(hours=2)
+KEEP_DELIVERIES = timedelta(days=7)
 TTL_SECONDS = 3600
 MAX_ATTEMPTS = 6
 RETRY_SECONDS = (10, 30, 120, 600, 1800)
 RECORD_SIZE = 4096
+# Push services accept at most 4096 bytes of body: an 86-byte header (salt, record size, key),
+# the 16-byte authentication tag and the padding delimiter leave this much for the message.
+MAX_PAYLOAD_BYTES = 4096 - 86 - 16 - 1
 
 
 class PushError(Exception):
@@ -103,20 +108,24 @@ def vapid_header(endpoint: str, private: ec.EllipticCurvePrivateKey, public: str
     return f"vapid t={token}, k={public}"
 
 
-def encrypt_payload(payload: bytes, p256dh: str, auth: str) -> bytes:
-    """Encrypt one push message for a subscription (RFC 8291 with RFC 8188 ``aes128gcm``)."""
+def encrypt_payload(payload: bytes, p256dh: str, auth: str, *, sender: ec.EllipticCurvePrivateKey | None = None, salt: bytes | None = None) -> bytes:
+    """Encrypt one push message for a subscription (RFC 8291 with RFC 8188 ``aes128gcm``).
+
+    ``sender`` and ``salt`` are fresh for every message; they are parameters only so the RFC's
+    worked example can be reproduced exactly.
+    """
     receiver = _unb64(p256dh)
     secret = _unb64(auth)
     if len(receiver) != 65 or len(secret) != 16:
         raise PushError("The subscription keys are malformed")
-    ephemeral = ec.generate_private_key(ec.SECP256R1())
+    ephemeral = sender or ec.generate_private_key(ec.SECP256R1())
     sender = ephemeral.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     shared = ephemeral.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), receiver))
     ikm = HKDF(hashes.SHA256(), 32, salt=secret, info=b"WebPush: info\x00" + receiver + sender).derive(shared)
-    salt = os.urandom(16)
+    salt = salt or os.urandom(16)
     key = HKDF(hashes.SHA256(), 16, salt=salt, info=b"Content-Encoding: aes128gcm\x00").derive(ikm)
     nonce = HKDF(hashes.SHA256(), 12, salt=salt, info=b"Content-Encoding: nonce\x00").derive(ikm)
-    if len(payload) + 1 + 16 > RECORD_SIZE:
+    if len(payload) > MAX_PAYLOAD_BYTES:
         raise PushError("The notification payload is too large")
     ciphertext = AESGCM(key).encrypt(nonce, payload + b"\x02", None)
     return salt + struct.pack(">I", RECORD_SIZE) + bytes([len(sender)]) + sender + ciphertext
@@ -125,12 +134,15 @@ def encrypt_payload(payload: bytes, p256dh: str, auth: str) -> bytes:
 # --- subscriptions and preferences --------------------------------------------------
 
 def validate_endpoint(endpoint: str) -> str:
-    """Push services are public HTTPS endpoints; anything else is refused before it is stored."""
+    """Push services are public HTTPS endpoints; anything else is refused, when stored and when used."""
     from .webhooks import validate_target_url
 
     if not endpoint.startswith("https://"):
         raise ValueError("Push subscriptions must use an HTTPS push service")
-    return validate_target_url(endpoint, allow_private=False)
+    try:
+        return validate_target_url(endpoint, allow_private=False)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("Webhook", "Push service").replace("webhook", "push service")) from exc
 
 
 def subscribe(user_id: int, endpoint: str, p256dh: str, auth: str, device_label: str) -> dict[str, Any]:
@@ -156,8 +168,12 @@ def subscribe(user_id: int, endpoint: str, p256dh: str, auth: str, device_label:
 
 
 def unsubscribe(user_id: int, endpoint: str) -> bool:
+    try:
+        stored = validate_endpoint(endpoint)
+    except ValueError:
+        stored = endpoint
     with connect() as db:
-        return db.execute("DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?", (user_id, endpoint)).rowcount > 0
+        return db.execute("DELETE FROM push_subscriptions WHERE user_id=? AND endpoint IN (?,?)", (user_id, endpoint, stored)).rowcount > 0
 
 
 def preferences(db: sqlite3.Connection, user_id: int) -> dict[str, Any]:
@@ -218,14 +234,30 @@ def verify_thumbnail_token(token: str, now: datetime | None = None) -> str:
 
 
 def queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
-    """Queue a notification to every device that wants this alarm, inside the caller's transaction."""
+    """Queue a notification to every device that wants this alarm, inside the caller's transaction.
+
+    A failure here is logged and undone on its own; it never undoes the alarm.
+    """
+    db.execute("SAVEPOINT push_queue")
+    try:
+        queued = _queue_for_alarm(db, alarm_id)
+    except Exception:  # noqa: BLE001 - notifications must not cost the alarm
+        db.execute("ROLLBACK TO push_queue")
+        db.execute("RELEASE push_queue")
+        logger.exception("Push notifications for alarm %s could not be queued", alarm_id)
+        return 0
+    db.execute("RELEASE push_queue")
+    return queued
+
+
+def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
     alarm = db.execute("SELECT a.*,c.name AS camera_name,c.group_id FROM alarms a JOIN cameras c ON c.id=a.camera_id WHERE a.id=?", (alarm_id,)).fetchone()
     if alarm is None:
         return 0
     occurred = datetime.fromisoformat(alarm["occurred_at"])
     groups = {row[0] for row in db.execute("SELECT group_id FROM cameras WHERE id=? AND group_id IS NOT NULL UNION SELECT group_id FROM camera_group_memberships WHERE camera_id=?",
                                            (alarm["camera_id"], alarm["camera_id"]))}
-    label = "Person" if alarm["label"] == "person" else "Vehicle" if alarm["label"] == "vehicle" else alarm["label"].title()
+    label = str(alarm["label"] or "object").capitalize()
     site = db.execute("SELECT time_zone FROM site_display_settings WHERE singleton_id=1").fetchone()
     try:
         shown = occurred.astimezone(ZoneInfo(site["time_zone"])) if site else occurred
@@ -261,8 +293,9 @@ def _claim(db: sqlite3.Connection) -> sqlite3.Row | None:
     db.execute("BEGIN IMMEDIATE")
     try:
         row = db.execute(
-            "SELECT d.id,d.payload_json,d.attempt_count,s.id AS subscription_id,s.endpoint,s.p256dh,s.auth FROM push_deliveries d "
-            "JOIN push_subscriptions s ON s.id=d.subscription_id WHERE d.status='queued' AND d.next_attempt_at<=? ORDER BY d.next_attempt_at LIMIT 1",
+            "SELECT d.id,d.payload_json,d.attempt_count,s.id AS subscription_id,s.user_id,s.endpoint,s.p256dh,s.auth,a.camera_id FROM push_deliveries d "
+            "JOIN push_subscriptions s ON s.id=d.subscription_id JOIN alarms a ON a.id=d.alarm_id "
+            "WHERE d.status='queued' AND d.next_attempt_at<=? ORDER BY d.next_attempt_at LIMIT 1",
             (_now().isoformat(),)).fetchone()
         if row is not None:
             db.execute("UPDATE push_deliveries SET status='sending',attempt_count=attempt_count+1 WHERE id=?", (row["id"],))
@@ -280,13 +313,13 @@ def _finish(delivery: sqlite3.Row, status_code: int | None, error: str | None) -
             db.execute("UPDATE push_deliveries SET status='sent',last_error=NULL WHERE id=?", (delivery["id"],))
             db.execute("UPDATE push_subscriptions SET last_success_at=? WHERE id=?", (now.isoformat(), delivery["subscription_id"]))
             return "sent"
-        if status_code in (404, 410):
-            # The push service says the subscription is gone: forget the device and its queue.
+        if status_code in (401, 403, 404, 410):
+            # The subscription is gone, or belongs to another key: forget the device and its queue.
             db.execute("DELETE FROM push_subscriptions WHERE id=?", (delivery["subscription_id"],))
             return "removed"
         db.execute("UPDATE push_subscriptions SET last_failure_at=? WHERE id=?", (now.isoformat(), delivery["subscription_id"]))
         attempts = int(delivery["attempt_count"]) + 1
-        if attempts >= MAX_ATTEMPTS or status_code in (400, 401, 403, 413):
+        if attempts >= MAX_ATTEMPTS or status_code in (400, 413) or (status_code is None and error and error.startswith("invalid:")):
             db.execute("UPDATE push_deliveries SET status='failed',last_error=? WHERE id=?", (error, delivery["id"]))
             return "failed"
         retry = now + timedelta(seconds=RETRY_SECONDS[min(attempts - 1, len(RETRY_SECONDS) - 1)])
@@ -298,7 +331,7 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
     """Send queued notifications that are due; return each outcome."""
     outcomes: list[str] = []
     owned = client is None
-    client = client or httpx.Client(timeout=10, follow_redirects=False)
+    client = client or httpx.Client(timeout=10, follow_redirects=False, trust_env=False)
     try:
         with connect() as db:
             private, public = _keys(db)
@@ -307,6 +340,12 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
                 delivery = _claim(db)
             if delivery is None:
                 break
+            with connect() as db:
+                allowed = may_view_camera(db, delivery["user_id"], delivery["camera_id"])
+            if not allowed:
+                # The device changed hands, or its owner lost access, since this was queued.
+                outcomes.append(_finish(delivery, None, "invalid: the recipient may no longer see this camera"))
+                continue
             try:
                 validate_endpoint(delivery["endpoint"])
                 body = encrypt_payload(delivery["payload_json"].encode("utf-8"), delivery["p256dh"], delivery["auth"])
@@ -315,12 +354,63 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
                     "Content-Type": "application/octet-stream", "TTL": str(TTL_SECONDS), "Urgency": "high",
                 })
                 outcomes.append(_finish(delivery, response.status_code, None if response.is_success else f"HTTP {response.status_code}"))
-            except (httpx.HTTPError, PushError, ValueError) as exc:
+            except (PushError, ValueError) as exc:
+                outcomes.append(_finish(delivery, None, f"invalid: {str(exc)[:180]}"))
+            except httpx.HTTPError as exc:
                 outcomes.append(_finish(delivery, None, str(exc)[:200] or exc.__class__.__name__))
+        with connect() as db:
+            db.execute("DELETE FROM push_deliveries WHERE status IN ('sent','failed') AND created_at<?", ((_now() - KEEP_DELIVERIES).isoformat(),))
     finally:
         if owned:
             client.close()
     return outcomes
+
+
+_THUMBNAILS: dict[tuple[str, str], bytes] = {}
+
+
+def thumbnail(alarm_id: str) -> bytes | None:
+    """The alarm's picture: a frame from its recording once indexed, else its object's keyframe."""
+    import shutil
+    import subprocess
+
+    from .retention import acquire_playback, release_playback
+    from .storage import recording_file_path
+
+    with connect() as db:
+        alarm = db.execute("SELECT camera_id,occurred_at,track_id FROM alarms WHERE id=?", (alarm_id,)).fetchone()
+        if alarm is None:
+            return None
+        segment = db.execute(
+            "SELECT id,relative_path,starts_at FROM recording_segments WHERE camera_id=? AND starts_at<=? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at DESC LIMIT 1",
+            (alarm["camera_id"], alarm["occurred_at"], alarm["occurred_at"])).fetchone()
+        keyframe = db.execute("SELECT jpeg FROM track_keyframes WHERE track_id=?", (alarm["track_id"],)).fetchone() if alarm["track_id"] else None
+    if segment is not None and shutil.which("ffmpeg"):
+        cache_key = (alarm_id, str(segment["id"]))
+        if cache_key in _THUMBNAILS:
+            return _THUMBNAILS[cache_key]
+        try:
+            path = recording_file_path(segment["relative_path"])
+        except (OSError, ValueError):
+            path = None
+        if path is not None and path.is_file():
+            offset = max(0.0, (datetime.fromisoformat(alarm["occurred_at"]) - datetime.fromisoformat(segment["starts_at"])).total_seconds())
+            acquire_playback(path)
+            try:
+                result = subprocess.run(
+                    [shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1", "-ss", f"{offset:.3f}", "-i", str(path),
+                     "-frames:v", "1", "-vf", "scale=640:-2:force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                    capture_output=True, timeout=15, check=False)
+            except subprocess.TimeoutExpired:
+                result = None
+            finally:
+                release_playback(path)
+            if result is not None and result.returncode == 0 and result.stdout.startswith(b"\xff\xd8"):
+                if len(_THUMBNAILS) >= 64:
+                    _THUMBNAILS.pop(next(iter(_THUMBNAILS)))
+                _THUMBNAILS[cache_key] = result.stdout
+                return result.stdout
+    return keyframe["jpeg"] if keyframe else None
 
 
 def recover_inflight() -> None:

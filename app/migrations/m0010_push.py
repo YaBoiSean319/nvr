@@ -1,5 +1,5 @@
 """Web Push for alarms: the installation's VAPID keys, device subscriptions, each
-person's notification choices and the delivery queue.
+person's notification choices, the delivery queue, and tracked objects' keyframes.
 
 The VAPID private key is encrypted with the credential key and lives in the
 database, so configuration backups carry it and a restore keeps every existing
@@ -63,6 +63,15 @@ _STATEMENTS = (
     """,
     """
     CREATE INDEX push_deliveries_due_idx ON push_deliveries(status,next_attempt_at)
+    """,
+    # The frame each tracked object was first analysed in, as a small JPEG: an alarm's
+    # thumbnail before its recording is indexed.
+    """
+    CREATE TABLE track_keyframes (
+        track_id TEXT PRIMARY KEY REFERENCES ai_tracks(id) ON DELETE CASCADE,
+        captured_at TEXT NOT NULL,
+        jpeg BLOB NOT NULL
+    )
     """,
 )
 

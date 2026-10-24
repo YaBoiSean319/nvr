@@ -88,6 +88,25 @@ class PushService:
         self.server.server_close()
 
 
+class EncryptionTests(unittest.TestCase):
+    def test_payload_encryption_matches_the_rfc_8291_example(self):
+        # RFC 8291 Appendix A: fixed sender key and salt give exactly the published message.
+        sender = ec.derive_private_key(int.from_bytes(unb64("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw"), "big"), ec.SECP256R1())
+        body = push.encrypt_payload(
+            b"When I grow up, I want to be a watermelon",
+            "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4", "BTBZMqHH6r4Tts7J_aSIgg",
+            sender=sender, salt=unb64("DGv6ra1nlYgDCS1FRnbzlw"),
+        )
+        self.assertEqual(b64(body), "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN")
+
+    def test_the_whole_message_fits_the_push_service_limit(self):
+        device = Device()
+        largest = push.MAX_PAYLOAD_BYTES
+        self.assertEqual(len(push.encrypt_payload(b"x" * largest, **device.keys())), 4096)
+        with self.assertRaises(push.PushError):
+            push.encrypt_payload(b"x" * (largest + 1), **device.keys())
+
+
 class PushTests(SceneTestCase):
     def setUp(self):
         super().setUp()
@@ -154,6 +173,17 @@ class PushTests(SceneTestCase):
         self.assertEqual(thumbnail.status_code, 200, thumbnail.text[:200])
         self.assertEqual(thumbnail.headers["content-type"], "image/jpeg")
         self.assertEqual(self.client.get("/api/push/preferences").json()["devices"][0]["device_label"], "phone")
+
+    def test_a_fresh_alarm_has_a_thumbnail_before_its_recording_is_indexed(self):
+        # Recorded segments are indexed when they close, up to a minute after the alarm; the
+        # object's first analysed frame stands in until then.
+        self.subscribe()
+        alarm_id = self.raise_alarm()
+        with TestClient(self.client.app) as device:
+            thumbnail = device.get(f"/api/push/thumbnails/{push.thumbnail_token(alarm_id)}")
+        self.assertEqual(thumbnail.status_code, 200, thumbnail.text[:200])
+        self.assertEqual(thumbnail.headers["content-type"], "image/jpeg")
+        self.assertTrue(thumbnail.content.startswith(b"\xff\xd8"))
 
     def test_thumbnail_links_expire_and_cannot_be_forged(self):
         self.subscribe()

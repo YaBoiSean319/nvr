@@ -36,16 +36,18 @@ Each person can be notified of alarms on their own devices, desktop or phone (in
 2. Choose which rules, and which camera groups, notify you. Everything is ticked at first. With every group ticked, cameras outside any group notify too.
 3. Optionally set **Quiet hours**: alarms raised inside them do not notify you. They still appear in the inbox.
 
-A notification shows the rule, camera, object and time, with a thumbnail from the recording. Clicking it opens the alarm in the inbox. People are only notified about cameras they may see.
+A notification shows the rule, camera, object and time, with a thumbnail: the recorded snapshot once the recording is indexed, otherwise the frame the object was first seen in. Clicking it opens the alarm in the inbox. People are only notified about cameras they may see, checked both when the alarm is raised and again when the notification is sent.
+
+Signing out removes the current device's subscription, so a shared device stops getting the previous person's alarms. Each device is listed by a coarse name such as "Chrome on Android".
 
 How it works:
 - Notifications are sent through each browser vendor's push service using Web Push. The message is encrypted for the device and signed with this installation's VAPID key.
 - The key is created on first use and stored, encrypted with the credential key, in the database, so configuration backups carry it and a restore keeps existing subscriptions working.
 - Set `NVR_VAPID_SUBJECT` to a contact address (`mailto:` or an `https://` URL) that push services can use. Without it, `NVR_PUBLIC_URL` is used when it is HTTPS.
-- Deliveries run in the background worker and retry with backoff. A device the push service reports gone is removed.
-- The thumbnail is fetched through a link that expires after 30 minutes and names only that alarm. It carries no session or API token.
+- Deliveries run in the background worker and retry with backoff. A device the push service reports gone, or whose keys no longer match (`401`, `403`, `404` or `410`), is removed. Sent and failed deliveries are kept for 7 days.
+- The thumbnail is fetched through a link that expires after 2 hours and names only that alarm. It carries no session or API token.
 
-The NVR must be able to reach the push services on the internet (for example `fcm.googleapis.com`, `updates.push.services.mozilla.com` and `web.push.apple.com`) for notifications to arrive.
+The NVR must be able to reach the push services on the internet (for example `fcm.googleapis.com`, `updates.push.services.mozilla.com` and `web.push.apple.com`) for notifications to arrive. Push endpoints must use HTTPS and are checked like webhook receivers: DNS names are resolved and private, loopback and link-local destinations are rejected before each delivery.
 
 ## Webhooks
 

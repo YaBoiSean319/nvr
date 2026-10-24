@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -105,31 +102,7 @@ def get_thumbnail(token: str) -> Response:
         alarm_id = push.verify_thumbnail_token(token)
     except LookupError as exc:
         raise HTTPException(status_code=410, detail=str(exc)) from exc
-    from app.retention import acquire_playback, release_playback
-    from app.storage import recording_file_path
-
-    with connect() as db:
-        alarm = db.execute("SELECT camera_id,occurred_at FROM alarms WHERE id=?", (alarm_id,)).fetchone()
-        segment = db.execute(
-            "SELECT relative_path,starts_at FROM recording_segments WHERE camera_id=? AND starts_at<=? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at DESC LIMIT 1",
-            (alarm["camera_id"], alarm["occurred_at"], alarm["occurred_at"])).fetchone() if alarm else None
-    if segment is None or not shutil.which("ffmpeg"):
-        raise HTTPException(status_code=404, detail="No recorded footage covers this alarm yet")
-    try:
-        path = recording_file_path(segment["relative_path"])
-    except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=404, detail="Recorded footage is unavailable") from exc
-    offset = max(0.0, (datetime.fromisoformat(alarm["occurred_at"]) - datetime.fromisoformat(segment["starts_at"])).total_seconds())
-    acquire_playback(path)
-    try:
-        result = subprocess.run(
-            [shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(path), "-frames:v", "1",
-             "-vf", "scale=640:-2:force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-            capture_output=True, timeout=15, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=503, detail="The thumbnail could not be extracted in time") from exc
-    finally:
-        release_playback(path)
-    if result.returncode != 0 or not result.stdout.startswith(b"\xff\xd8"):
-        raise HTTPException(status_code=404, detail="The thumbnail could not be extracted")
-    return Response(result.stdout, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=600", "X-Content-Type-Options": "nosniff"})
+    image = push.thumbnail(alarm_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="No picture of this alarm is available")
+    return Response(image, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=600", "X-Content-Type-Options": "nosniff"})
