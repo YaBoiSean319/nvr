@@ -10,7 +10,7 @@ const {
 fs.mkdirSync(FIXTURE_DIRECTORY, { recursive: true, mode: 0o700 });
 fs.chmodSync(FIXTURE_DIRECTORY, 0o700);
 try {
-  fs.writeFileSync(FIXTURE_PASSWORD_PATH, require("node:crypto").randomBytes(32).toString("base64url"), { flag: "wx", mode: 0o600 });
+  fs.writeFileSync(FIXTURE_PASSWORD_PATH, `${require("node:crypto").randomBytes(32).toString("base64url")}-7`, { flag: "wx", mode: 0o600 }); // policy: a letter and a number
 } catch (error) {
   if (error.code !== "EEXIST") throw error;
 }
