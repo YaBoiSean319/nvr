@@ -18,7 +18,7 @@ Zones and lines use fractions of the frame and are drawn over a recorded frame f
 
 ## One event per object
 
-The rules worker evaluates each object's whole track, so an object produces at most one event per rule, however many frames it meets the condition in. The event is the earliest moment that meets the condition, falls inside the schedule and is not within the cooldown of another event on that camera. It records the rule, camera, track, object class, time and box.
+The rules worker evaluates each object's whole track, so an object produces at most one event per rule, however many frames it meets the condition in. The event is the earliest moment that meets the condition, falls inside the schedule and is not within the cooldown of another event on that camera. It records the rule, camera, track, object class, time and box. Each event raises an [alarm](alarms.md).
 
 A saved rule never fires for moments before it was saved. Editing, enabling or disabling a rule applies to the running worker within a second, without a restart. Upgrading an installation does not evaluate detections stored before the upgrade.
 

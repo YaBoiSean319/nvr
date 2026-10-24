@@ -195,11 +195,14 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
         try:
             with connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                current=db.execute("SELECT id,camera_id,relative_path,ends_at,size_bytes FROM recording_segments WHERE id=?",(row["id"],)).fetchone()
+                current=db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments WHERE id=?",(row["id"],)).fetchone()
                 if current is None:
                     continue
                 active=db.execute("SELECT 1 FROM recording_holds WHERE segment_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(row["id"],now.astimezone(timezone.utc).isoformat())).fetchone()
                 if active:
+                    continue
+                from .alarms import protects_footage
+                if protects_footage(db,current["camera_id"],current["starts_at"],current["ends_at"],now):
                     continue
                 reserved=db.execute(
                     "SELECT 1 FROM export_sources s JOIN exports e ON e.id=s.export_id "
