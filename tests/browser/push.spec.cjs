@@ -2,6 +2,9 @@
 // that alarm; each person chooses what notifies them.
 const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
 
+// Chromium's headless shell never shows notifications; full Chromium in headless mode does.
+test.use({ channel: "chromium" });
+
 async function controlledRegistration(page) {
   await page.evaluate(() => navigator.serviceWorker.ready);
   if (!(await page.evaluate(() => Boolean(navigator.serviceWorker.controller)))) await page.reload();
