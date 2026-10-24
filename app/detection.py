@@ -350,8 +350,11 @@ async def _raw_frames(source: str, fps: float):
 
 
 class DetectionManager:
-    def __init__(self, detector_factory: Callable[..., Any] = OpenVINODetector):
+    def __init__(self, detector_factory: Callable[..., Any] = OpenVINODetector,
+                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.detector_factory = detector_factory
+        # When each analysed frame's results are known.
+        self.clock = clock
         self.detector: Any | None = None
         self._detectors: dict[tuple[str, str, str], Any] = {}
         self._model_lock = asyncio.Lock()
@@ -360,8 +363,6 @@ class DetectionManager:
         self.task_configs: dict[str, tuple[Any, ...]] = {}
         self.configuration_task: asyncio.Task[None] | None = None
         self.stopping = False
-        # When each analysed frame's results are known; tests replace it with a fixture clock.
-        self.clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     async def start(self) -> None:
         self.stopping = False
@@ -497,7 +498,13 @@ class DetectionManager:
                     model = {"model_id": str(config["model_id"]), "model_version": str(config["model_version"]), "provider": str(config["provider"])}
                     record_observations(camera_id, observations, at, **model)
                     with connect() as db:
-                        record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
+                        db.execute("BEGIN IMMEDIATE")
+                        try:
+                            record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
+                        except BaseException:
+                            db.execute("ROLLBACK")
+                            raise
+                        db.execute("COMMIT")
                 if not self.stopping:
                     raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
             except asyncio.CancelledError:

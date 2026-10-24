@@ -205,6 +205,8 @@ def delete_archived_camera_footage(
         if not unlink_many_if_unleased(paths):
             raise HTTPException(status_code=409, detail="Archived camera footage is currently being played")
         db.execute("DELETE FROM recording_segments WHERE camera_id=?", (camera_id,))
+        # Including detections between motion clips: nothing of this camera's recorded activity remains.
+        db.execute("DELETE FROM ai_tracks WHERE camera_id=?", (camera_id,))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "delete_camera_footage", "camera", camera_id,
                     json.dumps({"segments_deleted": len(segments)}, separators=(",", ":"))))

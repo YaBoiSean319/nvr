@@ -89,9 +89,8 @@ class DetectionTrackTests(unittest.TestCase):
                 finished.set()
                 await asyncio.Event().wait()  # the camera stays connected without new frames
 
-            manager = DetectionManager()
+            manager = DetectionManager(clock=clock)
             manager.detector = scene.SceneDetector()
-            manager.clock = clock
             with patch("app.detection._raw_frames", footage_frames):
                 await manager.start()
                 await asyncio.wait_for(finished.wait(), timeout=20)
@@ -204,6 +203,36 @@ class DetectionTrackTests(unittest.TestCase):
             self.assertEqual(_parse(track["first_seen_at"]), middle)
         detail = self.client.get(f"/api/ai/tracks/{tracks[0]['id']}").json()
         self.assertEqual(len(detail["detections"]), 15)
+
+    def test_tracking_continues_after_footage_under_an_active_track_is_deleted(self):
+        from app.tracks import Tracker, record_detections
+
+        detector, tracker = scene.SceneDetector(), Tracker()
+        start = datetime.now(timezone.utc)
+        times = scene.frame_times(start)
+        model = {"model_id": "fixture", "model_version": "1", "provider": "CPU"}
+        segment = self._add_segment(start, times[10])
+        for index in range(10):
+            with connect() as db:
+                record_detections(db, self.camera_id, detector.infer(scene.frame(index), 0.5), times[index], tracker, frame=scene.frame(index), **model)
+        self.assertEqual(self.client.delete(f"/api/cameras/{self.camera_id}/segments/{segment}").status_code, 204)
+        for index in range(10, 20):
+            with connect() as db:
+                record_detections(db, self.camera_id, detector.infer(scene.frame(index), 0.5), times[index], tracker, frame=scene.frame(index), **model)
+        self.scene_start = start
+        tracks = self._tracks()
+        self.assertEqual(len(tracks), len(scene.OBJECTS))
+        self.assertTrue(all(track["detection_count"] == 10 for track in tracks), tracks)
+
+    def test_deleting_an_archived_cameras_footage_removes_all_its_detections(self):
+        self._analyse_footage()
+        middle = self.scene_start + scene.FRAME_INTERVAL * 15
+        self._add_segment(middle, middle + scene.FRAME_INTERVAL * 2)  # motion clip; the rest is uncovered
+        with connect() as db:
+            db.execute("UPDATE cameras SET archived_at=?,enabled=0 WHERE id=?", (_iso(datetime.now(timezone.utc)), self.camera_id))
+        deleted = self.client.request("DELETE", f"/api/cameras/{self.camera_id}/footage", json={"confirm_camera_name": "Loading dock"})
+        self.assertEqual(deleted.status_code, 204, deleted.text)
+        self.assertEqual(self._tracks(), [])
 
     def test_retention_expiry_removes_detections_and_tracks(self):
         from app.retention import cleanup_expired_recordings

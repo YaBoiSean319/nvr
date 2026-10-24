@@ -125,17 +125,17 @@ def record_detections(
     """Store one frame's detections and return the track id of each."""
     stamp = at.astimezone(timezone.utc).isoformat()
     track_ids: list[str] = []
-    for item, (track_id, is_new) in zip(detections, tracker.assign(detections, at, frame), strict=True):
-        if is_new:
-            db.execute(
-                "INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES(?,?,?,?,?,?,?,?)",
-                (track_id, camera_id, item["label"], stamp, stamp, model_id, model_version, provider),
-            )
+    for item, (track_id, _) in zip(detections, tracker.assign(detections, at, frame), strict=True):
+        # Also recreates a track whose earlier detections were deleted with their footage mid-track.
+        db.execute(
+            "INSERT OR IGNORE INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES(?,?,?,?,?,?,?,?)",
+            (track_id, camera_id, item["label"], stamp, stamp, model_id, model_version, provider),
+        )
         box = item["box"]
         db.execute(
             "INSERT INTO ai_detections(camera_id,track_id,detected_at,label,confidence,box_x,box_y,box_width,box_height,attributes_json,model_id,model_version,provider) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (camera_id, track_id, stamp, item["label"], float(item["confidence"]), box["x"], box["y"], box["width"], box["height"],
+            (camera_id, track_id, stamp, item["label"], min(1.0, max(0.0, float(item["confidence"]))), box["x"], box["y"], box["width"], box["height"],
              json.dumps(item.get("attributes") or {}, separators=(",", ":"), sort_keys=True), model_id, model_version, provider),
         )
         track_ids.append(track_id)

@@ -226,11 +226,13 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             failed += 1
     # Deleting footage deletes its detections; detections no footage covers expire on the same schedule.
     from .tracks import purge_expired_detections
-    try:
-        with connect() as db:
-            for camera in db.execute("SELECT DISTINCT camera_id FROM ai_tracks").fetchall():
-                days,_=effective_retention(db,camera["camera_id"])
-                purge_expired_detections(db,camera["camera_id"],now-timedelta(days=days))
-    except sqlite3.Error:
-        failed += 1
+    with connect() as db:
+        cameras=[row[0] for row in db.execute("SELECT DISTINCT camera_id FROM ai_tracks")]
+    for camera_id in cameras:
+        try:
+            with connect() as db:
+                days,_=effective_retention(db,camera_id)
+                purge_expired_detections(db,camera_id,now-timedelta(days=days))
+        except sqlite3.Error:
+            failed += 1
     return {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "skipped_playback": skipped_leased, "failed": failed}

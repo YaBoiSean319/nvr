@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.principal import CurrentUser, requires_scope
+from app.principal import CurrentUser
 from app.store import connect
 from app.tracks import detection_view, iter_unanalyzed, track_view
 
@@ -31,7 +31,6 @@ def _require_camera(db, camera_id: str) -> None:
 
 
 @router.get("/api/ai/detections")
-@requires_scope("read")
 def list_detections(
     _: CurrentUser,
     camera_id: str = Query(max_length=64),
@@ -61,7 +60,6 @@ def list_detections(
 
 
 @router.get("/api/ai/tracks")
-@requires_scope("read")
 def list_tracks(
     _: CurrentUser,
     camera_id: str = Query(max_length=64),
@@ -87,7 +85,6 @@ def list_tracks(
 
 
 @router.get("/api/ai/tracks/{track_id}")
-@requires_scope("read")
 def get_track(track_id: str, _: CurrentUser) -> dict[str, object]:
     with connect() as db:
         track = db.execute("SELECT * FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
