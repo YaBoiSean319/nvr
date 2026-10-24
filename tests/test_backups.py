@@ -80,6 +80,21 @@ class BackupTests(unittest.TestCase):
         with connect() as db:
             self.assertIsNone(db.execute("SELECT 1 FROM incidents WHERE fault_type='backup' AND fault_active=1").fetchone())
 
+    def test_passphrase_can_come_from_a_secret_file(self):
+        os.environ.pop("NVR_BACKUP_PASSPHRASE")
+        secret_file = Path(self.temporary.name) / "backup-passphrase"
+        secret_file.write_text(f"{PASSPHRASE}\n", encoding="utf-8")
+        self.previous.setdefault("NVR_BACKUP_PASSPHRASE_FILE", os.environ.get("NVR_BACKUP_PASSPHRASE_FILE"))
+        os.environ["NVR_BACKUP_PASSPHRASE_FILE"] = str(secret_file)
+        self.assertIsNone(backup.disabled_reason())
+        self.assertEqual(backup.passphrase(), PASSPHRASE)
+        self._seed()
+        created = backup.create_backup("manual")
+        self.assertEqual([path.name for path in self._files()], [created["file_name"]])
+        # A missing file reads as unset.
+        os.environ["NVR_BACKUP_PASSPHRASE_FILE"] = str(secret_file.with_name("missing"))
+        self.assertIn("NVR_BACKUP_PASSPHRASE", backup.disabled_reason())
+
     def test_requested_backup_runs_in_background_and_is_encrypted(self):
         self._seed()
         with TestClient(create_app()) as client:

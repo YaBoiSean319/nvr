@@ -81,6 +81,20 @@ class BrandingTests(unittest.TestCase):
         self.assertEqual(reset.json()["app_name"],"Workplace NVR")
         self.assertEqual(reset.json()["assets"],{})
 
+    def test_rejected_asset_errors_name_the_asset(self):
+        rejected=self.client.put("/api/settings/branding",json={
+            "app_name":"North Hall","primary_color":"#101820","accent_color":"#f0a020",
+            "assets":{"dark":{"media_type":"image/png","data_base64":base64.b64encode(b"<svg></svg>").decode("ascii")}},
+        })
+        self.assertIn(rejected.status_code,{415,422})
+        self.assertTrue(rejected.json()["detail"].startswith("Dark-theme logo: "),rejected.json())
+        oversized=self.client.put("/api/settings/branding",json={
+            "app_name":"North Hall","primary_color":"#101820","accent_color":"#f0a020",
+            "assets":{"icon":{"media_type":"image/png","data_base64":base64.b64encode(b"x"*(2*1024*1024+1)).decode("ascii")}},
+        })
+        self.assertEqual(oversized.status_code,413)
+        self.assertEqual(oversized.json()["detail"],"Icon: Each branding image must be no larger than 2 MiB")
+
     def test_operator_and_anonymous_cannot_change_branding(self):
         payload={"app_name":"Attempt","primary_color":"#000000","accent_color":"#ffffff"}
         app.dependency_overrides[current_user]=lambda:{"id":2,"username":"operator","role":"operator"}

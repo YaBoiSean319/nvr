@@ -15,6 +15,13 @@ try {
   if (error.code !== "EEXIST") throw error;
 }
 fs.chmodSync(FIXTURE_PASSWORD_PATH, 0o600);
+// Backups read their passphrase from a file so no secret value appears in the server environment.
+const BACKUP_PASSPHRASE_PATH = path.join(FIXTURE_DIRECTORY, "backup-passphrase");
+try {
+  fs.writeFileSync(BACKUP_PASSPHRASE_PATH, require("node:crypto").randomBytes(24).toString("base64url"), { flag: "wx", mode: 0o600 });
+} catch (error) {
+  if (error.code !== "EEXIST") throw error;
+}
 
 const artifactDirectory = path.join(process.cwd(), "test-results");
 fs.mkdirSync(artifactDirectory, { recursive: true });
@@ -56,6 +63,8 @@ const fixtureEnvironment = {
   NVR_BROWSER_PORT: "8765",
   NVR_SEGMENT_SECONDS: "10",
   NVR_DISCOVERY_INTERFACE: "127.0.0.1",
+  NVR_BACKUP_PASSPHRASE_FILE: BACKUP_PASSPHRASE_PATH,
+  NVR_BACKUP_PATH: path.join(FIXTURE_DIRECTORY, "backups"),
 };
 fs.writeFileSync(FIXTURE_ENVIRONMENT_PATH, `${JSON.stringify(fixtureEnvironment, null, 2)}\n`, { mode: 0o600 });
 fs.chmodSync(FIXTURE_ENVIRONMENT_PATH, 0o600);

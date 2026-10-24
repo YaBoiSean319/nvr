@@ -160,6 +160,17 @@ def _decode_branding_asset(asset: BrandingAssetRequest) -> tuple[bytes, str]:
     return data,hashlib.sha256(data).hexdigest()
 
 
+BRANDING_ASSET_LABELS = {"primary": "Primary logo", "light": "Light-theme logo", "dark": "Dark-theme logo", "icon": "Icon"}
+
+
+def _decode_named_asset(key: str, asset: BrandingAssetRequest) -> tuple[bytes, str]:
+    """Validate one upload, naming the asset in any error so the field can show it."""
+    try:
+        return _decode_branding_asset(asset)
+    except HTTPException as exc:
+        raise HTTPException(status_code=exc.status_code, detail=f"{BRANDING_ASSET_LABELS[key]}: {exc.detail}") from exc
+
+
 @router.get("/api/public/branding")
 def get_public_branding() -> dict[str, object]:
     with connect() as db:
@@ -174,7 +185,7 @@ def get_branding_settings(_: Administrator) -> dict[str, object]:
 
 @router.put("/api/settings/branding")
 def save_branding_settings(payload: BrandingSaveRequest, user: Administrator) -> dict[str, object]:
-    validated_assets={key:None if asset is None else _decode_branding_asset(asset) for key,asset in payload.assets.items()}
+    validated_assets={key:None if asset is None else _decode_named_asset(key,asset) for key,asset in payload.assets.items()}
     now=datetime.now(timezone.utc).isoformat()
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")

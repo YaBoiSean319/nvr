@@ -6,13 +6,14 @@ import { keys, useMe, usePublicBranding, useSetupStatus } from "@/api/queries";
 import type { Me } from "@/api/types";
 import { SetupPage } from "@/features/auth/SetupPage";
 import { SignInPage } from "@/features/auth/SignInPage";
-import { AdministratorOnly, NotFound, WorkspacePlaceholder } from "@/features/placeholders/Pages";
+import { AdministratorOnly, NotFound } from "@/features/placeholders/Pages";
 import { LiveWorkspace } from "@/features/live/LiveWorkspace";
 import { useLiveStore } from "@/features/live/store";
 import { CamerasInventory, CamerasShell } from "@/features/admin/cameras/CamerasWorkspace";
 import { useCamerasStore } from "@/features/admin/cameras/store";
 import { AddCameras } from "@/features/admin/cameras/add/AddCameras";
 import { GroupsWorkspace } from "@/features/admin/groups/GroupsWorkspace";
+import { SettingsWorkspace } from "@/features/settings/SettingsWorkspace";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
 import { Shell } from "@/features/shell/Shell";
@@ -42,7 +43,8 @@ function router(me: Me) {
               { path: "*", element: <NotFound /> },
             ],
           },
-          { path: "settings/*", element: <AdminRoute me={me}><WorkspacePlaceholder title="Settings" legacyHint="Settings are available in the current interface." /></AdminRoute> },
+          { path: "settings", element: <AdminRoute me={me}><Navigate to="/settings/general" replace /></AdminRoute> },
+          { path: "settings/:category", element: <AdminRoute me={me}><SettingsWorkspace /></AdminRoute> },
           { path: "*", element: <NotFound /> },
         ],
       },

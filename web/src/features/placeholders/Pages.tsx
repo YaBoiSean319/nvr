@@ -1,17 +1,5 @@
 import { Link } from "react-router";
 
-/** Workspaces not yet rebuilt point to the current interface instead of pretending to work. */
-export function WorkspacePlaceholder({ title, legacyHint }: { title: string; legacyHint: string }) {
-  return (
-    <section className="placeholder" aria-labelledby="placeholder-title">
-      <h1 id="placeholder-title">{title}</h1>
-      <p>This workspace is being rebuilt in the new interface.</p>
-      <p className="muted">{legacyHint}</p>
-      <a className="button" href="/">Open the current interface</a>
-    </section>
-  );
-}
-
 export function AdministratorOnly() {
   return (
     <section className="placeholder" aria-labelledby="forbidden-title">

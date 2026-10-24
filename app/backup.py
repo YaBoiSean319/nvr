@@ -61,7 +61,13 @@ class BackupError(RuntimeError):
 # --- configuration ------------------------------------------------------------
 
 def passphrase() -> str | None:
+    """The backup passphrase from NVR_BACKUP_PASSPHRASE, or from the file NVR_BACKUP_PASSPHRASE_FILE names."""
     value = os.environ.get("NVR_BACKUP_PASSPHRASE", "")
+    if not value and os.environ.get("NVR_BACKUP_PASSPHRASE_FILE"):
+        try:
+            value = Path(os.environ["NVR_BACKUP_PASSPHRASE_FILE"]).read_text(encoding="utf-8").strip()
+        except OSError:
+            value = ""
     return value or None
 
 
@@ -78,7 +84,7 @@ def keep() -> int:
 
 def disabled_reason() -> str | None:
     if passphrase() is None:
-        return "Set NVR_BACKUP_PASSPHRASE to enable encrypted configuration backups; no unencrypted backup is ever written."
+        return "Set NVR_BACKUP_PASSPHRASE (or NVR_BACKUP_PASSPHRASE_FILE) to enable encrypted configuration backups; no unencrypted backup is ever written."
     if len(passphrase() or "") < 16:
         return "NVR_BACKUP_PASSPHRASE must be at least 16 characters."
     return None
