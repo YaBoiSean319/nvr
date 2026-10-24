@@ -17,6 +17,7 @@ function seedFixtures(count, options = {}) {
   if (options.footage) args.push("--footage");
   if (options.longNames) args.push("--long-names");
   if (options.detections) args.push("--detections");
+  if (options.alarm) args.push("--alarm");
   for (const [index, url] of Object.entries(options.streams ?? {})) args.push("--stream", `${index}=${url}`);
   for (const index of options.audio ?? []) args.push("--audio", String(index));
   const result = spawnSync("python", args, {

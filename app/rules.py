@@ -15,7 +15,8 @@ A condition is evaluated over a whole track, so each object produces at most one
 rule event per rule. The earliest moment that meets the condition, falls inside
 the rule's schedule and is not within the cooldown of another event on the same
 camera becomes the event. A saved rule never fires for moments before it was last
-saved. Test mode replays the same evaluation over stored tracks without writing.
+saved. Every rule event raises an alarm (see ``app.alarms``). Test mode replays
+the same evaluation over stored tracks without writing.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
+from .alarms import create_alarm
 from .scheduling import mode_at
 from .store import connect
 
@@ -253,12 +255,15 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
 
                 moment = choose_moment(rule, moments, cooled)
                 if moment is not None:
-                    db.execute(
+                    event_id = str(uuid.uuid4())
+                    inserted = db.execute(
                         "INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) "
                         "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                        (str(uuid.uuid4()), rule.id, rule.name, track["camera_id"], track["id"], moment.detection_id, track["label"],
+                        (event_id, rule.id, rule.name, track["camera_id"], track["id"], moment.detection_id, track["label"],
                          rule.condition_type, moment.at.isoformat(), json.dumps(moment.box, separators=(",", ":"))),
-                    )
+                    ).rowcount
+                    if inserted:
+                        create_alarm(db, event_id)
             db.execute("UPDATE rules_cursor SET last_detection_id=? WHERE singleton_id=1", (fresh[-1]["id"],))
         except BaseException:
             db.execute("ROLLBACK")
