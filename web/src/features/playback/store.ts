@@ -162,7 +162,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   setExportCameraIds: exportCameraIds => set({ exportCameraIds }),
   restore: (username, available, defaults) => {
     const saved = readSaved(username);
-    const cameraIds = (saved?.cameraIds ?? []).filter(id => available.has(id)).slice(0, MAX_DISPLAYED_CAMERAS);
+    // Cameras someone chose while the investigation was still being restored are kept too.
+    const chosen = get().cameraIds.filter(id => available.has(id));
+    const restored = (saved?.cameraIds ?? []).filter(id => available.has(id) && !chosen.includes(id));
+    const cameraIds = [...restored, ...chosen].slice(0, MAX_DISPLAYED_CAMERAS);
     set({
       cameraIds,
       draft: saved?.draft ?? defaults,
