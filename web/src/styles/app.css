@@ -574,3 +574,7 @@
 .wall-setup { min-height: 100vh; display: grid; place-items: center; padding: var(--n-space-3); background: var(--n-bg); }
 .wall-panel { width: min(100%, 32rem); display: grid; gap: var(--n-space-3); padding: var(--n-space-4, 24px); border: 1px solid var(--n-line); border-radius: var(--n-radius); background: var(--n-panel); }
 .wall-panel h1 { margin: 0; font-size: 20px; }
+
+.rule-action { display: grid; gap: var(--n-space-2); padding: var(--n-space-2) var(--n-space-3); border: 1px solid var(--n-line); border-radius: var(--n-radius); }
+.rule-action-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--n-space-2); }
+.rule-action-head .button { margin-left: auto; }

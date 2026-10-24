@@ -10,6 +10,7 @@ import { ZoneEditor } from "../cameras/ZoneEditor";
 import { guarded } from "../drafts";
 import { TabFooter } from "../TabFooter";
 import { failureText, useTabDraft } from "../tabDraft";
+import { ActionsEditor, DeliveryLog } from "./ActionsEditor";
 import {
   CONDITION_LABEL, TRAVEL_LABEL, createRule, definitionOf, definitionProblem, deleteRule, listRules, newRule, ruleKeys, switchCondition, testRule, updateRule,
   type Condition, type ObjectClass, type Rule, type RuleDefinition, type TestResult, type TravelDirection,
@@ -240,6 +241,8 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
           <p className="muted field-hint">Brings the alarm's camera and its neighbours into Live for people who turned alarm pop-in on, and onto video walls.</p>
         </fieldset>
 
+        <ActionsEditor actions={draft.actions} cameras={live} onChange={actions => tab.change({ actions })} />
+
         <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} blocked={problem} />
       </form>
 
@@ -254,6 +257,9 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
           <div role="status">
             <p><strong>{test.result.count === 0 ? "The rule would not have fired." : `The rule would have fired ${test.result.count} time${test.result.count === 1 ? "" : "s"}.`}</strong></p>
             <p className="muted field-hint">{test.result.coverage_note}</p>
+            {test.result.actions.length ? (
+              <p className="field-hint">Each event would also run, but test mode ran none of them: {test.result.actions.map(action => action.name).join(", ")}.</p>
+            ) : null}
             {test.result.events.length ? (
               <table className="zone-table rule-test-table">
                 <thead><tr><th scope="col">When</th><th scope="col">Camera</th><th scope="col">Object</th></tr></thead>
@@ -267,6 +273,8 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
           </div>
         ) : null}
       </section>
+
+      {rule ? <DeliveryLog ruleId={rule.id} when={when} /> : null}
 
       {rule ? (
         <>
