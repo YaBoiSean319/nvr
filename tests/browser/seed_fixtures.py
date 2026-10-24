@@ -123,6 +123,24 @@ def _seed_detections(db: sqlite3.Connection, camera_id: str) -> dict[str, object
     return {"camera_id": camera_id, "scene_start": start.isoformat()}
 
 
+def _seed_alarm(db: sqlite3.Connection, camera_id: str, anchor: str) -> dict[str, object]:
+    """A new alarm from a gate rule on camera 1, 30 seconds into its first recorded interval."""
+    from app.alarms import create_alarm
+
+    rule_id = str(uuid.uuid5(NAMESPACE, "rule-gate"))
+    occurred = (datetime.fromisoformat(anchor) + timedelta(seconds=30)).isoformat()
+    db.execute(
+        "INSERT INTO rules(id,name,camera_ids_json,condition_type,condition_json,classes_json,active_from) VALUES(?,?,?,?,?,?,?)",
+        (rule_id, "Gate entry", json.dumps([camera_id]), "zone_entry", json.dumps({"zone": {"x": 0, "y": 0.6, "width": 0.3, "height": 0.4}}), '["vehicle"]', anchor),
+    )
+    event_id = str(uuid.uuid5(NAMESPACE, "rule-event-gate"))
+    db.execute(
+        "INSERT INTO rule_events(id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?)",
+        (event_id, rule_id, "Gate entry", camera_id, "fixture-track", "vehicle", "zone_entry", occurred, '{"x":0.1,"y":0.7,"width":0.2,"height":0.15}'),
+    )
+    return {"alarm_id": create_alarm(db, event_id), "rule_id": rule_id, "occurred_at": occurred}
+
+
 def seed_fresh_install() -> dict[str, object]:
     """An installation before first-run setup: no accounts, default appearance."""
     initialize()
@@ -146,7 +164,7 @@ def _write_manifest(manifest: dict[str, object]) -> dict[str, object]:
 
 def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False, extra_group: bool = False,
                   streams: dict[int, str] | None = None, audio_cameras: set[int] | None = None,
-                  footage: bool = False, long_names: bool = False, detections: bool = False) -> dict[str, object]:
+                  footage: bool = False, long_names: bool = False, detections: bool = False, alarm: bool = False) -> dict[str, object]:
     initialize()
     with connect() as db:
         _reset_site_appearance(db)
@@ -173,6 +191,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DELETE FROM export_sources")
         db.execute("DELETE FROM exports")
         db.execute("DELETE FROM rules")
+        db.execute("UPDATE alarm_settings SET resolved_footage_days=30 WHERE singleton_id=1")
         db.execute("DELETE FROM live_workspace_states")
         db.execute("DELETE FROM viewer_layouts")
         db.execute("DELETE FROM shared_viewer_layouts")
@@ -265,7 +284,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
             )
 
         manifest = {
-            "footage": _seed_footage(db, cameras) if footage and cameras else None,
+            "footage": _seed_footage(db, cameras) if (footage or alarm) and cameras else None,
             "detections": _seed_detections(db, cameras[0]) if detections and cameras else None,
             "camera_count": count,
             "camera_ids": cameras,
@@ -278,6 +297,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
             "discovery_linkable_id": DISCOVERY_LINKABLE_ID,
             "discovery_linked_id": DISCOVERY_LINKED_ID if linked_id else None,
         }
+        if alarm and cameras:
+            manifest["alarm"] = _seed_alarm(db, cameras[0], manifest["footage"]["anchor"])
     return _write_manifest(manifest)
 
 
@@ -293,6 +314,7 @@ def main() -> None:
     parser.add_argument("--footage", action="store_true", help="give cameras 1 and 2 generated recorded intervals in the past hour")
     parser.add_argument("--long-names", action="store_true", help="give every camera a long name")
     parser.add_argument("--detections", action="store_true", help="store the detection fixture's scene on camera 1, an hour ago")
+    parser.add_argument("--alarm", action="store_true", help="give camera 1 footage and a new alarm 30 seconds into it")
     arguments = parser.parse_args()
     if arguments.fresh_install:
         seed_fresh_install()
@@ -302,7 +324,7 @@ def main() -> None:
     streams = {int(index): url for index, url in (item.split("=", 1) for item in arguments.stream)}
     seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save, extra_group=arguments.extra_group,
                   streams=streams, audio_cameras=set(arguments.audio), footage=arguments.footage, long_names=arguments.long_names,
-                  detections=arguments.detections)
+                  detections=arguments.detections, alarm=arguments.alarm)
 
 
 if __name__ == "__main__":

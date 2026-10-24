@@ -1,7 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "@/api/client";
-import { failureText } from "@/features/admin/tabDraft";
+import { TabFooter } from "@/features/admin/TabFooter";
+import { alarmKeys } from "@/features/alarms/api";
+import { failureText, useTabDraft } from "@/features/admin/tabDraft";
 import { formatRelative } from "@/lib/time";
 
 interface Volume {
@@ -111,6 +113,43 @@ export function StorageSettings() {
           </>
         ) : <p className="muted">{backups.error ? failureText(backups.error) : "Loading…"}</p>}
       </section>
+      <AlarmFootage />
     </div>
+  );
+}
+
+/** How long a resolved alarm keeps its footage beyond the camera's retention. */
+function AlarmFootage() {
+  const client = useQueryClient();
+  const settings = useQuery({ queryKey: alarmKeys.settings, queryFn: ({ signal }) => api<{ resolved_footage_days: number }>("/api/alarm-settings", { signal }) });
+  const tab = useTabDraft(settings.data, {
+    label: "Alarm footage",
+    editable: true,
+    save: async (draft, base) => {
+      try {
+        const saved = await api<{ resolved_footage_days: number }>("/api/alarm-settings", { method: "PUT", body: draft });
+        client.setQueryData(alarmKeys.settings, saved);
+        return { ok: true, base: saved, outcome: { tone: "good", text: "Saved." } };
+      } catch (error) {
+        return { ok: false, base, outcome: { tone: "bad", text: `Not saved: ${failureText(error)}.` } };
+      }
+    },
+  });
+  const days = tab.draft?.resolved_footage_days;
+  return (
+    <form className="field-group" aria-label="Alarm footage" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
+      <h2 className="field-heading">Alarm footage</h2>
+      <p className="muted field-hint">Footage around an alarm is kept, whatever the camera's retention, until the alarm is resolved and then for this many days.</p>
+      {tab.draft ? (
+        <>
+          <label className="field"><span>Days to keep after resolution</span>
+            <input type="number" min={0} max={3650} value={Number.isNaN(days) ? "" : days}
+                   onChange={event => tab.change({ resolved_footage_days: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
+          </label>
+          <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert}
+                     blocked={days !== undefined && days >= 0 && days <= 3650 && Number.isInteger(days) ? null : "Enter a whole number of days from 0 to 3650."} />
+        </>
+      ) : <p className="muted">{settings.error ? failureText(settings.error) : "Loading…"}</p>}
+    </form>
   );
 }
