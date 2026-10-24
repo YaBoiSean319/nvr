@@ -21,17 +21,25 @@ test("a pushed alarm shows a notification whose click opens that alarm", async (
   // Deliver a push to the installed worker the way a push service would.
   const session = await context.newCDPSession(page);
   const registrations = [];
+  const versions = [];
   session.on("ServiceWorker.workerRegistrationUpdated", event => registrations.push(...event.registrations));
+  session.on("ServiceWorker.workerVersionUpdated", event => versions.push(...event.versions));
   await session.send("ServiceWorker.enable");
   await expect.poll(() => registrations.find(item => item.scopeURL === `${baseURL}/` && !item.isDeleted)).toBeTruthy();
   const registrationId = registrations.find(item => item.scopeURL === `${baseURL}/` && !item.isDeleted).registrationId;
+  await expect.poll(() => versions.some(version => version.registrationId === registrationId && version.status === "activated")).toBe(true);
   const message = { alarm_id: alarmId, title: "Gate entry: Camera 001", body: "Vehicle at 10:00:00", url: `/?alarm=${alarmId}`, thumbnail_url: "/api/push/thumbnails/x" };
-  await session.send("ServiceWorker.deliverPushMessage", { origin: baseURL, registrationId, data: JSON.stringify(message) });
-
-  await expect.poll(async () => page.evaluate(async () => {
+  const shown = () => page.evaluate(async () => {
     const registration = await navigator.serviceWorker.ready;
     return (await registration.getNotifications()).map(item => ({ title: item.title, body: item.body, tag: item.tag, url: item.data && item.data.url }));
-  })).toEqual([{ title: "Gate entry: Camera 001", body: "Vehicle at 10:00:00", tag: `alarm-${alarmId}`, url: `/?alarm=${alarmId}` }]);
+  });
+  // A push delivered while the browser is still starting the worker can be dropped, as a push service
+  // may redeliver; a redelivery replaces the notification (same tag), so at most one is ever shown.
+  for (let attempt = 0; attempt < 3 && !(await shown()).length; attempt += 1) {
+    await session.send("ServiceWorker.deliverPushMessage", { origin: baseURL, registrationId, data: JSON.stringify(message) });
+    await expect.poll(async () => (await shown()).length, { timeout: 4_000 }).toBe(1).catch(() => undefined);
+  }
+  expect(await shown()).toEqual([{ title: "Gate entry: Camera 001", body: "Vehicle at 10:00:00", tag: `alarm-${alarmId}`, url: `/?alarm=${alarmId}` }]);
 
   // Clicking the notification opens its address; that address opens the alarm and tidies itself.
   await page.goto(`/?alarm=${alarmId}`);
