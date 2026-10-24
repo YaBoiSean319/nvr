@@ -115,10 +115,14 @@ test("Recording & storage: volume health, backup status and an on-demand backup"
   await openSettings(page, "Recording & storage");
   await expect(page.getByRole("region", { name: "Storage volumes" })).toContainText("archive");
   const backups = page.getByRole("region", { name: "Configuration backups" });
-  await expect(backups).toContainText("No backup has completed yet.");
+  // A fresh fixture has no backup run today, so the background worker may already have taken
+  // the day's scheduled catch-up backup (it checks every 30 seconds); either state is correct.
+  await expect(backups).toContainText(/No backup has completed yet\.|Last backup .* \(nvr-config-\S+-scheduled\.nvrbackup/);
+  await expect(backups).not.toContainText("-manual.nvrbackup");
   await press(backups.getByRole("button", { name: "Back up now" }));
   await expect(backups.getByRole("status")).toContainText("Backup finished: succeeded", { timeout: 20_000 });
   await expect(backups).toContainText(/Last backup .* \(nvr-config-/);
+  await expect(backups).toContainText(/nvr-config-\S+-manual\.nvrbackup/);
 
   // Without a passphrase the reason is shown and nothing can be started.
   await page.route("**/api/backups", async route => {
