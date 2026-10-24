@@ -5,7 +5,8 @@ from secrets import token_urlsafe
 from unittest.mock import patch
 
 
-TEST_PASSWORD = f"fixture-{token_urlsafe(24)}"
+# The account password policy needs a letter and a number; a random token alone can lack a digit.
+TEST_PASSWORD = f"fixture-{token_urlsafe(24)}-7"
 TEST_OIDC_CLIENT_SECRET = token_urlsafe(24)
 TEST_OIDC_SESSION_SECRET = token_urlsafe(32)
 TEST_CAMERA_PASSWORD = token_urlsafe(24)
