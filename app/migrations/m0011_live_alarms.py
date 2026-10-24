@@ -21,9 +21,16 @@ _STATEMENTS = (
     )
     """,
     "ALTER TABLE rules ADD COLUMN pop_into_live INTEGER NOT NULL DEFAULT 0 CHECK (pop_into_live IN (0,1))",
-    # Copied from the rule when the alarm is raised, so editing the rule never changes past alarms.
-    "ALTER TABLE alarms ADD COLUMN pop_into_live INTEGER NOT NULL DEFAULT 0 CHECK (pop_into_live IN (0,1))",
-    "CREATE INDEX alarms_pop_in_idx ON alarms(pop_into_live, created_at, id)",
+    # Alarms that pop into Live, in the order they were raised. Written with the alarm, so
+    # editing the rule later never changes past alarms. AUTOINCREMENT never reuses a
+    # sequence number, and SQLite's single writer commits them in order, so a reader's
+    # cursor never skips one.
+    """
+    CREATE TABLE alarm_pop_ins (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        alarm_id TEXT NOT NULL UNIQUE REFERENCES alarms(id) ON DELETE CASCADE
+    )
+    """,
     "ALTER TABLE users ADD COLUMN live_alarm_pop_in INTEGER NOT NULL DEFAULT 0 CHECK (live_alarm_pop_in IN (0,1))",
     """
     CREATE TABLE wall_sessions (

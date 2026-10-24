@@ -96,6 +96,9 @@ class LiveAlarmTests(SceneTestCase):
         self.assertEqual(start["alarms"], [])
 
         first = self.raise_alarm()
+        # A clock that stepped back stamps an earlier time; the alarm is still delivered in turn.
+        with connect() as db:
+            db.execute("UPDATE alarms SET created_at='2000-01-01T00:00:00+00:00' WHERE id=?", (first,))
         self.raise_alarm(quiet_rule)
         with connect() as db:
             db.execute("UPDATE cameras SET archived_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), self.porch))
@@ -158,6 +161,10 @@ class VideoWallTests(SceneTestCase):
         self.assertEqual(wall.get("/api/live/alarm-pop-ins").status_code, 200)
         # Nothing else: administration, changes, or the main interface.
         self.assertEqual(wall.get("/api/rules").status_code, 403)
+        # The token's administrator's own data stays theirs.
+        self.assertEqual(wall.get("/api/me/preferences").status_code, 403)
+        self.assertEqual(wall.get("/api/live/workspace").status_code, 403)
+        self.assertEqual(wall.get("/api/alarms").status_code, 403)
         self.assertEqual(wall.put("/api/me/preferences", json={"theme": "dark"}).status_code, 403)
         self.assertEqual(wall.get("/api/auth/me").status_code, 401)
 

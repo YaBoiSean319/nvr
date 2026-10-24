@@ -29,15 +29,15 @@ class WallSignIn(BaseModel):
 @router.get("/api/cameras/{camera_id}/neighbours")
 def get_neighbours(camera_id: str, _: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+        if not live_alarms.camera_exists(db, camera_id):
             raise HTTPException(status_code=404, detail="Camera not found")
-        return {"camera_ids": live_alarms.neighbours(db, camera_id)}
+        return {"camera_ids": live_alarms.neighbours(db, camera_id), "max": live_alarms.MAX_NEIGHBOURS}
 
 
 @router.put("/api/cameras/{camera_id}/neighbours")
 def put_neighbours(camera_id: str, payload: NeighboursRequest, user: Administrator) -> dict[str, object]:
     try:
-        return {"camera_ids": live_alarms.set_neighbours(camera_id, payload.camera_ids, int(user["id"]))}
+        return {"camera_ids": live_alarms.set_neighbours(camera_id, payload.camera_ids, int(user["id"])), "max": live_alarms.MAX_NEIGHBOURS}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except live_alarms.NeighbourError as exc:
@@ -60,8 +60,7 @@ def wall_sign_in(payload: WallSignIn, response: Response) -> dict[str, object]:
         row = authenticate(payload.token.strip())
     except TokenRejected as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
-    scopes = token_scopes(row)
-    if scopes != WALL_SCOPES:
+    if token_scopes(row) != WALL_SCOPES:
         raise HTTPException(status_code=403, detail="A video wall needs an API token with exactly the read and media scopes")
     raw = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
@@ -70,7 +69,7 @@ def wall_sign_in(payload: WallSignIn, response: Response) -> dict[str, object]:
         db.execute("DELETE FROM wall_sessions WHERE expires_at<=?", (now.isoformat(),))
         db.execute("INSERT INTO wall_sessions(token_hash,api_token_id,expires_at) VALUES(?,?,?)", (token_digest(raw), row["id"], expires.isoformat()))
     response.set_cookie(WALL_COOKIE_NAME, raw, httponly=True, secure=secure_cookie(), samesite="strict", path="/", max_age=WALL_SESSION_DAYS * 86400)
-    return {"name": row["name"], "scopes": sorted(scopes, key=["read", "media"].index)}
+    return _wall_view(row["name"])
 
 
 @router.get("/api/wall/session")
@@ -81,7 +80,7 @@ def wall_session(request: Request) -> dict[str, object]:
     principal = wall_principal(request, raw)
     with connect() as db:
         name = db.execute("SELECT name FROM api_tokens WHERE id=?", (principal.token_id,)).fetchone()["name"]
-    return {"name": name, "scopes": sorted(principal.scopes or (), key=["read", "media"].index)}
+    return _wall_view(name)
 
 
 @router.delete("/api/wall/session", status_code=status.HTTP_204_NO_CONTENT)
@@ -94,3 +93,7 @@ def wall_sign_out(request: Request, response: Response) -> Response:
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
+
+
+def _wall_view(name: str) -> dict[str, object]:
+    return {"name": name, "scopes": ["read", "media"]}

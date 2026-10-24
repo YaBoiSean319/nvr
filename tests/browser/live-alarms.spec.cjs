@@ -19,8 +19,10 @@ test("an alarm brings its camera and neighbours into Live for people who opted i
   seedFixtures(6);
   await signInNext(page, "camera-operator");
   await add(page, 5, 6);
+  // An enlarged tile is part of "exactly".
+  await page.getByRole("group", { name: new RegExp(`^${name(6)}:`) }).dblclick();
   const before = await displayed(page);
-  expect(before).toEqual([name(5), name(6)]);
+  expect(before).toEqual([name(6)]);
 
   // Not opted in: an alarm leaves Live alone.
   raiseAlarm(1, { neighbours: [2, 3] });
@@ -50,10 +52,12 @@ test("an alarm brings its camera and neighbours into Live for people who opted i
   await banner.getByRole("button", { name: "Return to my view" }).click();
   await expect(banner).toHaveCount(0);
   await expect.poll(() => displayed(page)).toEqual(before);
+  await page.keyboard.press("Escape");
+  await expect.poll(() => displayed(page)).toEqual([name(5), name(6)]);
 
   // The alarm layout was never saved as the person's workspace.
   await page.reload();
-  await expect.poll(() => displayed(page)).toEqual(before);
+  await expect.poll(() => displayed(page)).toEqual([name(5), name(6)]);
   await expect(page.getByRole("button", { name: /^Alarm pop-in/ })).toHaveAttribute("aria-pressed", "true");
 });
 

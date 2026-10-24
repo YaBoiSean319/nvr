@@ -6,9 +6,8 @@ import type { Camera } from "@/api/types";
 import { TabFooter } from "../TabFooter";
 import { failureText, useTabDraft } from "../tabDraft";
 
-const MAX_NEIGHBOURS = 15;
-
 interface Draft { camera_ids: string[] }
+interface Neighbours extends Draft { max: number }
 
 const at = (id: string) => `/api/cameras/${encodeURIComponent(id)}/neighbours`;
 
@@ -16,7 +15,7 @@ const at = (id: string) => `/api/cameras/${encodeURIComponent(id)}/neighbours`;
 export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolean }) {
   const client = useQueryClient();
   const queryKey = ["cameras", camera.id, "neighbours"] as const;
-  const neighbours = useQuery({ queryKey, queryFn: ({ signal }) => api<Draft>(at(camera.id), { signal }) });
+  const neighbours = useQuery({ queryKey, queryFn: ({ signal }) => api<Neighbours>(at(camera.id), { signal }) });
   const cameras = useCameras();
   const current = useMemo(() => neighbours.data ? { camera_ids: neighbours.data.camera_ids } : undefined, [neighbours.data]);
   const tab = useTabDraft(current, {
@@ -24,7 +23,7 @@ export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolea
     editable: admin,
     save: async (draft, base) => {
       try {
-        const saved = await api<Draft>(at(camera.id), { method: "PUT", body: draft });
+        const saved = await api<Neighbours>(at(camera.id), { method: "PUT", body: draft });
         client.setQueryData(queryKey, saved);
         return { ok: true, base: saved, outcome: { tone: "good", text: `Saved ${saved.camera_ids.length} neighbouring camera${saved.camera_ids.length === 1 ? "" : "s"}.` } };
       } catch (error) {
@@ -35,6 +34,7 @@ export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolea
   if (neighbours.isPending || cameras.isPending) return <p className="muted">Loading neighbours…</p>;
   if (neighbours.error || !tab.draft) return <p className="notice" data-tone="bad" role="alert">{failureText(neighbours.error, "Neighbours could not be loaded.")}</p>;
   const chosen = tab.draft.camera_ids;
+  const max = neighbours.data!.max;
   const byId = new Map((cameras.data ?? []).map(item => [item.id, item]));
   const others = (cameras.data ?? []).filter(item => item.id !== camera.id && !item.archived_at && !chosen.includes(item.id));
   const move = (index: number, offset: -1 | 1) => {
@@ -49,7 +49,7 @@ export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolea
         When a rule set to pop into Live raises an alarm on {camera.name}, Live shows {camera.name} first and then these cameras, in this order.
       </p>
       <fieldset className="field-group" disabled={!admin}>
-        <legend>Neighbours ({chosen.length} of {MAX_NEIGHBOURS})</legend>
+        <legend>Neighbours ({chosen.length} of {max})</legend>
         {chosen.length ? (
           <ol className="choice-list neighbour-list">
             {chosen.map((id, index) => (
@@ -65,7 +65,7 @@ export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolea
           </ol>
         ) : <p className="muted field-hint">No neighbours: an alarm shows only {camera.name}.</p>}
         <label className="field"><span>Add a neighbour</span>
-          <select value="" disabled={chosen.length >= MAX_NEIGHBOURS || !others.length} onChange={event => event.target.value && tab.change({ camera_ids: [...chosen, event.target.value] })}>
+          <select value="" disabled={chosen.length >= max || !others.length} onChange={event => event.target.value && tab.change({ camera_ids: [...chosen, event.target.value] })}>
             <option value="">{others.length ? "Choose a camera…" : "No other cameras"}</option>
             {others.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>

@@ -12,10 +12,9 @@ const SAVE_DELAY_MS = 600;
  */
 export function useLiveWorkspacePersistence(cameras: Camera[] | undefined) {
   const restored = useLiveStore(store => store.restored);
-  const arrangement = useLiveStore(store => store.arrangement);
+  // While an alarm layout is shown, the person's own arrangement is the one it will return to.
+  const arrangement = useLiveStore(store => store.alarmLayout?.saved.arrangement ?? store.arrangement);
   const sidebarOpen = useLiveStore(store => store.sidebarOpen);
-  // An alarm layout is temporary: the person's own workspace stays saved as it was.
-  const alarmShown = useLiveStore(store => store.alarmLayout !== null);
 
   useEffect(() => {
     if (restored || !cameras) return;
@@ -33,11 +32,11 @@ export function useLiveWorkspacePersistence(cameras: Camera[] | undefined) {
   }, [cameras, restored]);
 
   useEffect(() => {
-    if (!restored || alarmShown) return;
+    if (!restored) return;
     const timer = window.setTimeout(() => {
       const layout = toSaved(arrangement);
       void saveLiveWorkspace({ ...layout, sidebar_collapsed: !sidebarOpen }).catch(() => undefined);
     }, SAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [arrangement, sidebarOpen, restored, alarmShown]);
+  }, [arrangement, sidebarOpen, restored]);
 }

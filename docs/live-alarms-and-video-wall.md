@@ -14,7 +14,7 @@ When an alarm pops in, Live shows a temporary **alarm layout**, with a banner th
 
 - **Return to my view** puts back exactly what was there before: the cameras, their layout, the loaded view and its unsaved changes, and the active and enlarged tile.
 - Alarms that arrive while one is shown **wait their turn**. **Next alarm (n waiting)** shows the next one. Return dismisses the alarms still waiting.
-- The alarm layout is never saved as the person's workspace. Loading a saved view ends it.
+- The alarm layout is never saved as the person's workspace: their own layout stays saved, even if the browser closes while an alarm is shown. Changes made to the alarm layout itself are dropped on Return. Loading a saved view ends the alarm layout.
 - Live's limits apply as always: at most 16 tiles, and the server's live slot limit. Tiles that leave the screen close their streams.
 
 Live checks for new alarms every 2 seconds while it is open. It never replays alarms raised before it opened. People see only alarms on cameras they may view.

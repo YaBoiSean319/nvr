@@ -64,14 +64,14 @@ def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
     occurred = _parse(event["occurred_at"]).astimezone(timezone.utc)
     alarm_id = str(uuid.uuid4())
     stamp = _now()
-    rule = db.execute("SELECT pop_into_live FROM rules WHERE id=?", (event["rule_id"],)).fetchone()
     db.execute(
-        "INSERT INTO alarms(id,rule_event_id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,"
-        "pop_into_live,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO alarms(id,rule_event_id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (alarm_id, event["id"], event["rule_id"], event["rule_name"], event["camera_id"], event["track_id"], event["label"], event["condition_type"],
-         occurred.isoformat(), event["box_json"], (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(),
-         int(bool(rule and rule["pop_into_live"])), stamp, stamp),
+         occurred.isoformat(), event["box_json"], (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(), stamp, stamp),
     )
+    if db.execute("SELECT 1 FROM rules WHERE id=? AND pop_into_live=1", (event["rule_id"],)).fetchone():
+        db.execute("INSERT INTO alarm_pop_ins(alarm_id) VALUES(?)", (alarm_id,))
     _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"]})
     _notify(db, alarm_id, "alarm.created", None)
     from .push import queue_for_alarm

@@ -33,6 +33,19 @@ from .store import connect
 COOKIE_NAME = "nvr_session"
 WALL_COOKIE_NAME = "nvr_wall"
 WALL_SCOPES = frozenset({"read", "media"})
+# A wall acts as its token's administrator, so it may reach only what watching needs: never
+# that person's preferences, workspace or anything else a read token could otherwise see.
+WALL_ROUTES = frozenset({
+    "/api/wall/session",
+    "/api/auth/me",  # Answers 401 for a wall, so the main interface asks for a person to sign in.
+    "/api/cameras",
+    "/api/cameras/{camera_id}/live",
+    "/api/cameras/{camera_id}/live/status",
+    "/api/cameras/{camera_id}/live/stream",
+    "/api/live/views",
+    "/api/live/alarm-pop-ins",
+    "/api/settings/display",
+})
 Role = Literal["administrator", "operator"]
 Scope = Literal["read", "media", "export", "admin"]
 Endpoint = TypeVar("Endpoint", bound=Callable[..., object])
@@ -124,17 +137,18 @@ def _token_principal(request: HTTPConnection, authorization: str) -> Principal:
 
 
 def wall_principal(request: HTTPConnection, raw: str) -> Principal:
+    """Resolve a video wall's session cookie: its token's scopes, on the routes a wall needs."""
     with connect() as db:
         session = db.execute("SELECT api_token_id FROM wall_sessions WHERE token_hash=? AND expires_at>?",
                              (token_digest(raw), datetime.now(timezone.utc).isoformat())).fetchone()
-    if session is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Video wall session expired")
     try:
-        row = usable_token(session["api_token_id"])
-    except TokenRejected as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
-    if not token_scopes(row) <= WALL_SCOPES:
+        row = usable_token(session["api_token_id"]) if session else None
+    except TokenRejected:
+        row = None
+    if row is None or token_scopes(row) != WALL_SCOPES:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Video wall session expired")
+    if getattr(request.scope.get("route"), "path", None) not in WALL_ROUTES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="A video wall can only watch cameras")
     return _scoped(request, row, wall=True)
 
 
