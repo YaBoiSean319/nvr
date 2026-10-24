@@ -103,7 +103,11 @@ test("signing out leaves no credentials, session or camera data in browser stora
     const values = [];
     for (const storage of [localStorage, sessionStorage]) for (let index = 0; index < storage.length; index += 1) values.push(storage.getItem(storage.key(index)));
     for (const name of await caches.keys()) {
-      for (const request of await (await caches.open(name)).keys()) values.push(request.url, await (await (await caches.open(name)).match(request)).text());
+      for (const request of await (await caches.open(name)).keys()) {
+        values.push(request.url);
+        // The shipped scripts and styles are public code; only the cached page could hold data.
+        if (!new URL(request.url).pathname.startsWith("/assets/")) values.push(await (await (await caches.open(name)).match(request)).text());
+      }
     }
     return values.join("\n");
   });
