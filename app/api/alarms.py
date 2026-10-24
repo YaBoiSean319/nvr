@@ -1,6 +1,7 @@
 """The alarm inbox: list, inspect and handle alarms raised by rules."""
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
@@ -63,22 +64,28 @@ def list_alarms(
     rule_id: str | None = Query(default=None, max_length=64),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, object]:
-    clauses, values = [], []
+    # Counts follow the camera and rule filters, across every state.
+    scope, scope_values = [], []
+    for column, value in (("camera_id", camera_id), ("rule_id", rule_id)):
+        if value:
+            scope.append(f"{column}=?")
+            scope_values.append(value)
+    clauses, values = list(scope), list(scope_values)
     if state == "open":
         clauses.append("state IN ('new','acknowledged','assigned')")
     elif state != "all":
         clauses.append("state=?")
         values.append(state)
-    for column, value in (("camera_id", camera_id), ("rule_id", rule_id)):
-        if value:
-            clauses.append(f"{column}=?")
-            values.append(value)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    scoped = " WHERE " + " AND ".join(scope) if scope else ""
     with connect() as db:
         rows = db.execute("SELECT * FROM alarms" + where + " ORDER BY occurred_at DESC,id LIMIT ?", (*values, limit)).fetchall()
-        counts = {row["state"]: row["count"] for row in db.execute("SELECT state,count(*) AS count FROM alarms GROUP BY state")}
+        counts = {row["state"]: row["count"] for row in db.execute("SELECT state,count(*) AS count FROM alarms" + scoped + " GROUP BY state", scope_values)}
+        # Every rule that has raised an alarm, for the rule filter (operators cannot list rules).
+        rules = db.execute("SELECT rule_id AS id,max(rule_name) AS name FROM alarms WHERE rule_id IS NOT NULL GROUP BY rule_id ORDER BY name COLLATE NOCASE").fetchall()
         return {"alarms": [alarms.alarm_view(db, row) for row in rows],
-                "counts": {key: counts.get(key, 0) for key in ("new", "acknowledged", "assigned", "resolved")}}
+                "counts": {key: counts.get(key, 0) for key in ("new", "acknowledged", "assigned", "resolved")},
+                "rules": [dict(rule) for rule in rules]}
 
 
 @router.get("/api/alarms/assignees")
@@ -97,10 +104,17 @@ def get_alarm_settings(_: CurrentUser) -> dict[str, object]:
 @router.put("/api/alarm-settings")
 def put_alarm_settings(payload: AlarmSettingsRequest, user: Administrator) -> dict[str, object]:
     with connect() as db:
-        db.execute("UPDATE alarm_settings SET resolved_footage_days=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
-                   (payload.resolved_footage_days,))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "alarm_settings_updated", "alarm_settings", "1", f'{{"resolved_footage_days":{payload.resolved_footage_days}}}'))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("UPDATE alarm_settings SET resolved_footage_days=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
+                       (payload.resolved_footage_days,))
+            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                       (int(user["id"]), "alarm_settings_updated", "alarm_settings", "1",
+                        json.dumps({"resolved_footage_days": payload.resolved_footage_days}, separators=(",", ":"))))
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
     return {"resolved_footage_days": payload.resolved_footage_days}
 
 

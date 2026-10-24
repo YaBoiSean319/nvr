@@ -65,6 +65,12 @@ class AlarmTests(SceneTestCase):
         self.assertEqual(clip.headers["content-type"], "video/mp4")
         self.assertEqual([entry["action"] for entry in body["history"]], ["created"])
 
+        # Counts follow the camera filter; the rule filter always offers every alarming rule.
+        elsewhere = self.client.get("/api/alarms", params={"camera_id": "another-camera"}).json()
+        self.assertEqual((elsewhere["alarms"], elsewhere["counts"]["new"]), ([], 0))
+        self.assertEqual(elsewhere["rules"], [{"id": self.rule_id, "name": "Gate entry"}])
+        self.assertEqual(self.client.get("/api/alarms", params={"camera_id": self.camera_id}).json()["counts"]["new"], 1)
+
     def operator_client(self):
         from fastapi.testclient import TestClient
         from app.security import hash_password

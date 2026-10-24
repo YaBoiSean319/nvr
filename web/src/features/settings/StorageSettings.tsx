@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "@/api/client";
 import { TabFooter } from "@/features/admin/TabFooter";
+import { alarmKeys } from "@/features/alarms/api";
 import { failureText, useTabDraft } from "@/features/admin/tabDraft";
 import { formatRelative } from "@/lib/time";
 
@@ -120,14 +121,14 @@ export function StorageSettings() {
 /** How long a resolved alarm keeps its footage beyond the camera's retention. */
 function AlarmFootage() {
   const client = useQueryClient();
-  const settings = useQuery({ queryKey: ["alarm-settings"], queryFn: ({ signal }) => api<{ resolved_footage_days: number }>("/api/alarm-settings", { signal }) });
+  const settings = useQuery({ queryKey: alarmKeys.settings, queryFn: ({ signal }) => api<{ resolved_footage_days: number }>("/api/alarm-settings", { signal }) });
   const tab = useTabDraft(settings.data, {
     label: "Alarm footage",
     editable: true,
     save: async (draft, base) => {
       try {
         const saved = await api<{ resolved_footage_days: number }>("/api/alarm-settings", { method: "PUT", body: draft });
-        client.setQueryData(["alarm-settings"], saved);
+        client.setQueryData(alarmKeys.settings, saved);
         return { ok: true, base: saved, outcome: { tone: "good", text: "Saved." } };
       } catch (error) {
         return { ok: false, base, outcome: { tone: "bad", text: `Not saved: ${failureText(error)}.` } };

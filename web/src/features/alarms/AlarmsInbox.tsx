@@ -24,8 +24,6 @@ export function AlarmsInbox({ onNavigate }: { onNavigate: () => void }) {
   const alarms = useAlarms(query);
   const cameras = useCameras();
   const when = useWhen();
-  // Operators cannot list rules, so the rule filter offers the rules seen in alarms.
-  const rules = [...new Map((alarms.data?.alarms ?? []).filter(alarm => alarm.rule_id).map(alarm => [alarm.rule_id!, alarm.rule_name])).entries()];
 
   if (selectedId) return <AlarmDetailView id={selectedId} onBack={() => setSelectedId(null)} onNavigate={onNavigate} />;
   const counts = alarms.data?.counts;
@@ -46,7 +44,7 @@ export function AlarmsInbox({ onNavigate }: { onNavigate: () => void }) {
         <label className="field"><span>Rule</span>
           <select value={query.rule_id} onChange={event => setQuery({ ...query, rule_id: event.target.value })}>
             <option value="">All rules</option>
-            {rules.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            {(alarms.data?.rules ?? []).map(rule => <option key={rule.id} value={rule.id}>{rule.name}</option>)}
           </select>
         </label>
       </form>
@@ -85,14 +83,17 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
   if (alarm.error || !alarm.data) {
     return (
       <div className="alarm-detail">
-        <button type="button" className="button" onClick={onBack}>← All alarms</button>
+        <button type="button" className="button" onClick={onBack}><span aria-hidden="true">← </span>All alarms</button>
         <p className="notice" data-tone="bad" role="alert">{failureText(alarm.error, "The alarm could not be loaded.")}</p>
       </div>
     );
   }
   const data = alarm.data;
   const open = data.state !== "resolved";
-  const run = (next: Parameters<typeof action.mutate>[0], after?: () => void) => action.mutate(next, { onSuccess: () => after?.() });
+  const run = (next: Parameters<typeof action.mutate>[0], after?: () => void) => {
+    action.reset();
+    action.mutate(next, { onSuccess: () => after?.() });
+  };
 
   function addComment(event: FormEvent) {
     event.preventDefault();
@@ -109,7 +110,7 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
   const offset = first ? Math.max(0, (Date.parse(data.clip.starts_at) - Date.parse(first.starts_at)) / 1000) : 0;
   return (
     <article className="alarm-detail" aria-label={`Alarm: ${data.rule_name}`}>
-      <button type="button" className="button" onClick={onBack}>← All alarms</button>
+      <button type="button" className="button" onClick={onBack}><span aria-hidden="true">← </span>All alarms</button>
       <header>
         <h3>{data.rule_name}: {LABEL[data.label]} on {data.camera_name ?? "a removed camera"}</h3>
         <p className="muted">{when(data.occurred_at)} · <span data-state={data.state}>{STATE_LABEL[data.state]}{data.assigned_to ? ` to ${data.assigned_to}` : ""}</span></p>
@@ -122,10 +123,10 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
         <button type="button" className="button" onClick={() => openInPlayback(data)}>Open in Playback</button>
         {data.state === "new" ? <button type="button" className="button" data-variant="primary" disabled={action.isPending} onClick={() => run({ kind: "acknowledge" })}>Acknowledge</button> : null}
       </div>
-      {action.error ? <p className="notice" data-tone="bad" role="alert">{failureText(action.error)}</p> : null}
+      {action.error && !deleting ? <p className="notice" data-tone="bad" role="alert">{failureText(action.error)}</p> : null}
 
       {open ? (
-        <form className="alarm-form" aria-label="Assign alarm" onSubmit={event => { event.preventDefault(); if (assignee) run({ kind: "assign", userId: Number(assignee) }); }}>
+        <form className="alarm-form" aria-label="Assign alarm" onSubmit={event => { event.preventDefault(); if (assignee) run({ kind: "assign", userId: Number(assignee) }, () => setAssignee("")); }}>
           <label className="field"><span>Assign to</span>
             <select value={assignee} onChange={event => setAssignee(event.target.value)}>
               <option value="">Choose a person</option>
@@ -157,8 +158,8 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
       <section aria-label="History" className="alarm-section">
         <h4>History</h4>
         <ol className="plain-list">
-          {data.history.map((entry, index) => (
-            <li key={index}>{ACTION_LABEL[entry.action] ?? entry.action}{entry.actor ? ` by ${entry.actor}` : ""} · {when(entry.occurred_at)}
+          {data.history.map(entry => (
+            <li key={`${entry.occurred_at}-${entry.action}`}>{ACTION_LABEL[entry.action] ?? entry.action}{entry.actor ? ` by ${entry.actor}` : ""} · {when(entry.occurred_at)}
               {typeof entry.details.assigned_to === "string" ? ` · to ${entry.details.assigned_to}` : ""}</li>
           ))}
         </ol>
@@ -170,7 +171,8 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
           <Modal open={deleting} onOpenChange={setDeleting} title="Delete this alarm?"
                  description="The alarm, its comments and history are removed. The audit log keeps a record of the deletion."
                  footer={<><button type="button" className="button" onClick={() => setDeleting(false)}>Cancel</button>
-                   <button type="button" className="button" data-variant="danger" onClick={() => run({ kind: "delete" }, () => { setDeleting(false); onBack(); })}>Delete alarm</button></>}>
+                   <button type="button" className="button" data-variant="danger" disabled={action.isPending}
+                           onClick={() => run({ kind: "delete" }, () => { setDeleting(false); onBack(); })}>Delete alarm</button></>}>
             {action.error ? <p className="notice" data-tone="bad" role="alert">{failureText(action.error)}</p> : null}
           </Modal>
         </>

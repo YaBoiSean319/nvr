@@ -61,14 +61,14 @@ def _notify(db: sqlite3.Connection, alarm_id: str, event_type: str, actor_id: in
 def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
     """Raise the alarm for a rule event, inside the caller's transaction."""
     event = db.execute("SELECT * FROM rule_events WHERE id=?", (rule_event_id,)).fetchone()
-    occurred = _parse(event["occurred_at"])
+    occurred = _parse(event["occurred_at"]).astimezone(timezone.utc)
     alarm_id = str(uuid.uuid4())
     stamp = _now()
     db.execute(
         "INSERT INTO alarms(id,rule_event_id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (alarm_id, event["id"], event["rule_id"], event["rule_name"], event["camera_id"], event["track_id"], event["label"], event["condition_type"],
-         event["occurred_at"], event["box_json"], (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(), stamp, stamp),
+         occurred.isoformat(), event["box_json"], (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(), stamp, stamp),
     )
     _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"]})
     _notify(db, alarm_id, "alarm.created", None)
@@ -156,9 +156,13 @@ def resolved_footage_days(db: sqlite3.Connection) -> int:
     return int(row[0]) if row else 30
 
 
-def protects_footage(db: sqlite3.Connection, camera_id: str, starts_at: str, ends_at: str, now: datetime) -> bool:
+def resolved_kept_since(db: sqlite3.Connection, now: datetime) -> str:
+    """Alarms resolved after this time still keep their footage."""
+    return (now - timedelta(days=resolved_footage_days(db))).astimezone(timezone.utc).isoformat()
+
+
+def protects_footage(db: sqlite3.Connection, camera_id: str, starts_at: str, ends_at: str, kept_since: str) -> bool:
     """Whether an open, or recently resolved, alarm's clip overlaps this recorded interval."""
-    kept_since = (now - timedelta(days=resolved_footage_days(db))).astimezone(timezone.utc).isoformat()
     return db.execute(
         "SELECT 1 FROM alarms WHERE camera_id=? AND clip_starts_at<? AND clip_ends_at>? AND (resolved_at IS NULL OR resolved_at>?) LIMIT 1",
         (camera_id, ends_at, starts_at, kept_since),

@@ -31,12 +31,18 @@ export interface AlarmDetail extends Alarm {
   history: { action: string; actor: string | null; occurred_at: string; details: Record<string, unknown> }[];
 }
 
-export interface AlarmList { alarms: Alarm[]; counts: Record<AlarmState, number> }
+export interface AlarmList { alarms: Alarm[]; counts: Record<AlarmState, number>; rules: { id: string; name: string }[] }
 export interface AlarmQuery { state: AlarmFilter; camera_id: string; rule_id: string }
 
 /** Other people's handling appears within this interval, without a reload. */
 const ALARM_REFRESH_MS = 5_000;
-export const alarmKeys = { all: ["alarms"] as const, list: (query: AlarmQuery) => ["alarms", "list", query] as const, detail: (id: string) => ["alarms", "detail", id] as const };
+export const alarmKeys = {
+  all: ["alarms"] as const,
+  list: (query: AlarmQuery) => ["alarms", "list", query] as const,
+  detail: (id: string) => ["alarms", "detail", id] as const,
+  assignees: ["alarm-assignees"] as const,
+  settings: ["alarm-settings"] as const,
+};
 
 const at = (id: string) => `/api/alarms/${encodeURIComponent(id)}`;
 
@@ -59,7 +65,7 @@ export function useAlarm(id: string | null) {
 
 export function useAssignees(enabled: boolean) {
   return useQuery({
-    queryKey: ["alarms", "assignees"], enabled,
+    queryKey: alarmKeys.assignees, enabled,
     queryFn: ({ signal }) => api<{ users: { id: number; username: string }[] }>("/api/alarms/assignees", { signal }).then(body => body.users),
   });
 }
@@ -83,9 +89,10 @@ export function useAlarmAction(id: string) {
         case "delete": return api<void>(at(id), { method: "DELETE" });
       }
     },
-    onSuccess: result => {
-      if (result) client.setQueryData(alarmKeys.detail(id), result);
-      void client.invalidateQueries({ queryKey: alarmKeys.all });
+    onSuccess: (result, action) => {
+      if (action.kind === "delete") client.removeQueries({ queryKey: alarmKeys.detail(id) });
+      else if (result) client.setQueryData(alarmKeys.detail(id), result);
+      void client.invalidateQueries({ queryKey: [...alarmKeys.all, "list"] });
     },
   });
 }

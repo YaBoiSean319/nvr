@@ -8,6 +8,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .alarms import protects_footage, resolved_kept_since
 from .recording import recordings_path
 from .store import connect
 
@@ -177,8 +178,9 @@ def coverage_summary(db, camera_id: str, root: Path | None = None, now: datetime
 
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
-    removed_segments = removed_bytes = skipped_leased = failed = 0
+    removed_segments = removed_bytes = skipped_leased = skipped_alarm = failed = 0
     with connect() as db:
+        kept_since = resolved_kept_since(db, now)
         expired=db.execute("SELECT id,segment_id FROM recording_holds WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?",(now.astimezone(timezone.utc).isoformat(),)).fetchall()
         for hold in expired:
             db.execute("UPDATE recording_holds SET released_at=expires_at WHERE id=?",(hold["id"],))
@@ -201,8 +203,8 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                 active=db.execute("SELECT 1 FROM recording_holds WHERE segment_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(row["id"],now.astimezone(timezone.utc).isoformat())).fetchone()
                 if active:
                     continue
-                from .alarms import protects_footage
-                if protects_footage(db,current["camera_id"],current["starts_at"],current["ends_at"],now):
+                if protects_footage(db,current["camera_id"],current["starts_at"],current["ends_at"],kept_since):
+                    skipped_alarm+=1
                     continue
                 reserved=db.execute(
                     "SELECT 1 FROM export_sources s JOIN exports e ON e.id=s.export_id "
@@ -238,4 +240,5 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                 purge_expired_detections(db,camera_id,now-timedelta(days=days))
         except sqlite3.Error:
             failed += 1
-    return {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "skipped_playback": skipped_leased, "failed": failed}
+    return {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "skipped_playback": skipped_leased,
+            "kept_for_alarms": skipped_alarm, "failed": failed}
