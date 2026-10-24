@@ -9,6 +9,7 @@ from typing import Annotated, Literal, Union
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app import rule_actions
 from app.principal import Administrator
 from app.rules import Rule, replay
 from app.scheduling import validate_schedule
@@ -88,6 +89,31 @@ class RuleSchedule(BaseModel):
         return self
 
 
+class ActionDefinition(BaseModel):
+    """One rule action. Secrets (url, signing_secret) are write-only: send them to set or
+    change them, leave them out (with the action's id) to keep what is saved."""
+    id: str | None = Field(default=None, max_length=64)
+    type: Literal["webhook", "mqtt", "slack", "teams", "relay"]
+    name: str = Field(min_length=1, max_length=80)
+    enabled: bool = True
+    url: str | None = Field(default=None, max_length=2048)
+    signing_secret: str | None = Field(default=None, max_length=256)
+    allow_private: bool = False
+    topic: str | None = Field(default=None, max_length=1024)
+    retain: bool = False
+    camera_id: str | None = Field(default=None, max_length=64)
+    relay_token: str | None = Field(default=None, max_length=128)
+    duration_seconds: float = Field(default=1.0, ge=0.1, le=rule_actions.MAX_RELAY_SECONDS)
+
+    @field_validator("name")
+    @classmethod
+    def trimmed(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Enter an action name")
+        return value
+
+
 class RuleDefinition(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     enabled: bool = True
@@ -99,6 +125,7 @@ class RuleDefinition(BaseModel):
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
     # Bring the alarm's camera and its neighbours into Live for people who opted in.
     pop_into_live: bool = False
+    actions: list[ActionDefinition] = Field(default_factory=list, max_length=rule_actions.MAX_ACTIONS)
 
     @field_validator("name")
     @classmethod
@@ -135,7 +162,7 @@ def _columns(definition: RuleDefinition) -> tuple[object, ...]:
     )
 
 
-def rule_view(row) -> dict[str, object]:
+def rule_view(row, db) -> dict[str, object]:
     condition = {"type": row["condition_type"], **json.loads(row["condition_json"])}
     return {
         "id": row["id"], "name": row["name"], "enabled": bool(row["enabled"]),
@@ -144,7 +171,15 @@ def rule_view(row) -> dict[str, object]:
         "schedule": json.loads(row["schedule_json"]) if row["schedule_json"] else None,
         "cooldown_seconds": row["cooldown_seconds"], "pop_into_live": bool(row["pop_into_live"]), "active_from": row["active_from"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "actions": rule_actions.action_views(db, row["id"]),
     }
+
+
+def _save_actions(db, rule_id: str, definition: RuleDefinition) -> None:
+    try:
+        rule_actions.save_actions(db, rule_id, [action.model_dump() for action in definition.actions])
+    except rule_actions.ActionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _audit(db, actor: Administrator, action: str, rule_id: str, details: dict[str, object]) -> None:
@@ -167,7 +202,7 @@ def _now() -> str:
 def list_rules(_: Administrator) -> dict[str, object]:
     with connect() as db:
         rows = db.execute("SELECT * FROM rules ORDER BY name COLLATE NOCASE,id").fetchall()
-    return {"rules": [rule_view(row) for row in rows]}
+        return {"rules": [rule_view(row, db) for row in rows]}
 
 
 @router.post("/api/rules", status_code=status.HTTP_201_CREATED)
@@ -180,23 +215,34 @@ async def create_rule(definition: RuleDefinition, request: Request, user: Admini
             db.execute(
                 "INSERT INTO rules(name,enabled,camera_ids_json,group_ids_json,condition_type,condition_json,classes_json,schedule_json,cooldown_seconds,pop_into_live,"
                 "id,active_from,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (*_columns(definition), rule_id, _now(), int(user["id"])))
-            _audit(db, user, "rule_created", rule_id, {"name": definition.name})
+            _save_actions(db, rule_id, definition)
+            _audit(db, user, "rule_created", rule_id, {"name": definition.name, "actions": len(definition.actions)})
         except BaseException:
             db.execute("ROLLBACK")
             raise
         db.execute("COMMIT")
         row = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
+        view = rule_view(row, db)
     _nudge(request)
-    return rule_view(row)
+    return view
 
 
 @router.get("/api/rules/{rule_id}")
 def get_rule(rule_id: str, _: Administrator) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    return rule_view(row)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        return rule_view(row, db)
+
+
+@router.get("/api/rules/{rule_id}/deliveries")
+def get_rule_deliveries(rule_id: str, _: Administrator, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, object]:
+    """The rule's action deliveries, newest first: status, attempts and the error code of the last try."""
+    with connect() as db:
+        if db.execute("SELECT 1 FROM rules WHERE id=?", (rule_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Rule not found")
+    return {"deliveries": rule_actions.deliveries(rule_id, limit)}
 
 
 @router.put("/api/rules/{rule_id}")
@@ -211,14 +257,16 @@ async def update_rule(rule_id: str, definition: RuleDefinition, request: Request
             db.execute(
                 "UPDATE rules SET name=?,enabled=?,camera_ids_json=?,group_ids_json=?,condition_type=?,condition_json=?,classes_json=?,schedule_json=?,cooldown_seconds=?,"
                 "pop_into_live=?,active_from=?,updated_at=? WHERE id=?", (*_columns(definition), now, now, rule_id))
-            _audit(db, user, "rule_updated", rule_id, {"name": definition.name, "enabled": definition.enabled})
+            _save_actions(db, rule_id, definition)
+            _audit(db, user, "rule_updated", rule_id, {"name": definition.name, "enabled": definition.enabled, "actions": len(definition.actions)})
         except BaseException:
             db.execute("ROLLBACK")
             raise
         db.execute("COMMIT")
         row = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
+        view = rule_view(row, db)
     _nudge(request)
-    return rule_view(row)
+    return view
 
 
 @router.delete("/api/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -251,7 +299,9 @@ def test_rule(definition: RuleDefinition, _: Administrator) -> dict[str, object]
         schedule=definition.schedule.model_dump() if definition.schedule else None, cooldown=timedelta(seconds=definition.cooldown_seconds), active_from=start,
     )
     events = replay(rule, start, end)
-    return {"start": start.isoformat(), "end": end.isoformat(), "events": events, "count": len(events),
+    # Listed, never run: test mode performs no action.
+    actions = rule_actions.describe([action.model_dump() for action in definition.actions])
+    return {"start": start.isoformat(), "end": end.isoformat(), "events": events, "count": len(events), "actions": actions,
             "coverage_note": "Test mode replays analysed frames only; time a camera was not analysed cannot match."}
 
 

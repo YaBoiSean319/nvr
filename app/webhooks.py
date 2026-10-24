@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import secrets
 import socket
 import sqlite3
@@ -36,6 +37,11 @@ EVENT_TYPES = {
     "alarm.resolved",
     "webhook.test",
 }
+# httpx logs each request's full URL at INFO. Webhook, Slack and Teams URLs carry their
+# secret in the path, so outbound request logging stays at warnings and above.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 MAX_ATTEMPTS = 8
 MAX_PENDING_PER_ENDPOINT = 1000
 REQUEST_TIMEOUT_SECONDS = 10
@@ -87,6 +93,19 @@ def validate_target_url(value: str, allow_private: bool) -> str:
     display_host = f"[{host}]" if ":" in host else host
     netloc = display_host + (f":{port}" if port else "")
     return urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, ""))
+
+
+def signed_headers(secret: str, event_id: str, event_type: str, body: bytes) -> dict[str, str]:
+    """The NVR webhook signature: HMAC-SHA256 over "<timestamp>.<body>" with the receiver's secret."""
+    timestamp = str(int(time.time()))
+    signature = hmac.new(secret.encode("utf-8"), timestamp.encode("ascii") + b"." + body, hashlib.sha256).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "X-NVR-Event-ID": event_id,
+        "X-NVR-Event-Type": event_type,
+        "X-NVR-Timestamp": timestamp,
+        "X-NVR-Signature": f"sha256={signature}",
+    }
 
 
 def url_origin(ciphertext: bytes) -> str:
@@ -299,18 +318,8 @@ class WebhookManager:
                 asyncio.to_thread(validate_target_url, decrypt(delivery["target_url_ciphertext"]), bool(delivery["allow_private"])),
                 timeout=5,
             )
-            secret = decrypt(delivery["signing_secret_ciphertext"]).encode("utf-8")
             body = json.dumps(json.loads(delivery["payload_json"]), sort_keys=True, separators=(",", ":")).encode("utf-8")
-            timestamp = str(int(time.time()))
-            signed = timestamp.encode("ascii") + b"." + body
-            signature = hmac.new(secret, signed, hashlib.sha256).hexdigest()
-            headers = {
-                "Content-Type": "application/json",
-                "X-NVR-Event-ID": str(delivery["event_id"]),
-                "X-NVR-Event-Type": str(delivery["event_type"]),
-                "X-NVR-Timestamp": timestamp,
-                "X-NVR-Signature": f"sha256={signature}",
-            }
+            headers = signed_headers(decrypt(delivery["signing_secret_ciphertext"]), str(delivery["event_id"]), str(delivery["event_type"]), body)
             async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
                 response = await client.post(target, content=body, headers=headers)
             code = int(response.status_code)
