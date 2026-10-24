@@ -169,7 +169,11 @@ class CameraArchiveTests(unittest.TestCase):
             reference = sqlite3.connect(":memory:", isolation_level=None)
             m0001_baseline.upgrade(reference)
             baseline = m0001_baseline._shape(reference)
+            baseline_triggers = {row[0] for row in reference.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
             reference.close()
+            for (trigger,) in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
+                if trigger not in baseline_triggers:
+                    db.execute(f"DROP TRIGGER {trigger}")
             for table, columns in m0001_baseline._shape(db).items():
                 if table not in baseline:
                     db.execute(f"DROP TABLE {table}")

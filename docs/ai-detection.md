@@ -35,6 +35,24 @@ GET /api/ai/events?camera_id=<camera-id>&label=person&start=2026-10-21T12%3A00%3
 GET /api/cameras/<camera-id>/ai/coverage
 ```
 
+### Detections and tracks
+
+Alongside the grouped observations above, the AI worker stores every detection as structured data: camera, analysis time (UTC), class, confidence, normalized box (`x`, `y`, `width`, `height` in 0–1 of the frame), attributes and the model that produced it. A lightweight tracker links one camera's detections into **tracks**. It matches each detection to the previous frame's objects by box overlap (IoU) and appearance (a colour histogram of the box), so an object keeps one track ID while it moves and two objects that cross keep theirs. Tracker state is held per camera in the AI worker; after the worker or camera stream restarts, objects already in view start new tracks. Rules, search, object tracks in Playback, insights, redaction and PTZ auto-tracking build on this data.
+
+Detections follow footage retention. Deleting a recorded interval, deleting an archived camera's footage or retention expiry deletes the detections inside that footage (unless other retained footage still covers the same moment). Detections that no footage covers, for example on a motion-recorded camera between events, expire on the camera's retention schedule. A track whose detections are all gone is deleted.
+
+Detections are written only inside analysed coverage. Each response lists the unanalysed intervals that overlap the request: no detection in such an interval means the frames were not analysed, not that the scene was empty.
+
+```http
+GET /api/ai/detections?camera_id=<camera-id>&start=<iso>&end=<iso>[&label=person][&track_id=<id>][&limit=500]
+GET /api/ai/tracks?camera_id=<camera-id>&start=<iso>&end=<iso>[&label=vehicle][&limit=500]
+GET /api/ai/tracks/<track-id>
+```
+
+These are footage reads: any signed-in user, or an API token with the `read` scope. The existing `/api/ai/events` responses and the Playback timeline's `ai_detections` and `ai_unanalyzed` fields are unchanged.
+
+The automated tests use a deterministic detection fixture (`tests/fixtures/detection_scene.py`): synthetic people and a vehicle moving through generated H.264 footage, found by colour from the decoded pixels. Rules, search and tracks are tested against it without model variance. Model accuracy is measured separately and never asserted in CI.
+
 The `GET /api/cameras/{camera_id}/ai` response reports model availability and the analysis state. Configuration changes require the administrator role; operators can search results and inspect coverage.
 
 ## CPU benchmark and acceptance limits

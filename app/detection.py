@@ -360,6 +360,8 @@ class DetectionManager:
         self.task_configs: dict[str, tuple[Any, ...]] = {}
         self.configuration_task: asyncio.Task[None] | None = None
         self.stopping = False
+        # When each analysed frame's results are known; tests replace it with a fixture clock.
+        self.clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     async def start(self) -> None:
         self.stopping = False
@@ -470,10 +472,13 @@ class DetectionManager:
             self.task_configs[camera_id] = signature
 
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
+        from .tracks import Tracker, record_detections
+
         while not self.stopping:
             try:
                 source = _camera_source(camera_id, bool(config["use_substream"]))
                 zones = json.loads(config["zones_json"])
+                tracker = Tracker()
                 seen_frame = False
                 async for frame in _raw_frames(source, float(config["analysis_fps"])):
                     if self.stopping:
@@ -486,8 +491,13 @@ class DetectionManager:
                             set_camera_state(camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
                         observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
-                    record_observations(camera_id, observations, model_id=str(config["model_id"]), model_version=str(config["model_version"]), provider=str(config["provider"]))
-                    set_camera_state(camera_id, "analyzed")
+                    at = self.clock()
+                    # Analysed coverage starts no later than the detections it contains.
+                    set_camera_state(camera_id, "analyzed", at=at)
+                    model = {"model_id": str(config["model_id"]), "model_version": str(config["model_version"]), "provider": str(config["provider"])}
+                    record_observations(camera_id, observations, at, **model)
+                    with connect() as db:
+                        record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
                 if not self.stopping:
                     raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
             except asyncio.CancelledError:

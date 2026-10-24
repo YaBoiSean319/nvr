@@ -130,6 +130,29 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(status.json()["setup_required"])
         self.assertEqual(self._versions(), ALL_VERSIONS)
 
+    def test_rebuild_database_gains_detections_with_its_data_intact(self):
+        rebuild = [(version, module) for version, module in migrations.MIGRATIONS if version <= 6]
+        with mock.patch.object(migrations, "MIGRATIONS", rebuild):
+            initialize()
+        with connect() as db:
+            db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(1,'admin','unused','administrator')")
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES('c1','Dock East',x'00')")
+            db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) "
+                       "VALUES('c1','c1/a.mp4','2026-10-01T00:00:00+00:00','2026-10-01T00:01:00+00:00',10)")
+            db.execute("INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) "
+                       "VALUES('o1','c1','person',0.8,'{}','2026-10-01T00:00:10+00:00','2026-10-01T00:00:20+00:00',448,256,'m','v')")
+            tables = ("users", "cameras", "recording_segments", "ai_observations")
+            before = {table: self._rows(db, table) for table in tables}
+
+        initialize()
+
+        self.assertEqual(self._versions(), ALL_VERSIONS)
+        with connect() as db:
+            self.assertEqual({table: self._rows(db, table) for table in tables}, before)
+            self.assertEqual(db.execute("SELECT count(*) FROM ai_detections").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM ai_tracks").fetchone()[0], 0)
+        self.assertEqual(len(self._copies()), 1)
+
     def test_unrecognised_database_is_refused_untouched(self):
         self._load("CREATE TABLE inventory(id INTEGER PRIMARY KEY); INSERT INTO inventory VALUES(7);")
         original = self.path.read_bytes()
