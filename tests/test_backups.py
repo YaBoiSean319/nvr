@@ -115,9 +115,12 @@ class BackupTests(unittest.TestCase):
                     break
                 time.sleep(0.2)
             self.assertEqual(run["status"], "succeeded", run)
-            self.assertEqual(state["last_success"]["id"], run_id)
+            # A first start after the daily time also takes its scheduled backup, which can
+            # finish just before or just after the requested one; the latest is the last success.
+            latest = max((item for item in state["runs"] if item["status"] == "succeeded"), key=lambda item: item["finished_at"])
+            self.assertEqual(state["last_success"]["id"], latest["id"])
+            self.assertIn(latest["id"], {run_id} | {item["id"] for item in state["runs"] if item["kind"] == "scheduled"})
             self.assertFalse(state["stale"])
-            # A first start after the daily time also takes its scheduled backup.
             self.assertIn(run["file_name"], [item["file_name"] for item in state["stored"]])
         archive = self.backups / run["file_name"]
         self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
