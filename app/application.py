@@ -12,6 +12,7 @@ from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import api
+from .api import web_interface
 from .backup import BackupManager
 from .detection import DetectionManager
 from .live_hub import LiveHub
@@ -100,6 +101,8 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     )
     for router in api.ROUTERS:
         app.include_router(router)
+    # Last: the interface's client-route catch-all must never shadow an API route.
+    app.include_router(web_interface.router)
     app.openapi = lambda: _openapi_with_scopes(app)
     return app
 

@@ -2,9 +2,9 @@ import { fileURLToPath, URL } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// Served by FastAPI at /next until the cutover replaces the legacy interface.
+// Served by FastAPI at the site root (app/api/web_interface.py).
 export default defineConfig({
-  base: "/next/",
+  base: "/",
   plugins: [react()],
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
   build: {

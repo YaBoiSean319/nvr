@@ -26,6 +26,7 @@ services:
       # Encrypted configuration backups (database and credential key, never footage).
       # Backups stay disabled until a passphrase of at least 16 characters is set.
       NVR_BACKUP_PASSPHRASE: ${NVR_BACKUP_PASSPHRASE:-}
+      NVR_BACKUP_PASSPHRASE_FILE: ${NVR_BACKUP_PASSPHRASE_FILE:-}
       NVR_BACKUP_PATH: /backups
       NVR_BACKUP_KEEP: ${NVR_BACKUP_KEEP:-14}
     volumes:

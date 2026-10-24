@@ -1,5 +1,5 @@
 // Real-browser journeys for the Cameras inventory and General & Connection editor (#95, #67).
-const { test, expect, seedFixtures, signInNext, trackLiveSockets, FIXTURE_PASSWORD } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInNext, trackLiveSockets, FIXTURE_PASSWORD, median, percentile, writeAcceptanceMeasurements } = require("./helpers.cjs");
 
 const nav = page => page.getByRole("navigation", { name: "Workspaces" });
 const inventory = page => page.getByRole("region", { name: "Camera inventory" });
@@ -292,3 +292,153 @@ for (const width of [320, 768, 1440]) {
     await expectNoHorizontalOverflow(page);
   });
 }
+
+test("a selected camera that disappears says so, and comes back when it returns", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openCameras(page);
+  await selectCamera(page, "Camera 001");
+
+  seedFixtures(0);
+  await nav(page).getByRole("link", { name: "Live" }).click();
+  await openCameras(page); // remounting refetches the inventory
+  await expect(inventory(page).getByText("No cameras have been added yet.")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "This camera is no longer available." })).toBeVisible();
+
+  seedFixtures(1);
+  await nav(page).getByRole("link", { name: "Live" }).click();
+  await openCameras(page);
+  await expect(page.getByRole("region", { name: "Settings for Camera 001" })).toBeVisible();
+  await expect(page.getByText("This camera is no longer available.")).toHaveCount(0);
+});
+
+test("a failed preview is visible, Retry starts media, and signing out releases the viewer", async ({ page }) => {
+  test.setTimeout(90_000);
+  const fixtures = seedFixtures(1);
+  // The first live connection is refused the way the server refuses an unavailable camera.
+  // Socket routes are installed into the page as it loads, so this precedes signing in.
+  let refused = 0;
+  await page.routeWebSocket(/\/api\/cameras\/[^/]+\/live\/stream/, socket => {
+    if (refused === 0) {
+      refused += 1;
+      setTimeout(() => socket.close({ code: 4404, reason: "Deterministic browser fixture preview failure" }), 100);
+      return;
+    }
+    socket.connectToServer();
+  });
+  await signInNext(page);
+  await openCameras(page);
+  await selectCamera(page, "Camera 001");
+
+  const preview = page.getByRole("region", { name: "Preview of Camera 001" });
+  await page.getByRole("button", { name: "Show preview" }).click();
+  await expect(preview).toHaveAttribute("data-phase", "error");
+  await expect(preview.getByRole("status")).toContainText("Deterministic browser fixture preview failure");
+
+  const viewers = async () => (await (await page.request.get(`/api/cameras/${fixtures.primary_camera_id}/live/status`)).json()).active_viewers;
+  await preview.getByRole("button", { name: "Retry" }).click();
+  await expect(preview).toHaveAttribute("data-phase", "live", { timeout: 30_000 });
+  await expect.poll(viewers).toBeGreaterThan(0);
+
+  // A second session watches the viewer count while this one signs out.
+  const observer = await page.context().browser().newContext({ baseURL: "http://127.0.0.1:8765" });
+  try {
+    const login = await observer.request.post("/api/auth/login", { data: { username: "camera-admin", password: FIXTURE_PASSWORD } });
+    expect(login.status()).toBe(200);
+    await page.getByRole("button", { name: /Account menu/ }).click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect(page.getByLabel("Username")).toBeVisible();
+    await expect.poll(async () => (await (await observer.request.get(`/api/cameras/${fixtures.primary_camera_id}/live/status`)).json()).active_viewers).toBe(0);
+  } finally {
+    await observer.close();
+  }
+});
+
+test("the pane width is the only stored layout preference and survives a reload", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openCameras(page);
+  const resizer = page.getByRole("separator", { name: "Resize inventory and settings" });
+  await resizer.focus();
+  await page.keyboard.press("End");
+  await expect(resizer).toHaveAttribute("aria-valuenow", "75");
+  await page.keyboard.press("ArrowLeft");
+  await expect(resizer).toHaveAttribute("aria-valuenow", "73");
+  const ratio = await page.locator(".admin-panes").evaluate(panes => {
+    const left = panes.querySelector(".inventory").getBoundingClientRect().width;
+    const right = panes.querySelector(".editor-pane").getBoundingClientRect().width;
+    return Math.round(left / (left + right) * 100);
+  });
+  expect(Math.abs(ratio - 73)).toBeLessThanOrEqual(1);
+  await page.reload();
+  await expect(page.getByRole("separator", { name: "Resize inventory and settings" })).toHaveAttribute("aria-valuenow", "73");
+  const stored = await page.evaluate(() => Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])));
+  const table = Object.entries(stored).filter(([key]) => key.startsWith("nvr-next-camera-table:"));
+  expect(table).toHaveLength(1);
+  expect(Object.keys(JSON.parse(table[0][1])).sort()).toEqual(["paneWidth", "showBrand", "sort"]);
+  expect(Object.keys(stored).some(key => /draft|secret|preview|selected|bulk/i.test(key))).toBe(false);
+});
+
+test("200-camera filtering and selection record browser measurements without row media", async ({ page, browserName, browser }) => {
+  seedFixtures(200);
+  const work = trackCameraWork(page);
+  const errors = { page: 0, console: 0, failed_requests: 0, http_errors: 0 };
+  const details = [];
+  await signInNext(page); // the signed-out probe of /api/auth/me is expected to fail
+  page.on("pageerror", error => { errors.page += 1; details.push(`page: ${error.message}`); });
+  page.on("console", message => { if (message.type() === "error") { errors.console += 1; details.push(`console: ${message.text()}`); } });
+  page.on("requestfailed", request => { errors.failed_requests += 1; details.push(`request failed ${new URL(request.url()).pathname}: ${request.failure()?.errorText || "unknown error"}`); });
+  page.on("response", response => { if (response.status() >= 400) { errors.http_errors += 1; details.push(`HTTP ${response.status()} ${new URL(response.url()).pathname}`); } });
+  await openCameras(page);
+  await expect(inventory(page).locator("tbody tr")).toHaveCount(200);
+  await expect(page.getByText("Select a camera to view settings.")).toBeVisible();
+
+  const elapsed = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() =>
+    resolve(performance.now() - performance.getEntriesByName("camera-acceptance-feedback-start").at(-1).startTime)))));
+  const search = inventory(page).getByRole("searchbox");
+  const filterSamples = [];
+  for (let index = 0; index < 10; index += 1) {
+    await page.evaluate(() => performance.mark("camera-acceptance-feedback-start"));
+    await search.fill(index % 2 ? "Camera 1" : "Camera 20");
+    await expect(inventory(page).locator("tbody tr").first()).toBeVisible();
+    filterSamples.push(await elapsed());
+  }
+  await search.fill("");
+  const panelSamples = [];
+  for (const name of ["Camera 200", "Camera 199", "Camera 200", "Camera 199", "Camera 200"]) {
+    await page.evaluate(() => performance.mark("camera-acceptance-feedback-start"));
+    await selectCamera(page, name);
+    panelSamples.push(await elapsed());
+  }
+  const system = await (await page.request.get("/api/system/status")).json();
+  const errorCount = Object.values(errors).reduce((total, count) => total + count, 0);
+  writeAcceptanceMeasurements({
+    record_type: "camera-admin-acceptance-measurements",
+    measurement_status: "measured",
+    app_version: system.version,
+    browser: browserName,
+    browser_version: browser.version(),
+    environment: {
+      runner_os: process.env.RUNNER_OS || process.platform,
+      runner_arch: process.arch,
+      runner_release: require("node:os").release(),
+      node_version: process.version,
+      browser_mode: "Chromium headless",
+      ci: process.env.GITHUB_ACTIONS === "true" ? "GitHub Actions" : "local host",
+    },
+    configured_camera_count: 200,
+    sample_counts: { filter_feedback: filterSamples.length, panel_feedback: panelSamples.length },
+    error_counts: errors,
+    error_count: errorCount,
+    filter_feedback_ms: { p50: median(filterSamples), p95: percentile(filterSamples, 95), samples: filterSamples },
+    panel_feedback_ms: { p50: median(panelSamples), p95: percentile(panelSamples, 95), samples: panelSamples },
+    inventory_live_requests_before_explicit_preview: work.length,
+    production_capacity_gate: "unchecked",
+    thirty_day_qualification_gate: "unchecked",
+    owner: "camera-browser-acceptance CI job",
+    result: errorCount === 0 && work.length === 0 ? "measurement journey completed without browser errors or inventory media requests" : "measurement journey completed; inspect recorded errors and media requests",
+    evidence: ["test-results/camera-browser-acceptance.json", "test-results/playwright/"],
+  });
+  expect(work).toEqual([]);
+  expect(errorCount, details.join("\n") || "No browser error details were captured.").toBe(0);
+});

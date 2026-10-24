@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app.api import web_next
+from app.api import web_interface
 from app.application import create_app
 from tests.test_support import TEST_PASSWORD
 
@@ -36,24 +36,44 @@ class WebInterfaceTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_client_routes_get_the_page_with_security_headers(self):
-        with patch.object(web_next, "DIST_DIRECTORY", self.dist):
-            self.assertEqual(self.client.get("/next", follow_redirects=False).headers["location"], "/next/")
-            for path in ("/next/", "/next/live", "/next/settings/branding"):
+        with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
+            for path in ("/", "/live", "/playback", "/cameras/groups", "/settings/appearance"):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200, path)
                 self.assertIn("<title>NVR</title>", response.text)
                 self.assertEqual(response.headers["cache-control"], "no-cache")
                 self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
                 self.assertIn("script-src 'self'", response.headers["content-security-policy"])
-            asset = self.client.get("/next/assets/index-abc123.js")
+            asset = self.client.get("/assets/index-abc123.js")
             self.assertEqual(asset.status_code, 200)
             self.assertIn("immutable", asset.headers["cache-control"])
-            self.assertEqual(self.client.get("/next/assets/missing.js").status_code, 404)
-            self.assertEqual(self.client.get("/next/assets/..%2F..%2Fsecret.txt").status_code, 404)
+            self.assertEqual(self.client.get("/assets/missing.js").status_code, 404)
+            self.assertEqual(self.client.get("/assets/..%2F..%2Fsecret.txt").status_code, 404)
+
+    def test_the_preview_path_redirects_to_the_same_place(self):
+        with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
+            for old, new in (("/next", "/"), ("/next/", "/"), ("/next/playback", "/playback"), ("/next/settings/access?x=1", "/settings/access?x=1")):
+                response = self.client.get(old, follow_redirects=False)
+                self.assertEqual((response.status_code, response.headers["location"]), (308, new), old)
+
+    def test_api_and_service_paths_are_never_answered_with_the_page(self):
+        with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
+            missing = self.client.get("/api/does-not-exist")
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(missing.headers["content-type"], "application/json")
+            self.assertEqual(self.client.get("/healthz").status_code, 200)
+            self.assertEqual(self.client.get("/openapi.json").status_code, 200)
+
+    def test_legacy_interface_assets_are_gone(self):
+        with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
+            for path in ("/app.js", "/camera-groups.css", "/camera-editor.js"):
+                self.assertNotEqual(self.client.get(path).headers.get("content-type", ""), "text/javascript", path)
+                self.assertNotIn("text/css", self.client.get(path).headers.get("content-type", ""), path)
+        self.assertFalse((Path(__file__).resolve().parents[1] / "app" / "static").exists())
 
     def test_missing_build_is_reported_honestly(self):
-        with patch.object(web_next, "DIST_DIRECTORY", self.dist / "absent"):
-            response = self.client.get("/next/live")
+        with patch.object(web_interface, "DIST_DIRECTORY", self.dist / "absent"):
+            response = self.client.get("/live")
         self.assertEqual(response.status_code, 503)
         self.assertIn("not been built", response.json()["detail"])
 

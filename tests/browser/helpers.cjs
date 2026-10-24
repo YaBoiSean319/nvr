@@ -28,66 +28,6 @@ function seedFixtures(count, options = {}) {
   return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
 }
 
-async function signIn(page, username = "camera-admin") {
-  const pageErrors = [];
-  const onPageError = error => pageErrors.push(error.message);
-  page.on("pageerror", onPageError);
-  try {
-    await page.goto("/");
-    try {
-      await page.locator("#login").waitFor({ state: "visible", timeout: 8_000 });
-    } catch {
-      const setupResponse = await page.request.get(new URL("/api/setup/status", page.url()).toString()).catch(() => null);
-      const setupStatus = setupResponse?.ok() ? await setupResponse.json().catch(() => null) : null;
-      const setupRequired = setupStatus ? String(setupStatus.setup_required) : "unknown";
-      throw new Error(`Login screen is hidden. Initial setup required: ${setupRequired}. Page errors: ${pageErrors.join("; ") || "(none)"}`);
-    }
-    await expect(page.locator("#login")).toBeVisible();
-    await page.locator("#login-user").fill(username);
-    await page.locator("#login-pass").fill(FIXTURE_PASSWORD);
-    const loginResponsePromise = page.waitForResponse(response => {
-      try { return new URL(response.url()).pathname === "/api/auth/login"; }
-      catch { return false; }
-    }, { timeout: 8_000 }).catch(() => null);
-    await page.getByRole("button", { name: "Sign in" }).click();
-    const loginResponse = await loginResponsePromise;
-    const message = (await page.locator("#message").innerText().catch(() => "")).trim();
-    if (!loginResponse) {
-      throw new Error(`No /api/auth/login response. Message: ${message || "(empty)"}. Page errors: ${pageErrors.join("; ") || "(none)"}`);
-    }
-    if (!loginResponse.ok()) {
-      const setupResponse = loginResponse.status() === 401
-        ? await page.request.get(new URL("/api/setup/status", page.url()).toString()).catch(() => null)
-        : null;
-      const setupStatus = setupResponse?.ok()
-        ? await setupResponse.json().catch(() => null)
-        : null;
-      const accountConfigured = setupStatus
-        ? String(setupStatus.setup_required === false)
-        : "unknown";
-      throw new Error(`Fixture login returned HTTP ${loginResponse.status()}. Message: ${message || "(empty)"}. Fixture account configured: ${accountConfigured}.`);
-    }
-    await expect(page.locator("#status"), `Login returned HTTP ${loginResponse.status()}, but the workspace stayed hidden. Message: ${message || "(empty)"}. Page errors: ${pageErrors.join("; ") || "(none)"}`).toBeVisible();
-    await expect(page.locator('#console-nav [data-screen="camera-settings"]')).toBeVisible();
-  } finally {
-    page.off("pageerror", onPageError);
-  }
-}
-
-async function openCameraSettings(page) {
-  await page.locator('#console-nav [data-screen="camera-settings"]').click();
-  await expect(page.locator("#camera-inventory-table")).toBeVisible();
-  const fixture = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
-  await page.locator("#camera-inventory-refresh").click();
-  await expect(page.locator("#camera-inventory-load-status")).toHaveAttribute("data-state", "ready");
-  await expect(page.locator("#camera-inventory-table tbody tr")).toHaveCount(fixture.camera_count);
-}
-
-async function selectCamera(page, cameraId) {
-  await page.locator(`#camera-inventory-table button[data-camera-id="${cameraId}"]`).click();
-  await expect(page.locator(`#camera-list article[data-camera-id="${cameraId}"]`)).toBeVisible();
-}
-
 function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -106,9 +46,9 @@ function writeAcceptanceMeasurements(record) {
   return output;
 }
 
-/** Sign in to the rebuilt interface at /next/. */
+/** Sign in to the web interface. */
 async function signInNext(page, username = "camera-admin") {
-  await page.goto("/next/");
+  await page.goto("/");
   await page.getByLabel("Username").fill(username);
   await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -131,4 +71,4 @@ function trackLiveSockets(page) {
   };
 }
 
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, signIn, signInNext, trackLiveSockets, openCameraSettings, selectCamera, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, signInNext, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

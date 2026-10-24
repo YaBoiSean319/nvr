@@ -146,7 +146,7 @@ test("operators cannot reach bulk changes or group policies, and the server refu
   await signInNext(page, "camera-operator");
   await openCameras(page);
   await expect(inventory(page).getByRole("checkbox", { name: /for bulk changes/ })).toHaveCount(0);
-  await page.goto("/next/cameras/groups");
+  await page.goto("/cameras/groups");
   await expect(page.getByRole("heading", { name: "Administrator access required" })).toBeVisible();
   expect((await page.request.post("/api/cameras/bulk-update", { data: { camera_ids: [fixtures.camera_ids[0]], recording_enabled: true } })).status()).toBe(403);
   expect((await page.request.put(`/api/camera-groups/${fixtures.group_id}/retention`, { data: { retention_days: 5 } })).status()).toBe(403);

@@ -1,5 +1,7 @@
 # Console acceptance and operating limits
 
+> The resource bounds and archive rules below still apply. The console and settings descriptions refer to the previous interface, which was removed at the cutover (#104); the README describes the current workspaces, and the [rebuild acceptance report](acceptance/rebuild.md) lists the post-merge checks that remain.
+
 This note distinguishes behavior covered by local tests or GitHub CI from checks that require the target installation, a real browser/camera, or representative host workload. Passing the automated suite does not satisfy production acceptance.
 
 ## Implemented console and settings
@@ -36,10 +38,10 @@ The ZIP includes SHA-256 file checksums and byte counts. Verification compares d
 Deterministic tests cover API permissions, saved views/groups, synchronized playback, archive safeguards, generated individual/grid media, audio, ZIP contents/integrity, settings, storage, retention, alerts, and heartbeat. GitHub CI can run the repository's tests and syntax checks, but it cannot reach a deployment's camera network, identity provider, browser fleet, persistent volumes, or representative production traffic. Use focused tests such as:
 
 ```sh
-python -m unittest tests.test_console_navigation tests.test_saved_views tests.test_camera_groups
+python -m unittest tests.test_web_interface tests.test_saved_views tests.test_camera_groups
 python -m unittest tests.test_synchronized_playback tests.test_camera_archive tests.test_exports tests.test_audio tests.test_live_views
 python -m unittest tests.test_display_settings tests.test_storage tests.test_retention tests.test_webhooks tests.test_heartbeat
-node --check app/static/app.js
+npm run build --prefix web
 python -m compileall -q app
 git diff --check
 ```

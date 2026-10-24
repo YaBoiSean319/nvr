@@ -7,6 +7,8 @@ const { cleanupFixtureEnvironment } = require("../tests/browser/fixture_environm
 
 const ROOT = path.resolve(__dirname, "..");
 const EXPECTED_SERVER_ENV_KEYS = [
+  "NVR_BACKUP_PASSPHRASE_FILE",
+  "NVR_BACKUP_PATH",
   "NVR_BROWSER_FIXTURE_MANIFEST",
   "NVR_BROWSER_FIXTURE_PASSWORD_PATH",
   "NVR_BROWSER_HOST",

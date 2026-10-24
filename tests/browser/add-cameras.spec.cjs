@@ -171,3 +171,74 @@ test("CSV import previews, then reports every row and never adds an untested str
   expect(all.map(camera => camera.name).sort()).toEqual(["Camera 001", "Dock"]);
   expect(all.every(camera => camera.recording_enabled === false)).toBe(true);
 });
+
+test("a late candidate list cannot replace newer scan results", async ({ page }) => {
+  seedFixtures(0);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let captured;
+  const firstCaptured = new Promise(resolve => { captured = resolve; });
+  let finished;
+  const firstFinished = new Promise(resolve => { finished = resolve; });
+  let calls = 0;
+  const holdFirst = async route => {
+    calls += 1;
+    if (calls !== 1) return route.continue();
+    // The answer is taken now, before the scan, and delivered after it.
+    const response = await route.fetch();
+    captured();
+    await held;
+    await route.fulfill({ response });
+    finished();
+  };
+  await page.route("**/api/discovery/candidates", holdFirst);
+  await signInNext(page);
+  await openAdd(page);
+  await firstCaptured;
+  await page.getByLabel("Duration (s)").fill("0.5");
+  await page.getByRole("button", { name: "Scan camera network" }).click();
+  await expect(page.getByText(/Scan complete: 1 device\(s\) found/)).toBeVisible();
+  await expect(results(page)).toContainText("DeterministicFixtureCamera");
+  release();
+  await firstFinished;
+  await page.waitForTimeout(300);
+  await expect(results(page)).toContainText("DeterministicFixtureCamera");
+  await page.unroute("**/api/discovery/candidates", holdFirst);
+});
+
+test("a failed CSV preview explains itself and a preview of older text cannot be imported", async ({ page }) => {
+  seedFixtures(0);
+  await signInNext(page);
+  await openAdd(page, "CSV Import");
+  const csv = page.getByRole("textbox", { name: /^CSV/ });
+  const failOnce = route => route.abort("failed");
+  await page.route("**/api/cameras/import/preview", failOnce);
+  await csv.fill(`name,stream_url,recording_mode\nPreview Failure,${STREAM},disabled`);
+  await page.getByRole("button", { name: "Preview import" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: /preview|reach/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Import \d+ camera/ })).toBeDisabled();
+  await page.unroute("**/api/cameras/import/preview", failOnce);
+
+  // The text changes while a preview is in flight: its answer describes the old text.
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const holdPreview = async route => {
+    const response = await route.fetch();
+    await held;
+    await route.fulfill({ response });
+  };
+  await page.route("**/api/cameras/import/preview", holdPreview);
+  await csv.fill(`name,stream_url,recording_mode\nOlder Text Fixture,${STREAM},disabled`);
+  await page.getByRole("button", { name: "Preview import" }).click();
+  await expect(page.getByRole("button", { name: "Checking…" })).toBeDisabled();
+  await csv.fill(`name,stream_url,recording_mode\nNewer Text Fixture,${STREAM},disabled`);
+  release();
+  await expect(page.getByRole("table", { name: "Import preview" })).toContainText("Older Text Fixture");
+  await expect(page.getByText("The CSV changed since the preview. Preview it again before importing.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Import 1 camera" })).toBeDisabled();
+  await page.unroute("**/api/cameras/import/preview", holdPreview);
+
+  await page.getByRole("button", { name: "Preview import" }).click();
+  await expect(page.getByRole("table", { name: "Import preview" })).toContainText("Newer Text Fixture");
+  await expect(page.getByRole("button", { name: "Import 1 camera" })).toBeEnabled();
+});

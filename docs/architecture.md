@@ -34,11 +34,11 @@ FFmpeg copies the camera's H.264 video without re-encoding it. When an administr
 
 - `app.main` is the ASGI app the web worker serves. It only builds the application with `create_app()`.
 - `app.application.create_app(start_workers=True)` owns the middleware, the lifespan, and router registration. The lifespan applies schema migrations, then starts the export, webhook, heartbeat, recording and detection managers. `start_workers=False` serves the API without background loops.
-- `app.api.ROUTERS` lists every domain router in registration order. The legacy browser interface router (`app.api.web_ui`) is registered last so its catch-all asset paths cannot shadow API routes.
+- `app.api.ROUTERS` lists every domain router in registration order. The browser interface router (`app.api.web_interface`) is registered after all of them, so its client-route catch-all can never shadow an API route; paths under `/api/` and `/assets/` that match nothing return a JSON `404` instead of the interface.
 
 ## Browser interface
 
-`web/` is a React and TypeScript single-page application built by Vite into `app/web_dist`, which `app.api.web_next` serves at `/next/` with a strict Content-Security-Policy. The legacy interface stays at `/` until the cutover ticket. The building blocks are:
+`web/` is a React and TypeScript single-page application built by Vite into `app/web_dist`. `app.api.web_interface` serves it at the site root with a strict Content-Security-Policy: hashed files under `/assets/` are cached as immutable, and every other non-API path returns the application page so client routes (`/live`, `/playback`, `/cameras`, `/settings/…`) survive a reload. The preview address `/next/…` permanently redirects (`308`) to the same path at the root. If the interface has not been built, the page returns `503` while the API keeps working. The building blocks are:
 
 - `api/client.ts`: same-origin fetch with typed `ApiError`s, a session-expiry signal, and `latestOnly` so overlapping requests never let an older response win.
 - `api/queries.ts`: TanStack Query hooks for server state.
@@ -46,8 +46,10 @@ FFmpeg copies the camera's H.264 video without re-encoding it. When an administr
 - Site branding: the accent colour is adjusted until it reaches 4.5:1 contrast in both themes, and status colours are never branded.
 - Theme: a per-user preference stored on the server (`/api/me/preferences`).
 - Drawers that return focus to whatever opened them.
-
-Workspaces that are not rebuilt yet say so and link to the current interface, rather than imitating it.
+- Workspace state (`features/*/store.ts`, Zustand) belongs to one signed-in person and is cleared on sign-out or a change of user. Only harmless table preferences are kept in browser storage; selections, drafts and secrets never are.
+- Editor drafts (`features/admin/tabDraft.ts`, `features/admin/drafts.tsx`): explicit Save and Revert, refreshes that never overwrite edits, partial-save outcomes, and one leave guard for route changes, sign-out and closing the tab.
+- Live video (`features/live/LivePlayer.ts`): the fMP4 WebSocket described above through Media Source Extensions, with the MJPEG fallback when the browser cannot decode the stream.
+- Playback (`features/playback`): one wall-clock-driven `PlaybackClock` shared by every tile, site-time helpers in `lib/zonedTime.ts`, and microsecond frame positions.
 
 ## Domain routers (`app.api`)
 
@@ -67,7 +69,7 @@ Workspaces that are not rebuilt yet say so and link to the current interface, ra
 | `export_jobs` | Export job submission, status, cancellation, download and evidence verification. |
 | `alerts` | Incidents, webhooks and the external heartbeat. |
 | `operations` | Administrator system status and opt-in diagnostics. |
-| `web_ui` | The legacy static browser interface (replaced by the new interface in a later ticket). |
+| `web_interface` | The browser interface: the built application, its hashed assets and the `/next/` redirect. Registered after every API router. |
 
 Routers may import public helpers from another router only in one direction (for example `onboarding` → `cameras` → `policies`). They never import `app.main` or `app.application`. Shared constants that several layers need live in small modules (`app.viewing` for live admission limits, `app.version` for the release identifier).
 
@@ -80,7 +82,7 @@ Domain logic that does not depend on HTTP (recording, retention, storage, export
 - `CurrentUser`: any signed-in administrator or operator.
 - `Administrator`: administrators only (403 otherwise).
 
-Both yield a `Principal` (`id`, `username`, `role`, and for API tokens `scopes`/`token_id`) that also supports `principal["id"]` style access. A bearer API token resolves to its creating administrator, limited by scope: an endpoint marked `@requires_scope("media")` or `@requires_scope("export")` needs that scope, administrator routes need `admin`, other reads need `read`, and other changes need `admin`. The OpenAPI document publishes the result as `x-required-scope`. Unauthenticated routes are deliberate: setup status/bootstrap, sign-in, OIDC, public branding, health, and the static interface. Tests replace identity by overriding `app.principal.current_user` or `app.principal.administrator` in `app.dependency_overrides`.
+Both yield a `Principal` (`id`, `username`, `role`, and for API tokens `scopes`/`token_id`) that also supports `principal["id"]` style access. A bearer API token resolves to its creating administrator, limited by scope: an endpoint marked `@requires_scope("media")` or `@requires_scope("export")` needs that scope, administrator routes need `admin`, other reads need `read`, and other changes need `admin`. The OpenAPI document publishes the result as `x-required-scope`. Unauthenticated routes are deliberate: setup status/bootstrap, sign-in, OIDC, public branding, health, and the browser interface's page and assets (which contain no data). Tests replace identity by overriding `app.principal.current_user` or `app.principal.administrator` in `app.dependency_overrides`.
 
 ## Database
 

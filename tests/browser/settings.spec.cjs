@@ -51,7 +51,7 @@ test("Appearance: the draft preview is private until saved, uploads are validate
 
   // Another person sees nothing of the draft.
   const other = await (await browser.newContext()).newPage();
-  await other.goto("/next/");
+  await other.goto("/");
   await expect(other.getByText("Workplace NVR").first()).toBeVisible();
   await expect(other.getByText("North Hall")).toHaveCount(0);
 
@@ -188,7 +188,7 @@ test("operators cannot reach Settings and the server refuses their changes", asy
   seedFixtures(1);
   await signInNext(page, "camera-operator");
   await expect(page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" })).toHaveCount(0);
-  await page.goto("/next/settings/access");
+  await page.goto("/settings/access");
   await expect(page.getByRole("heading", { name: "Administrator access required" })).toBeVisible();
   expect((await page.request.put("/api/settings/display", { data: { time_zone: "UTC", date_format: "iso", clock_format: "24" } })).status()).toBe(403);
   expect((await page.request.post("/api/admin/api-tokens", { data: { name: "x", scopes: ["read"] } })).status()).toBe(403);

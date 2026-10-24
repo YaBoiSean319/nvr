@@ -54,16 +54,13 @@ function router(me: Me) {
 }
 
 function SignedIn({ me }: { me: Me }) {
-  // Workspace state belongs to one person: start clean and forget it on sign-out.
-  useEffect(() => {
+  // Workspace state belongs to one person: forget it on sign-out or a change of user. Only the
+  // cleanup resets: React runs every cleanup before any new effect, whereas a reset in this
+  // effect's body would run after the workspaces' own effects and erase what they just loaded.
+  useEffect(() => () => {
     useLiveStore.getState().reset();
     usePlaybackStore.getState().reset();
     useCamerasStore.getState().reset();
-    return () => {
-      useLiveStore.getState().reset();
-      usePlaybackStore.getState().reset();
-      useCamerasStore.getState().reset();
-    };
   }, [me.username]);
   // One router per signed-in identity, so a role change rebuilds the route table.
   const routes = useMemo(() => router(me), [me.username, me.role]); // eslint-disable-line react-hooks/exhaustive-deps

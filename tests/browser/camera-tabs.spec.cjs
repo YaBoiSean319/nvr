@@ -187,7 +187,7 @@ test("Health & History shows write health and opens the camera in Playback", asy
   await expect(editor(page).getByRole("region", { name: "Coverage problems" })).toContainText("Camera offline");
   await expect(editor(page).getByRole("region", { name: "Recent motion events" }).getByRole("listitem")).toHaveCount(2);
   await editor(page).getByRole("button", { name: "Open in Playback" }).click();
-  await expect(page).toHaveURL(/\/next\/playback$/);
+  await expect(page).toHaveURL(/\/playback$/);
   await expect(page.getByRole("group", { name: /^Camera 001.*: playback$/ })).toBeVisible();
 });
 

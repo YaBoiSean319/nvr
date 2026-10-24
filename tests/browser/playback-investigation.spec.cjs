@@ -239,7 +239,7 @@ test("Open in Playback starts a past-hour investigation, then joins it keeping t
   await row(page, "Camera 001").click();
   await liveTile(page, "Camera 001").getByRole("button", { name: "More actions for Camera 001" }).click();
   await page.getByRole("menuitem", { name: "Open in Playback" }).click();
-  await expect(page).toHaveURL(/\/next\/playback$/);
+  await expect(page).toHaveURL(/\/playback$/);
   await expect(tile(page, "Camera 001")).toBeVisible();
   await expect.poll(() => clockTime(page)).toBe(anchor);
   await expect(page.getByRole("form", { name: "Footage search" })).toHaveAttribute("data-stale", "false");

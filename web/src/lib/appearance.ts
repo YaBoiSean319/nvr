@@ -2,9 +2,10 @@ import type { Branding, ThemePreference } from "@/api/types";
 import { legibleOn, textOn } from "./color";
 
 const THEME_KEY = "nvr-theme";
-// The neutral panel colours each accent must stay legible on (see tokens.css).
-const LIGHT_PANEL = "#ffffff";
-const DARK_PANEL = "#171a20";
+// The neutral surface in each theme with the least contrast against an accent (see tokens.css):
+// the raised grey in light, the raised charcoal in dark. Passing there passes on the page and panels too.
+const LIGHT_PANEL = "#f0f2f5";
+const DARK_PANEL = "#22262e";
 
 export function storedTheme(): ThemePreference {
   try {

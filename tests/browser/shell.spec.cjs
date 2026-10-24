@@ -2,7 +2,7 @@
 // setup, sign-in, role-gated navigation, operational status, branding and theme.
 const { test, expect, FIXTURE_PASSWORD, seedFixtures, signInNext } = require("./helpers.cjs");
 
-const NEXT = "/next/";
+const NEXT = "/";
 const ADMIN = "camera-admin";
 const OPERATOR = "camera-operator";
 
@@ -74,7 +74,7 @@ test("administrators see every destination and status opens with the keyboard", 
   await expect(recording).toBeFocused();
 
   await nav.getByRole("link", { name: "Settings" }).click();
-  await expect(page).toHaveURL(/\/next\/settings$/);
+  await expect(page).toHaveURL(/\/settings\/general$/);
   await expect(page).toHaveTitle(/Settings · /);
 });
 

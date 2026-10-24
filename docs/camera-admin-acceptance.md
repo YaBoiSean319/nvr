@@ -1,5 +1,7 @@
 # Camera administration acceptance record
 
+> **Superseded.** This records the previous interface's camera-administration checks. The interface it describes was removed at the cutover (#104); see the [rebuild acceptance report](acceptance/rebuild.md) for current results and the open post-merge items.
+
 Ticket #75 adds authenticated Playwright journeys backed by the running FastAPI application, temporary SQLite/recording/credential stores, deterministic camera fixtures, a loopback ONVIF responder, and generated RTSP test media. CI installs the pinned Playwright package and Chromium, runs the browser journeys, and validates two report conditions: serialized `webServer.env` keys match the fixture allowlist, and the injected runner-only sentinel is absent. It uploads the report, traces, screenshots, videos, and sanitized 200-camera measurements as the `camera-admin-browser-acceptance` artifact only when both conditions pass, including when a browser journey fails.
 
 ## Current verification record
