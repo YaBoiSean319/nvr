@@ -24,6 +24,7 @@ export interface RuleDefinition {
   classes: ObjectClass[];
   schedule: RuleSchedule | null;
   cooldown_seconds: number;
+  pop_into_live: boolean;
 }
 
 export interface Rule extends RuleDefinition {
@@ -67,12 +68,12 @@ export function switchCondition(current: Condition, type: Condition["type"]): Co
 
 export const newRule = (): RuleDefinition => ({
   name: "", enabled: true, camera_ids: [], group_ids: [], condition: { type: "zone_entry", zone: DEFAULT_ZONE },
-  classes: ["person"], schedule: null, cooldown_seconds: 0,
+  classes: ["person"], schedule: null, cooldown_seconds: 0, pop_into_live: false,
 });
 
 export const definitionOf = (rule: Rule): RuleDefinition => ({
   name: rule.name, enabled: rule.enabled, camera_ids: rule.camera_ids, group_ids: rule.group_ids, condition: rule.condition,
-  classes: rule.classes, schedule: rule.schedule, cooldown_seconds: rule.cooldown_seconds,
+  classes: rule.classes, schedule: rule.schedule, cooldown_seconds: rule.cooldown_seconds, pop_into_live: rule.pop_into_live,
 });
 
 /** What the form can tell before the server does. */

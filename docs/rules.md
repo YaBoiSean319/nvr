@@ -13,6 +13,7 @@ A rule watches cameras for people or vehicles doing one thing, and records a **r
 - **Objects**: people, vehicles or both.
 - **When** (optional): weekly intervals in a time zone, using the same rules as recording schedules. Outside them the rule does not fire.
 - **Cooldown** (optional): no two of the rule's events on the same camera are closer together than this.
+- **Pop alarms into Live** (optional): the rule's alarms bring their camera and its neighbours into Live for people who opted in, and onto video walls (see [alarms in Live and video walls](live-alarms-and-video-wall.md)).
 
 Zones and lines use fractions of the frame and are drawn over a recorded frame from the first camera the rule watches. Every coordinate can be typed. With the keyboard, arrows move a zone or a line end (Shift for larger steps), and Alt+arrows resize a zone.
 
@@ -51,7 +52,8 @@ A rule body:
   "condition": {"type": "line_crossing", "line": {"x1": 0.5, "y1": 0.1, "x2": 0.45, "y2": 0.9}, "direction": "forward"},
   "classes": ["person"],
   "schedule": {"timezone": "Europe/London", "intervals": [{"days": [0, 1, 2, 3, 4], "start": "18:00", "end": "07:00"}]},
-  "cooldown_seconds": 60
+  "cooldown_seconds": 60,
+  "pop_into_live": false
 }
 ```
 
