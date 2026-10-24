@@ -97,6 +97,8 @@ class RuleDefinition(BaseModel):
     classes: list[Literal["person", "vehicle"]] = Field(min_length=1)
     schedule: RuleSchedule | None = None
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
+    # Bring the alarm's camera and its neighbours into Live for people who opted in.
+    pop_into_live: bool = False
 
     @field_validator("name")
     @classmethod
@@ -129,6 +131,7 @@ def _columns(definition: RuleDefinition) -> tuple[object, ...]:
         definition.name, int(definition.enabled), json.dumps(sorted(set(definition.camera_ids))), json.dumps(sorted(set(definition.group_ids))),
         definition.condition.type, _condition_json(definition), json.dumps(sorted(set(definition.classes))),
         json.dumps(definition.schedule.model_dump(), separators=(",", ":")) if definition.schedule else None, definition.cooldown_seconds,
+        int(definition.pop_into_live),
     )
 
 
@@ -139,7 +142,7 @@ def rule_view(row) -> dict[str, object]:
         "camera_ids": json.loads(row["camera_ids_json"]), "group_ids": json.loads(row["group_ids_json"]),
         "condition": condition, "classes": json.loads(row["classes_json"]),
         "schedule": json.loads(row["schedule_json"]) if row["schedule_json"] else None,
-        "cooldown_seconds": row["cooldown_seconds"], "active_from": row["active_from"],
+        "cooldown_seconds": row["cooldown_seconds"], "pop_into_live": bool(row["pop_into_live"]), "active_from": row["active_from"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
 
@@ -175,8 +178,8 @@ async def create_rule(definition: RuleDefinition, request: Request, user: Admini
         try:
             _check_scope(db, definition)
             db.execute(
-                "INSERT INTO rules(name,enabled,camera_ids_json,group_ids_json,condition_type,condition_json,classes_json,schedule_json,cooldown_seconds,id,active_from,created_by) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (*_columns(definition), rule_id, _now(), int(user["id"])))
+                "INSERT INTO rules(name,enabled,camera_ids_json,group_ids_json,condition_type,condition_json,classes_json,schedule_json,cooldown_seconds,pop_into_live,"
+                "id,active_from,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (*_columns(definition), rule_id, _now(), int(user["id"])))
             _audit(db, user, "rule_created", rule_id, {"name": definition.name})
         except BaseException:
             db.execute("ROLLBACK")
@@ -207,7 +210,7 @@ async def update_rule(rule_id: str, definition: RuleDefinition, request: Request
             now = _now()
             db.execute(
                 "UPDATE rules SET name=?,enabled=?,camera_ids_json=?,group_ids_json=?,condition_type=?,condition_json=?,classes_json=?,schedule_json=?,cooldown_seconds=?,"
-                "active_from=?,updated_at=? WHERE id=?", (*_columns(definition), now, now, rule_id))
+                "pop_into_live=?,active_from=?,updated_at=? WHERE id=?", (*_columns(definition), now, now, rule_id))
             _audit(db, user, "rule_updated", rule_id, {"name": definition.name, "enabled": definition.enabled})
         except BaseException:
             db.execute("ROLLBACK")

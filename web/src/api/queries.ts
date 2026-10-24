@@ -54,11 +54,13 @@ export function usePublicBranding() {
   });
 }
 
+export interface Preferences { theme: ThemePreference; live_alarm_pop_in: boolean }
+
 export function usePreferences(enabled: boolean) {
   return useQuery({
     queryKey: keys.preferences,
     enabled,
-    queryFn: ({ signal }) => api<{ theme: ThemePreference }>("/api/me/preferences", { signal }),
+    queryFn: ({ signal }) => api<Preferences>("/api/me/preferences", { signal }),
     staleTime: Infinity,
   });
 }
@@ -66,7 +68,7 @@ export function usePreferences(enabled: boolean) {
 export function useSavePreferences() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (theme: ThemePreference) => api<{ theme: ThemePreference }>("/api/me/preferences", { method: "PUT", body: { theme } }),
+    mutationFn: (changes: Partial<Preferences>) => api<Preferences>("/api/me/preferences", { method: "PUT", body: changes }),
     onSuccess: preferences => client.setQueryData(keys.preferences, preferences),
   });
 }

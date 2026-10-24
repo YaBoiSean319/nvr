@@ -65,6 +65,7 @@ FFmpeg copies the camera's H.264 video without re-encoding it. When an administr
 | `onboarding` | ONVIF discovery and candidates, CSV import, reviewed bulk updates. Builds on `cameras`. |
 | `ai_settings` | Per-camera, per-group and runtime person/vehicle detection settings. |
 | `live_media` | Authenticated live video/audio delivery and viewer admission. |
+| `live_alarms` | Camera neighbours, the feed of alarms that pop into Live, and video wall sign-in. |
 | `footage` | Segments, coverage, motion and AI events, archive/restore, footage deletion, preservation holds. |
 | `playback` | Synchronized timeline, segment media, snapshots and frame navigation. |
 | `export_jobs` | Export job submission, status, cancellation, download and evidence verification. |
@@ -83,7 +84,7 @@ Domain logic that does not depend on HTTP (recording, retention, storage, export
 - `CurrentUser`: any signed-in administrator or operator.
 - `Administrator`: administrators only (403 otherwise).
 
-Both yield a `Principal` (`id`, `username`, `role`, and for API tokens `scopes`/`token_id`) that also supports `principal["id"]` style access. A bearer API token resolves to its creating administrator, limited by scope: an endpoint marked `@requires_scope("media")` or `@requires_scope("export")` needs that scope, administrator routes need `admin`, other reads need `read`, and other changes need `admin`. The OpenAPI document publishes the result as `x-required-scope`. Unauthenticated routes are deliberate: setup status/bootstrap, sign-in, OIDC, public branding, health, and the browser interface's page and assets (which contain no data). Tests replace identity by overriding `app.principal.current_user` or `app.principal.administrator` in `app.dependency_overrides`.
+Both yield a `Principal` (`id`, `username`, `role`, and for API tokens `scopes`/`token_id`) that also supports `principal["id"]` style access. A bearer API token resolves to its creating administrator, limited by scope: an endpoint marked `@requires_scope("media")` or `@requires_scope("export")` needs that scope, administrator routes need `admin`, other reads need `read`, and other changes need `admin`. The OpenAPI document publishes the result as `x-required-scope`. Unauthenticated routes are deliberate: setup status/bootstrap, sign-in, OIDC, public branding, health, video wall sign-in (`POST /api/wall/session`, which takes a token) and sign-out, push notification thumbnails (behind short-lived signed links), and the browser interface's page and assets (which contain no data). A video wall exchanges a token with exactly the `read` and `media` scopes for an `nvr_wall` session cookie. `current_user` honours that cookie only when no person's session is present, re-checks the token on every request (so revoking it ends the session), and allows only the routes in `app.principal.WALL_ROUTES`, which watching needs. Tests replace identity by overriding `app.principal.current_user` or `app.principal.administrator` in `app.dependency_overrides`.
 
 ## Database
 

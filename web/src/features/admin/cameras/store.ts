@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { Batch } from "./bulk";
 import { DEFAULT_FILTERS, DEFAULT_SORT, type Filters, type Sort } from "./inventory";
 
-export type EditorTab = "general" | "recording" | "motion" | "ai" | "schedule" | "health";
+export type EditorTab = "general" | "recording" | "motion" | "ai" | "neighbours" | "schedule" | "health";
 
 interface Preferences {
   sort: Sort;

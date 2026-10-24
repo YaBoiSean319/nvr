@@ -86,18 +86,36 @@ def authenticate(presented: str) -> sqlite3.Row:
         ).fetchone()
         if row is None or not hmac.compare_digest(row["secret_digest"], _digest(secret)):
             raise TokenRejected("Invalid API token")
-        if row["revoked_at"]:
-            raise TokenRejected("API token has been revoked")
-        if row["expires_at"] and _parse(row["expires_at"]) <= now:
-            raise TokenRejected("API token has expired")
-        if row["created_by"] is None or row["owner_role"] != "administrator":
-            raise TokenRejected("API token owner is no longer an administrator")
+        _check_usable(row, now)
         last_used = _parse(row["last_used_at"]) if row["last_used_at"] else None
         if last_used is None or now - last_used >= LAST_USED_WRITE_INTERVAL:
             # Bounded writes: record use (and audit it) at most once per interval per token.
             db.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?", (_iso(now), token_id))
             _audit(db, row["created_by"], "api_token_used", token_id, {})
     return row
+
+
+def usable_token(token_id: str) -> sqlite3.Row:
+    """A token by id, for a session it signed in (a video wall), or raise TokenRejected."""
+    with connect() as db:
+        row = db.execute(
+            "SELECT t.*,u.username AS owner_username,u.role AS owner_role FROM api_tokens t "
+            "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
+            (token_id,),
+        ).fetchone()
+    if row is None:
+        raise TokenRejected("Invalid API token")
+    _check_usable(row, _now())
+    return row
+
+
+def _check_usable(row: sqlite3.Row, now: datetime) -> None:
+    if row["revoked_at"]:
+        raise TokenRejected("API token has been revoked")
+    if row["expires_at"] and _parse(row["expires_at"]) <= now:
+        raise TokenRejected("API token has expired")
+    if row["created_by"] is None or row["owner_role"] != "administrator":
+        raise TokenRejected("API token owner is no longer an administrator")
 
 
 def token_scopes(row: sqlite3.Row) -> frozenset[str]:

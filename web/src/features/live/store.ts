@@ -2,12 +2,34 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import * as arrange from "./arrangement";
 import type { Arrangement, ManualSize } from "./arrangement";
+import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
 
 export type Quality = "auto" | "main" | "sub";
 
 export interface LoadedView {
   name: string;
   scope: "personal" | "shared";
+}
+
+/** An alarm that pops into Live: its camera first, then that camera's neighbours. */
+export interface PopIn {
+  id: string;
+  rule_name: string;
+  camera_id: string;
+  camera_name: string;
+  label: string;
+  occurred_at: string;
+  camera_ids: string[];
+}
+
+type Workspace = Pick<LiveState, "arrangement" | "view" | "baseline" | "activeId" | "enlargedId">;
+
+/** A temporary layout for an alarm, over the person's own workspace, which Return puts back exactly. */
+export interface AlarmLayout {
+  current: PopIn;
+  /** Alarms that arrived while this one is shown wait their turn instead of taking the screen. */
+  queue: PopIn[];
+  saved: Workspace;
 }
 
 interface LiveState {
@@ -24,6 +46,7 @@ interface LiveState {
   listeningId: string | null;
   /** Set once the server-side workspace has been applied, so saving starts after restoring. */
   restored: boolean;
+  alarmLayout: AlarmLayout | null;
 
   toggle: (id: string) => void;
   remove: (id: string) => void;
@@ -41,7 +64,18 @@ interface LiveState {
   setSidebarOpen: (open: boolean) => void;
   setListening: (id: string | null) => void;
   clearNotice: () => void;
+  popIn: (alarm: PopIn) => void;
+  nextAlarm: () => void;
+  returnToMyView: () => void;
   reset: () => void;
+}
+
+export function alarmArrangement(alarm: PopIn): Arrangement {
+  return { mode: "auto", order: [...new Set(alarm.camera_ids)].slice(0, MAX_DISPLAYED_CAMERAS), slots: [] };
+}
+
+function showing(alarm: PopIn) {
+  return { arrangement: alarmArrangement(alarm), view: null, baseline: null, activeId: alarm.camera_id, enlargedId: null, listeningId: null, notice: null };
 }
 
 const initial = {
@@ -55,6 +89,7 @@ const initial = {
   notice: null,
   listeningId: null,
   restored: false,
+  alarmLayout: null,
 };
 
 export const useLiveStore = create<LiveState>((set, get) => ({
@@ -97,8 +132,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const { arrangement, notice } = arrange.toManual(get().arrangement, size);
     set({ arrangement, notice: notice ?? null, enlargedId: null });
   },
+  // Choosing a view is the person taking the screen back: any alarm layout ends.
   load: (arrangement, view) =>
-    set({ arrangement, view, baseline: view ? arrangement : null, enlargedId: null, listeningId: null, notice: null,
+    set({ arrangement, view, alarmLayout: null, baseline: view ? arrangement : null, enlargedId: null, listeningId: null, notice: null,
           activeId: arrange.members(arrangement)[0] ?? null }),
   markSaved: view => set(state => ({ view, baseline: state.arrangement })),
   restore: (arrangement, sidebarOpen) =>
@@ -110,6 +146,27 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   setSidebarOpen: open => set({ sidebarOpen: open }),
   setListening: id => set({ listeningId: id }),
   clearNotice: () => set({ notice: null }),
+  popIn: alarm => {
+    const layout = get().alarmLayout;
+    if (layout) {
+      if (layout.current.id === alarm.id || layout.queue.some(waiting => waiting.id === alarm.id)) return;
+      set({ alarmLayout: { ...layout, queue: [...layout.queue, alarm] } });
+      return;
+    }
+    const { arrangement, view, baseline, activeId, enlargedId } = get();
+    set({ ...showing(alarm), alarmLayout: { current: alarm, queue: [], saved: { arrangement, view, baseline, activeId, enlargedId } } });
+  },
+  nextAlarm: () => {
+    const layout = get().alarmLayout;
+    const [next, ...rest] = layout?.queue ?? [];
+    if (!layout || !next) return;
+    set({ ...showing(next), alarmLayout: { ...layout, current: next, queue: rest } });
+  },
+  returnToMyView: () => {
+    const layout = get().alarmLayout;
+    if (!layout) return;
+    set({ ...layout.saved, alarmLayout: null, listeningId: null, notice: null });
+  },
   reset: () => set(initial),
 }));
 

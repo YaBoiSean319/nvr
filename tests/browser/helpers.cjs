@@ -30,6 +30,14 @@ function seedFixtures(count, options = {}) {
   return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
 }
 
+/** Raise a new alarm on fixture camera `camera` from a rule that pops into Live, with those neighbours. */
+function raiseAlarm(camera, { neighbours = [], rule = "Gate entry" } = {}) {
+  const args = ["-m", "tests.browser.raise_alarm", "--camera", String(camera), "--neighbours", neighbours.join(","), "--rule", rule];
+  const result = spawnSync("python", args, { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, `raising an alarm failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -73,4 +81,4 @@ function trackLiveSockets(page) {
   };
 }
 
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, signInNext, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, signInNext, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

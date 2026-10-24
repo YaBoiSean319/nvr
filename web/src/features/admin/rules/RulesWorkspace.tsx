@@ -236,6 +236,8 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                    onChange={event => tab.change({ cooldown_seconds: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
           </label>
           <p className="muted field-hint">Each object fires a rule at most once. A cooldown also waits this long after an event on a camera before the next.</p>
+          <label className="check"><input type="checkbox" checked={draft.pop_into_live} onChange={event => tab.change({ pop_into_live: event.target.checked })} /> Pop alarms into Live</label>
+          <p className="muted field-hint">Brings the alarm's camera and its neighbours into Live for people who turned alarm pop-in on, and onto video walls.</p>
         </fieldset>
 
         <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} blocked={problem} />
