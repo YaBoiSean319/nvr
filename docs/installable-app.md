@@ -17,10 +17,10 @@ Icon addresses change whenever branding changes, so an installed app shows the n
 A service worker (`/sw.js`) keeps the application shell available:
 
 - **The page:** it always comes from the server when the server can be reached, so a new release shows immediately. A copy is kept only to show the sign-in page when the server is unreachable.
-- **Hashed script and style files** (`/assets/…`) are kept. Their names change with every release.
+- **Hashed script and style files** (`/assets/…`) that the page names are kept, so the shell also opens when the server is unreachable. Their names change with every release.
 - **Nothing else.** API responses, live video, recorded footage, snapshots, exports and credentials pass straight through and are never stored.
 
-The worker's version is derived from the built page, so every release installs a new worker. That worker deletes the previous release's stored files when it takes over.
+The worker's version is derived from the built page, so every release installs a new worker. Pages always load from the server first, so the next load shows the new release at once. The new worker takes over once the previous release's open windows have closed, so it never removes files from under an open page, and it then deletes the previous release's stored files.
 
 Signing out ends the session (its cookie is removed). It leaves only per-person preferences such as the theme, the camera inventory's sort order and the last Playback search; none of them holds credentials, tokens or camera addresses.
 

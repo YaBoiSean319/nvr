@@ -42,55 +42,15 @@ def preview_redirect(request: Request, path: str = "") -> RedirectResponse:
     return RedirectResponse(f"/{path}{query}", status_code=308)
 
 
-# The service worker caches only the application shell and hashed assets. It never
-# intercepts API, media or snapshot requests. Its version is the built page's digest, so
-# every release installs a new worker that deletes the previous release's caches.
-SERVICE_WORKER = """'use strict';
-const VERSION = "__VERSION__";
-const SHELL = `nvr-shell-${VERSION}`;
-
-self.addEventListener('install', event => {
-  event.waitUntil(caches.open(SHELL).then(cache => cache.add(new Request('/', { cache: 'reload' }))).then(() => self.skipWaiting()));
-});
-
-self.addEventListener('activate', event => {
-  event.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(key => key.startsWith('nvr-shell-') && key !== SHELL).map(key => caches.delete(key))))
-    .then(() => self.clients.claim()));
-});
-
-self.addEventListener('fetch', event => {
-  const request = event.request;
-  const url = new URL(request.url);
-  if (request.method !== 'GET' || url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith('/assets/')) {
-    // Hashed file names never change content, so the first copy is the right one.
-    event.respondWith(caches.open(SHELL).then(cache => cache.match(request).then(hit => hit || fetch(request).then(response => {
-      if (response.ok && response.type === 'basic') cache.put(request, response.clone());
-      return response;
-    }))));
-    return;
-  }
-  if (request.mode === 'navigate' && !url.pathname.startsWith('/api/')) {
-    // The page always comes from the network when it can, so a new release shows at once.
-    event.respondWith(fetch(request).then(response => {
-      if (response.ok && response.type === 'basic') caches.open(SHELL).then(cache => cache.put('/', response.clone()));
-      return response;
-    }).catch(() => caches.open(SHELL).then(cache => cache.match('/')).then(hit => hit || Response.error())));
-  }
-  // Everything else (API responses, live and recorded media, snapshots) is never touched.
-});
-"""
-
-
 @router.get("/sw.js", include_in_schema=False)
 def service_worker() -> Response:
-    page = DIST_DIRECTORY / "index.html"
-    if not page.is_file():
+    """The installable app's service worker (web/public/sw.js), versioned by the built page."""
+    page, worker = DIST_DIRECTORY / "index.html", DIST_DIRECTORY / "sw.js"
+    if not page.is_file() or not worker.is_file():
         raise HTTPException(status_code=503, detail="The web interface has not been built")
     version = hashlib.sha256(page.read_bytes()).hexdigest()[:16]
-    return Response(SERVICE_WORKER.replace("__VERSION__", version), media_type="text/javascript; charset=utf-8",
-                    headers={**SECURITY_HEADERS, "Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+    return Response(worker.read_text(encoding="utf-8").replace("__VERSION__", version), media_type="text/javascript; charset=utf-8",
+                    headers={**SECURITY_HEADERS, "Cache-Control": "no-cache"})
 
 
 @router.get("/assets/{path:path}", include_in_schema=False)

@@ -33,6 +33,7 @@ class InstallableAppTests(unittest.TestCase):
         self.dist = root / "dist"
         (self.dist / "assets").mkdir(parents=True)
         (self.dist / "index.html").write_text("<!doctype html><title>NVR</title>")
+        shutil.copyfile(Path(__file__).resolve().parents[1] / "web" / "public" / "sw.js", self.dist / "sw.js")
         self.context = TestClient(create_app(start_workers=False))
         self.client = self.context.__enter__()
         self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
@@ -88,7 +89,6 @@ class InstallableAppTests(unittest.TestCase):
             self.assertEqual(worker.status_code, 200)
             self.assertEqual(worker.headers["content-type"], "text/javascript; charset=utf-8")
             self.assertEqual(worker.headers["cache-control"], "no-cache")
-            self.assertEqual(worker.headers["service-worker-allowed"], "/")
             version = hashlib.sha256((self.dist / "index.html").read_bytes()).hexdigest()[:16]
             self.assertIn(f'"{version}"', worker.text)
             (self.dist / "index.html").write_text("<!doctype html><title>NVR next release</title>")
