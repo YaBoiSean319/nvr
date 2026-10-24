@@ -74,6 +74,7 @@ test("only administrators delete alarms, and the alarm footage period is a setti
   await openAlarm(page);
   await detail(page).getByRole("button", { name: "Delete alarm…" }).click();
   await page.getByRole("dialog", { name: "Delete this alarm?" }).getByRole("button", { name: "Delete alarm" }).click();
-  await expect(inbox(page).getByRole("list", { name: "Alarms" })).toBeVisible();
+  // Back in the inbox, which no longer lists the deleted alarm.
   await expect(inbox(page)).toContainText("No alarms match these filters.");
+  await expect(inbox(page).getByRole("button", { name: /^Gate entry/ })).toHaveCount(0);
 });
