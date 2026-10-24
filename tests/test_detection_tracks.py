@@ -1,112 +1,24 @@
 from __future__ import annotations
 
-import asyncio
 import os
-import tempfile
 import unittest
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app.application import create_app
-from app.credentials import encrypt
-from app.detection import DetectionManager
 from app.principal import COOKIE_NAME
 from app.store import connect
 from tests.fixtures import detection_scene as scene
+from tests.scene_case import SceneTestCase, iso as _iso, parse as _parse
 from tests.test_support import TEST_PASSWORD
 
 
-def _iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _parse(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-class DetectionTrackTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.footage_directory = tempfile.TemporaryDirectory()
-        cls.footage = scene.write_footage(Path(cls.footage_directory.name) / "scene.mp4")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.footage_directory.cleanup()
-
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        root = Path(self.temporary.name)
-        self.previous = {key: os.environ.get(key) for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH")}
-        os.environ["NVR_DB_PATH"] = str(root / "state.sqlite3")
-        os.environ["NVR_RECORDINGS_PATH"] = str(root / "recordings")
-        os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(root / "credentials.key")
-        (root / "recordings").mkdir()
-        self.context = TestClient(create_app(start_workers=False))
-        self.client = self.context.__enter__()
-        created = self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD})
-        self.assertEqual(created.status_code, 201, created.text)
-        self.camera_id = str(uuid.uuid4())
-        with connect() as db:
-            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES(?,?,?)",
-                       (self.camera_id, "Loading dock", encrypt("rtsp://camera.invalid/main")))
-            db.execute("INSERT INTO ai_camera_settings(camera_id,config_override,enabled,use_substream) VALUES(?,1,1,0)", (self.camera_id,))
-        self.scene_start: datetime | None = None
-
-    def tearDown(self):
-        self.context.__exit__(None, None, None)
-        for key, value in self.previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        self.temporary.cleanup()
-
-    def _analyse_footage(self) -> None:
-        """Run the AI worker's camera loop over the fixture footage until every frame is analysed."""
-        decoded = scene.decode_footage(self.footage)
-        self.assertEqual(len(decoded), scene.FRAME_COUNT)
-        times: list[datetime] = []
-
-        def clock() -> datetime:
-            # The first analysed frame is stamped at the real time, as in production;
-            # later frames follow the scene's sampling interval.
-            if not times:
-                self.scene_start = datetime.now(timezone.utc)
-                times.extend(scene.frame_times(self.scene_start))
-            return times.pop(0)
-
-        async def run() -> None:
-            finished = asyncio.Event()
-
-            async def footage_frames(source, fps):
-                for item in decoded:
-                    yield item
-                finished.set()
-                await asyncio.Event().wait()  # the camera stays connected without new frames
-
-            manager = DetectionManager(clock=clock)
-            manager.detector = scene.SceneDetector()
-            with patch("app.detection._raw_frames", footage_frames):
-                await manager.start()
-                await asyncio.wait_for(finished.wait(), timeout=20)
-                await asyncio.sleep(0.2)
-                await manager.stop()
-
-        asyncio.run(run())
-
-    def _range(self) -> dict[str, str]:
-        return {"camera_id": self.camera_id, "start": _iso(self.scene_start - timedelta(minutes=1)),
-                "end": _iso(self.scene_start + timedelta(minutes=1))}
-
+class DetectionTrackTests(SceneTestCase):
     def test_worker_stores_detections_with_boxes_linked_into_tracks(self):
-        self._analyse_footage()
+        self.analyse_footage()
 
-        tracks = self.client.get("/api/ai/tracks", params=self._range())
+        tracks = self.client.get("/api/ai/tracks", params=self.scene_range())
         self.assertEqual(tracks.status_code, 200, tracks.text)
         listed = tracks.json()["tracks"]
         self.assertEqual(sorted(track["label"] for track in listed), ["person", "person", "vehicle"])
@@ -126,7 +38,7 @@ class DetectionTrackTests(unittest.TestCase):
             self.assertEqual(detail.json()["last_seen_at"], detections[-1]["detected_at"])
         self.assertEqual(sorted(colors), ["blue", "green", "red"])
 
-        found = self.client.get("/api/ai/detections", params={**self._range(), "label": "vehicle"})
+        found = self.client.get("/api/ai/detections", params={**self.scene_range(), "label": "vehicle"})
         self.assertEqual(found.status_code, 200, found.text)
         vehicles = found.json()["detections"]
         self.assertEqual(len(vehicles), scene.FRAME_COUNT)
@@ -141,14 +53,14 @@ class DetectionTrackTests(unittest.TestCase):
         self.assertIn("model_id", first)
 
     def test_unanalysed_intervals_are_reported_and_never_contain_detections(self):
-        self._analyse_footage()
+        self.analyse_footage()
         # The camera then stops being analysed: what follows is unknown, not empty.
         with connect() as db:
             db.execute("UPDATE ai_camera_settings SET enabled=0 WHERE camera_id=?", (self.camera_id,))
         from app.detection import set_camera_state
         set_camera_state(self.camera_id, "failed", "Camera stream ended", at=self.scene_start + timedelta(seconds=20))
 
-        found = self.client.get("/api/ai/detections", params=self._range())
+        found = self.client.get("/api/ai/detections", params=self.scene_range())
         self.assertEqual(found.status_code, 200, found.text)
         body = found.json()
         self.assertEqual(len(body["detections"]), scene.FRAME_COUNT * len(scene.OBJECTS))
@@ -162,7 +74,7 @@ class DetectionTrackTests(unittest.TestCase):
             self.assertEqual(inside, [], interval)
 
         # The existing timeline keeps its shape: observation intervals and unanalysed coverage.
-        span = self._range()
+        span = self.scene_range()
         timeline = self.client.post("/api/playback/timeline", json={"camera_ids": [self.camera_id], "start": span["start"], "end": span["end"]})
         self.assertEqual(timeline.status_code, 200, timeline.text)
         camera = timeline.json()["cameras"][0]
@@ -180,12 +92,12 @@ class DetectionTrackTests(unittest.TestCase):
                               (self.camera_id, name, starts_at.isoformat(), ends_at.isoformat(), 7)).lastrowid
 
     def _tracks(self) -> list[dict]:
-        response = self.client.get("/api/ai/tracks", params=self._range())
+        response = self.client.get("/api/ai/tracks", params=self.scene_range())
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["tracks"]
 
     def test_deleting_footage_removes_the_detections_it_covers(self):
-        self._analyse_footage()
+        self.analyse_footage()
         middle = self.scene_start + scene.FRAME_INTERVAL * 15
         first = self._add_segment(self.scene_start, middle)
         self._add_segment(middle, self.scene_start + scene.FRAME_INTERVAL * scene.FRAME_COUNT)
@@ -193,7 +105,7 @@ class DetectionTrackTests(unittest.TestCase):
         deleted = self.client.delete(f"/api/cameras/{self.camera_id}/segments/{first}")
         self.assertEqual(deleted.status_code, 204, deleted.text)
 
-        remaining = self.client.get("/api/ai/detections", params=self._range()).json()["detections"]
+        remaining = self.client.get("/api/ai/detections", params=self.scene_range()).json()["detections"]
         self.assertEqual(len(remaining), 15 * len(scene.OBJECTS))
         self.assertTrue(all(_parse(item["detected_at"]) >= middle for item in remaining))
         tracks = self._tracks()
@@ -225,7 +137,7 @@ class DetectionTrackTests(unittest.TestCase):
         self.assertTrue(all(track["detection_count"] == 10 for track in tracks), tracks)
 
     def test_deleting_an_archived_cameras_footage_removes_all_its_detections(self):
-        self._analyse_footage()
+        self.analyse_footage()
         middle = self.scene_start + scene.FRAME_INTERVAL * 15
         self._add_segment(middle, middle + scene.FRAME_INTERVAL * 2)  # motion clip; the rest is uncovered
         with connect() as db:
@@ -237,7 +149,7 @@ class DetectionTrackTests(unittest.TestCase):
     def test_retention_expiry_removes_detections_and_tracks(self):
         from app.retention import cleanup_expired_recordings
 
-        self._analyse_footage()
+        self.analyse_footage()
         end = self.scene_start + scene.FRAME_INTERVAL * scene.FRAME_COUNT
         self._add_segment(self.scene_start, end)
         with connect() as db:
@@ -248,12 +160,12 @@ class DetectionTrackTests(unittest.TestCase):
 
         self.assertEqual(cleanup_expired_recordings(end + timedelta(days=8))["removed_segments"], 1)
         self.assertEqual(self._tracks(), [])
-        self.assertEqual(self.client.get("/api/ai/detections", params=self._range()).json()["detections"], [])
+        self.assertEqual(self.client.get("/api/ai/detections", params=self.scene_range()).json()["detections"], [])
 
     def test_detection_reads_need_a_signed_in_user_or_a_read_token(self):
-        self._analyse_footage()
+        self.analyse_footage()
         track_id = self._tracks()[0]["id"]
-        paths = [("/api/ai/detections", self._range()), ("/api/ai/tracks", self._range()), (f"/api/ai/tracks/{track_id}", None)]
+        paths = [("/api/ai/detections", self.scene_range()), ("/api/ai/tracks", self.scene_range()), (f"/api/ai/tracks/{track_id}", None)]
 
         def token(*scopes: str) -> str:
             response = self.client.post("/api/admin/api-tokens", json={"name": "Detections", "scopes": list(scopes)})
@@ -281,7 +193,7 @@ class DetectionTrackTests(unittest.TestCase):
         from app.retention import cleanup_expired_recordings
 
         # Motion-only or paused recording: the camera was analysed but nothing was written.
-        self._analyse_footage()
+        self.analyse_footage()
         end = self.scene_start + scene.FRAME_INTERVAL * scene.FRAME_COUNT
         cleanup_expired_recordings(end + timedelta(days=29))
         self.assertEqual(len(self._tracks()), len(scene.OBJECTS))
