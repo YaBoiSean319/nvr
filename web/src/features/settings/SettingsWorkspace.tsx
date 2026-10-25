@@ -6,6 +6,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { CoverageSettings } from "./CoverageSettings";
 import { DiagnosticsSettings } from "./DiagnosticsSettings";
 import { GeneralSettings } from "./GeneralSettings";
+import { HardeningSettings } from "./HardeningSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
 import { NotificationsSettings } from "./NotificationsSettings";
 import { StorageSettings } from "./StorageSettings";
@@ -17,6 +18,7 @@ const CATEGORIES = {
   recording: { label: "Recording & storage", page: StorageSettings },
   coverage: { label: "Coverage & self-test", page: CoverageSettings },
   audit: { label: "Viewing audit", page: AuditSettings },
+  hardening: { label: "Camera hardening", page: HardeningSettings },
   notifications: { label: "Notifications", page: NotificationsSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },
   diagnostics: { label: "Diagnostics", page: DiagnosticsSettings },

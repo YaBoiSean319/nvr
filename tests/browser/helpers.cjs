@@ -55,6 +55,17 @@ function smartReading(state) {
   return JSON.parse(result.stdout);
 }
 
+/** Give fixture camera `camera` a camera address, an ONVIF login and/or an ONVIF device address, for the hardening checks. */
+function weakenCamera(camera, { ip, onvifUser, onvifPassword, device } = {}) {
+  const args = ["-m", "tests.browser.seed_hardening", "--camera", String(camera)];
+  if (ip) args.push("--ip", ip);
+  if (onvifUser) args.push("--onvif-user", onvifUser, "--onvif-password", onvifPassword ?? "");
+  if (device) args.push("--device", device);
+  const result = spawnSync("python", args, { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, `weakening a camera failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 /** Raise a new alarm on fixture camera `camera` from a rule that pops into Live, with those neighbours. */
 function raiseAlarm(camera, { neighbours = [], rule = "Gate entry" } = {}) {
   const args = ["-m", "tests.browser.raise_alarm", "--camera", String(camera), "--neighbours", neighbours.join(","), "--rule", rule];
@@ -116,4 +127,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

@@ -5,7 +5,7 @@ const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
 const WIDTHS = [320, 360, 768, 1024, 1440].map(width => ({ width, height: 800 }));
 // The desktop sizes #77 names for operators' monitoring stations.
 const DESKTOPS = [{ width: 1920, height: 1080 }, { width: 1440, height: 900 }, { width: 1366, height: 768 }];
-const SETTINGS = ["general", "appearance", "access", "recording", "notifications", "integrations", "diagnostics"];
+const SETTINGS = ["general", "appearance", "access", "recording", "notifications", "integrations", "diagnostics", "hardening"];
 const ADMIN_ROUTES = ["/live", "/playback", "/cameras", "/cameras/add", "/cameras/groups", "/cameras/rules", ...SETTINGS.map(category => `/settings/${category}`)];
 const OPERATOR_ROUTES = ["/live", "/playback", "/cameras"];
 // Roles that are operated by name; any of these without one is unusable with a screen reader.
