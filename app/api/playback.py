@@ -6,13 +6,14 @@ import shutil
 import subprocess
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
+from app import privacy
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
@@ -130,20 +131,30 @@ def synchronized_playback_timeline(
     return {"start": start_text, "end": end_text, "cameras": cameras}
 
 
+def _segment_zones(user, camera_id: str, starts_at: str, unmasked: bool) -> list:
+    recorded_at = datetime.fromisoformat(starts_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+    try:
+        return privacy.zones_for(user, camera_id, unmasked=unmasked, recorded_at=recorded_at)
+    except privacy.UnmaskedRefused as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 @router.get("/api/cameras/{camera_id}/segments/{segment_id}/media")
 @requires_scope("media")
-def play_segment(
+async def play_segment(
     camera_id: str,
     segment_id: int,
-    _: CurrentUser,
+    user: CurrentUser,
+    unmasked: Annotated[bool, Query()] = False,
 ) -> FileResponse:
     with connect() as db:
         row = db.execute(
-            "SELECT relative_path FROM recording_segments WHERE id=? AND camera_id=?",
+            "SELECT relative_path,starts_at FROM recording_segments WHERE id=? AND camera_id=?",
             (segment_id, camera_id),
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Recorded interval is unavailable")
+    zones = _segment_zones(user, camera_id, row["starts_at"], unmasked)
     from app.storage import recording_file_path
     try:
         path = recording_file_path(row["relative_path"])
@@ -153,6 +164,15 @@ def play_segment(
     if not path.is_file():
         release_playback(path)
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+    if zones:
+        # Recordings on disk are not masked: deliver a masked rendering, never the file itself.
+        try:
+            masked = await privacy.masked_recording(path, zones)
+        except (OSError, RuntimeError, asyncio.TimeoutError) as exc:
+            raise HTTPException(status_code=503, detail="The masked recording could not be prepared") from exc
+        finally:
+            release_playback(path)
+        return FileResponse(masked, media_type="video/mp4", filename=path.name, content_disposition_type="inline")
     return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="inline", background=BackgroundTask(release_playback,path))
 
 
@@ -163,6 +183,7 @@ async def snapshot_segment(
     segment_id: int,
     at: datetime,
     user: CurrentUser,
+    unmasked: Annotated[bool, Query()] = False,
 ) -> Response:
     if at.tzinfo is None:
         raise HTTPException(status_code=422, detail="Snapshot time must include a timezone")
@@ -170,6 +191,7 @@ async def snapshot_segment(
         row = db.execute("SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE id=? AND camera_id=?", (segment_id,camera_id)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Recorded interval is unavailable")
+    zones = _segment_zones(user, camera_id, row["starts_at"], unmasked)
     start = datetime.fromisoformat(row["starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
     end = datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
     at = at.astimezone(timezone.utc)
@@ -190,7 +212,7 @@ async def snapshot_segment(
     try:
         process = await asyncio.create_subprocess_exec(
             shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}",
-            "-i", str(path), "-frames:v", "1", "-vf", "scale=1280:-2:force_original_aspect_ratio=decrease",
+            "-i", str(path), "-frames:v", "1", "-vf", privacy.with_mask("scale=1280:-2:force_original_aspect_ratio=decrease", zones),
             "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )

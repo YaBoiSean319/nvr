@@ -384,9 +384,13 @@ def thumbnail(alarm_id: str) -> bytes | None:
         segment = db.execute(
             "SELECT id,relative_path,starts_at FROM recording_segments WHERE camera_id=? AND starts_at<=? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at DESC LIMIT 1",
             (alarm["camera_id"], alarm["occurred_at"], alarm["occurred_at"])).fetchone()
-        keyframe = db.execute("SELECT jpeg FROM track_keyframes WHERE track_id=?", (alarm["track_id"],)).fetchone() if alarm["track_id"] else None
+        keyframe = db.execute("SELECT jpeg,captured_at FROM track_keyframes WHERE track_id=?", (alarm["track_id"],)).fetchone() if alarm["track_id"] else None
+        from .privacy import drawbox_filter, mask_jpeg_sync, server_zones
+
+        segment_zones = server_zones(db, alarm["camera_id"], datetime.fromisoformat(segment["starts_at"])) if segment is not None else []
+        keyframe_zones = server_zones(db, alarm["camera_id"], datetime.fromisoformat(keyframe["captured_at"])) if keyframe is not None else []
     if segment is not None and shutil.which("ffmpeg"):
-        cache_key = (alarm_id, str(segment["id"]))
+        cache_key = (alarm_id, str(segment["id"]), json.dumps(segment_zones))
         if cache_key in _THUMBNAILS:
             return _THUMBNAILS[cache_key]
         try:
@@ -399,7 +403,8 @@ def thumbnail(alarm_id: str) -> bytes | None:
             try:
                 result = subprocess.run(
                     [shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1", "-ss", f"{offset:.3f}", "-i", str(path),
-                     "-frames:v", "1", "-vf", "scale=640:-2:force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                     "-frames:v", "1", "-vf", (f"{drawbox_filter(segment_zones)}," if segment_zones else "") + "scale=640:-2:force_original_aspect_ratio=decrease",
+                     "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
                     capture_output=True, timeout=15, check=False)
             except subprocess.TimeoutExpired:
                 result = None
@@ -410,7 +415,8 @@ def thumbnail(alarm_id: str) -> bytes | None:
                     _THUMBNAILS.pop(next(iter(_THUMBNAILS)))
                 _THUMBNAILS[cache_key] = result.stdout
                 return result.stdout
-    return keyframe["jpeg"] if keyframe else None
+    # Privacy masks apply to the keyframe too; if one cannot be drawn there is no picture at all.
+    return mask_jpeg_sync(keyframe["jpeg"], keyframe_zones) if keyframe else None
 
 
 def recover_inflight() -> None:

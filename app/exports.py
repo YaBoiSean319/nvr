@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import privacy
 from .display_settings import format_display_datetime
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
@@ -367,7 +368,8 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
             next_start = offsets[span_index + 1][0] if span_index + 1 < len(spans) else duration
             args.extend(["-ss", f"{source_offset:.6f}", "-t", f"{span_duration:.6f}", "-i", str(recording_file_path(segment["relative_path"]))])
             clip, composed = f"tile{tile_index}_clip{span_index}", f"tile{tile_index}_composed{span_index}"
-            graph.append(f"[{next_input}:v]fps=15,scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration={max(0.01, next_start-output_start-span_duration):.6f},trim=duration={max(0.01, next_start-output_start):.6f},setpts=PTS-STARTPTS+{output_start:.6f}/TB[{clip}]")
+            mask = f"{privacy.drawbox_filter(camera['privacy_zones'])}," if camera.get("privacy_zones") else ""
+            graph.append(f"[{next_input}:v]{mask}fps=15,scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration={max(0.01, next_start-output_start-span_duration):.6f},trim=duration={max(0.01, next_start-output_start):.6f},setpts=PTS-STARTPTS+{output_start:.6f}/TB[{clip}]")
             graph.append(f"[{current}][{clip}]overlay=eof_action=pass:shortest=0:enable='between(t,{output_start:.6f},{next_start:.6f})'[{composed}]")
             current = composed
             next_input += 1
@@ -681,7 +683,11 @@ class ExportManager:
                         "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
                         (camera_id, end.isoformat(), start.isoformat()),
                     ).fetchall()]
-                    per_camera.append({"camera_id": camera_id, "name": camera["name"], "index": index, "segments": segments,
+                    # Privacy masks: burn in the mask over the whole camera if any of its footage needs it.
+                    zones: list[dict[str, float]] = []
+                    for segment in segments:
+                        zones = zones or privacy.server_zones(db, camera_id, _parse_time(segment["starts_at"]))
+                    per_camera.append({"camera_id": camera_id, "name": camera["name"], "index": index, "segments": segments, "privacy_zones": zones,
                                        "audio_supported": bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
                                        "spans": _unique_output_spans(start, end, segments)})
                     total_segments += len(segments)
@@ -760,6 +766,7 @@ class ExportManager:
                     continue
                 entry: dict[str, Any] = {
                     "camera_id": camera["camera_id"], "camera_name": camera["name"],
+                    "privacy_masked": bool(camera["privacy_zones"]),
                     "actual_intervals": actual, "missing_intervals": missing,
                     "segment_count": len(spans), "video_file": None,
                     "source_to_output_intervals": [
@@ -788,7 +795,7 @@ class ExportManager:
                     first_overlay_samples = _write_source_time_subtitles(subtitle_path, camera["name"], spans, display_settings)
                     await self._run_ffmpeg(job_id, [
                         "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
-                        "-map", "0:v:0", "-an", "-vf", f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}",
+                        "-map", "0:v:0", "-an", "-vf", privacy.with_mask(f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}", camera["privacy_zones"]),
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-y", str(clip_path),
                     ])
                     if job_id in self._cancelled:
