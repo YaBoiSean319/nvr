@@ -301,7 +301,7 @@ def scheduled_run_due(now: datetime | None = None) -> bool:
     if disabled_reason():
         return False
     now = now or datetime.now(timezone.utc)
-    zone = _site_zone()
+    zone = site_zone()
     local = now.astimezone(zone)
     boundary = datetime.combine(local.date(), SCHEDULE_TIME, zone)
     if local < boundary:
@@ -342,7 +342,7 @@ def status() -> dict[str, object]:
         "destination": str(destination()),
         "destination_error": destination_error,
         "keep": keep(),
-        "schedule": {"local_time": SCHEDULE_TIME.strftime("%H:%M"), "time_zone": str(_site_zone())},
+        "schedule": {"local_time": SCHEDULE_TIME.strftime("%H:%M"), "time_zone": str(site_zone())},
         "last_success": _run_view(last_success) if last_success else None,
         "last_failure": _run_view(last_failure) if last_failure else None,
         "age_hours": age_hours,
@@ -425,7 +425,7 @@ def _run_view(row: sqlite3.Row) -> dict[str, object]:
     return {key: row[key] for key in ("id", "kind", "status", "created_at", "started_at", "finished_at", "file_name", "size_bytes", "error")}
 
 
-def _site_zone() -> ZoneInfo:
+def site_zone() -> ZoneInfo:
     try:
         with connect() as db:
             row = db.execute("SELECT time_zone FROM site_display_settings WHERE singleton_id=1").fetchone()

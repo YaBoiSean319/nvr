@@ -27,6 +27,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _result(check: str, kind: str, name: str, passed: bool | None, detail: str, **extra: Any) -> dict[str, Any]:
+    """One check's outcome. ``passed`` is None when the check does not apply (it neither passes nor fails)."""
+    return {"check": check, "kind": kind, "name": name, "passed": passed, "detail": detail, **extra}
+
+
 def _check_cameras(now: datetime) -> list[dict[str, Any]]:
     """Cameras that were expected to record at some point in the last day, and whether they wrote footage."""
     since = (now - SILENT_AFTER).isoformat()
@@ -39,17 +44,18 @@ def _check_cameras(now: datetime) -> list[dict[str, Any]]:
     results = []
     for row in rows:
         passed = row["last_footage"] is not None and row["last_footage"] > since
-        results.append({"check": f"camera:{row['id']}", "kind": "camera", "camera_id": row["id"], "name": row["name"], "passed": passed,
-                        "detail": f"Last footage {row['last_footage']}" if passed else
-                                  f"{row['name']} has written no footage in the last day" + (f" (last footage {row['last_footage']})" if row["last_footage"] else "")})
+        results.append(_result(f"camera:{row['id']}", "camera", row["name"], passed,
+                               f"{row['name']}: last footage {row['last_footage']}" if passed else
+                               f"{row['name']} has written no footage in the last day" + (f" (last footage {row['last_footage']})" if row["last_footage"] else ""),
+                               camera_id=row["id"]))
     return results
 
 
 def _check_volumes() -> list[dict[str, Any]]:
     from .storage import storage_status
 
-    return [{"check": f"volume:{volume['id']}", "kind": "volume", "name": volume["id"], "passed": bool(volume["writable"]),
-             "detail": f"Recording volume {volume['id']} is writable" if volume["writable"] else f"Recording volume {volume['id']} is not writable ({volume['state']})"}
+    return [_result(f"volume:{volume['id']}", "volume", volume["id"], bool(volume["writable"]),
+                    f"Recording volume {volume['id']} is writable" if volume["writable"] else f"Recording volume {volume['id']} is not writable ({volume['state']})")
             for volume in storage_status()["volumes"]]
 
 
@@ -58,20 +64,17 @@ def _check_backup() -> list[dict[str, Any]]:
 
     state = backup.status()
     if not state["enabled"]:
-        return [{"check": "backup", "kind": "backup", "name": "Configuration backup", "passed": None,
-                 "detail": f"Configuration backups are not configured: {state['disabled_reason']}"}]
+        return [_result("backup", "backup", "Configuration backup", None, f"Configuration backups are not configured: {state['disabled_reason']}")]
     if state["age_hours"] is None:
         # A new installation has not reached its first nightly backup yet: only too long without one is a failure.
         with connect() as db:
             first = db.execute("SELECT MIN(created_at) FROM backup_runs").fetchone()[0]
         overdue = first is not None and _now() - datetime.fromisoformat(first.replace("Z", "+00:00")) > backup.STALE_AFTER
-        return [{"check": "backup", "kind": "backup", "name": "Configuration backup", "passed": False if overdue else None,
-                 "detail": "No configuration backup has succeeded yet" + ("" if overdue else "; the first one runs tonight")}]
+        return [_result("backup", "backup", "Configuration backup", False if overdue else None,
+                        "No configuration backup has succeeded yet" + ("" if overdue else "; the first one runs tonight"))]
     if state["stale"]:
-        return [{"check": "backup", "kind": "backup", "name": "Configuration backup", "passed": False,
-                 "detail": f"The latest configuration backup is {state['age_hours']:.0f} hours old"}]
-    return [{"check": "backup", "kind": "backup", "name": "Configuration backup", "passed": True,
-             "detail": f"The latest configuration backup is {state['age_hours']:.1f} hours old"}]
+        return [_result("backup", "backup", "Configuration backup", False, f"The latest configuration backup is {state['age_hours']:.0f} hours old")]
+    return [_result("backup", "backup", "Configuration backup", True, f"The latest configuration backup is {state['age_hours']:.1f} hours old")]
 
 
 def run(kind: str = "manual") -> dict[str, Any]:
@@ -79,7 +82,12 @@ def run(kind: str = "manual") -> dict[str, Any]:
     started = _now()
     with connect() as db:
         run_id = db.execute("INSERT INTO self_test_runs(kind,started_at) VALUES(?,?)", (kind, started.isoformat())).lastrowid
-    results = _check_cameras(started) + _check_volumes() + _check_backup()
+    try:
+        results = _check_cameras(started) + _check_volumes() + _check_backup()
+    except BaseException:
+        with connect() as db:  # A run that never finished must not count as tonight's, or it would not be retried.
+            db.execute("DELETE FROM self_test_runs WHERE id=?", (run_id,))
+        raise
     passed = all(result["passed"] is not False for result in results)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -117,16 +125,16 @@ def latest() -> dict[str, Any] | None:
 
 def due(now: datetime | None = None) -> bool:
     """Whether tonight's scheduled run has not started yet."""
-    from .backup import _site_zone
+    from .backup import site_zone
 
     now = now or _now()
-    zone = _site_zone()
+    zone = site_zone()
     local = now.astimezone(zone)
     boundary = datetime.combine(local.date(), SCHEDULE_TIME, zone)
     if local < boundary:
         boundary -= timedelta(days=1)
     with connect() as db:
-        return db.execute("SELECT 1 FROM self_test_runs WHERE kind='scheduled' AND started_at>=? LIMIT 1",
+        return db.execute("SELECT 1 FROM self_test_runs WHERE kind='scheduled' AND finished_at IS NOT NULL AND started_at>=? LIMIT 1",
                           (boundary.astimezone(timezone.utc).isoformat(),)).fetchone() is None
 
 

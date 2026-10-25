@@ -25,6 +25,8 @@ _STATEMENTS = (
         WHEN reason = 'Camera stream is unavailable' THEN 'camera_offline'
         ELSE 'unknown' END
     """,
+    # Open intervals were running when this version started, so they are confirmed now rather than at their start.
+    "UPDATE coverage_intervals SET checked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE ends_at IS NULL",
     """
     CREATE TABLE self_test_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

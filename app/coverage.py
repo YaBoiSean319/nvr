@@ -56,22 +56,22 @@ def reason_code(camera: sqlite3.Row | dict[str, Any], policy: dict[str, Any], he
 def timeline(db: sqlite3.Connection, camera_id: str, start: datetime, end: datetime, limit: int | None = 500) -> dict[str, list[dict[str, Any]]]:
     """A camera's footage, recorded coverage intervals and gaps in [start, end), in UTC."""
     start_text, end_text = start.isoformat(), end.isoformat()
-    bound = "" if limit is None else f" LIMIT {int(limit)}"
+    bound = limit if limit is not None else -1  # SQLite: a negative LIMIT is no limit.
     segments = db.execute(
         "SELECT id,starts_at,ends_at,size_bytes FROM recording_segments "
-        f"WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at{bound}",
-        (camera_id, end_text, start_text)).fetchall()
+        "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at LIMIT ?",
+        (camera_id, end_text, start_text, bound)).fetchall()
     coverage = [dict(row) for row in db.execute(
         "SELECT coverage_kind,reason,reason_code,starts_at,ends_at FROM coverage_intervals "
-        f"WHERE camera_id=? AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at{bound}",
-        (camera_id, end_text, start_text))]
+        "WHERE camera_id=? AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT ?",
+        (camera_id, end_text, start_text, bound))]
     # Indexed footage whose file is gone (for example after a restore) is a known failure, not footage.
     coverage += [{"coverage_kind": "failure", "reason": row["unavailable_reason"], "reason_code": "disk_unavailable",
                   "starts_at": row["starts_at"], "ends_at": row["ends_at"]}
                  for row in db.execute(
                      "SELECT starts_at,ends_at,unavailable_reason FROM recording_segments "
-                     f"WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NOT NULL ORDER BY starts_at{bound}",
-                     (camera_id, end_text, start_text))]
+                     "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NOT NULL ORDER BY starts_at LIMIT ?",
+                     (camera_id, end_text, start_text, bound))]
     spans = sorted((max(start, _parse(row["starts_at"])), min(end, _parse(row["ends_at"]))) for row in segments)
     return {"segments": [dict(row) for row in segments], "coverage": coverage, "gaps": gaps(coverage, spans, start, end)}
 
@@ -112,25 +112,31 @@ def gaps(coverage: list[dict[str, Any]], spans: Iterable[tuple[datetime, datetim
     return result
 
 
+def _seconds(items: Iterable[dict[str, Any]]) -> float:
+    return sum((_parse(gap["ends_at"]) - _parse(gap["starts_at"])).total_seconds() for gap in items)
+
+
 def report(start: datetime, end: datetime) -> dict[str, Any]:
     """Coverage per camera against its policy for [start, end), with its largest outages and their reasons."""
     from .scheduling import effective_policy
 
-    start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
-    total = (end - start).total_seconds()
+    # Only time that has happened counts, and only since each camera was added.
+    start, end = start.astimezone(timezone.utc), min(end.astimezone(timezone.utc), datetime.now(timezone.utc))
     cameras = []
     with connect() as db:
-        rows = db.execute("SELECT id,name,recording_mode FROM cameras WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE, id").fetchall()
+        rows = db.execute("SELECT id,name,recording_mode,created_at FROM cameras WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE, id").fetchall()
         for camera in rows:
-            camera_gaps = timeline(db, camera["id"], start, end, limit=None)["gaps"]
-            seconds = lambda items: sum((_parse(gap["ends_at"]) - _parse(gap["starts_at"])).total_seconds() for gap in items)
+            since = max(start, _parse(camera["created_at"]))
+            if since >= end:
+                continue
+            camera_gaps = timeline(db, camera["id"], since, end, limit=None)["gaps"]
             expected_idle = [gap for gap in camera_gaps if gap["reason_code"] in EXPECTED]
             outages = [gap for gap in camera_gaps if gap["reason_code"] not in EXPECTED]
-            expected = total - seconds(expected_idle)
-            missed = seconds(outages)
+            expected = (end - since).total_seconds() - _seconds(expected_idle)
+            missed = _seconds(outages)
             by_reason: dict[str, float] = {}
             for gap in outages:
-                by_reason[gap["reason_code"]] = by_reason.get(gap["reason_code"], 0) + seconds([gap])
+                by_reason[gap["reason_code"]] = by_reason.get(gap["reason_code"], 0) + _seconds([gap])
             policy = effective_policy(db, camera["id"], end)
             cameras.append({
                 "camera_id": camera["id"], "name": camera["name"],
@@ -138,16 +144,16 @@ def report(start: datetime, end: datetime) -> dict[str, Any]:
                 "expected_seconds": round(expected, 1), "covered_seconds": round(expected - missed, 1), "missed_seconds": round(missed, 1),
                 "coverage_percent": None if expected <= 0 else round(100 * (expected - missed) / expected, 2),
                 "missed_by_reason": {code: round(value, 1) for code, value in sorted(by_reason.items(), key=lambda item: -item[1])},
-                "largest_gaps": sorted(({**gap, "seconds": round(seconds([gap]), 1)} for gap in outages), key=lambda gap: -gap["seconds"])[:REPORT_GAPS],
+                "largest_gaps": sorted(({**gap, "seconds": round(_seconds([gap]), 1)} for gap in outages), key=lambda gap: -gap["seconds"])[:REPORT_GAPS],
             })
     return {"start": start.isoformat(), "end": end.isoformat(), "reasons": REASONS, "cameras": cameras}
 
 
 def last_week(now: datetime | None = None) -> tuple[datetime, datetime]:
     """The most recent full week, Monday to Monday at midnight in the site's time zone."""
-    from .backup import _site_zone
+    from .backup import site_zone
 
-    zone = _site_zone()
+    zone = site_zone()
     local = (now or datetime.now(timezone.utc)).astimezone(zone)
     monday = datetime.combine((local - timedelta(days=local.weekday())).date(), datetime.min.time(), zone)
     return (monday - timedelta(days=7)).astimezone(timezone.utc), monday.astimezone(timezone.utc)
@@ -163,12 +169,19 @@ def publish_weekly_report(now: datetime | None = None) -> dict[str, Any] | None:
             return None
     weekly = report(period_start, period_end)
     with connect() as db:
-        created = db.execute("INSERT OR IGNORE INTO coverage_reports(period_start,period_end,created_at,report_json) VALUES(?,?,?,?)",
-                             (period_start.isoformat(), period_end.isoformat(), datetime.now(timezone.utc).isoformat(), json.dumps(weekly)))
-        if created.rowcount:
-            enqueue_event(db, "coverage.weekly_report", {"event_id": str(uuid.uuid4()), "event_type": "coverage.weekly_report",
-                                                         "occurred_at": datetime.now(timezone.utc).isoformat(), "report": weekly})
-    return weekly
+        # Stored and queued together, so a report is never kept without having been sent.
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            created = db.execute("INSERT OR IGNORE INTO coverage_reports(period_start,period_end,created_at,report_json) VALUES(?,?,?,?)",
+                                 (period_start.isoformat(), period_end.isoformat(), datetime.now(timezone.utc).isoformat(), json.dumps(weekly)))
+            if created.rowcount:
+                enqueue_event(db, "coverage.weekly_report", {"event_id": str(uuid.uuid4()), "event_type": "coverage.weekly_report",
+                                                             "occurred_at": datetime.now(timezone.utc).isoformat(), "report": weekly})
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+    return weekly if created.rowcount else None
 
 
 def latest_reports(limit: int = 8) -> list[dict[str, Any]]:

@@ -29,12 +29,17 @@ def weekly_reports(_: Administrator) -> dict[str, object]:
     return {"reports": coverage.latest_reports()}
 
 
+def _self_test_view() -> dict[str, object]:
+    return {"latest": self_test.latest(), "schedule": {"local_time": self_test.SCHEDULE_TIME.strftime("%H:%M")}}
+
+
 @router.get("/api/self-test")
 def self_test_status(_: Administrator) -> dict[str, object]:
-    return {"latest": self_test.latest(), "schedule": {"local_time": self_test.SCHEDULE_TIME.strftime("%H:%M")}}
+    return _self_test_view()
 
 
 @router.post("/api/self-test/run")
 def run_self_test(_: Administrator) -> dict[str, object]:
     """Run the self-test now, for example to confirm a fix; incidents recover when their check passes."""
-    return {"latest": self_test.run("manual"), "schedule": {"local_time": self_test.SCHEDULE_TIME.strftime("%H:%M")}}
+    self_test.run("manual")
+    return _self_test_view()

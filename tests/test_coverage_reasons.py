@@ -152,7 +152,12 @@ class GapReasonTests(CoverageCase):
         self.assertIsNone(self.sync()["reason_code"])  # Covered.
         with connect() as db:
             db.execute("UPDATE coverage_intervals SET checked_at=? WHERE ends_at IS NULL", (ago(minutes=10),))
-        RecordingManager._mark_restart_gaps()
+
+        async def restart():
+            manager = RecordingManager()
+            await manager.start()
+            await manager.stop()
+        asyncio.run(restart())
         with connect() as db:
             rows = [dict(row) for row in db.execute("SELECT * FROM coverage_intervals WHERE camera_id=? ORDER BY id DESC LIMIT 2", (self.camera_id,))]
         restart, covered = rows
@@ -171,6 +176,43 @@ class GapReasonTests(CoverageCase):
         intervals = self.client.get(f"/api/cameras/{self.camera_id}/coverage").json()["intervals"]
         self.assertEqual(set(intervals[0]), {"coverage_kind", "reason", "reason_code", "starts_at", "ends_at"})
 
+    def test_every_reason_shows_in_the_timeline_gap_it_explains(self):
+        codes = ["camera_offline", "stream_error", "disk_unavailable", "outside_schedule", "recording_disabled", "worker_restart", "no_motion", "unknown"]
+        start = NOW - timedelta(hours=1)
+        at = lambda minutes: (start + timedelta(minutes=minutes)).isoformat()
+        with connect() as db:
+            for index, code in enumerate(codes):
+                kind = "expected_idle" if code in coverage.EXPECTED else "failure"
+                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,ends_at) VALUES(?,?,?,?,?,?)",
+                           (self.camera_id, kind, f"fixture {code}", code, at(index * 5), at(index * 5 + 5)))
+        timeline = self.client.post("/api/playback/timeline", json={"camera_ids": [self.camera_id], "start": at(0), "end": at(40)}).json()
+        gaps = timeline["cameras"][0]["gaps"]
+        self.assertEqual([(gap["reason_code"], gap["reason"]) for gap in gaps], [(code, f"fixture {code}") for code in codes])
+
+    def test_a_stream_fault_ends_with_the_stream_and_is_not_carried_into_other_gaps(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET stream_fault='camera_offline', recording_status='reconnecting' WHERE id=?", (self.camera_id,))
+        self.assertEqual(self.sync()["reason_code"], "camera_offline")
+        with connect() as db:  # Video is flowing again: the old fault no longer explains anything.
+            db.execute("UPDATE cameras SET last_video_at=?, recording_status='connecting' WHERE id=?", (ago(seconds=1), self.camera_id))
+        self.assertEqual(self.fault(self.camera_id), "camera_offline")
+        self.sync()
+        self.assertIsNone(self.fault(self.camera_id))
+        RecordingManager()._set_status(self.camera_id, "reconnecting", "Camera stream interrupted; retrying", fault="stream_error")
+        RecordingManager()._set_status(self.camera_id, "unavailable", "FFmpeg is not installed")  # No fault named: unknown, not the last one.
+        self.assertIsNone(self.fault(self.camera_id))
+
+    def test_downtime_while_nothing_was_expected_is_not_an_outage(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET recording_enabled=0 WHERE id=?", (self.camera_id,))
+        self.assertEqual(self.sync()["reason_code"], "recording_disabled")
+        with connect() as db:
+            db.execute("UPDATE coverage_intervals SET checked_at=? WHERE ends_at IS NULL", (ago(hours=3),))
+        RecordingManager._mark_restart_gaps()
+        with connect() as db:
+            rows = db.execute("SELECT reason_code,ends_at FROM coverage_intervals WHERE camera_id=?", (self.camera_id,)).fetchall()
+        self.assertEqual([(row["reason_code"], row["ends_at"]) for row in rows], [("recording_disabled", None)])
+
 
 class CoverageReportTests(CoverageCase):
     def test_the_report_matches_the_coverage_api_for_the_same_range(self):
@@ -178,6 +220,7 @@ class CoverageReportTests(CoverageCase):
         end = start + timedelta(hours=4)
         at = lambda minutes: (start + timedelta(minutes=minutes)).isoformat()
         with connect() as db:
+            db.execute("UPDATE cameras SET created_at=?", ((start - timedelta(days=1)).isoformat(),))
             for offset in (0, 30, 60, 150, 200):
                 db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,1000)",
                            (self.camera_id, f"{self.camera_id}/s{offset}.mp4", at(offset), at(offset + 20)))
@@ -198,6 +241,14 @@ class CoverageReportTests(CoverageCase):
         for gap in camera["largest_gaps"]:
             self.assertIn({key: gap[key] for key in ("starts_at", "ends_at", "state", "reason", "reason_code")}, gaps)
         self.assertEqual(camera["coverage_percent"], round(100 * (camera["expected_seconds"] - camera["missed_seconds"]) / camera["expected_seconds"], 2))
+
+    def test_a_report_counts_only_time_that_has_happened_since_the_camera_was_added(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET created_at=?", (ago(hours=2),))
+        report = self.client.get("/api/coverage/report", params={"start": ago(days=3), "end": (NOW + timedelta(days=3)).isoformat()}).json()
+        camera = report["cameras"][0]
+        self.assertAlmostEqual(camera["expected_seconds"], 2 * 3600, delta=60)  # Not a week.
+        self.assertLessEqual(report["end"], datetime.now(timezone.utc).isoformat())
 
     def test_last_weeks_report_is_stored_once_and_sent_to_subscribed_webhooks(self):
         from app.webhooks import create_endpoint
@@ -261,6 +312,15 @@ class SelfTestTests(CoverageCase):
             db.execute("INSERT INTO backup_runs(id,kind,status,created_at,finished_at) VALUES('new','manual','succeeded',?,?)", (ago(minutes=2), ago(minutes=1)))
         self.client.post("/api/self-test/run")
         self.assertEqual(self.incident("backup")["state"], "recovered")
+
+    def test_a_run_that_crashes_is_retried_rather_than_counted_as_tonights(self):
+        from unittest import mock
+
+        with mock.patch.object(self_test, "_check_volumes", side_effect=OSError("boom")), self.assertRaises(OSError):
+            self_test.run("scheduled")
+        self.assertTrue(self_test.due())
+        self_test.run("scheduled")
+        self.assertFalse(self_test.due())
 
     def test_the_nightly_run_happens_once_a_night_and_shows_in_system_status(self):
         self.assertTrue(self_test.due())

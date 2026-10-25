@@ -24,7 +24,7 @@ from .incidents import sync_incident, sync_storage_incidents
 
 RECONNECT_MAX_SECONDS = 30
 # An open coverage interval not confirmed for this long means the recorder was not running.
-RESTART_GAP_AFTER = timedelta(seconds=30)
+RESTART_GAP_AFTER = timedelta(seconds=15)
 
 
 def segment_seconds() -> int:
@@ -250,16 +250,16 @@ class RecordingManager:
     @staticmethod
     def _mark_restart_gaps(now: datetime | None = None) -> None:
         """While the recorder was not running nothing was recorded: close each open interval when it was last
-        confirmed, and record the time since as a worker_restart gap, unless no recording was expected."""
+        confirmed and record the time since as a worker_restart gap. An interval where no recording was expected stays open."""
         now = now or datetime.now(timezone.utc)
         with connect() as db:
             for interval in db.execute("SELECT * FROM coverage_intervals WHERE ends_at IS NULL").fetchall():
                 checked = interval["checked_at"] or interval["starts_at"]
                 if now - datetime.fromisoformat(checked.replace("Z", "+00:00")) < RESTART_GAP_AFTER:
                     continue
-                db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (checked, interval["id"]))
                 if interval["coverage_kind"] == "expected_idle":
-                    continue
+                    continue  # Nothing was expected: the interval carries on across the restart.
+                db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (checked, interval["id"]))
                 db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,ends_at,checked_at) VALUES(?,?,?,?,?,?,?)",
                            (interval["camera_id"], "failure", "The recorder was not running", "worker_restart", checked, now.isoformat(), now.isoformat()))
 
@@ -278,6 +278,9 @@ class RecordingManager:
             storage_faulty = db.execute(
                 "SELECT 1 FROM incidents i, json_each(i.details_json, '$.affected_cameras') c "
                 "WHERE i.fault_type='storage' AND i.fault_active=1 AND json_extract(c.value, '$.id')=? LIMIT 1", (camera_id,)).fetchone() is not None
+            if health["video_fresh"] and row["stream_fault"]:
+                db.execute("UPDATE cameras SET stream_fault=NULL WHERE id=?", (camera_id,))  # Fresh video: the stream works again.
+                row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
             code = coverage.reason_code(row, policy, health, storage_faulty)
             active = db.execute("SELECT id,coverage_kind,reason_code FROM coverage_intervals WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
             kind = str(health["coverage_kind"])
@@ -312,12 +315,14 @@ class RecordingManager:
             return db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
 
     def _set_status(self, camera_id: str, value: str, error: str | None = None, fault: str | None = None) -> None:
-        """Record the recorder's state. ``fault`` says what went wrong with the stream; it stays until footage is recorded again."""
+        """Record the recorder's state. ``fault`` says what went wrong when the state is a failure; it is kept while the recorder
+        retries and cleared once the stream works (see ``_sync_coverage``) or recording stops."""
         with connect() as db:
             db.execute(
-                "UPDATE cameras SET recording_status=?, last_error=?, stream_fault=CASE WHEN ?='recording' THEN NULL ELSE COALESCE(?, stream_fault) END, "
+                "UPDATE cameras SET recording_status=?, last_error=?, "
+                "stream_fault=CASE WHEN ? IN ('reconnecting','unavailable','failed') THEN ? WHEN ? IN ('recording','stopped','scheduled_idle') THEN NULL ELSE stream_fault END, "
                 "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
-                (value, error, value, fault, camera_id),
+                (value, error, value, fault, value, camera_id),
             )
 
     def _mark_video_fresh(self, camera_id: str) -> None:

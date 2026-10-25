@@ -86,6 +86,8 @@ def _seed_footage(db: sqlite3.Connection, cameras: list[str]) -> dict[str, objec
                        (camera_id, relative, at(offset), at(offset + FOOTAGE_CLIP_SECONDS), target.stat().st_size))
             segments.append({"camera_id": camera_id, "starts_at": at(offset), "ends_at": at(offset + FOOTAGE_CLIP_SECONDS)})
     first = cameras[0]
+    # The fixture's history starts before its footage, so coverage reports see all of it.
+    db.execute("UPDATE cameras SET created_at=?", ((anchor - timedelta(days=1)).isoformat(),))
     db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,ends_at) VALUES(?,?,?,?,?,?)",
                (first, "failure", "Camera offline", "camera_offline", at(60), at(150)))
 
