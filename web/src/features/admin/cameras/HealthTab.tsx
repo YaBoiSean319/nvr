@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "@/api/client";
 import type { Camera } from "@/api/types";
@@ -12,6 +13,28 @@ interface Coverage {
 }
 
 const KIND_LABEL: Record<string, string> = { covered: "Recorded", expected_idle: "Idle (expected)", failure: "Failure", uncertain: "Uncertain" };
+
+interface Verification {
+  valid: boolean;
+  chain_error: string | null;
+  signed_upto: number;
+  segments: { segment_id: number; starts_at: string; ends_at: string; status: string }[];
+  problems: { segment_id: number; starts_at: string; ends_at: string; status: string }[];
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  ok: "Verified",
+  ok_unsigned_yet: "Matches the chain; signed within a minute",
+  signature_missing: "Not signed: the chain has not been signed since this was recorded",
+  not_signed: "Not signed (recorded before signing began)",
+  pending: "Not hashed yet",
+  out_of_order: "Out of order: its time range differs from the chain",
+  unavailable: "Marked unavailable",
+  missing: "Missing: removed without a recorded deletion",
+  altered: "Altered: the file no longer matches its hash",
+};
+
+const RANGES = [{ label: "Last hour", hours: 1 }, { label: "Last 24 hours", hours: 24 }, { label: "Last 7 days", hours: 24 * 7 }];
 
 const when = (iso: string | null | undefined) => (iso ? `${formatRelative(iso)} (${new Date(iso).toLocaleString()})` : "Never");
 
@@ -59,6 +82,7 @@ export function HealthTab({ camera }: { camera: Camera }) {
           </ul>
         ) : <p className="muted">No failures or uncertain coverage recorded.</p>}
       </section>
+      <FootageVerification camera={camera} />
       <section className="field-group" aria-label="Recent motion events">
         <h3 className="field-heading">Recent motion events</h3>
         {events.isPending ? <p className="muted">Loading…</p> : recentEvents.length ? (
@@ -70,5 +94,55 @@ export function HealthTab({ camera }: { camera: Camera }) {
         ) : <p className="muted">No motion events recorded.</p>}
       </section>
     </div>
+  );
+}
+
+/** Checks the camera's footage against its signed hash chain and names any segment that does not match. */
+function FootageVerification({ camera }: { camera: Camera }) {
+  const [hours, setHours] = useState(24);
+  const verify = useMutation({
+    mutationFn: () => {
+      const end = new Date();
+      const params = new URLSearchParams({ start: new Date(end.getTime() - hours * 3_600_000).toISOString(), end: end.toISOString() });
+      return api<Verification>(`/api/cameras/${encodeURIComponent(camera.id)}/footage/verify?${params}`);
+    },
+  });
+  const result = verify.data;
+  const counts = new Map<string, number>();
+  for (const segment of result?.segments ?? []) counts.set(segment.status, (counts.get(segment.status) ?? 0) + 1);
+
+  return (
+    <section className="field-group" aria-label="Footage verification">
+      <h3 className="field-heading">Verify footage</h3>
+      <p className="muted field-hint">Every recorded segment is hashed into a signed chain. Verifying checks the files against it, so altered, missing or reordered footage is named. Deletions by retention or an administrator are expected.</p>
+      <div className="field-actions">
+        <label className="field"><span>Range</span>
+          <select value={hours} onChange={event => { setHours(Number(event.target.value)); verify.reset(); }}>
+            {RANGES.map(range => <option key={range.hours} value={range.hours}>{range.label}</option>)}
+          </select>
+        </label>
+        <button type="button" className="button" disabled={verify.isPending} onClick={() => verify.mutate()}>{verify.isPending ? "Verifying…" : "Verify footage"}</button>
+      </div>
+      {verify.error ? <p className="notice" data-tone="bad" role="alert">Footage could not be verified: {verify.error.message}.</p> : null}
+      {result ? (
+        <div role="status">
+          <p className="notice" data-tone={result.valid ? "good" : "bad"}>
+            {result.chain_error ? `The chain cannot be trusted: ${result.chain_error}.`
+              : result.valid ? `${result.segments.length} segment${result.segments.length === 1 ? "" : "s"} checked; no tampering found.`
+                : `${result.problems.length} segment${result.problems.length === 1 ? "" : "s"} failed verification.`}
+          </p>
+          {counts.size ? <p className="muted">{[...counts].map(([status, count]) => `${STATUS_LABEL[status] ?? status}: ${count}`).join(" · ")}</p> : null}
+          {result.problems.length ? (
+            <ul className="plain-list" aria-label="Segments that failed verification">
+              {result.problems.map(problem => (
+                <li key={`${problem.segment_id}-${problem.status}`}>
+                  <strong>{STATUS_LABEL[problem.status] ?? problem.status}</strong> · segment {problem.segment_id} · {new Date(problem.starts_at).toLocaleString()} to {new Date(problem.ends_at).toLocaleTimeString()}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   );
 }

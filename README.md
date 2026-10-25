@@ -60,6 +60,8 @@ ONVIF PTZ cameras can be moved from Live and the camera editor (buttons, keyboar
 
 Privacy masks black out areas of a camera's picture everywhere: written to cameras that support ONVIF masks, and otherwise drawn by the NVR into every live view, recording, snapshot and export. Administrators can see unmasked footage only for a stated, audited reason (see [privacy masks](docs/privacy-masks.md)).
 
+Every recording segment is hashed into a signed per-camera chain, so altered, missing or reordered footage can be found from a camera's Health & History tab, and evidence packages carry the chain and public key to verify offline (see [signed footage](docs/signed-footage.md)).
+
 The interface installs as an app on desktops and phones, named and iconed from the site's branding; its service worker keeps only the application shell, never API responses or footage (see [installable app](docs/installable-app.md)).
 
 Every editor saves explicitly. Leaving with unsaved changes asks whether to save, discard or stay, and a refresh never overwrites what you are editing. The interface used to be previewed at `/next/`; those addresses now redirect to the same page at `/`. Keyboard use, screen-reader names, reduced motion and widths from 320 px are covered by the browser suite.
