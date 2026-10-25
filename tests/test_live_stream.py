@@ -183,10 +183,10 @@ class LiveStreamTests(unittest.TestCase):
                  self.client.websocket_connect("/api/cameras/cam/live/stream") as second:
                 self.assertTrue(first.receive_json()["audio"])
                 second.receive_json()
-                first.send_json({"type": "listen", "on": True})
-                second.send_json({"type": "listen", "on": True})
+                # One at a time: which of two simultaneous requests the server handles first is not up to the test.
                 replies = []
                 for websocket in (first, second):
+                    websocket.send_json({"type": "listen", "on": True})
                     while True:
                         message = websocket.receive()
                         if message.get("text"):
