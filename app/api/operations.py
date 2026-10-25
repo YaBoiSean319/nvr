@@ -11,7 +11,7 @@ from app.version import APP_VERSION
 from app.workers import liveness, supervised
 from app.principal import Administrator
 from app.store import connect, database_path
-from app import diagnostics
+from app import diagnostics, self_test
 
 router = APIRouter()
 
@@ -42,6 +42,7 @@ def system_status(user: Administrator) -> dict[str, object]:
         "configured_administrators": admin_count,
         "configured_cameras": camera_count,
         "storage": storage,
+        "self_test": self_test.latest(),
     }
 
 

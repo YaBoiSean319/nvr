@@ -155,6 +155,27 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM ai_tracks").fetchone()[0], 0)
         self.assertEqual(len(self._copies()), 1)
 
+    def test_coverage_reasons_confirm_open_intervals_and_code_existing_ones(self):
+        before = [(version, module) for version, module in migrations.MIGRATIONS if version <= 15]
+        with mock.patch.object(migrations, "MIGRATIONS", before):
+            initialize()
+        with connect() as db:
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES('c1','Dock East',x'00')")
+            for kind, reason, ends in (("covered", "Fresh video and expected recording writes are present", "2026-10-02T00:00:00+00:00"),
+                                       ("expected_idle", "Recording is disabled by camera or schedule policy", "2026-10-03T00:00:00+00:00"),
+                                       ("failure", "Camera stream is unavailable", "2026-10-04T00:00:00+00:00"),
+                                       ("uncertain", "No fresh decodable video has been observed", None)):
+                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at,ends_at) VALUES('c1',?,?,'2026-10-01T00:00:00+00:00',?)", (kind, reason, ends))
+
+        initialize()
+
+        with connect() as db:
+            rows = db.execute("SELECT coverage_kind,reason_code,checked_at FROM coverage_intervals ORDER BY id").fetchall()
+        self.assertEqual([row["reason_code"] for row in rows], [None, "recording_disabled", "camera_offline", "unknown"])
+        # Only the interval still open is confirmed, and as of the upgrade, so no outage is invented for the weeks before it.
+        self.assertEqual([row["checked_at"] is not None for row in rows], [False, False, False, True])
+        self.assertGreater(rows[3]["checked_at"], "2026-10-24")
+
     def test_rules_start_after_detections_stored_before_the_upgrade(self):
         before_rules = [(version, module) for version, module in migrations.MIGRATIONS if version <= 7]
         with mock.patch.object(migrations, "MIGRATIONS", before_rules):

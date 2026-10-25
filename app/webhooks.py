@@ -35,6 +35,7 @@ EVENT_TYPES = {
     "alarm.acknowledged",
     "alarm.assigned",
     "alarm.resolved",
+    "coverage.weekly_report",
     "webhook.test",
 }
 # httpx logs each request's full URL at INFO. Webhook, Slack and Teams URLs carry their

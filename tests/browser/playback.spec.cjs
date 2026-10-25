@@ -229,7 +229,9 @@ test("every tile follows one clock across speeds and gaps show No recording whil
   await page.getByLabel("Speed").selectOption("16");
   await page.getByRole("button", { name: "Play", exact: true }).click();
   await expect(tile(page, "Camera 001")).toHaveAttribute("data-phase", "no-recording", { timeout: 10_000 });
-  await expect(tile(page, "Camera 001").getByText("No recording")).toBeVisible();
+  await expect(tile(page, "Camera 001").getByText("No recording: Camera offline")).toBeVisible();
+  // The timeline names the same reason on hover.
+  await expect(page.locator('.timeline-mark[data-reason="camera_offline"]').first()).toHaveAttribute("title", /Recording failure: Camera offline\./);
   const inGap = await clockTime(page);
   await expect.poll(() => clockTime(page)).toBeGreaterThan(inGap + 5_000);
   await expect(tile(page, "Camera 001")).toHaveAttribute("data-phase", "ready", { timeout: 15_000 });

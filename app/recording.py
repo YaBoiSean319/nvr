@@ -18,10 +18,13 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
+from . import coverage
 from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
 RECONNECT_MAX_SECONDS = 30
+# An open coverage interval not confirmed for this long means the recorder was not running.
+RESTART_GAP_AFTER = timedelta(seconds=15)
 
 
 def segment_seconds() -> int:
@@ -50,6 +53,22 @@ def safe_stream_url(raw: str) -> str:
     if any(ch.isspace() or ch in "'\\\x00" for ch in raw):
         raise ValueError("Camera URL must be URL-encoded and contain no whitespace or quotes")
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+
+
+async def _stream_fault(source: str) -> str:
+    """camera_offline when nothing answers at the camera's stream address, otherwise stream_error."""
+    parts = urlsplit(source)
+    if not parts.hostname:
+        return "stream_error"
+    try:
+        port = parts.port or {"rtsp": 554, "rtsps": 322, "http": 80, "https": 443}.get(parts.scheme, 554)
+        _, writer = await asyncio.wait_for(asyncio.open_connection(parts.hostname, port), timeout=3)
+    except (OSError, ValueError, asyncio.TimeoutError):
+        return "camera_offline"
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return "stream_error"
 
 
 def _manifest_bytes(source: str) -> bytes:
@@ -124,6 +143,7 @@ class RecordingManager:
 
     async def start(self) -> None:
         self.stopping = False
+        self._mark_restart_gaps()
         with connect() as db:
             rows = db.execute("SELECT id FROM cameras").fetchall()
         for row in rows:
@@ -227,6 +247,22 @@ class RecordingManager:
         with connect() as db:
             sync_storage_incidents(db, status["volumes"])
 
+    @staticmethod
+    def _mark_restart_gaps(now: datetime | None = None) -> None:
+        """While the recorder was not running nothing was recorded: close each open interval when it was last
+        confirmed and record the time since as a worker_restart gap. An interval where no recording was expected stays open."""
+        now = now or datetime.now(timezone.utc)
+        with connect() as db:
+            for interval in db.execute("SELECT * FROM coverage_intervals WHERE ends_at IS NULL").fetchall():
+                checked = interval["checked_at"] or interval["starts_at"]
+                if now - datetime.fromisoformat(checked.replace("Z", "+00:00")) < RESTART_GAP_AFTER:
+                    continue
+                if interval["coverage_kind"] == "expected_idle":
+                    continue  # Nothing was expected: the interval carries on across the restart.
+                db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (checked, interval["id"]))
+                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,ends_at,checked_at) VALUES(?,?,?,?,?,?,?)",
+                           (interval["camera_id"], "failure", "The recorder was not running", "worker_restart", checked, now.isoformat(), now.isoformat()))
+
     def _sync_coverage(self, camera_id: str) -> None:
         with connect() as db:
             row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -239,16 +275,23 @@ class RecordingManager:
                 recording_status=row["recording_status"], motion_source_status=row["motion_source_status"],
                 last_video_at=row["last_video_at"], last_footage_write_at=row["last_footage_write_at"],
             )
-            active = db.execute("SELECT id,coverage_kind FROM coverage_intervals WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
+            storage_faulty = db.execute(
+                "SELECT 1 FROM incidents i, json_each(i.details_json, '$.affected_cameras') c "
+                "WHERE i.fault_type='storage' AND i.fault_active=1 AND json_extract(c.value, '$.id')=? LIMIT 1", (camera_id,)).fetchone() is not None
+            if health["video_fresh"] and row["stream_fault"]:
+                db.execute("UPDATE cameras SET stream_fault=NULL WHERE id=?", (camera_id,))  # Fresh video: the stream works again.
+                row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            code = coverage.reason_code(row, policy, health, storage_faulty)
+            active = db.execute("SELECT id,coverage_kind,reason_code FROM coverage_intervals WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
             kind = str(health["coverage_kind"])
-            if active and active["coverage_kind"] == kind:
-                db.execute("UPDATE coverage_intervals SET reason=? WHERE id=?", (str(health["detail"]), active["id"]))
+            now = datetime.now(timezone.utc).isoformat()
+            if active and active["coverage_kind"] == kind and active["reason_code"] == code:
+                db.execute("UPDATE coverage_intervals SET reason=?,checked_at=? WHERE id=?", (str(health["detail"]), now, active["id"]))
             else:
-                now = datetime.now(timezone.utc).isoformat()
                 if active:
                     db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (now, active["id"]))
-                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at) VALUES(?,?,?,?)",
-                           (camera_id, kind, str(health["detail"]), now))
+                db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,checked_at) VALUES(?,?,?,?,?,?)",
+                           (camera_id, kind, str(health["detail"]), code, now, now))
             for fault_type, coverage_kinds, title in (
                 ("recording_failure", {"failure"}, "Recording coverage failure"),
                 ("recording_uncertain", {"uncertain"}, "Recording coverage is uncertain"),
@@ -271,11 +314,15 @@ class RecordingManager:
         with connect() as db:
             return db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
 
-    def _set_status(self, camera_id: str, value: str, error: str | None = None) -> None:
+    def _set_status(self, camera_id: str, value: str, error: str | None = None, fault: str | None = None) -> None:
+        """Record the recorder's state. ``fault`` says what went wrong when the state is a failure; it is kept while the recorder
+        retries and cleared once the stream works (see ``_sync_coverage``) or recording stops."""
         with connect() as db:
             db.execute(
-                "UPDATE cameras SET recording_status=?, last_error=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
-                (value, error, camera_id),
+                "UPDATE cameras SET recording_status=?, last_error=?, "
+                "stream_fault=CASE WHEN ? IN ('reconnecting','unavailable','failed') THEN ? WHEN ? IN ('recording','stopped','scheduled_idle') THEN NULL ELSE stream_fault END, "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+                (value, error, value, fault, value, camera_id),
             )
 
     def _mark_video_fresh(self, camera_id: str) -> None:
@@ -436,14 +483,15 @@ class RecordingManager:
                     except OSError:
                         pass
                 if proc.returncode is not None:
-                    self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying")
+                    self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=await _stream_fault(source))
                     break
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
         except (OSError, ValueError):
             with connect() as db:
-                db.execute("UPDATE cameras SET recording_status='reconnecting',motion_source_status='unavailable',last_error='Camera motion buffer could not start' WHERE id=?", (camera_id,))
+                db.execute("UPDATE cameras SET recording_status='reconnecting',motion_source_status='unavailable',last_error='Camera motion buffer could not start',stream_fault=? WHERE id=?",
+                           (await _stream_fault(source), camera_id))
         finally:
             if event_task:
                 event_task.cancel()
@@ -569,14 +617,14 @@ class RecordingManager:
                 source = decrypt(row["stream_url_ciphertext"])
                 safe_stream_url(source)
             except Exception:
-                self._set_status(camera_id, "failed", "Camera credentials are unavailable")
+                self._set_status(camera_id, "failed", "Camera credentials are unavailable", fault="stream_error")
                 return
             try:
                 from .storage import camera_recordings_dir
                 output_dir = camera_recordings_dir(camera_id) / uuid.uuid4().hex
                 output_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
-                self._set_status(camera_id, "unavailable", "Assigned recording volume is missing or not writable")
+                self._set_status(camera_id, "unavailable", "Assigned recording volume is missing or not writable", fault="disk_unavailable")
                 await asyncio.sleep(5)
                 continue
             list_path = output_dir / "segments.csv"
@@ -637,7 +685,7 @@ class RecordingManager:
                 if self.stopping:
                     return
                 failures += 1
-                self._set_status(camera_id, "reconnecting", "Camera stream interrupted; retrying")
+                self._set_status(camera_id, "reconnecting", "Camera stream interrupted; retrying", fault=await _stream_fault(source))
             except asyncio.CancelledError:
                 if process and process.returncode is None:
                     process.terminate()
@@ -650,5 +698,5 @@ class RecordingManager:
                 raise
             except OSError:
                 failures += 1
-                self._set_status(camera_id, "reconnecting", "Camera stream could not start; retrying")
+                self._set_status(camera_id, "reconnecting", "Camera stream could not start; retrying", fault=await _stream_fault(source))
             await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))

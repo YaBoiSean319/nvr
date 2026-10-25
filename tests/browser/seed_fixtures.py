@@ -86,8 +86,10 @@ def _seed_footage(db: sqlite3.Connection, cameras: list[str]) -> dict[str, objec
                        (camera_id, relative, at(offset), at(offset + FOOTAGE_CLIP_SECONDS), target.stat().st_size))
             segments.append({"camera_id": camera_id, "starts_at": at(offset), "ends_at": at(offset + FOOTAGE_CLIP_SECONDS)})
     first = cameras[0]
-    db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,starts_at,ends_at) VALUES(?,?,?,?,?)",
-               (first, "failure", "Camera offline", at(60), at(150)))
+    # The fixture's history starts before its footage, so coverage reports see all of it.
+    db.execute("UPDATE cameras SET created_at=?", ((anchor - timedelta(days=1)).isoformat(),))
+    db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,ends_at) VALUES(?,?,?,?,?,?)",
+               (first, "failure", "Camera offline", "camera_offline", at(60), at(150)))
 
     def motion(camera_id: str, seconds: int) -> None:
         db.execute("INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,status) "
@@ -186,7 +188,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DROP TRIGGER IF EXISTS camera_browser_fixture_reject_name_save")
         db.execute("DELETE FROM discovery_candidates")
         # Settings state from earlier journeys.
-        for table in ("api_tokens", "webhook_deliveries", "webhook_endpoints", "heartbeat_configuration", "backup_runs", "diagnostic_settings"):
+        for table in ("api_tokens", "webhook_deliveries", "webhook_endpoints", "heartbeat_configuration", "backup_runs", "diagnostic_settings", "coverage_reports"):
             db.execute(f"DELETE FROM {table}")
         db.execute("UPDATE ai_runtime_settings SET max_active_cameras=4 WHERE singleton_id=1")
         db.execute("DELETE FROM export_sources")
