@@ -6,7 +6,6 @@ import hashlib
 import json
 import shutil
 import threading
-import time
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -94,7 +93,7 @@ def live_view_status(camera_id: str, _: CurrentUser) -> dict[str, object]:
 @requires_scope("media")
 def live_camera_audio(
     camera_id: str,
-    _: CurrentUser,
+    user: CurrentUser,
 ) -> StreamingResponse:
     with connect() as db:
         camera = db.execute("SELECT stream_url_ciphertext,audio_supported,audio_enabled,archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -120,6 +119,7 @@ def live_camera_audio(
 
     async def stream():
         process: asyncio.subprocess.Process | None = None
+        watching = viewing_audit.LiveSession(user.id, camera_id, "audio")
         try:
             process = await asyncio.create_subprocess_exec(
                 executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
@@ -134,6 +134,7 @@ def live_camera_audio(
             await process.stdin.drain()
             process.stdin.close()
             while chunk := await process.stdout.read(32 * 1024):
+                await watching.delivered()
                 yield chunk
         except asyncio.CancelledError:
             raise
@@ -151,6 +152,7 @@ def live_camera_audio(
                     process.kill()
                     await process.wait()
             _release_live_audio()
+            watching.close()
 
     return StreamingResponse(stream(), media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
@@ -243,22 +245,18 @@ def live_camera(
         raise HTTPException(status_code=503, detail="Camera stream configuration is invalid") from exc
 
     async def stream():
-        viewing_id = viewing_audit.safely(viewing_audit.begin, user.id, camera_id, "live", quality)
-        beat = time.monotonic()
+        watching = viewing_audit.LiveSession(user.id, camera_id, quality)
         try:
             async for frame in _mjpeg_frames(camera_id, source, quality, zones):
                 if not guard.still_valid():
                     return  # Masks or grants changed: the viewer reconnects under the new ones.
-                if viewing_id is not None and time.monotonic() - beat >= viewing_audit.HEARTBEAT_SECONDS:
-                    beat = time.monotonic()
-                    viewing_audit.safely(viewing_audit.heartbeat, viewing_id)
+                await watching.delivered()
                 yield frame
         except (OSError, RuntimeError, asyncio.TimeoutError):
             return
         finally:
-            if viewing_id is not None:
-                viewing_audit.safely(viewing_audit.end, viewing_id)
             _release_live_view(camera_id)
+            watching.close()
 
     return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
@@ -375,7 +373,7 @@ async def live_stream(
                       source, include_audio, viewer, mark_fresh, video_filter)
     receiver = asyncio.create_task(websocket.receive())
     getter: asyncio.Task | None = None
-    viewing_id: int | None = None
+    watching = viewing_audit.LiveSession(principal.id, camera_id, quality)
     try:
         await asyncio.wait({receiver, asyncio.create_task(stream.ready.wait())}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
         if receiver.done():
@@ -395,12 +393,8 @@ async def live_stream(
         include_audio = has_audio
         await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening})
         await websocket.send_bytes(stream.init)
-        viewing_id = viewing_audit.safely(viewing_audit.begin, principal.id, camera_id, "live", quality)
-        beat = time.monotonic()
         while True:
-            if viewing_id is not None and time.monotonic() - beat >= viewing_audit.HEARTBEAT_SECONDS:
-                beat = time.monotonic()
-                viewing_audit.safely(viewing_audit.heartbeat, viewing_id)
+            await watching.delivered()
             if getter is None:
                 getter = asyncio.create_task(viewer.queue.get())
             # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once.
@@ -448,9 +442,8 @@ async def live_stream(
         receiver.cancel()
         if getter is not None:
             getter.cancel()
-        if viewing_id is not None:
-            viewing_audit.safely(viewing_audit.end, viewing_id)
         hub.leave(stream, viewer)
         if listening:
             _release_live_audio()
         _release_live_view(camera_id)
+        watching.close()

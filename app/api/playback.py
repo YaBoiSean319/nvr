@@ -114,7 +114,6 @@ async def play_segment(
     if not path.is_file():
         release_playback(path)
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
-    viewing_audit.safely(viewing_audit.touch_playback, user.id, camera_id)
     if zones:
         # Recordings on disk are not masked: deliver a masked rendering, never the file itself.
         try:
@@ -123,7 +122,9 @@ async def play_segment(
             raise HTTPException(status_code=503, detail="The masked recording could not be prepared") from exc
         finally:
             release_playback(path)
+        await asyncio.to_thread(viewing_audit.safely, viewing_audit.touch_playback, user.id, camera_id)
         return FileResponse(masked, media_type="video/mp4", filename=path.name, content_disposition_type="inline")
+    await asyncio.to_thread(viewing_audit.safely, viewing_audit.touch_playback, user.id, camera_id)
     return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="inline", background=BackgroundTask(release_playback,path))
 
 

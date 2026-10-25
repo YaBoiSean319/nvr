@@ -32,8 +32,6 @@ def _range(start: datetime | None, end: datetime | None) -> tuple[datetime, date
     return start, end
 
 
-
-
 @router.get("/api/admin/viewing-audit/report")
 def viewing_report(_: Administrator, by: Literal["person", "camera"] = "person", start: Annotated[datetime | None, Query(alias="from")] = None,
                    end: Annotated[datetime | None, Query(alias="to")] = None, user_id: int | None = None, camera_id: str | None = Query(default=None, max_length=64)) -> dict[str, object]:
@@ -45,7 +43,7 @@ def viewing_report(_: Administrator, by: Literal["person", "camera"] = "person",
 @router.get("/api/admin/viewing-audit/entries")
 def viewing_entries(_: Administrator, start: Annotated[datetime | None, Query(alias="from")] = None, end: Annotated[datetime | None, Query(alias="to")] = None,
                     user_id: int | None = None, camera_id: str | None = Query(default=None, max_length=64),
-                    kind: Literal["live", "playback", "export", "download", "snapshot"] | None = None,
+                    kind: viewing_audit.Kind | None = None,
                     limit: Annotated[int, Query(ge=1, le=500)] = 100, offset: Annotated[int, Query(ge=0)] = 0) -> dict[str, object]:
     start, end = _range(start, end)
     with connect() as db:
@@ -68,6 +66,8 @@ def viewing_csv(admin: Administrator, view: Literal["person", "camera", "entries
     with connect() as db:
         if view == "entries":
             data = viewing_audit.entries(db, start, end, user_id, camera_id, None, MAX_CSV_ROWS, 0)
+            if data["total"] > MAX_CSV_ROWS:
+                raise HTTPException(status_code=422, detail=f"That range has {data['total']} entries, more than the {MAX_CSV_ROWS} one file holds; choose a shorter range")
             writer.writerow(["person", "camera", "kind", "started_at", "ended_at", "seconds", "quality", "reference"])
             for row in data["entries"]:
                 writer.writerow([_cell(value) for value in (row["username"], row["camera_name"], row["kind"], row["started_at"], row["ended_at"] or "", row["seconds"], row["quality"] or "", row["reference"] or "")])

@@ -6,8 +6,10 @@ request. Exports, downloads and snapshots are single rows. Both reports group th
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Literal
 
@@ -67,15 +69,21 @@ def touch_playback(db: sqlite3.Connection, user_id: int, camera_id: str) -> None
     db.execute("UPDATE viewing_audit SET ended_at=started_at WHERE id=?", (session_id,))
 
 
-def record_events(db: sqlite3.Connection, user_id: int | None, camera_ids: Iterable[str], kind: Kind, reference: str | None = None) -> None:
-    """One row per camera for an export, download or snapshot."""
+def record_events(db: sqlite3.Connection, user_id: int | None, camera_ids: Iterable[str], kind: Kind, reference: str | None = None,
+                  once_within: timedelta | None = None) -> None:
+    """One row per camera for an export, download or snapshot. With ``once_within``, a camera already recorded for the same
+    person and reference inside that time is skipped: a resumed or ranged download is one download."""
     if user_id is None:
         return
     now = stamp()
     who = _who(db, user_id)
-    db.executemany(
-        "INSERT INTO viewing_audit(user_id,username,camera_id,camera_name,kind,started_at,ended_at,last_seen_at,reference) VALUES(?,?,?,?,?,?,?,?,?)",
-        [(user_id, who, camera_id, _camera_name(db, camera_id), kind, now, now, now, reference) for camera_id in dict.fromkeys(camera_ids)])
+    cutoff = stamp(datetime.now(timezone.utc) - once_within) if once_within else None
+    for camera_id in dict.fromkeys(camera_ids):
+        if cutoff and db.execute("SELECT 1 FROM viewing_audit WHERE user_id=? AND camera_id=? AND kind=? AND reference=? AND started_at>=?",
+                                 (user_id, camera_id, kind, reference, cutoff)).fetchone():
+            continue
+        db.execute("INSERT INTO viewing_audit(user_id,username,camera_id,camera_name,kind,started_at,ended_at,last_seen_at,reference) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (user_id, who, camera_id, _camera_name(db, camera_id), kind, now, now, now, reference))
 
 
 def safely(action: Any, *args: Any, **kwargs: Any) -> Any:
@@ -83,9 +91,35 @@ def safely(action: Any, *args: Any, **kwargs: Any) -> Any:
     try:
         with connect() as db:
             return action(db, *args, **kwargs)
-    except sqlite3.Error:
+    except (sqlite3.Error, OSError):
         logger.warning("The viewing audit could not be written", exc_info=True)
         return None
+
+
+class LiveSession:
+    """The audit row of one live viewing: opened when the first video or audio is delivered, kept alive while it flows,
+    closed when delivery stops. Writes run off the event loop, which a busy database must not stall."""
+
+    def __init__(self, user_id: int, camera_id: str, quality: str) -> None:
+        self.user_id, self.camera_id, self.quality = user_id, camera_id, quality
+        self.row: int | None = None
+        self.opened = False
+        self.beat = 0.0
+
+    async def delivered(self) -> None:
+        now = time.monotonic()
+        if not self.opened:
+            self.opened, self.beat = True, now
+            self.row = await asyncio.to_thread(safely, begin, self.user_id, self.camera_id, "live", self.quality)
+        elif self.row is not None and now - self.beat >= HEARTBEAT_SECONDS:
+            self.beat = now
+            await asyncio.to_thread(safely, heartbeat, self.row)
+
+    def close(self) -> None:
+        """Called from a finally, where an await could be cancelled: hand the write to the executor and move on."""
+        if self.row is not None:
+            asyncio.get_running_loop().run_in_executor(None, safely, end, self.row)
+            self.row = None
 
 
 def close_orphans(db: sqlite3.Connection) -> None:
@@ -104,7 +138,7 @@ def prune(db: sqlite3.Connection, now: datetime | None = None) -> int:
 
 
 # The seconds a row spends inside [start, end]; an entry without a duration counts only if it happened in the range.
-_SECONDS = ("MAX(0, (julianday(MIN(COALESCE(ended_at,last_seen_at), :end)) - julianday(MAX(started_at, :start))) * 86400)")
+_SECONDS = "MAX(0, (julianday(MIN(COALESCE(ended_at,last_seen_at), :end)) - julianday(MAX(started_at, :start))) * 86400)"
 _IN_RANGE = "(started_at<:end AND COALESCE(ended_at,last_seen_at)>=:start)"
 
 
@@ -120,6 +154,11 @@ def _filters(user_id: int | None, camera_id: str | None, kind: str | None) -> tu
         clauses.append("kind=:kind")
         values["kind"] = kind
     return "".join(f" AND {clause}" for clause in clauses), values
+
+
+def _latest(column: str) -> str:
+    """The value of ``column`` on the newest row of a group (a renamed person or camera shows today's name); stamps are 24 characters."""
+    return f"substr(MAX(started_at || char(31) || {column}), 26)"
 
 
 def _range(start: datetime, end: datetime) -> dict[str, Any]:
@@ -140,7 +179,7 @@ def report(db: sqlite3.Connection, start: datetime, end: datetime, by: Literal["
         "SUM(CASE WHEN kind='snapshot' THEN 1 ELSE 0 END) AS snapshots")
     where = f"WHERE {_IN_RANGE}{extra}"
     rows = db.execute(
-        f"SELECT {key} AS key, MAX(user_id) AS user_id, MAX(username) AS username, MAX(camera_id) AS camera_id, MAX(camera_name) AS camera_name, "
+        f"SELECT {key} AS key, MAX(user_id) AS user_id, {_latest('username')} AS username, MAX(camera_id) AS camera_id, {_latest('camera_name')} AS camera_name, "
         f"COUNT(DISTINCT {other}) AS distinct_other, MIN(started_at) AS first_at, MAX(COALESCE(ended_at,last_seen_at)) AS last_at, {measures} "
         f"FROM viewing_audit {where} GROUP BY {key} ORDER BY live_seconds+playback_seconds DESC, key", values).fetchall()
     total = db.execute(f"SELECT COUNT(*) AS entries, {measures} FROM viewing_audit {where}", values).fetchone()

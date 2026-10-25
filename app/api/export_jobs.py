@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -175,9 +175,9 @@ def download_export(job_id: str, user: CurrentUser) -> FileResponse:
             masks = db.execute("SELECT zones_json,updated_at FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
             if masks and json.loads(masks["zones_json"]) and masks["updated_at"] > row["created_at"]:
                 raise HTTPException(status_code=409, detail="This export was made before the camera's current privacy masks; export again to download it masked")
-    with connect() as db:
-        viewing_audit.record_events(db, int(user["id"]), json.loads(row["camera_ids_json"]), "download", job_id)
     acquire_playback(path)
+    # A resumed or ranged download is one download.
+    viewing_audit.safely(viewing_audit.record_events, int(user["id"]), json.loads(row["camera_ids_json"]), "download", job_id, timedelta(minutes=10))
     return FileResponse(path, media_type="application/zip", filename=f"nvr-export-{job_id}.zip", background=BackgroundTask(release_playback, path))
 
 

@@ -54,6 +54,7 @@ class LiveSessionTests(AuditCase):
         with self.stub_hub(), self.limited.websocket_connect(f"/api/cameras/{self.d1}/live/stream?quality=high") as websocket:
             websocket.receive_json()
             websocket.receive_bytes()
+            websocket.receive_bytes()  # The first fragment: the session opens as video is delivered.
             (open_row,) = self.rows()
             self.assertEqual((open_row["user_id"], open_row["camera_id"], open_row["kind"], open_row["quality"], open_row["ended_at"]),
                              (self.limited_id, self.d1, "live", "high", None))
@@ -65,6 +66,65 @@ class LiveSessionTests(AuditCase):
     def test_a_refused_tile_is_not_a_viewing(self):
         with self.stub_hub():
             self._Live.refusal(self, self.limited, self.y1)
+        self.assertEqual(self.rows(), [])
+
+    def mjpeg(self, frames):
+        async def fake(camera_id, source, quality, zones=None):
+            for frame in frames:
+                yield frame
+        return mock.patch.multiple("app.api.live_media", _mjpeg_frames=fake, safe_stream_url=lambda url: None)
+
+    def test_the_motion_jpeg_fallback_is_a_session_opened_by_its_first_frame(self):
+        with self.mjpeg([b"frame"]):
+            response = self.limited.get(f"/api/cameras/{self.d1}/live?quality=high")
+        self.assertEqual(response.status_code, 200)
+        (row,) = self.rows()
+        self.assertEqual((row["camera_id"], row["kind"], row["quality"]), (self.d1, "live", "high"))
+        self.assertIsNotNone(row["ended_at"])
+
+    def test_a_stream_that_delivers_nothing_is_not_a_viewing(self):
+        with self.mjpeg([]):
+            self.limited.get(f"/api/cameras/{self.d1}/live")
+        self.assertEqual(self.rows(), [])
+
+    def test_listening_to_a_camera_on_its_own_is_a_live_session_too(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET audio_supported=1,audio_enabled=1 WHERE id=?", (self.d1,))
+
+        class Process:
+            returncode = 0
+
+            class _Out:
+                def __init__(self):
+                    self.chunks = [b"mp3", b""]
+
+                async def read(self, size):
+                    return self.chunks.pop(0)
+
+            class _In:
+                def write(self, data): pass
+                async def drain(self): pass
+                def close(self): pass
+
+            def __init__(self):
+                self.stdout, self.stdin = self._Out(), self._In()
+
+            async def wait(self):
+                return 0
+
+        async def spawn(*args, **kwargs):
+            return Process()
+
+        with mock.patch("app.api.live_media.asyncio.create_subprocess_exec", spawn), mock.patch("app.api.live_media.safe_stream_url", lambda url: None):
+            self.assertEqual(self.limited.get(f"/api/cameras/{self.d1}/audio/live").status_code, 200)
+        (row,) = self.rows()
+        self.assertEqual((row["kind"], row["quality"], row["camera_id"]), ("live", "audio", self.d1))
+
+    def test_a_failing_audit_write_never_cuts_off_viewing(self):
+        with mock.patch("app.viewing_audit.connect", side_effect=OSError("disk gone")), self.stub_hub(), self.limited.websocket_connect(f"/api/cameras/{self.d1}/live/stream") as websocket:
+            websocket.receive_json()
+            websocket.receive_bytes()
+            self.assertEqual(websocket.receive_bytes(), b"fragment")
         self.assertEqual(self.rows(), [])
 
     def test_a_session_a_crash_left_open_ends_when_it_was_last_seen(self):
@@ -93,6 +153,13 @@ class PlaybackAndPointEventTests(AuditCase):
         missing = self.add_segment(self.d1, 5)  # Indexed, but no file on disk.
         self.assertEqual(self.limited.get(f"/api/cameras/{self.d1}/segments/{missing}/media").status_code, 410)
         self.assertEqual(self.limited.get(f"/api/cameras/{self.y1}/segments/{missing}/media").status_code, 404)
+        self.assertEqual(self.rows(), [])
+
+    @unittest.skipUnless(FFMPEG, "needs ffmpeg")
+    def test_masked_playback_that_fails_to_render_is_not_recorded(self):
+        segment = self.make_video(self.d1)
+        with mock.patch("app.privacy.zones_for", return_value=[object()]), mock.patch("app.privacy.masked_recording", side_effect=RuntimeError("no render")):
+            self.assertEqual(self.limited.get(f"/api/cameras/{self.d1}/segments/{segment}/media").status_code, 503)
         self.assertEqual(self.rows(), [])
 
     @unittest.skipUnless(FFMPEG, "needs ffmpeg")
@@ -126,6 +193,27 @@ class PlaybackAndPointEventTests(AuditCase):
         self.assertEqual(sorted(row["camera_id"] for row in self.rows(kind="download")), sorted([self.d1, self.d2]))
         self.assertEqual(self.limited.get(f"/api/exports/{uuid.uuid4()}/download").status_code, 404)
         self.assertEqual(len(self.rows(kind="download")), 2)
+
+    def test_a_resumed_or_ranged_download_is_one_download_but_a_retry_is_a_new_export(self):
+        job = self.export(self.limited, [self.d1])
+        with connect() as db:
+            db.execute("UPDATE exports SET status='completed',expires_at=?,output_relative_path=? WHERE id=?",
+                       ((datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), f"exports/{job}.zip", job))
+        package = Path(self.environment["NVR_RECORDINGS_PATH"]) / "exports" / f"{job}.zip"
+        package.parent.mkdir(parents=True, exist_ok=True)
+        package.write_bytes(b"PK" * 100)
+        self.limited.get(f"/api/exports/{job}/download")
+        self.limited.get(f"/api/exports/{job}/download", headers={"Range": "bytes=10-"})
+        self.assertEqual(len(self.rows(kind="download")), 1)
+        with connect() as db:  # Earlier than the window: a fresh download.
+            db.execute("UPDATE viewing_audit SET started_at=? WHERE kind='download'", (viewing_audit.stamp(datetime.now(timezone.utc) - timedelta(minutes=11)),))
+        self.limited.get(f"/api/exports/{job}/download")
+        self.assertEqual(len(self.rows(kind="download")), 2)
+        with connect() as db:
+            db.execute("UPDATE exports SET status='failed' WHERE id=?", (job,))
+        retried = self.limited.post(f"/api/exports/{job}/retry")
+        self.assertEqual(retried.status_code, 202, retried.text)
+        self.assertEqual(len(self.rows(kind="export")), 2)
 
     def test_an_export_that_fails_validation_leaves_nothing_behind(self):
         self.app.state.exports = type("Queue", (), {"enqueue": staticmethod(lambda job: None)})()
@@ -178,6 +266,13 @@ class ReportTests(AuditCase):
         by_name = {row["username"]: row for row in report["rows"]}
         self.assertEqual((by_name["limited"]["live_seconds"], by_name["full"]["live_seconds"]), (180, 60))
         self.assertNotIn("export", {kind for row in report["rows"] for kind in row if row[kind] and kind == "export"})
+
+    def test_a_renamed_camera_shows_the_name_on_its_newest_entry_not_the_greatest_one(self):
+        with connect() as db:
+            db.execute("UPDATE viewing_audit SET camera_name='Zebra (old name)' WHERE camera_id=?", (self.d1,))
+            db.execute("UPDATE viewing_audit SET camera_name='Aardvark (new name)' WHERE id=(SELECT id FROM viewing_audit WHERE camera_id=? ORDER BY started_at DESC,id DESC LIMIT 1)", (self.d1,))
+        by_camera = {row["camera_id"]: row for row in self.report(by="camera", **self.range)["rows"]}
+        self.assertEqual(by_camera[self.d1]["camera_name"], "Aardvark (new name)")
 
     def test_a_person_who_was_removed_stays_in_the_report_under_their_name(self):
         with connect() as db:
@@ -252,6 +347,13 @@ class AccessAndExportTests(ReportTests):
         _, rows = self.csv_rows(view="person")
         self.assertIn("'=HYPERLINK(\"http://x\")", {row[0] for row in rows})
         self.assertNotIn('=HYPERLINK("http://x")', {row[0] for row in rows})
+
+    def test_a_range_too_big_for_one_csv_is_refused_not_truncated(self):
+        with mock.patch("app.api.viewing_audit.MAX_CSV_ROWS", 3):
+            refused = self.admin.get("/api/admin/viewing-audit/export.csv", params={**self.range, "view": "entries"})
+            self.assertEqual(refused.status_code, 422)
+            self.assertIn("choose a shorter range", refused.json()["detail"])
+            self.assertEqual(self.admin.get("/api/admin/viewing-audit/export.csv", params={**self.range, "view": "entries", "camera_id": self.y1}).status_code, 200)
 
     def test_downloading_the_csv_is_itself_audited(self):
         self.csv_rows(view="camera")

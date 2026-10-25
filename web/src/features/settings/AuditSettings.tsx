@@ -95,8 +95,10 @@ export function AuditSettings() {
                         <td>{row.playback_sessions} · {duration(row.playback_seconds)}</td>
                         <td>{row.exports}</td><td>{row.downloads}</td><td>{row.snapshots}</td>
                         <td>
-                          <button type="button" className="button" data-variant="ghost" aria-label={`Show entries for ${name}`}
-                                  onClick={() => setFocus(by === "person" ? { user_id: row.user_id ?? undefined, label: name } : { camera_id: row.camera_id, label: name })}>Entries</button>
+                          {by === "person" && row.user_id == null ? <span className="muted">Removed account</span> : (
+                            <button type="button" className="button" data-variant="ghost" aria-label={`Show entries for ${name}`}
+                                    onClick={() => setFocus(by === "person" ? { user_id: row.user_id ?? undefined, label: name } : { camera_id: row.camera_id, label: name })}>Entries</button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -116,8 +118,8 @@ export function AuditSettings() {
         ) : null}
         {range ? (
           <p className="field-actions">
-            <a className="button" href={`/api/admin/viewing-audit/export.csv?${query({ view: by })}`} download>Download CSV by {by}</a>
-            <a className="button" data-variant="ghost" href={`/api/admin/viewing-audit/export.csv?${query({ view: "entries" })}`} download>Download every entry as CSV</a>
+            <a className="button" href={`/api/admin/viewing-audit/export.csv?${query({ view: by, ...filter })}`} download>Download CSV by {by}</a>
+            <a className="button" data-variant="ghost" href={`/api/admin/viewing-audit/export.csv?${query({ view: "entries", ...filter })}`} download>Download every entry as CSV</a>
           </p>
         ) : null}
       </section>

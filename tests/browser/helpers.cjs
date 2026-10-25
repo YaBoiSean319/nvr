@@ -92,5 +92,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = {
-  signInAs, test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, signInNext, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
