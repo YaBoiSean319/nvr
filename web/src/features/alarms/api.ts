@@ -15,7 +15,7 @@ export interface Alarm {
   camera_id: string;
   camera_name: string | null;
   track_id: string | null;
-  label: "person" | "vehicle";
+  label: "person" | "vehicle" | "covered" | "moved" | "defocused";
   assigned_to: string | null;
   acknowledged_by: string | null;
   acknowledged_at: string | null;

@@ -31,6 +31,14 @@ function seedFixtures(count, options = {}) {
   return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
 }
 
+/** Feed `count` tamper-detection frames of a made-up view (normal, covered or moved) to fixture camera `camera`, as the recorder's sampler would. */
+function feedTamper(camera, pattern, count = 1) {
+  const args = ["-m", "tests.browser.feed_tamper", "--camera", String(camera), "--pattern", pattern, "--count", String(count)];
+  const result = spawnSync("python", args, { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, `feeding tamper frames failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 /** Raise a new alarm on fixture camera `camera` from a rule that pops into Live, with those neighbours. */
 function raiseAlarm(camera, { neighbours = [], rule = "Gate entry" } = {}) {
   const args = ["-m", "tests.browser.raise_alarm", "--camera", String(camera), "--neighbours", neighbours.join(","), "--rule", rule];
@@ -92,4 +100,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

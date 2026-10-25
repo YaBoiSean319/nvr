@@ -29,6 +29,8 @@ EVENT_TYPES = {
     "ai.detection",
     "ai.failure",
     "ai.recovered",
+    "tamper.detected",
+    "tamper.recovered",
     "system.failure",
     "system.recovered",
     "alarm.created",

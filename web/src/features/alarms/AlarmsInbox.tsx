@@ -12,7 +12,7 @@ import {
   type Alarm, type AlarmFilter, type AlarmQuery,
 } from "./api";
 
-const LABEL = { person: "Person", vehicle: "Vehicle" } as const;
+const LABEL = { person: "Person", vehicle: "Vehicle", covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused" } as const;
 
 function useWhen() {
   const display = useDisplaySettings();

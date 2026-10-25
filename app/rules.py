@@ -17,6 +17,11 @@ the rule's schedule and is not within the cooldown of another event on the same
 camera becomes the event. A saved rule never fires for moments before it was last
 saved. Every rule event raises an alarm (see ``app.alarms``). Test mode replays
 the same evaluation over stored tracks without writing.
+
+A ``tamper`` rule is not about objects. It fires when camera tamper detection (see ``app.tamper``) confirms a covered,
+moved or defocused camera, once per detection and for the kinds the rule lists (all three if it lists none): its schedule,
+cooldown and scope apply as to any rule, and it raises an alarm labelled with the kind. Test mode replays the tamper
+incidents of the last day.
 """
 from __future__ import annotations
 
@@ -36,6 +41,8 @@ from .store import connect
 logger = logging.getLogger("nvr.rules")
 
 WRONG_WAY_DISTANCE = 0.1
+TAMPER_KINDS = ("covered", "moved", "defocused")
+FULL_FRAME = '{"x":0,"y":0,"width":1,"height":1}'
 DIRECTIONS = {"right": (1.0, 0.0), "left": (-1.0, 0.0), "down": (0.0, 1.0), "up": (0.0, -1.0)}
 BATCH_SIZE = 5000
 
@@ -77,6 +84,9 @@ class Rule:
     def watches(self, camera_id: str, groups: Iterable[str], label: str) -> bool:
         in_scope = camera_id in self.camera_ids or not self.group_ids.isdisjoint(groups)
         return in_scope and label in self.classes
+
+    def watches_camera(self, camera_id: str, groups: Iterable[str]) -> bool:
+        return camera_id in self.camera_ids or not self.group_ids.isdisjoint(groups)
 
     def scheduled(self, at: datetime) -> bool:
         if self.schedule is None:
@@ -272,8 +282,55 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
     return len(fresh)
 
 
+def _tamper_kinds(rule: Rule) -> list[str]:
+    return [kind for kind in rule.condition.get("kinds") or TAMPER_KINDS if kind in TAMPER_KINDS]
+
+
+def fire_tamper(db: sqlite3.Connection, camera_id: str, kind: str, at: datetime) -> int:
+    """Raise an alarm for each ``tamper`` rule that watches the camera and the kind, inside the caller's transaction."""
+    groups = _camera_groups(db, camera_id)
+    fired = 0
+    for rule in load_rules(db):
+        if rule.condition_type != "tamper" or not rule.watches_camera(camera_id, groups) or kind not in _tamper_kinds(rule):
+            continue
+        if at < rule.active_from or not rule.scheduled(at):
+            continue
+        if rule.cooldown and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                                        (rule.id, camera_id, (at - rule.cooldown).isoformat(), (at + rule.cooldown).isoformat())).fetchone():
+            continue
+        event_id = str(uuid.uuid4())
+        db.execute("INSERT INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (event_id, rule.id, rule.name, camera_id, f"tamper-{event_id}", None, kind, "tamper", at.isoformat(), FULL_FRAME))
+        create_alarm(db, event_id)
+        fired += 1
+    return fired
+
+
+def _replay_tamper(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """The tamper detections of [start, end) the rule would have fired on, from the incident history."""
+    with connect() as db:
+        rows = db.execute(
+            "SELECT i.camera_id,i.fault_type,e.occurred_at,c.name AS camera_name FROM incident_events e JOIN incidents i ON i.id=e.incident_id "
+            "JOIN cameras c ON c.id=i.camera_id WHERE i.fault_type LIKE 'tamper\\_%' ESCAPE '\\' AND e.event_type IN ('raised','recurred') "
+            "AND e.occurred_at>=? AND e.occurred_at<? ORDER BY e.occurred_at,e.id", (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat())).fetchall()
+        groups = {row["camera_id"]: _camera_groups(db, row["camera_id"]) for row in rows}
+    events, last = [], {}
+    for row in rows:
+        kind, at = row["fault_type"].removeprefix("tamper_"), _parse(row["occurred_at"])
+        if not rule.watches_camera(row["camera_id"], groups[row["camera_id"]]) or kind not in _tamper_kinds(rule) or not rule.scheduled(at):
+            continue
+        if rule.cooldown and row["camera_id"] in last and abs(at - last[row["camera_id"]]) < rule.cooldown:
+            continue
+        last[row["camera_id"]] = at
+        events.append({"camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": None, "label": kind, "occurred_at": at.isoformat(),
+                       "box": json.loads(FULL_FRAME)})
+    return events
+
+
 def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
     """What the rule would have fired over stored tracks in [start, end); writes nothing."""
+    if rule.condition_type == "tamper":
+        return _replay_tamper(rule, start, end)
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
         tracks = db.execute(
