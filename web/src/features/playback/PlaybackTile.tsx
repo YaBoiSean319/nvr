@@ -1,3 +1,4 @@
+import { withUnmasked } from "@/features/privacy/store";
 import { useEffect, useRef, useState } from "react";
 import type { TimelineCamera } from "@/api/types";
 import { playbackClock } from "./clock";
@@ -17,7 +18,7 @@ interface Interval { id: number; start: number; end: number; url: string }
 
 function intervals(camera: TimelineCamera | undefined): Interval[] {
   return (camera?.segments ?? []).map(segment => ({
-    id: segment.id, start: Date.parse(segment.starts_at), end: Date.parse(segment.ends_at), url: segment.media_url,
+    id: segment.id, start: Date.parse(segment.starts_at), end: Date.parse(segment.ends_at), url: camera ? withUnmasked(segment.media_url, camera.camera_id) : segment.media_url,
   }));
 }
 

@@ -164,7 +164,8 @@ def _write_manifest(manifest: dict[str, object]) -> dict[str, object]:
 
 def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: bool = False, extra_group: bool = False,
                   streams: dict[int, str] | None = None, audio_cameras: set[int] | None = None,
-                  footage: bool = False, long_names: bool = False, detections: bool = False, alarm: bool = False) -> dict[str, object]:
+                  footage: bool = False, long_names: bool = False, detections: bool = False, alarm: bool = False,
+                  device_urls: dict[int, str] | None = None) -> dict[str, object]:
     initialize()
     with connect() as db:
         _reset_site_appearance(db)
@@ -232,6 +233,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
 
             if index in (audio_cameras or set()):
                 db.execute("UPDATE cameras SET audio_supported=1,audio_enabled=1 WHERE id=?", (camera_id,))
+            if index in (device_urls or {}):
+                db.execute("UPDATE cameras SET device_service_url=? WHERE id=?", (device_urls[index], camera_id))
 
         now = "2026-01-01T00:00:00+00:00"
         linked_id = cameras[0] if cameras else None
@@ -318,6 +321,7 @@ def main() -> None:
     parser.add_argument("--long-names", action="store_true", help="give every camera a long name")
     parser.add_argument("--detections", action="store_true", help="store the detection fixture's scene on camera 1, an hour ago")
     parser.add_argument("--alarm", action="store_true", help="give camera 1 footage and a new alarm 30 seconds into it")
+    parser.add_argument("--device", action="append", default=[], metavar="INDEX=URL", help="give camera INDEX this ONVIF device service URL")
     arguments = parser.parse_args()
     if arguments.fresh_install:
         seed_fresh_install()
@@ -327,7 +331,8 @@ def main() -> None:
     streams = {int(index): url for index, url in (item.split("=", 1) for item in arguments.stream)}
     seed_fixtures(arguments.count, bulk_trigger=arguments.bulk_trigger, fail_name_save=arguments.fail_name_save, extra_group=arguments.extra_group,
                   streams=streams, audio_cameras=set(arguments.audio), footage=arguments.footage, long_names=arguments.long_names,
-                  detections=arguments.detections, alarm=arguments.alarm)
+                  detections=arguments.detections, alarm=arguments.alarm,
+                  device_urls={int(index): url for index, url in (item.split("=", 1) for item in arguments.device)})
 
 
 if __name__ == "__main__":

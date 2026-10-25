@@ -1,9 +1,10 @@
-"""The background worker: signed webhook delivery, push notifications, rule actions, the external heartbeat and configuration backups."""
+"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, the external heartbeat and configuration backups."""
 from __future__ import annotations
 
 from app.backup import BackupManager
 from app.heartbeat import HeartbeatManager
 from app.push import PushManager
+from app.ptz import PtzTourManager
 from app.rule_actions import RuleActionManager
 from app.webhooks import WebhookManager
 from app.workers import runtime
@@ -14,6 +15,7 @@ class BackgroundService:
         self.webhooks = WebhookManager()
         self.push = PushManager()
         self.rule_actions = RuleActionManager()
+        self.ptz_tours = PtzTourManager()
         self.heartbeat = HeartbeatManager()
         self.backups = BackupManager()
 
@@ -21,12 +23,14 @@ class BackgroundService:
         await self.webhooks.start()
         await self.push.start()
         await self.rule_actions.start()
+        await self.ptz_tours.start()
         await self.heartbeat.start()
         await self.backups.start()
 
     async def stop(self) -> None:
         await self.backups.stop()
         await self.heartbeat.stop()
+        await self.ptz_tours.stop()
         await self.rule_actions.stop()
         await self.push.stop()
         await self.webhooks.stop()

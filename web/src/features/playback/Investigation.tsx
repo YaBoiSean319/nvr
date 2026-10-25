@@ -1,3 +1,4 @@
+import { withUnmasked } from "@/features/privacy/store";
 import { useEffect, useMemo, useRef } from "react";
 import { ApiError, latestOnly } from "@/api/client";
 import type { DisplaySettings, TimelineCamera } from "@/api/types";
@@ -84,7 +85,7 @@ export function Investigation({ settings, range, rows, names }: Props) {
       setMessage(`${name} has no recording at ${formatSiteDateTime(at, settings)}. Move to recorded footage to take a snapshot.`);
       return;
     }
-    const url = `/api/cameras/${encodeURIComponent(active.camera_id)}/segments/${interval.id}/snapshot?at=${encodeURIComponent(toMicroIso(at))}`;
+    const url = withUnmasked(`/api/cameras/${encodeURIComponent(active.camera_id)}/segments/${interval.id}/snapshot?at=${encodeURIComponent(toMicroIso(at))}`, active.camera_id);
     try {
       const response = await fetch(url, { credentials: "same-origin" });
       if (!response.ok) {
