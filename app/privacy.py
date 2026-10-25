@@ -27,8 +27,26 @@ MAX_ZONES = 8
 GRANT_MINUTES = 15
 MASKED_COPY_DIRECTORY = ".masked"
 MASKED_COPY_DAYS = 1
+# Footage starting this soon after the camera accepted its masks may still hold earlier frames.
+CAMERA_MASK_MARGIN = timedelta(seconds=30)
+# Unmasked views of one camera by one person are audited at most this often.
+UNMASKED_AUDIT_INTERVAL = timedelta(minutes=1)
+MAX_CONCURRENT_RENDERS = 2
 
 _render_locks: dict[str, asyncio.Lock] = {}
+_render_slots: asyncio.Semaphore | None = None
+_save_locks: dict[str, asyncio.Lock] = {}
+# Bumped whenever a camera's masks or grants change: open streams that began under an
+# older generation stop, so nobody keeps a picture they would no longer be given.
+_generations: dict[str, int] = {}
+
+
+def generation(camera_id: str) -> int:
+    return _generations.get(camera_id, 0)
+
+
+def _bump(camera_id: str) -> None:
+    _generations[camera_id] = generation(camera_id) + 1
 
 
 class UnmaskedRefused(PermissionError):
@@ -64,9 +82,12 @@ def server_zones(db: sqlite3.Connection, camera_id: str, recorded_at: datetime |
     if not zones:
         return []
     if row["camera_side"] == "applied" and row["camera_masked_since"]:
-        since = datetime.fromisoformat(row["camera_masked_since"])
-        if recorded_at is None or recorded_at >= since:
-            return []
+        # Trust the camera only while it is the device the masks were written to.
+        device = db.execute("SELECT device_service_url FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if device is not None and device["device_service_url"] and device["device_service_url"] == row["written_to"]:
+            since = datetime.fromisoformat(row["camera_masked_since"]) + CAMERA_MASK_MARGIN
+            if recorded_at is None or recorded_at >= since:
+                return []
     return zones
 
 
@@ -105,17 +126,37 @@ def with_mask(video_filter: str, zones: list[dict[str, float]]) -> str:
     return f"{drawbox_filter(zones)},{video_filter}" if video_filter else drawbox_filter(zones)
 
 
+def _audit(db: sqlite3.Connection, actor_id: int, action: str, camera_id: str, details: dict[str, Any]) -> None:
+    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+               (actor_id, action, "camera", camera_id, json.dumps(details)))
+
+
 def grant_unmasked(user_id: int, camera_id: str, reason: str) -> dict[str, Any]:
     now = _now()
     grant = {"id": str(uuid.uuid4()), "camera_id": camera_id, "reason": reason, "created_at": now.isoformat(),
              "expires_at": (now + timedelta(minutes=GRANT_MINUTES)).isoformat()}
     with connect() as db:
-        db.execute("INSERT INTO unmasked_grants(id,user_id,camera_id,reason,created_at,expires_at) VALUES(?,?,?,?,?,?)",
-                   (grant["id"], user_id, camera_id, reason, grant["created_at"], grant["expires_at"]))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (user_id, "privacy_unmasked_view_granted", "camera", camera_id,
-                    json.dumps({"reason": reason, "expires_at": grant["expires_at"]})))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("INSERT INTO unmasked_grants(id,user_id,camera_id,reason,created_at,expires_at) VALUES(?,?,?,?,?,?)",
+                       (grant["id"], user_id, camera_id, reason, grant["created_at"], grant["expires_at"]))
+            _audit(db, user_id, "privacy_unmasked_view_granted", camera_id, {"reason": reason, "expires_at": grant["expires_at"]})
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
     return grant
+
+
+def revoke_unmasked(user_id: int, camera_id: str | None = None) -> None:
+    """End this person's grants (for one camera, or all on sign-out); unmasked streams they hold stop."""
+    with connect() as db:
+        rows = db.execute("SELECT DISTINCT camera_id FROM unmasked_grants WHERE user_id=? AND (? IS NULL OR camera_id=?) AND expires_at>?",
+                          (user_id, camera_id, camera_id, _now().isoformat())).fetchall()
+        db.execute("DELETE FROM unmasked_grants WHERE user_id=? AND (? IS NULL OR camera_id=?)", (user_id, camera_id, camera_id))
+        for row in rows:
+            _audit(db, user_id, "privacy_unmasked_view_ended", row["camera_id"], {})
+            _bump(row["camera_id"])
 
 
 def active_grant(db: sqlite3.Connection, user_id: int, camera_id: str) -> sqlite3.Row | None:
@@ -130,11 +171,28 @@ def zones_for(principal: Any, camera_id: str, *, unmasked: bool = False, recorde
         if unmasked:
             if principal.role != "administrator" or principal.token_id is not None or active_grant(db, int(principal.id), camera_id) is None:
                 raise UnmaskedRefused("Unmasked footage needs an administrator's stated reason first")
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(principal.id), "privacy_unmasked_viewed", "camera", camera_id,
-                        json.dumps({"recorded_at": recorded_at.isoformat() if recorded_at else "live"})))
+            recent = db.execute("SELECT 1 FROM audit_log WHERE actor_id=? AND action='privacy_unmasked_viewed' AND resource_id=? AND created_at>?",
+                                (int(principal.id), camera_id, (_now() - UNMASKED_AUDIT_INTERVAL).strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
+            if recent is None:
+                _audit(db, int(principal.id), "privacy_unmasked_viewed", camera_id, {"recorded_at": recorded_at.isoformat() if recorded_at else "live"})
             return []
         return server_zones(db, camera_id, recorded_at)
+
+
+class StreamGuard:
+    """For an open live stream: stops it when the camera's masks or grants change, or its grant lapses."""
+
+    def __init__(self, principal: Any, camera_id: str, unmasked: bool) -> None:
+        self.camera_id = camera_id
+        self.generation = generation(camera_id)
+        self.until: datetime | None = None
+        if unmasked:
+            with connect() as db:
+                grant = active_grant(db, int(principal.id), camera_id)
+            self.until = datetime.fromisoformat(grant["expires_at"]) if grant else _now()
+
+    def still_valid(self) -> bool:
+        return generation(self.camera_id) == self.generation and (self.until is None or _now() < self.until)
 
 
 async def _ffmpeg(args: list[str], stdin: bytes | None = None, timeout: float = 120) -> bytes:
@@ -196,26 +254,45 @@ def _sweep(root: Path) -> None:
 
 
 async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
-    """A masked copy of a recording, rendered once per recording and mask and kept for a day."""
+    """A masked copy of a recording, rendered once per recording and mask and kept for a day.
+    Renders are few at a time, so scrubbing through masked footage cannot exhaust the processor."""
+    global _render_slots
     digest = hashlib.sha256(f"{source}|{source.stat().st_mtime_ns}|{json.dumps(zones, sort_keys=True)}".encode()).hexdigest()[:32]
     root = _copies_root()
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"{digest}.mp4"
     lock = _render_locks.setdefault(digest, asyncio.Lock())
-    async with lock:
-        if not target.is_file():
-            await asyncio.to_thread(_sweep, root)
-            partial = root / f"{digest}.partial.mp4"
-            await _ffmpeg(["-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-vf", drawbox_filter(zones),
-                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", "-y", str(partial)], timeout=600)
-            partial.replace(target)
-    _render_locks.pop(digest, None)
-    return target
+    try:
+        async with lock:
+            if target.is_file():
+                target.touch()  # In use: not swept for another day.
+                return target
+            if _render_slots is None:
+                _render_slots = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
+            async with _render_slots:
+                await asyncio.to_thread(_sweep, root)
+                partial = root / f"{digest}.{uuid.uuid4().hex}.partial.mp4"
+                try:
+                    await _ffmpeg(["-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-vf", drawbox_filter(zones),
+                                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", "-y", str(partial)], timeout=600)
+                    partial.replace(target)
+                finally:
+                    partial.unlink(missing_ok=True)
+            return target
+    finally:
+        if not lock.locked():
+            _render_locks.pop(digest, None)
 
 
 async def save(camera_id: str, zones: list[dict[str, float]], actor_id: int) -> dict[str, Any]:
     """Store the masks, and write them to the camera where it accepts ONVIF masks."""
-    from .onvif_masks import MasksUnsupported, write_masks
+    lock = _save_locks.setdefault(camera_id, asyncio.Lock())
+    async with lock:
+        return await _save(camera_id, zones, actor_id)
+
+
+async def _save(camera_id: str, zones: list[dict[str, float]], actor_id: int) -> dict[str, Any]:
+    from .onvif_masks import MasksUnsupported, MaskWriteFailed, write_masks
 
     with connect() as db:
         camera = db.execute("SELECT device_service_url,motion_credentials_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -223,24 +300,35 @@ async def save(camera_id: str, zones: list[dict[str, float]], actor_id: int) -> 
             raise LookupError("Camera not found")
         previous = mask_row(db, camera_id)
     previous_tokens = json.loads(previous["camera_mask_tokens_json"]) if previous else []
-    camera_side, tokens, since = "none", [], None
+    camera_side, tokens, since, written_to = "none", previous_tokens, None, None
     if camera["device_service_url"] and (zones or previous_tokens):
         credentials = json.loads(decrypt(camera["motion_credentials_ciphertext"])) if camera["motion_credentials_ciphertext"] else {}
         try:
             tokens = await write_masks(camera["device_service_url"], credentials.get("username", ""), credentials.get("password", ""), zones, previous_tokens)
             camera_side = "applied" if zones else "none"
             since = _now().isoformat() if zones else None
+            written_to = camera["device_service_url"]
         except MasksUnsupported:
-            camera_side = "unsupported"
+            camera_side = "unsupported"  # Nothing was changed on the camera.
+        except MaskWriteFailed as exc:
+            # The old masks are gone and these were created: remember them to remove next time.
+            camera_side, tokens = "failed", exc.created
         except Exception:  # noqa: BLE001 - the NVR masks everything itself until the camera accepts them
-            camera_side, tokens = "failed", previous_tokens
+            camera_side = "failed"
     elif zones:
         camera_side = "unsupported"
     with connect() as db:
-        db.execute("INSERT INTO privacy_masks(camera_id,zones_json,camera_side,camera_mask_tokens_json,camera_masked_since,updated_at) VALUES(?,?,?,?,?,?) "
-                   "ON CONFLICT(camera_id) DO UPDATE SET zones_json=excluded.zones_json,camera_side=excluded.camera_side,"
-                   "camera_mask_tokens_json=excluded.camera_mask_tokens_json,camera_masked_since=excluded.camera_masked_since,updated_at=excluded.updated_at",
-                   (camera_id, json.dumps(zones), camera_side if zones else "none", json.dumps(tokens), since, _now().isoformat()))
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (actor_id, "privacy_masks_updated", "camera", camera_id, json.dumps({"areas": len(zones), "camera_side": camera_side})))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("INSERT INTO privacy_masks(camera_id,zones_json,camera_side,camera_mask_tokens_json,camera_masked_since,written_to,updated_at) VALUES(?,?,?,?,?,?,?) "
+                       "ON CONFLICT(camera_id) DO UPDATE SET zones_json=excluded.zones_json,camera_side=excluded.camera_side,"
+                       "camera_mask_tokens_json=excluded.camera_mask_tokens_json,camera_masked_since=excluded.camera_masked_since,"
+                       "written_to=excluded.written_to,updated_at=excluded.updated_at",
+                       (camera_id, json.dumps(zones), camera_side if zones else "none", json.dumps(tokens), since, written_to, _now().isoformat()))
+            _audit(db, actor_id, "privacy_masks_updated", camera_id, {"areas": len(zones), "camera_side": camera_side})
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+        _bump(camera_id)
         return status(db, camera_id)

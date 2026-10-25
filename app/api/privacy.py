@@ -1,7 +1,7 @@
 """Privacy masks: each camera's masked areas, and administrators' audited unmasked viewing."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from app import privacy
@@ -67,3 +67,10 @@ def grant_unmasked(camera_id: str, payload: UnmaskedRequest, user: Administrator
         raise HTTPException(status_code=403, detail="Unmasked footage is for a signed-in administrator, never an API token")
     _camera(camera_id)
     return privacy.grant_unmasked(int(user["id"]), camera_id, payload.reason)
+
+
+@router.delete("/api/cameras/{camera_id}/privacy/unmasked", status_code=status.HTTP_204_NO_CONTENT)
+def end_unmasked(camera_id: str, user: CurrentUser) -> Response:
+    """End this person's unmasked viewing of the camera now; any unmasked stream they hold stops."""
+    privacy.revoke_unmasked(int(user["id"]), camera_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

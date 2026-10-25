@@ -225,12 +225,13 @@ def live_camera(
         raise HTTPException(status_code=404, detail="Camera not found")
     if camera["archived_at"]:
         raise HTTPException(status_code=410, detail="Camera is archived")
-    if not shutil.which("ffmpeg"):
-        raise HTTPException(status_code=503, detail="Live video transcoding is unavailable")
     try:
         zones = privacy.zones_for(user, camera_id, unmasked=unmasked)
     except privacy.UnmaskedRefused as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    guard = privacy.StreamGuard(user, camera_id, unmasked)
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(status_code=503, detail="Live video transcoding is unavailable")
     if not _acquire_live_view(camera_id):
         raise HTTPException(status_code=503, detail="All live-view slots are in use; close another view and retry")
     source = decrypt(camera["live_substream_url_ciphertext"] or camera["stream_url_ciphertext"]) if quality == "low" else decrypt(camera["stream_url_ciphertext"])
@@ -243,6 +244,8 @@ def live_camera(
     async def stream():
         try:
             async for frame in _mjpeg_frames(camera_id, source, quality, zones):
+                if not guard.still_valid():
+                    return  # Masks or grants changed: the viewer reconnects under the new ones.
                 yield frame
         except (OSError, RuntimeError, asyncio.TimeoutError):
             return
@@ -325,6 +328,7 @@ async def live_stream(
     except privacy.UnmaskedRefused as exc:
         await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": str(exc)})
         return
+    guard = privacy.StreamGuard(principal, camera_id, unmasked)
     # A masked camera is transcoded with the mask drawn in (H.264, so any camera codec plays).
     video_filter = privacy.drawbox_filter(zones) if zones else None
     profile = "sub" if quality == "low" and camera["live_substream_url_ciphertext"] else "main"
@@ -400,6 +404,9 @@ async def live_stream(
                 receiver = asyncio.create_task(websocket.receive())
                 continue
             item = getter.result()
+            if not guard.still_valid():
+                await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
+                return
             if item is None:
                 if viewer.closed_reason == "too_slow":
                     await _refuse(websocket, CLOSE_TOO_SLOW, {"type": "too_slow", "detail": "Video could not be delivered fast enough; reconnect to resume at live"})

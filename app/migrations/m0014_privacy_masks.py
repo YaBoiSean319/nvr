@@ -16,6 +16,8 @@ _STATEMENTS = (
         camera_side TEXT NOT NULL DEFAULT 'none' CHECK (camera_side IN ('none','applied','unsupported','failed')),
         camera_mask_tokens_json TEXT NOT NULL DEFAULT '[]',
         camera_masked_since TEXT,
+        -- The device the masks were written to: a camera replaced at another address is not trusted.
+        written_to TEXT,
         updated_at TEXT NOT NULL
     )
     """,

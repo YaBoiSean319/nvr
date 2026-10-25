@@ -80,7 +80,10 @@ export function PrivacyTab({ camera, admin }: { camera: Camera; admin: boolean }
           {seeingUnmasked ? (
             <div className="field-actions" role="status">
               <span>You see this camera unmasked in Live and Playback until {when(new Date(unmaskedUntil!).toISOString())}.</span>
-              <button type="button" className="button" onClick={() => clear(camera.id)}>Mask again</button>
+              <button type="button" className="button" onClick={() => {
+                clear(camera.id);
+                void api(at(camera.id, "/unmasked"), { method: "DELETE" }).catch(error => setGrantError(failureText(error)));
+              }}>Mask again</button>
             </div>
           ) : (
             <form className="field-group plain" aria-label="Reason for unmasked viewing" onSubmit={event => {

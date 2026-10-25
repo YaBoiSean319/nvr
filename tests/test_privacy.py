@@ -44,7 +44,7 @@ def brightness(media: bytes, *, image: bool = False) -> tuple[int, int]:
     return pixels[INSIDE[1] * WIDTH + INSIDE[0]], pixels[OUTSIDE[1] * WIDTH + OUTSIDE[0]]
 
 
-class PrivacyTests(SceneTestCase):
+class PrivacyCase(SceneTestCase):
     def setUp(self):
         super().setUp()
         root = Path(self.temporary.name) / "recordings"
@@ -75,6 +75,9 @@ class PrivacyTests(SceneTestCase):
         self.assertEqual(client.post("/api/auth/login", json={"username": "watcher", "password": TEST_PASSWORD}).status_code, 200)
         return client
 
+
+
+class PrivacyTests(PrivacyCase):
     def test_without_camera_masks_every_view_and_export_is_masked(self):
         status = self.mask()
         self.assertEqual((status["camera_side"], status["server_enforced"]), ("unsupported", True))
@@ -161,7 +164,13 @@ class PrivacyTests(SceneTestCase):
             audit = [(row["action"], json.loads(row["details_json"])) for row in db.execute(
                 "SELECT action,details_json FROM audit_log WHERE resource_type='camera' AND resource_id=? AND action LIKE 'privacy_unmasked%' ORDER BY id", (self.camera_id,))]
         self.assertEqual(audit[0], ("privacy_unmasked_view_granted", {"reason": reason, "expires_at": granted.json()["expires_at"]}))
-        self.assertEqual([action for action, _ in audit[1:]], ["privacy_unmasked_viewed", "privacy_unmasked_viewed"])
+        # Views are audited, at most once a minute per camera, so playback does not flood the log.
+        self.assertEqual([action for action, _ in audit[1:]], ["privacy_unmasked_viewed"])
+
+        # "Mask again" ends the grant on the server, not only in the browser.
+        self.assertEqual(self.client.delete(f"/api/cameras/{self.camera_id}/privacy/unmasked").status_code, 204)
+        self.assertEqual(self.client.get(self.media, params={"unmasked": "true"}).status_code, 403)
+        granted = self.client.post(f"/api/cameras/{self.camera_id}/privacy/unmasked", json={"reason": reason})
 
         # The grant lapses.
         with connect() as db:
@@ -195,9 +204,17 @@ class PrivacyTests(SceneTestCase):
         shutil.copy(self.clip, self.clip.with_name("newer.mp4"))
         with connect() as db:
             newer = db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
-                               (self.camera_id, f"{self.camera_id}/newer.mp4", (since + timedelta(seconds=1)).isoformat(),
-                                (since + timedelta(seconds=3)).isoformat(), self.clip.stat().st_size)).lastrowid
+                               (self.camera_id, f"{self.camera_id}/newer.mp4", (since + timedelta(seconds=60)).isoformat(),
+                                (since + timedelta(seconds=62)).isoformat(), self.clip.stat().st_size)).lastrowid
         self.assertEqual(self.client.get(f"/api/cameras/{self.camera_id}/segments/{newer}/media").content, self.clip.with_name("newer.mp4").read_bytes())
+
+        # A different device at the camera's address is not trusted to mask: the NVR masks again.
+        with connect() as db:
+            db.execute("UPDATE cameras SET device_service_url=? WHERE id=?", ("http://192.0.2.99/onvif/device_service", self.camera_id))
+        inside, _ = brightness(self.client.get(f"/api/cameras/{self.camera_id}/segments/{newer}/media").content)
+        self.assertLess(inside, 30)
+        with connect() as db:
+            db.execute("UPDATE cameras SET device_service_url=? WHERE id=?", (device.url, self.camera_id))
 
         # Changing the masks replaces the camera's: the old ones are deleted by token.
         self.mask([{"x": 0.5, "y": 0.5, "width": 0.25, "height": 0.25}])
@@ -229,3 +246,62 @@ class PrivacyTests(SceneTestCase):
         inside, outside = brightness(thumbnail(alarm), image=True)
         self.assertLess(inside, 30)
         self.assertGreater(outside, 220)
+
+
+class LiveRouteTests(PrivacyCase):
+    """The real live routes: masks drawn, refusals, slot limits and streams ended when masks change."""
+
+    def file_stream(self):
+        return (patch.object(live_hub, "_PROTOCOLS", live_hub._PROTOCOLS + ",file"),
+                patch.object(live_hub, "_manifest_bytes", lambda source: f"ffconcat version 1.0\nfile file:{self.clip}\n".encode()))
+
+    def receive_video(self, client, query="") -> bytes:
+        protocols, manifest = self.file_stream()
+        with protocols, manifest, client.websocket_connect(f"/api/cameras/{self.camera_id}/live/stream?quality=high{query}") as socket:
+            init = socket.receive_json()
+            self.assertEqual(init["type"], "init", init)
+            return socket.receive_bytes() + socket.receive_bytes()
+
+    def test_the_live_websocket_draws_the_mask_and_refuses_operators_unmasked(self):
+        self.mask()
+        inside, outside = brightness(self.receive_video(self.client))
+        self.assertLess(inside, 30)
+        self.assertGreater(outside, 220)
+        operator = self.operator()
+        with operator.websocket_connect(f"/api/cameras/{self.camera_id}/live/stream?unmasked=true") as socket:
+            self.assertEqual(socket.receive_json()["type"], "forbidden")
+
+    def test_masked_live_viewers_count_against_the_slot_limit(self):
+        self.mask()
+        with patch("app.api.live_media.MAX_LIVE_VIEWERS", 0):
+            with self.client.websocket_connect(f"/api/cameras/{self.camera_id}/live/stream") as socket:
+                self.assertEqual(socket.receive_json()["type"], "busy")
+            self.assertEqual(self.client.get(f"/api/cameras/{self.camera_id}/live").status_code, 503)
+
+    def test_old_exports_of_a_camera_masked_since_cannot_be_downloaded(self):
+        job_id = create_export_record(1, [self.camera_id], self.starts, self.starts + timedelta(seconds=2))
+        asyncio.run(ExportManager()._execute(job_id))
+        result = self.client.get(f"/api/exports/{job_id}").json()
+        self.assertEqual(self.client.get(result["download_url"]).status_code, 200)
+        self.mask()
+        refused = self.client.get(result["download_url"])
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertIn("privacy mask", refused.json()["detail"])
+
+    def test_streams_stop_when_masks_or_grants_change(self):
+        guard_before = privacy.StreamGuard(None, self.camera_id, False)
+        self.assertTrue(guard_before.still_valid())
+        self.mask()
+        self.assertFalse(guard_before.still_valid())
+        reason = "Checking the delivery van at the gate"
+        self.client.post(f"/api/cameras/{self.camera_id}/privacy/unmasked", json={"reason": reason})
+        with connect() as db:
+            admin = db.execute("SELECT id FROM users WHERE username='keeper'").fetchone()["id"]
+
+        class Admin:
+            id, role, token_id = admin, "administrator", None
+
+        unmasked_guard = privacy.StreamGuard(Admin, self.camera_id, True)
+        self.assertTrue(unmasked_guard.still_valid())
+        self.client.delete(f"/api/cameras/{self.camera_id}/privacy/unmasked")
+        self.assertFalse(unmasked_guard.still_valid())
