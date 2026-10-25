@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import os
 import tempfile
 import unittest
@@ -32,7 +34,7 @@ class CameraGroupMembershipTests(unittest.TestCase):
                 "INSERT INTO cameras(id,name,group_id,stream_url_ciphertext,recording_mode,recording_enabled) VALUES(?,?,?,X'01','motion',1)",
                 (self.camera, "Lobby", self.policy_group),
             )
-        self.active_user = {"id": 1, "username": "admin", "role": "administrator"}
+        self.active_user = principal(1, "admin", "administrator")
         app.dependency_overrides[current_user] = lambda: self.active_user
         self.context = TestClient(app)
         self.client = self.context.__enter__()
@@ -88,7 +90,7 @@ class CameraGroupMembershipTests(unittest.TestCase):
         self.assertEqual(by_id[self.browsing_group]["camera_ids"], [])
 
     def test_operator_can_list_groups_but_cannot_manage_groups_or_memberships(self):
-        self.active_user = {"id": 2, "username": "operator", "role": "operator"}
+        self.active_user = principal(2, "operator", "operator")
         self.assertEqual(self.client.get("/api/camera-groups").status_code, 200)
         self.assertEqual(
             self.client.put(f"/api/camera-groups/{self.browsing_group}/members", json={"camera_ids": [self.camera]}).status_code,

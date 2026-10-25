@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from tests.test_support import patch_camera_probe
+from tests.test_support import patch_camera_probe, principal
 from app.credentials import encrypt
 from app.main import app
 from app.principal import administrator, current_user
@@ -37,7 +37,7 @@ class CameraAudioApiTests(unittest.TestCase):
             db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(2,'administrator','unused','administrator')")
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,?,'disabled')",
                        (self.camera_id, "Audio test", encrypt("rtsp://camera.invalid/audio")))
-        self.active_user = {"id": 1, "username": "operator", "role": "operator"}
+        self.active_user = principal(1, "operator", "operator")
         app.dependency_overrides[current_user] = lambda: self.active_user
 
         def require_admin():
@@ -67,7 +67,7 @@ class CameraAudioApiTests(unittest.TestCase):
         self.assertEqual(camera["audio_status"], "unknown")
         self.assertEqual(self.client.patch(f"/api/cameras/{self.camera_id}", json={"audio_enabled": True}).status_code, 403)
 
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         unsupported = self.client.patch(f"/api/cameras/{self.camera_id}", json={"audio_enabled": True})
         self.assertEqual(unsupported.status_code, 422)
         with patch_camera_probe(new=AsyncMock(return_value={"reachable": True, "audio": True, "video": {"codec": "h264", "width": 64, "height": 64}})):
@@ -78,7 +78,7 @@ class CameraAudioApiTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertTrue(saved.json()["audio_enabled"])
 
-        self.active_user = {"id": 1, "username": "operator", "role": "operator"}
+        self.active_user = principal(1, "operator", "operator")
         camera = self.client.get("/api/cameras").json()["cameras"][0]
         self.assertEqual(camera["audio_status"], "enabled")
         denied = self.client.patch(f"/api/cameras/{self.camera_id}", json={"audio_enabled": False})
@@ -87,7 +87,7 @@ class CameraAudioApiTests(unittest.TestCase):
             live = self.client.get(f"/api/cameras/{self.camera_id}/audio/live")
         self.assertEqual(live.status_code, 503, live.text)
 
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         with patch_camera_probe(new=AsyncMock(return_value={"reachable": True, "audio": False, "video": {"codec": "h264", "width": 64, "height": 64}})):
             lost = self.client.post(f"/api/cameras/{self.camera_id}/audio/probe")
         self.assertEqual(lost.status_code, 200, lost.text)

@@ -27,11 +27,11 @@ class WallSignIn(BaseModel):
 
 
 @router.get("/api/cameras/{camera_id}/neighbours")
-def get_neighbours(camera_id: str, _: CurrentUser) -> dict[str, object]:
+def get_neighbours(camera_id: str, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         if not live_alarms.camera_exists(db, camera_id):
             raise HTTPException(status_code=404, detail="Camera not found")
-        return {"camera_ids": live_alarms.neighbours(db, camera_id), "max": live_alarms.MAX_NEIGHBOURS}
+        return {"camera_ids": user.access.only(live_alarms.neighbours(db, camera_id)), "max": live_alarms.MAX_NEIGHBOURS}
 
 
 @router.put("/api/cameras/{camera_id}/neighbours")

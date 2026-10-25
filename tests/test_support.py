@@ -26,3 +26,9 @@ def patch_camera_probe(**kwargs):
     """Replace the stream probe everywhere cameras are tested before saving."""
     with patch("app.api.cameras.probe_stream", **kwargs) as probe, patch("app.api.onboarding.probe_stream", new=probe):
         yield probe
+
+
+def principal(user_id: int, username: str, role: str):
+    """The signed-in user as the API sees one, for tests that fake authentication."""
+    from app.principal import Principal
+    return Principal(id=user_id, username=username, role=role)

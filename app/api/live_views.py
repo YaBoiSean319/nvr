@@ -9,6 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field, model_validator
 
+from app.access import Access
 from app.viewing import MAX_LIVE_VIEWERS
 from app.principal import Administrator, CurrentUser
 from app.store import connect
@@ -50,6 +51,16 @@ class LiveWorkspaceRequest(BaseModel):
         return self
 
 
+def _permitted_layout(layout: dict[str, object], access: Access) -> dict[str, object] | None:
+    """A saved layout showing only the cameras this person may see (a hidden tile stays an empty one), or None when none remain."""
+    if access.unrestricted:
+        return layout
+    camera_ids = access.only(layout["camera_ids"])
+    if not camera_ids:
+        return None
+    return {**layout, "camera_ids": camera_ids, "tile_camera_ids": [camera_id if camera_id is None or access.can_see(camera_id) else None for camera_id in layout["tile_camera_ids"]]}
+
+
 def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
     with connect() as db:
         rows = db.execute(
@@ -74,9 +85,10 @@ def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
     layouts = []
     for row in rows:
         layout = decode_layout(row, "personal")
-        if layout is not None:
+        if layout is not None and (layout := _permitted_layout(layout, user.access)) is not None:
             layouts.append(layout)
-    shared_views = [layout for row in shared_rows if (layout := decode_layout(row, "shared")) is not None]
+    shared_views = [layout for row in shared_rows
+                    if (layout := decode_layout(row, "shared")) is not None and (layout := _permitted_layout(layout, user.access)) is not None]
     return {"layouts": layouts, "shared_views": shared_views}
 
 
@@ -84,7 +96,7 @@ def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
 def get_viewer_layouts(user: CurrentUser) -> dict[str, object]:
     views = _load_live_views(user)
     with connect() as db:
-        available = {row["id"] for row in db.execute("SELECT id FROM cameras")}
+        available = {row["id"] for row in db.execute("SELECT id FROM cameras") if user.access.can_see(row["id"])}
     layouts = [{"name": layout["name"], "camera_ids": [camera_id for camera_id in layout["camera_ids"] if camera_id in available]}
                for layout in views["layouts"] if any(camera_id in available for camera_id in layout["camera_ids"])]
     return {"layouts": layouts}
@@ -105,7 +117,7 @@ def save_viewer_layout(
     if not name or len(name) > 60:
         raise HTTPException(status_code=422, detail="Layout name must be between 1 and 60 characters")
     with connect() as db:
-        present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall()}
+        present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall() if user.access.can_see(row["id"])}
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
         db.execute(
@@ -160,6 +172,9 @@ def get_live_workspace(user: CurrentUser) -> dict[str, object]:
         tile_camera_ids = json.loads(row["tile_camera_ids_json"])
     except (TypeError, json.JSONDecodeError):
         camera_ids, tile_camera_ids = [], []
+    if not user.access.unrestricted:  # A workspace saved before access narrowed shows only what may still be seen.
+        camera_ids = user.access.only(camera_ids)
+        tile_camera_ids = [camera_id if camera_id is None or user.access.can_see(camera_id) else None for camera_id in tile_camera_ids]
     return {"camera_ids": camera_ids, "tile_camera_ids": tile_camera_ids, "grid_size": row["grid_size"],
             "layout_mode": row["layout_mode"], "sidebar_collapsed": bool(row["sidebar_collapsed"])}
 
@@ -167,7 +182,7 @@ def get_live_workspace(user: CurrentUser) -> dict[str, object]:
 @router.put("/api/live/workspace")
 def save_live_workspace(payload: LiveWorkspaceRequest, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall()}
+        present = {row["id"] for row in db.execute("SELECT id FROM cameras").fetchall() if user.access.can_see(row["id"])}
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Workspace contains an unknown camera")
         db.execute(

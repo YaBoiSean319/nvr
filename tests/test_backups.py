@@ -17,7 +17,7 @@ from app.application import create_app
 from app.credentials import decrypt, encrypt
 from app.principal import COOKIE_NAME
 from app.store import connect, initialize
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, principal
 
 PASSPHRASE = "correct horse battery staple"
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -208,7 +208,7 @@ class BackupTests(unittest.TestCase):
         from app.principal import current_user
 
         app = create_app(start_workers=False)
-        app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "keeper", "role": "administrator"}
+        app.dependency_overrides[current_user] = lambda: principal(1, "keeper", "administrator")
         with TestClient(app) as client:
             listed = {segment["starts_at"][11:19]: segment for segment in client.get("/api/cameras/c1/segments").json()["segments"]}
             self.assertTrue(listed["10:00:00"]["available"])

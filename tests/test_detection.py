@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import os
 import tempfile
 import time
@@ -35,7 +37,7 @@ class DetectionApiTests(unittest.TestCase):
             db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(2,'administrator','unused','administrator')")
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,live_substream_url_ciphertext,recording_mode,recording_enabled) VALUES(?,?,?,?,?,?)",
                        (self.camera_id, "AI camera", encrypt("rtsp://camera.invalid/main"), encrypt("rtsp://camera.invalid/low"), "continuous", 1))
-        self.active_user = {"id": 1, "username": "operator", "role": "operator"}
+        self.active_user = principal(1, "operator", "operator")
         app.dependency_overrides[current_user] = lambda: self.active_user
         def require_admin():
             if self.active_user["role"] != "administrator":
@@ -59,7 +61,7 @@ class DetectionApiTests(unittest.TestCase):
     def test_admin_can_configure_detection_and_operator_can_search_but_not_change_it(self):
         denied = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": True})
         self.assertEqual(denied.status_code, 403)
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         manager = app.state.detectors
         manager.detector = object()
         saved = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={
@@ -73,7 +75,7 @@ class DetectionApiTests(unittest.TestCase):
         coverage = self.client.get(f"/api/cameras/{self.camera_id}/ai/coverage")
         self.assertEqual(coverage.status_code, 200, coverage.text)
         self.assertEqual(coverage.json()["intervals"][0]["state"], "unanalyzed")
-        self.active_user = {"id": 1, "username": "operator", "role": "operator"}
+        self.active_user = principal(1, "operator", "operator")
         self.assertEqual(self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": False}).status_code, 403)
 
         event_at = datetime.now(timezone.utc)
@@ -90,7 +92,7 @@ class DetectionApiTests(unittest.TestCase):
         self.assertIn("do not prove", results.json()["coverage_note"])
 
     def test_invalid_zones_and_substream_are_rejected_and_only_one_camera_can_be_enabled(self):
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         invalid = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={
             "enabled": True, "zones": [{"x": 0.9, "y": 0, "width": 0.2, "height": 1}],
         })
@@ -114,7 +116,7 @@ class DetectionApiTests(unittest.TestCase):
         self.assertTrue(point_in_zones(box, []))
 
     def test_group_inheritance_camera_override_and_bounded_camera_capacity(self):
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         manager: DetectionManager = app.state.detectors
 
         class QuietDetector:
@@ -156,7 +158,7 @@ class DetectionApiTests(unittest.TestCase):
     def test_recording_policy_and_worker_are_separate_from_ai_stop(self):
         manager: DetectionManager = app.state.detectors
         manager.detector = object()
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         response = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": True, "use_substream": False})
         self.assertEqual(response.status_code, 200, response.text)
         recorder_task = app.state.recorders.tasks[self.camera_id]
@@ -168,7 +170,7 @@ class DetectionApiTests(unittest.TestCase):
         self.assertEqual((camera["recording_enabled"], camera["recording_mode"]), (1, "continuous"))
 
     def test_runtime_provider_and_model_are_validated_before_activation(self):
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         candidate = {"provider": "GPU", "model_id": MODEL_ID}
         with patch("app.api.ai_settings.validate_detector", return_value={"valid": False, "reason": "GPU unavailable"}):
             preview = self.client.post("/api/ai/settings/validate", json=candidate)
@@ -194,7 +196,7 @@ class DetectionApiTests(unittest.TestCase):
         test_stream = os.environ.get("NVR_RTSP_TEST_URL")
         if not test_stream:
             self.skipTest("CI simulated RTSP camera is required for the motion recording continuity check")
-        self.active_user = {"id": 2, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(2, "administrator", "administrator")
         with connect() as db:
             db.execute("UPDATE cameras SET stream_url_ciphertext=?,recording_mode='motion',recording_enabled=1,motion_fallback_enabled=1,motion_sensitivity=1,motion_post_roll_seconds=1 WHERE id=?",
                        (encrypt(test_stream), self.camera_id))

@@ -1103,13 +1103,13 @@ def get_export(job_id: str, requester_id: int, is_admin: bool = False) -> sqlite
         return db.execute("SELECT * FROM exports WHERE id=? AND requested_by=?", (job_id, requester_id)).fetchone()
 
 
-def list_exports(requester_id: int, is_admin: bool = False) -> list[dict[str, Any]]:
+def list_exports(requester_id: int, is_admin: bool = False, limit: int = 50) -> list[dict[str, Any]]:
     expire_exports()
     with connect() as db:
         if is_admin:
-            rows = db.execute("SELECT * FROM exports ORDER BY created_at DESC LIMIT 50").fetchall()
+            rows = db.execute("SELECT * FROM exports ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         else:
-            rows = db.execute("SELECT * FROM exports WHERE requested_by=? ORDER BY created_at DESC LIMIT 50", (requester_id,)).fetchall()
+            rows = db.execute("SELECT * FROM exports WHERE requested_by=? ORDER BY created_at DESC LIMIT ?", (requester_id, limit)).fetchall()
     return [_job_view(row) for row in rows]
 
 

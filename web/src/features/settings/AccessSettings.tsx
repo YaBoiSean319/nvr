@@ -5,6 +5,7 @@ import { Modal } from "@/components/Modal";
 import { failureText } from "@/features/admin/tabDraft";
 import { formatRelative } from "@/lib/time";
 import { SecretDialog } from "./SecretDialog";
+import { CameraAccess } from "./CameraAccess";
 import { SignInSecurity } from "./SignInSecurity";
 
 interface Session { session_id: string; created_at: string; expires_at: string; username: string; role: string }
@@ -74,6 +75,8 @@ export function AccessSettings() {
       </section>
 
       <SignInSecurity />
+
+      <CameraAccess />
 
       <section className="field-group" aria-label="Active sessions">
         <h2 className="field-heading">Active sessions</h2>

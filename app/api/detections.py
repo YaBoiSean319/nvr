@@ -85,10 +85,10 @@ def list_tracks(
 
 
 @router.get("/api/ai/tracks/{track_id}")
-def get_track(track_id: str, _: CurrentUser) -> dict[str, object]:
+def get_track(track_id: str, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         track = db.execute("SELECT * FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
-        if track is None:
+        if track is None or not user.access.can_see(track["camera_id"]):
             raise HTTPException(status_code=404, detail="Track not found")
         rows = db.execute("SELECT * FROM ai_detections WHERE track_id=? ORDER BY detected_at,id LIMIT 5000", (track_id,)).fetchall()
     return {**track_view(track), "detections": [detection_view(row) for row in rows]}

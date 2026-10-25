@@ -21,7 +21,7 @@ from app.security import hash_password
 from app.store import connect
 from tests.fixtures.mask_device import MaskDevice
 from tests.scene_case import SceneTestCase
-from tests.test_support import TEST_PASSWORD
+from tests.test_support import TEST_PASSWORD, principal
 
 WIDTH, HEIGHT = 320, 240
 # The top-left quarter of the picture is private.
@@ -289,7 +289,7 @@ class LiveRouteTests(PrivacyCase):
         self.assertIn("privacy mask", refused.json()["detail"])
 
     def test_streams_stop_when_masks_or_grants_change(self):
-        guard_before = privacy.StreamGuard(None, self.camera_id, False)
+        guard_before = privacy.StreamGuard(principal(1, "viewer", "administrator"), self.camera_id, False)
         self.assertTrue(guard_before.still_valid())
         self.mask()
         self.assertFalse(guard_before.still_valid())

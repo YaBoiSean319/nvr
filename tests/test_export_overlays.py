@@ -1,6 +1,8 @@
 """Burned-in export overlays measured on decoded frames, not on subtitle strings."""
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import json
 import os
 import shutil
@@ -66,7 +68,7 @@ class ExportOverlayTests(unittest.TestCase):
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:r=15",
                         "-t", "2", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", str(self.clip)], check=True, timeout=60)
         self.app = create_app()
-        self.app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "investigator", "role": "operator"}
+        self.app.dependency_overrides[current_user] = lambda: principal(1, "investigator", "operator")
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
 

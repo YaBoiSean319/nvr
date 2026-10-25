@@ -375,12 +375,15 @@ async def _resolve_camera_source(payload: CameraProbeRequest, service_url: str |
 
 
 @router.get("/api/cameras")
-def list_cameras(_: CurrentUser) -> dict[str, object]:
+def list_cameras(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        rows = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE").fetchall()
+        rows = [row for row in db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE")
+                if user.access.can_see(row["id"])]
         cameras = []
         for row in rows:
             camera = camera_view(row)
+            if row["group_id"] and not user.access.can_see_group(row["group_id"]):
+                camera["group_name"] = None  # Visible through another group; the name of the one that is not is not theirs to see.
             schedule = effective_schedule_view(db, row["id"])
             camera.update(schedule)
             retention_days, retention_source = effective_retention(db, row["id"])

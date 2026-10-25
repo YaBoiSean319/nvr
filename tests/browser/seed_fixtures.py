@@ -192,6 +192,9 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
                       "user_totp", "user_passkeys", "user_recovery_codes", "mfa_challenges", "auth_failures"):
             db.execute(f"DELETE FROM {table}")
         db.execute("UPDATE users SET passkey_sign_in=0")
+        # Every operator sees every camera until a journey narrows them.
+        db.execute("DELETE FROM access_grants")
+        db.execute("INSERT INTO access_grants(subject_type,subject,scope_type) SELECT 'user', CAST(id AS TEXT), 'all' FROM users WHERE role='operator'")
         db.execute("UPDATE security_settings SET mfa_policy='off' WHERE singleton_id=1")
         db.execute("UPDATE ai_runtime_settings SET max_active_cameras=4 WHERE singleton_id=1")
         db.execute("DELETE FROM export_sources")

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .access import may_view_camera
 from .credentials import decrypt
 from .store import connect
 
@@ -179,11 +180,18 @@ def zones_for(principal: Any, camera_id: str, *, unmasked: bool = False, recorde
         return server_zones(db, camera_id, recorded_at)
 
 
+ACCESS_RECHECK_SECONDS = 1.0
+
+
 class StreamGuard:
-    """For an open live stream: stops it when the camera's masks or grants change, or its grant lapses."""
+    """For an open live stream: stops it when the camera's masks or grants change, its grant lapses, or the
+    viewer's access to the camera ends (re-checked every second, so an expired access grant cuts a stream at once)."""
 
     def __init__(self, principal: Any, camera_id: str, unmasked: bool) -> None:
         self.camera_id = camera_id
+        self.user_id = int(principal.id)
+        self.reason: str | None = None  # "access" or "masks", once it has stopped being valid
+        self._access_checked = time.monotonic()
         self.generation = generation(camera_id)
         self.until: datetime | None = None
         if unmasked:
@@ -192,7 +200,18 @@ class StreamGuard:
             self.until = datetime.fromisoformat(grant["expires_at"]) if grant else _now()
 
     def still_valid(self) -> bool:
-        return generation(self.camera_id) == self.generation and (self.until is None or _now() < self.until)
+        if self.reason is not None:
+            return False
+        if time.monotonic() - self._access_checked >= ACCESS_RECHECK_SECONDS:
+            self._access_checked = time.monotonic()
+            with connect() as db:
+                if not may_view_camera(db, self.user_id, self.camera_id):
+                    self.reason = "access"
+                    return False
+        if generation(self.camera_id) != self.generation or (self.until is not None and _now() >= self.until):
+            self.reason = "masks"
+            return False
+        return True
 
 
 async def _ffmpeg(args: list[str], stdin: bytes | None = None, timeout: float = 120) -> bytes:
