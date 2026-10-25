@@ -92,7 +92,7 @@ export function CameraAccess() {
               </tbody>
             </table>
           ) : <p className="muted">No role has been given access. An Entra operator whose role has no grant here starts with every camera.</p>}
-          <form className="field-actions" aria-label="Give an Entra role access" onSubmit={event => { event.preventDefault(); if (newRole.trim()) { setEditing({ type: "role", key: newRole.trim(), label: newRole.trim() }); setNewRole(""); } }}>
+          <form className="field-actions" aria-label="Add a role" onSubmit={event => { event.preventDefault(); if (newRole.trim()) { setEditing({ type: "role", key: newRole.trim(), label: newRole.trim() }); setNewRole(""); } }}>
             <label className="field"><span>Entra role</span>
               <input value={newRole} list="entra-roles" maxLength={200} placeholder="NVR.Contractor" onChange={event => setNewRole(event.target.value)} />
               <datalist id="entra-roles">{data.roles.map(role => <option key={role} value={role} />)}</datalist>
