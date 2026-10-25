@@ -17,6 +17,7 @@ import { PrivacyTab } from "./PrivacyTab";
 import { PtzTab } from "./PtzTab";
 import { RecordingTab } from "./RecordingTab";
 import { ScheduleTab } from "./ScheduleTab";
+import { TamperTab } from "./TamperTab";
 import { CONNECTION_LABEL, HEALTH_LABEL, MODE_LABEL, connectionOf, modeOf } from "./inventory";
 import { Preview } from "./Preview";
 import { useCamerasStore, type EditorTab } from "./store";
@@ -30,6 +31,7 @@ export const TAB_LABEL: Record<EditorTab, string> = {
   privacy: "Privacy",
   neighbours: "Neighbours",
   schedule: "Schedule & Retention",
+  tamper: "Tamper",
   health: "Health & History",
 };
 
@@ -45,6 +47,7 @@ const CONTENT: TabContent = {
   privacy: (camera, admin) => <PrivacyTab key={camera.id} camera={camera} admin={admin} />,
   neighbours: (camera, admin) => <NeighboursTab key={camera.id} camera={camera} admin={admin} />,
   schedule: (camera, admin) => <ScheduleTab key={camera.id} camera={camera} admin={admin} />,
+  tamper: (camera, admin) => <TamperTab key={camera.id} camera={camera} admin={admin} />,
   health: camera => <HealthTab key={camera.id} camera={camera} />,
 };
 

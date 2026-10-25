@@ -3,9 +3,10 @@ import { formatSiteTime } from "@/lib/zonedTime";
 import { useLiveStore, type AlarmLayout, type PopIn } from "./store";
 
 const capitalised = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+const LABEL: Record<string, string> = { covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused" };
 
 export function popInSummary(alarm: PopIn, time: string): string {
-  return `${alarm.rule_name}: ${alarm.camera_name} · ${capitalised(alarm.label)}${time ? ` at ${time}` : ""}`;
+  return `${alarm.rule_name}: ${alarm.camera_name} · ${LABEL[alarm.label] ?? capitalised(alarm.label)}${time ? ` at ${time}` : ""}`;
 }
 
 /** Shown over Live while an alarm layout replaces the person's own: what it is, what waits, and the way back. */

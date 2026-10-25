@@ -58,6 +58,14 @@ def _notify(db: sqlite3.Connection, alarm_id: str, event_type: str, actor_id: in
     })
 
 
+LABEL_TEXT = {"person": "Person", "vehicle": "Vehicle", "covered": "Camera covered", "moved": "Camera moved", "defocused": "Camera defocused"}
+
+
+def label_text(label: object) -> str:
+    """How an alarm's label reads in a notification: an object class, or what happened to the camera."""
+    return LABEL_TEXT.get(str(label), str(label or "object").capitalize())
+
+
 def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
     """Raise the alarm for a rule event, inside the caller's transaction."""
     event = db.execute("SELECT * FROM rule_events WHERE id=?", (rule_event_id,)).fetchone()

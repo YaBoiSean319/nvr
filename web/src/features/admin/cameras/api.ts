@@ -111,3 +111,13 @@ export const getMotionEvents = (id: string, signal?: AbortSignal) =>
   api<{ events: { id: string; source_event_at: string; status: string; failure_reason: string | null }[] }>(`${at(id)}/motion-events`, { signal });
 export const latestSegment = (id: string, signal?: AbortSignal) =>
   api<{ segments: { id: number; starts_at: string; ends_at: string }[] }>(`${at(id)}/segments`, { signal }).then(result => result.segments.at(-1) ?? null);
+
+export type TamperState = "off" | "learning" | "ok" | "covered" | "moved" | "defocused";
+export interface CameraTamper {
+  enabled: boolean; sensitivity: number; sustain_seconds: number; state: TamperState; state_since: string | null;
+  learning_progress: number; learning_samples: number; reference_at: string | null; last_sample_at: string | null;
+  last_metrics: { layout_match: number; brightness: number; contrast: number; sharpness: number; judged: string | null } | null; sample_seconds: number;
+}
+export const getTamper = (id: string, signal?: AbortSignal) => api<CameraTamper>(`${at(id)}/tamper`, { signal });
+export const putTamper = (id: string, body: Pick<CameraTamper, "enabled" | "sensitivity" | "sustain_seconds">) => api<CameraTamper>(`${at(id)}/tamper`, { method: "PUT", body });
+export const relearnTamper = (id: string) => api<CameraTamper>(`${at(id)}/tamper/relearn`, { method: "POST" });

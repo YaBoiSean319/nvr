@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import mqtt
+from .alarms import label_text
 from .credentials import decrypt, encrypt
 from .store import connect
 from .webhooks import signed_headers, validate_target_url
@@ -278,7 +279,7 @@ def _finish(delivery_id: str, attempt: int, *, response_status: int | None = Non
 
 def _message(payload: dict[str, Any]) -> str:
     when = payload["occurred_at"][11:19]
-    text = f"{payload['rule_name']}: {payload['label'].capitalize()} on {payload['camera_name'] or 'a camera'} at {when} UTC"
+    text = f"{payload['rule_name']}: {label_text(payload['label'])} on {payload['camera_name'] or 'a camera'} at {when} UTC"
     return text
 
 

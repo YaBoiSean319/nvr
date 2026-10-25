@@ -70,6 +70,8 @@ The viewing audit records who watched which camera live or in playback, from whe
 
 `/metrics` serves Prometheus metrics to an API token with the `metrics` scope, and the logs can be forwarded as syslog (TCP or TLS) or OTLP, scrubbed of camera addresses and credentials and never blocking the NVR (see [metrics and log forwarding](docs/metrics-and-log-forwarding.md)).
 
+Camera tamper detection notices a covered, moved or defocused camera by comparing a small frame from it with a learned view, raises an incident that recovers when the view returns, and can trigger rules; it is off until switched on per camera (see [camera tamper detection](docs/tamper-detection.md)).
+
 Local accounts can add passkeys or an authenticator app with one-time recovery codes; administrators can require them, reset them, and sign-in attempts are rate limited per account and per address (see [passkeys and authenticator apps](docs/second-factors.md)).
 
 Every recording segment is hashed into a signed per-camera chain, so altered, missing or reordered footage can be found from a camera's Health & History tab, and evidence packages carry the chain and public key to verify offline (see [signed footage](docs/signed-footage.md)).

@@ -12,16 +12,18 @@ import { TabFooter } from "../TabFooter";
 import { failureText, useTabDraft } from "../tabDraft";
 import { ActionsEditor, DeliveryLog } from "./ActionsEditor";
 import {
-  CONDITION_LABEL, TRAVEL_LABEL, createRule, definitionOf, definitionProblem, deleteRule, listRules, newRule, ruleKeys, switchCondition, testRule, updateRule,
-  type Condition, type ObjectClass, type Rule, type RuleDefinition, type TestResult, type TravelDirection,
+  CONDITION_LABEL, TAMPER_KINDS, TAMPER_LABEL, TRAVEL_LABEL, createRule, definitionOf, definitionProblem, deleteRule, listRules, newRule, ruleKeys, switchCondition, testRule, updateRule,
+  type Condition, type ObjectClass, type Rule, type RuleDefinition, type TamperKind, type TestResult, type TravelDirection,
 } from "./api";
 
 const NEW = "new";
 const CLASS_LABEL: Record<ObjectClass, string> = { person: "People", vehicle: "Vehicles" };
 
 function summary(rule: Rule): string {
-  const classes = rule.classes.map(item => CLASS_LABEL[item].toLowerCase()).join(" and ");
-  return `${CONDITION_LABEL[rule.condition.type]} · ${classes}${rule.enabled ? "" : " · disabled"}`;
+  const subject = rule.condition.type === "tamper"
+    ? rule.condition.kinds.map(kind => TAMPER_LABEL[kind].toLowerCase()).join(", ")
+    : rule.classes.map(item => CLASS_LABEL[item].toLowerCase()).join(" and ");
+  return `${CONDITION_LABEL[rule.condition.type]} · ${subject}${rule.enabled ? "" : " · disabled"}`;
 }
 
 /** Rules beside one rule editor; phones drill into the editor and come back. */
@@ -173,7 +175,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
         <fieldset className="field-group">
           <legend>Condition</legend>
           <div className="field-row">
-            <label className="field"><span>When an object</span>
+            <label className="field"><span>{condition.type === "tamper" ? "When" : "When an object"}</span>
               <select value={condition.type} onChange={event => setCondition(switchCondition(condition, event.target.value as Condition["type"]))}>
                 {(Object.keys(CONDITION_LABEL) as Condition["type"][]).map(type => <option key={type} value={type}>{CONDITION_LABEL[type]}</option>)}
               </select>
@@ -199,25 +201,40 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
               </label>
             ) : null}
           </div>
-          {condition.type === "line_crossing" ? (
-            <LineEditor cameraId={previewCamera} line={condition.line} direction={condition.direction} label="Rule line"
-                        onChange={line => setCondition({ ...condition, line })} />
+          {condition.type === "tamper" ? (
+            <fieldset className="plain">
+              <legend className="field-heading">Kinds of tampering</legend>
+              <p className="muted field-hint">Fires once when a camera is confirmed covered, moved or defocused. Turn detection on for each camera under its Tamper tab.</p>
+              <div className="segmented">
+                {TAMPER_KINDS.map(kind => (
+                  <label key={kind}><input type="checkbox" checked={condition.kinds.includes(kind)}
+                                           onChange={event => setCondition({ ...condition, kinds: TAMPER_KINDS.filter(item => (item === kind ? event.target.checked : condition.kinds.includes(item))) })} /> {TAMPER_LABEL[kind]}</label>
+                ))}
+              </div>
+            </fieldset>
           ) : (
-            <ZoneEditor cameraId={previewCamera} zones={[condition.zone]} max={1} label="Rule zone" emptyHint="Draw the zone the rule watches."
-                        onChange={zones => zones[0] && setCondition({ ...condition, zone: zones[0] })} />
+            <>
+              {condition.type === "line_crossing" ? (
+                <LineEditor cameraId={previewCamera} line={condition.line} direction={condition.direction} label="Rule line"
+                            onChange={line => setCondition({ ...condition, line })} />
+              ) : (
+                <ZoneEditor cameraId={previewCamera} zones={[condition.zone]} max={1} label="Rule zone" emptyHint="Draw the zone the rule watches."
+                            onChange={zones => zones[0] && setCondition({ ...condition, zone: zones[0] })} />
+              )}
+              {condition.type === "wrong_way" ? (
+                <p className="muted field-hint">Fires when an object inside the zone travels a tenth of the frame against the expected direction.</p>
+              ) : null}
+              <fieldset className="plain">
+                <legend className="field-heading">Objects</legend>
+                <div className="segmented">
+                  {(Object.keys(CLASS_LABEL) as ObjectClass[]).map(item => (
+                    <label key={item}><input type="checkbox" checked={draft.classes.includes(item)}
+                                             onChange={event => tab.change({ classes: toggle(draft.classes, item, event.target.checked) })} /> {CLASS_LABEL[item]}</label>
+                  ))}
+                </div>
+              </fieldset>
+            </>
           )}
-          {condition.type === "wrong_way" ? (
-            <p className="muted field-hint">Fires when an object inside the zone travels a tenth of the frame against the expected direction.</p>
-          ) : null}
-          <fieldset className="plain">
-            <legend className="field-heading">Objects</legend>
-            <div className="segmented">
-              {(Object.keys(CLASS_LABEL) as ObjectClass[]).map(item => (
-                <label key={item}><input type="checkbox" checked={draft.classes.includes(item)}
-                                         onChange={event => tab.change({ classes: toggle(draft.classes, item, event.target.checked) })} /> {CLASS_LABEL[item]}</label>
-              ))}
-            </div>
-          </fieldset>
         </fieldset>
 
         <fieldset className="field-group">
@@ -265,7 +282,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                 <thead><tr><th scope="col">When</th><th scope="col">Camera</th><th scope="col">Object</th></tr></thead>
                 <tbody>
                   {test.result.events.map(event => (
-                    <tr key={`${event.track_id}-${event.occurred_at}`}><td>{when(event.occurred_at)}</td><td>{event.camera_name}</td><td>{CLASS_LABEL[event.label]}</td></tr>
+                    <tr key={`${event.track_id ?? event.label}-${event.camera_id}-${event.occurred_at}`}><td>{when(event.occurred_at)}</td><td>{event.camera_name}</td><td>{event.label in CLASS_LABEL ? CLASS_LABEL[event.label as ObjectClass] : TAMPER_LABEL[event.label as TamperKind]}</td></tr>
                   ))}
                 </tbody>
               </table>

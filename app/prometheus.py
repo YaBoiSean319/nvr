@@ -65,6 +65,11 @@ def _cameras(out: _Output, db: sqlite3.Connection, scrub: logforward.Scrubber) -
         out.sample("nvr_camera_recording_state", 1, camera_id=camera["id"], camera=camera["camera"], state=camera["row"]["recording_status"])
     each("nvr_camera_recording_enabled", "gauge", "1 when recording is switched on for the camera.", lambda c: int(bool(c["row"]["enabled"] and c["row"]["recording_enabled"])))
     each("nvr_camera_last_footage_write_timestamp_seconds", "gauge", "When footage was last written for the camera.", lambda c: _timestamp(c["row"]["last_footage_write_at"]))
+    tamper_states = {row["camera_id"]: row["state"] for row in db.execute("SELECT camera_id,state FROM tamper_settings WHERE enabled=1")}
+    out.family("nvr_camera_tamper_state", "gauge", "1 for the state tamper detection reports for each camera that has it on: learning, ok, covered, moved or defocused.")
+    for camera in cameras:
+        if camera["id"] in tamper_states:
+            out.sample("nvr_camera_tamper_state", 1, camera_id=camera["id"], camera=camera["camera"], state=tamper_states[camera["id"]])
     each("nvr_segments_written_total", "counter", "Segments that became playable.", lambda c: counters.get((SEGMENTS_WRITTEN, c["id"]), 0))
     each("nvr_segments_dropped_total", "counter",
          "Segments the recorder produced and could not keep: a file too small to be video, an unreadable index row, or a motion clip that could not be assembled.",

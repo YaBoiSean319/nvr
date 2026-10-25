@@ -70,7 +70,18 @@ class WrongWay(BaseModel):
     direction: Literal["right", "left", "down", "up"]
 
 
-Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay], Field(discriminator="type")]
+class Tamper(BaseModel):
+    """The camera is covered, moved or defocused (see Camera tamper detection); a rule on it needs no object classes."""
+    type: Literal["tamper"]
+    kinds: list[Literal["covered", "moved", "defocused"]] = Field(default_factory=lambda: ["covered", "moved", "defocused"], min_length=1, max_length=3)
+
+    @field_validator("kinds")
+    @classmethod
+    def distinct(cls, value: list[str]) -> list[str]:
+        return sorted(set(value), key=["covered", "moved", "defocused"].index)
+
+
+Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper], Field(discriminator="type")]
 
 
 class ScheduleInterval(BaseModel):
@@ -120,7 +131,7 @@ class RuleDefinition(BaseModel):
     camera_ids: list[str] = Field(default_factory=list, max_length=500)
     group_ids: list[str] = Field(default_factory=list, max_length=200)
     condition: Condition
-    classes: list[Literal["person", "vehicle"]] = Field(min_length=1)
+    classes: list[Literal["person", "vehicle"]] = Field(default_factory=list)
     schedule: RuleSchedule | None = None
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
     # Bring the alarm's camera and its neighbours into Live for people who opted in.
@@ -136,9 +147,13 @@ class RuleDefinition(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def has_scope(self) -> "RuleDefinition":
+    def valid_definition(self) -> "RuleDefinition":
         if not self.camera_ids and not self.group_ids:
             raise ValueError("Choose at least one camera or group")
+        if self.condition.type == "tamper":
+            self.classes = []
+        elif not self.classes:
+            raise ValueError("Choose at least one object class")
         return self
 
 

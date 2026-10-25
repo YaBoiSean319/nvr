@@ -18,7 +18,7 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
-from . import coverage, metrics, viewing_audit
+from . import coverage, metrics, tamper, viewing_audit
 from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
@@ -138,6 +138,7 @@ class RecordingManager:
         self.task_modes: dict[str, str] = {}
         self.scheduler_task: asyncio.Task[None] | None = None
         self.retention_task: asyncio.Task[None] | None = None
+        self.tamper = tamper.TamperManager()
         self._dropped: set[str] = set()  # Segments already counted as dropped: the index is re-read every few seconds.
         self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
@@ -154,9 +155,11 @@ class RecordingManager:
         self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
         self.retention_task = asyncio.create_task(self._retention_loop(), name="recording-retention-cleanup")
         self.storage_task = asyncio.create_task(self._storage_loop(), name="recording-storage-health")
+        await self.tamper.start()
 
     async def stop(self) -> None:
         self.stopping = True
+        await self.tamper.stop()
         if self.scheduler_task and not self.scheduler_task.done():
             self.scheduler_task.cancel()
             await asyncio.gather(self.scheduler_task, return_exceptions=True)

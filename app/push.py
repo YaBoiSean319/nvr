@@ -37,6 +37,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .access import may_view_camera
+from .alarms import label_text
 from .credentials import decrypt, derived_key, encrypt
 from .store import connect
 
@@ -257,7 +258,7 @@ def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
     occurred = datetime.fromisoformat(alarm["occurred_at"])
     groups = {row[0] for row in db.execute("SELECT group_id FROM cameras WHERE id=? AND group_id IS NOT NULL UNION SELECT group_id FROM camera_group_memberships WHERE camera_id=?",
                                            (alarm["camera_id"], alarm["camera_id"]))}
-    label = str(alarm["label"] or "object").capitalize()
+    label = label_text(alarm["label"])
     site = db.execute("SELECT time_zone FROM site_display_settings WHERE singleton_id=1").fetchone()
     try:
         shown = occurred.astimezone(ZoneInfo(site["time_zone"])) if site else occurred

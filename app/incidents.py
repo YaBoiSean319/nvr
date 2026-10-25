@@ -29,6 +29,8 @@ def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: d
         return
     if str(incident["fault_type"]).startswith("ai_"):
         webhook_type = "ai.recovered" if event_type == "recovered" else "ai.failure"
+    elif str(incident["fault_type"]).startswith("tamper_"):
+        webhook_type = "tamper.recovered" if event_type == "recovered" else "tamper.detected"
     elif incident["fault_type"] in SYSTEM_FAULT_TYPES:
         webhook_type = "system.recovered" if event_type == "recovered" else "system.failure"
     else:
