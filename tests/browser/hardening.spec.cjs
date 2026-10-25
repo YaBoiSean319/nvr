@@ -65,6 +65,7 @@ test("the hardening report finds each weakness, takes an acknowledgement with a 
   // Each finding leads to the camera.
   await table.getByRole("button", { name: "Camera 001", exact: true }).click();
   await expect(page).toHaveURL(/\/cameras$/);
+  await expect(page.getByRole("region", { name: "Settings for Camera 001" })).toBeVisible(); // The camera the finding was about, and no other.
   await expect(page.getByRole("tab", { name: "Recording" })).toBeVisible();
   const report = await (await page.request.get("/api/hardening")).json();
   expect(report.findings.map(item => [item.camera_id, item.check]).sort()).toEqual(

@@ -13,9 +13,12 @@ An administrator's report of how exposed the cameras are, from four checks on ea
 Each finding carries a fingerprint of its condition, free of secrets. An acknowledgement (with the reason the administrator gave) hides the
 finding until the fingerprint changes; a finding that stops applying is removed, so one that returns is shown again.
 
-The checks that ask the camera something (the two TLS probes) are bounded the way the NVR's other camera probes are: a bounded number at
-once, a short timeout, and at most one probe of each kind per camera in ``PROBE_GAP`` (and one per address in a run, however many cameras share it). A run inside the gap reuses the last answer. Runs happen
-on demand and weekly (``HardeningManager``, in the background worker). An administrator can switch the probes off, and the two protocol checks are then not made.
+The checks that ask the camera something (the two TLS probes) are bounded. The NVR has no per-camera probe interval of its own (its discovery and
+onboarding probes are capped only by concurrency), so these add one: a bounded number at once, a short timeout, at most one probe of each kind per
+camera in ``PROBE_GAP``, and one per address in a run however many cameras share it. A run inside the gap reuses the last answer. A probe that could
+not tell (nothing answered: the camera may be busy or offline) leaves the finding, and any acknowledgement of it, as it was; only an answer of "not
+offered" removes it. Runs happen on demand and weekly (``HardeningManager``, in the background worker). An administrator can switch the probes
+off, and the two protocol checks are then not made.
 """
 from __future__ import annotations
 
@@ -37,7 +40,17 @@ from .store import connect
 
 logger = logging.getLogger(__name__)
 
-PROBE_GAP = timedelta(seconds=float(os.environ.get("NVR_HARDENING_PROBE_GAP_SECONDS", "3600")))
+
+
+def _seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+PROBE_GAP = timedelta(seconds=_seconds("NVR_HARDENING_PROBE_GAP_SECONDS", 3600))
 PROBE_CONCURRENCY = 4
 PROBE_TIMEOUT_SECONDS = 3.0
 SCHEDULE = timedelta(days=7)
@@ -76,6 +89,14 @@ CHECKS: dict[str, dict[str, str]] = {
         "fix": "Move the camera onto the camera network (or add its network under Camera networks if it belongs there), and close any route to it from outside.",
     },
 }
+
+
+class Unreachable(Exception):
+    """A probe could not tell whether a secure port is offered: nothing answered at all (a timeout or no route), so the camera may simply be busy or offline."""
+
+
+# A check that could not be made this run: the finding it gave before, and any acknowledgement of it, are left as they were.
+KEEP: dict[str, str] = {"keep": "unknown"}
 
 
 def _now() -> datetime:
@@ -189,6 +210,13 @@ def probes_needed(camera: dict[str, Any]) -> dict[str, str]:
     return needs
 
 
+def _port(parts, default: int) -> int:
+    try:
+        return parts.port or default
+    except ValueError:  # A port that is not a number: the camera API refuses it, but a stored value may predate that.
+        return default
+
+
 def _address(host: str | None):
     try:
         return ipaddress.ip_address((host or "").strip("[]"))
@@ -196,21 +224,31 @@ def _address(host: str | None):
         return None
 
 
-def evaluate(camera: dict[str, Any], camera_networks: list, offered: dict[str, int | None]) -> dict[str, dict[str, str] | None]:
-    """Each check's outcome for one camera: None when it does not apply, else the fingerprint and detail of the finding."""
-    results: dict[str, dict[str, str] | None] = {name: None for name in CHECKS}
+def evaluate(camera: dict[str, Any], camera_networks: list, offered: dict[str, int | None], asking: bool = True) -> dict[str, Any]:
+    """Each check's outcome for one camera: None when it does not apply, else the fingerprint and detail of the finding.
+
+    ``offered`` holds a kind only when its probe was answered (the port found, or None for "not offered"). A protocol check whose probe
+    was not answered is ``KEEP``: it could not be made, which is not the same as passing it.
+    """
+    results: dict[str, Any] = {name: None for name in CHECKS}
     sources = _default_sources(camera)
     if sources:
         where = " and ".join({"stream": "its stream login", "onvif": "its ONVIF login"}[source] for source in sources)
         results["default_credentials"] = {"fingerprint": "+".join(sources), "detail": f"{camera['name']} uses a well-known factory default for {where}."}
     stream = _split(camera["stream_url"])
-    if stream and stream.scheme == "rtsp" and offered.get("rtsps"):
-        results["plain_rtsp"] = {"fingerprint": f"{stream.hostname}:{stream.port or 554}>{offered['rtsps']}",
-                                 "detail": f"{camera['name']} is read over rtsp://{stream.hostname}:{stream.port or 554} but answers a secure connection on port {offered['rtsps']}."}
+    if stream and stream.scheme == "rtsp" and asking:
+        if "rtsps" not in offered:
+            results["plain_rtsp"] = KEEP
+        elif offered["rtsps"]:
+            results["plain_rtsp"] = {"fingerprint": f"{stream.hostname}:{_port(stream, 554)}>{offered['rtsps']}",
+                                     "detail": f"{camera['name']} is read over rtsp://{stream.hostname}:{_port(stream, 554)} but answers a secure connection on port {offered['rtsps']}."}
     device = _split(camera["device_service_url"])
-    if device and device.scheme == "http" and offered.get("onvif_https"):
-        results["onvif_http"] = {"fingerprint": f"{device.hostname}:{device.port or 80}>{offered['onvif_https']}",
-                                 "detail": f"{camera['name']} is controlled over http://{device.hostname}:{device.port or 80} but answers HTTPS on port {offered['onvif_https']}."}
+    if device and device.scheme == "http" and asking:
+        if "onvif_https" not in offered:
+            results["onvif_http"] = KEEP
+        elif offered["onvif_https"]:
+            results["onvif_http"] = {"fingerprint": f"{device.hostname}:{_port(device, 80)}>{offered['onvif_https']}",
+                                     "detail": f"{camera['name']} is controlled over http://{device.hostname}:{_port(device, 80)} but answers HTTPS on port {offered['onvif_https']}."}
     if camera_networks:
         hosts = []
         for value in (camera["camera_ip"], (stream.hostname if stream else None), (_split(camera["substream_url"]).hostname if _split(camera["substream_url"]) else None),
@@ -227,18 +265,26 @@ def evaluate(camera: dict[str, Any], camera_networks: list, offered: dict[str, i
 # ------------------------------------------------------------------------------------------------------------------ probes
 
 def tls_offered(host: str, kind: str) -> int | None:
-    """The first usual port for ``kind`` on which ``host`` completes a TLS handshake, else None. Only the handshake is made: nothing is sent after it."""
+    """The first usual port for ``kind`` on which ``host`` completes a TLS handshake, else None when the camera answered but offers none. Only the handshake is made: nothing is sent after it.
+
+    Raises ``Unreachable`` when no port answered at all: a camera that is busy or offline has not said it offers nothing.
+    """
     context = ssl.create_default_context()
     # The question is whether a secure alternative is offered, not whether its certificate is trusted: cameras present self-signed ones.
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
+    answered = False
     for port in PORTS[kind]:
         try:
             with socket.create_connection((host, port), timeout=PROBE_TIMEOUT_SECONDS) as sock, context.wrap_socket(sock):
                 return port
-        except (OSError, ssl.SSLError, ValueError):
+        except (ConnectionRefusedError, ConnectionResetError, ssl.SSLError):
+            answered = True  # The camera is there and said no (or does not speak TLS on that port).
+        except (OSError, ValueError):
             continue
-    return None
+    if answered:
+        return None
+    raise Unreachable(kind)
 
 
 def _parse(value: str) -> datetime:
@@ -252,6 +298,8 @@ def _sync(db: sqlite3.Connection, camera_id: str, results: dict[str, dict[str, s
     existing = {row["check_name"]: row for row in db.execute("SELECT * FROM hardening_findings WHERE camera_id=?", (camera_id,))}
     for name, result in results.items():
         row = existing.get(name)
+        if result is KEEP:
+            continue
         if result is None:
             if row is not None:
                 db.execute("DELETE FROM hardening_findings WHERE camera_id=? AND check_name=?", (camera_id, name))
@@ -277,12 +325,16 @@ def run(kind: str = "manual", prober: Callable[[str, str], int | None] | None = 
         asking = probes_enabled(db)
         cached = {(row["camera_id"], row["kind"]): row for row in db.execute("SELECT * FROM hardening_probes")}
     offered: dict[str, dict[str, int | None]] = {camera["id"]: {} for camera in cameras}
+    fresh: dict[tuple[str, str], Any] = {}  # The newest answer for each address, whichever camera it was recorded for: a second camera at one address is not a new question.
+    for row in cached.values():
+        if timedelta(0) <= now - _parse(row["checked_at"]) < PROBE_GAP and ((row["host"], row["kind"]) not in fresh or row["checked_at"] > fresh[(row["host"], row["kind"])]["checked_at"]):
+            fresh[(row["host"], row["kind"])] = row
     # One probe for each host and kind, however many cameras are at that address (a multi-channel encoder is one device).
     pending: dict[tuple[str, str], list[str]] = {}
     for camera in cameras:
         for probe_kind, host in (probes_needed(camera).items() if asking else ()):
-            row = cached.get((camera["id"], probe_kind))
-            if row is not None and row["host"] == host and timedelta(0) <= now - _parse(row["checked_at"]) < PROBE_GAP:
+            row = fresh.get((host, probe_kind))
+            if row is not None:
                 offered[camera["id"]][probe_kind] = row["port"]
             else:
                 pending.setdefault((host, probe_kind), []).append(camera["id"])
@@ -291,6 +343,8 @@ def run(kind: str = "manual", prober: Callable[[str, str], int | None] | None = 
         host, probe_kind = item
         try:
             return host, probe_kind, prober(host, probe_kind), True
+        except Unreachable:
+            return host, probe_kind, None, False
         except Exception:  # noqa: BLE001 - a probe that failed to run says nothing about the camera; it is asked again next run
             logger.warning("A hardening probe could not be made")
             return host, probe_kind, None, False
@@ -301,17 +355,29 @@ def run(kind: str = "manual", prober: Callable[[str, str], int | None] | None = 
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            present_now = {row["id"] for row in db.execute("SELECT id FROM cameras")}
             for host, probe_kind, port, answered in probed:
                 if not answered:
                     continue
                 for camera_id in pending[(host, probe_kind)]:
                     offered[camera_id][probe_kind] = port
+                    if camera_id not in present_now:
+                        continue
                     db.execute("INSERT INTO hardening_probes(camera_id,kind,host,checked_at,port) VALUES(?,?,?,?,?) "
                                "ON CONFLICT(camera_id,kind) DO UPDATE SET host=excluded.host,checked_at=excluded.checked_at,port=excluded.port", (camera_id, probe_kind, host, stamp, port))
-            live = [camera["id"] for camera in cameras]  # A camera archived since the last run no longer has findings.
+            # Cameras were read before the probes ran: one removed or archived since is skipped, and an archived one has no findings.
+            present = {row["id"] for row in db.execute("SELECT id FROM cameras WHERE archived_at IS NULL")}
+            live = [camera["id"] for camera in cameras if camera["id"] in present]
             db.execute(f"DELETE FROM hardening_findings WHERE camera_id NOT IN ({','.join('?' * len(live))})", live)
             for camera in cameras:
-                _sync(db, camera["id"], evaluate(camera, camera_networks, offered[camera["id"]]), stamp)
+                if camera["id"] not in present:
+                    continue
+                try:
+                    results = evaluate(camera, camera_networks, offered[camera["id"]], asking)
+                except (ValueError, TypeError, AttributeError):  # One camera's odd stored value must not stop the others being checked.
+                    logger.warning("A camera could not be checked")
+                    continue
+                _sync(db, camera["id"], results, stamp)
             db.execute("UPDATE hardening_settings SET last_run_at=?,last_run_kind=? WHERE id=1", (stamp, kind))
             db.execute("COMMIT")
         except BaseException:
@@ -338,7 +404,7 @@ def report(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any
     now = now or _now()
     settings = db.execute("SELECT * FROM hardening_settings WHERE id=1").fetchone()
     findings, acknowledged = [], []
-    for row in db.execute("SELECT f.*,c.name AS camera_name,u.username AS acknowledged_by_name FROM hardening_findings f JOIN cameras c ON c.id=f.camera_id "
+    for row in db.execute("SELECT f.*,c.name AS camera_name,u.username AS acknowledged_by_name FROM hardening_findings f JOIN cameras c ON c.id=f.camera_id AND c.archived_at IS NULL "
                           "LEFT JOIN users u ON u.id=f.acknowledged_by ORDER BY CASE f.severity WHEN 'high' THEN 0 ELSE 1 END,c.name COLLATE NOCASE,f.check_name"):
         meta = CHECKS[row["check_name"]]
         entry = {"camera_id": row["camera_id"], "camera_name": row["camera_name"], "check": row["check_name"], "severity": row["severity"], "title": meta["title"],

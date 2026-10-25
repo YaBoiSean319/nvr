@@ -53,7 +53,7 @@ STARTUP_ORDER = (
     ("backups", BackupManager),
 )
 # Detection reads recorder state, and recording should outlive everything else.
-SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "self_test", "footage_chain", "ptz_tours", "rule_actions", "push", "webhooks", "heartbeat", "recorders")
+SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "hardening", "self_test", "footage_chain", "ptz_tours", "rule_actions", "push", "webhooks", "heartbeat", "recorders")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:

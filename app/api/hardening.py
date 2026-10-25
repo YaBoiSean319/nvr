@@ -16,7 +16,7 @@ router = APIRouter()
 
 class Settings(BaseModel):
     camera_networks: list[str] = Field(max_length=hardening.MAX_NETWORKS)
-    probes_enabled: bool = True
+    probes_enabled: bool | None = None  # Left out, the setting is left as it is.
 
 
 class Acknowledgement(BaseModel):
@@ -50,12 +50,18 @@ async def put_settings(payload: Settings, admin: Administrator) -> dict[str, obj
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     with connect() as db:
-        before = [str(network) for network in hardening.networks(db)]
-        after = hardening.set_networks(db, payload.camera_networks)
-        record(db, admin.id, "hardening_networks_set", "hardening", "networks", before=before, after=after)
-        if payload.probes_enabled != hardening.probes_enabled(db):
-            hardening.set_probes_enabled(db, payload.probes_enabled)
-            record(db, admin.id, "hardening_probes_set", "hardening", "probes", enabled=payload.probes_enabled)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            before = [str(network) for network in hardening.networks(db)]
+            after = hardening.set_networks(db, payload.camera_networks)
+            record(db, admin.id, "hardening_networks_set", "hardening", "networks", before=before, after=after)
+            if payload.probes_enabled is not None and payload.probes_enabled != hardening.probes_enabled(db):
+                hardening.set_probes_enabled(db, payload.probes_enabled)
+                record(db, admin.id, "hardening_probes_set", "hardening", "probes", enabled=payload.probes_enabled)
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
     return await asyncio.to_thread(hardening.run, "manual")
 
 

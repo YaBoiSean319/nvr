@@ -119,11 +119,11 @@ function Findings({ report }: { report: Report }) {
                         {acknowledge.error ? <p className="field-error" role="alert">{failureText(acknowledge.error)}.</p> : null}
                         <div className="field-actions">
                           <button type="submit" className="button" disabled={!reason.trim() || acknowledge.isPending}>Acknowledge</button>
-                          <button type="button" className="button" onClick={() => { setOpen(null); setReason(""); }}>Cancel</button>
+                          <button type="button" className="button" onClick={() => { acknowledge.reset(); setOpen(null); setReason(""); }}>Cancel</button>
                         </div>
                       </form>
                     ) : (
-                      <button type="button" className="button" aria-label={`Acknowledge ${finding.title} on ${finding.camera_name}`} onClick={() => { setOpen(key(finding)); setReason(""); }}>Acknowledge…</button>
+                      <button type="button" className="button" aria-label={`Acknowledge ${finding.title} on ${finding.camera_name}`} onClick={() => { acknowledge.reset(); setOpen(key(finding)); setReason(""); }}>Acknowledge…</button>
                     )}
                   </td>
                 </tr>

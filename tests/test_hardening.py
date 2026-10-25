@@ -219,6 +219,7 @@ class NetworkCheckTests(HardeningCase):
         self.assertIn("default_credentials", self.findings_for(self.run_checks(), self.d1))
         with connect() as db:
             db.execute("UPDATE cameras SET archived_at=? WHERE id=?", (NOW.isoformat(), self.d1))
+            self.assertEqual(hardening.report(db)["findings"], [])  # Not shown even before the next run.
         self.assertEqual(self.findings_for(self.run_checks(), self.d1), {})
 
 
@@ -322,6 +323,36 @@ class ProbeLimitTests(HardeningCase):
         self.assertLessEqual(offers.peak, hardening.PROBE_CONCURRENCY)
         self.assertGreater(offers.peak, 1)
 
+    def test_a_probe_that_gets_no_answer_keeps_the_finding_and_its_acknowledgement_while_a_no_removes_them(self):
+        self.plain(self.d1, "10.20.0.5")
+        self.run_checks(Offers({("10.20.0.5", "rtsps"): 322}))
+        with connect() as db:
+            hardening.acknowledge(db, self.d1, "plain_rtsp", "Accepted", 1)
+
+        def silent(host: str, kind: str) -> int | None:
+            raise hardening.Unreachable(kind)
+        result = hardening.run("manual", silent, NOW + hardening.PROBE_GAP + timedelta(seconds=1))
+        self.assertEqual([item["check"] for item in result["acknowledged"]], ["plain_rtsp"])  # Busy or offline: nothing was learned, nothing changes.
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT port FROM hardening_probes WHERE kind='rtsps'").fetchone()[0], 322)  # And the old answer is not overwritten.
+        result = hardening.run("manual", Offers(), NOW + 2 * hardening.PROBE_GAP)  # It answered, and offers nothing: the finding goes.
+        self.assertEqual((result["findings"], result["acknowledged"]), ([], []))
+
+    def test_a_second_camera_at_an_address_just_probed_is_not_a_new_question(self):
+        self.plain(self.d1, "10.20.0.5")
+        offers = Offers({("10.20.0.5", "rtsps"): 322})
+        self.run_checks(offers)
+        self.plain(self.d2, "10.20.0.5")
+        result = self.run_checks(offers, NOW + timedelta(minutes=5))
+        self.assertEqual(len([call for call in offers.calls if call[0] == "10.20.0.5"]), 2)
+        self.assertIn("plain_rtsp", self.findings_for(result, self.d2))
+
+    def test_one_camera_with_an_odd_stored_address_does_not_stop_the_others(self):
+        self.set_camera(self.d1, stream="rtsp://admin:admin@10.20.0.5:notaport/main", substream="rtsp://10.20.0.5:99999999/x")
+        self.set_camera(self.d2, stream="rtsp://admin:admin@10.20.0.6/main")
+        result = self.run_checks()
+        self.assertIn("default_credentials", self.findings_for(result, self.d2))
+
     def test_a_probe_that_fails_to_run_is_no_finding_and_is_not_remembered(self):
         self.plain(self.d1, "10.20.0.5")
         def broken(host: str, kind: str) -> int | None:
@@ -401,9 +432,14 @@ class TlsProbeTests(unittest.TestCase):
         closed.bind(("127.0.0.1", 0))
         closed_port = closed.getsockname()[1]
         closed.close()
-        with mock.patch.dict(hardening.PORTS, {"rtsps": (closed_port, secure), "onvif_https": (plain,)}), mock.patch.object(hardening, "PROBE_TIMEOUT_SECONDS", 2.0):
+        with mock.patch.dict(hardening.PORTS, {"rtsps": (closed_port, secure), "onvif_https": (plain,), "closed": (closed_port,)}), mock.patch.object(hardening, "PROBE_TIMEOUT_SECONDS", 2.0):
             self.assertEqual(hardening.tls_offered("127.0.0.1", "rtsps"), secure)  # The closed port is passed over; the certificate need not be trusted.
             self.assertIsNone(hardening.tls_offered("127.0.0.1", "onvif_https"))  # A listener that does not speak TLS is not a secure alternative.
+            self.assertIsNone(hardening.tls_offered("127.0.0.1", "closed"))  # A camera that refuses the connection has answered: it offers nothing there.
+
+    def test_a_camera_that_does_not_answer_at_all_is_unknown_not_a_no(self):
+        with mock.patch("socket.create_connection", side_effect=TimeoutError("timed out")), self.assertRaises(hardening.Unreachable):
+            hardening.tls_offered("10.20.0.5", "rtsps")
 
 
 class ScheduleTests(HardeningCase):
@@ -467,7 +503,8 @@ class ApiTests(HardeningCase):
             self.assertNotIn("plain_rtsp", self.findings_for(response.json(), self.d1))
             self.assertEqual(len(offers.calls), calls)  # Nothing was asked of a camera.
             self.assertEqual(self.audit("hardening_probes_set")[0]["details"], {"enabled": False})
-            self.assertTrue(self.admin.put("/api/hardening/settings", json={"camera_networks": []}).json()["probes_enabled"])  # Left out means on.
+            self.assertFalse(self.admin.put("/api/hardening/settings", json={"camera_networks": []}).json()["probes_enabled"])  # Left out, it is left as it is.
+            self.assertTrue(self.admin.put("/api/hardening/settings", json={"camera_networks": [], "probes_enabled": True}).json()["probes_enabled"])
 
     def test_acknowledging_needs_a_reason_and_an_existing_finding_and_is_audited(self):
         self.set_camera(self.d1, stream="rtsp://admin:admin@10.20.0.5/main")
@@ -503,6 +540,13 @@ class ApiTests(HardeningCase):
         with connect() as db:
             db.execute("DELETE FROM cameras WHERE id=?", (self.d1,))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM hardening_findings WHERE camera_id=?", (self.d1,)).fetchone()[0], 0)
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_every_manager_that_is_started_is_also_stopped(self):
+        from app.application import SHUTDOWN_ORDER, STARTUP_ORDER
+        self.assertEqual({name for name, _ in STARTUP_ORDER} - set(SHUTDOWN_ORDER), set())
+        self.assertIn("hardening", {name for name, _ in STARTUP_ORDER})
 
 
 class UpgradeTests(unittest.TestCase):

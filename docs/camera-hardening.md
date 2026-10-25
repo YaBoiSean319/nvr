@@ -20,7 +20,18 @@ Names are not placed on a network, so only addresses written as IPs are judged. 
 
 ## How often cameras are contacted
 
-A camera is probed for each kind at most **once an hour** (`NVR_HARDENING_PROBE_GAP_SECONDS`, default 3600). A run inside the hour reuses the last answer, so running the checks by hand repeatedly asks the camera nothing more. Cameras at the same address (a multi-channel encoder) are probed once per run, at most **four probes run at once**, each connection waits at most three seconds, and a changed address is probed at once. Checks run **weekly**, counted from the first time the NVR starts with this feature (so starting the NVR contacts no camera), and on demand with **Run checks now**.
+The NVR has no per-camera probe interval of its own: its discovery and onboarding probes are capped only by how many run at once (and a camera is otherwise only ever streamed from). So these checks add their own limits, which are deliberately tighter than those:
+
+- a camera is probed for each kind at most **once an hour** (`NVR_HARDENING_PROBE_GAP_SECONDS`, default 3600). A run inside the hour reuses the last answer, so running the checks by hand repeatedly asks the camera nothing more;
+- cameras at the same address (a multi-channel encoder, or a camera added later at an address already asked about) share one answer, and one probe per address is made in a run;
+- at most **four probes run at once**, each tries at most three ports, and each connection waits at most three seconds;
+- a camera whose configured address changes is probed at once (it is a different address).
+
+Checks run **weekly** and on demand with **Run checks now** (saving the camera networks also runs them). The week is counted from the last run, by hand or weekly. On an installation new to this feature it is counted from the first time the NVR starts with it, so starting the NVR contacts no camera; after the NVR has been stopped for more than a week the first poll runs the overdue checks.
+
+A probe that cannot tell (nothing answered on any port: the camera may be busy or offline) is not treated as "no secure alternative": the finding it gave before, and any acknowledgement of it, stay as they were until a probe gets an answer. Switching probes off removes the two protocol findings (and their acknowledgements), because those checks are then not made.
+
+The probe asks only whether a TLS handshake completes on the camera's usual RTSPS and HTTPS ports. Camera addresses are written by administrators, and so is this setting; as with the rest of camera setup, an administrator who points a camera at an internal address can learn from a finding whether those few ports answer TLS there.
 
 ## Acknowledging a finding
 
