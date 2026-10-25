@@ -34,7 +34,7 @@ def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: d
     elif incident["fault_type"] in SYSTEM_FAULT_TYPES:
         webhook_type = "system.recovered" if event_type == "recovered" else "system.failure"
     else:
-        category = "storage" if incident["fault_type"] == "storage" else "recording"
+        category = "storage" if incident["fault_type"] in {"storage", "disk_health", "retention_forecast"} else "recording"
         if event_type == "recovered":
             webhook_type = f"{category}.recovered"
         elif incident["fault_type"] == "recording_uncertain":

@@ -197,6 +197,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("INSERT INTO access_grants(subject_type,subject,scope_type) SELECT 'user', CAST(id AS TEXT), 'all' FROM users WHERE role='operator'")
         db.execute("DELETE FROM viewing_audit")
         db.execute("DELETE FROM tamper_settings")
+        db.execute("DELETE FROM disk_health")
         db.execute("DELETE FROM incident_events")
         db.execute("DELETE FROM incidents")
         db.execute("UPDATE security_settings SET audit_retention_days=365")

@@ -29,6 +29,14 @@ services:
       NVR_BACKUP_PASSPHRASE_FILE: ${NVR_BACKUP_PASSPHRASE_FILE:-}
       NVR_BACKUP_PATH: /backups
       NVR_BACKUP_KEEP: ${NVR_BACKUP_KEEP:-14}
+      # Which disk holds each storage volume, for SMART (JSON, volume name to device). Needed in a container, where the disk cannot be traced from the mount.
+      NVR_SMART_DEVICES: ${NVR_SMART_DEVICES:-}
+    # Disk health (SMART) needs the recording disks passed through. Uncomment and name your disks, and tell the NVR which disk holds each volume;
+    # without this, Settings > Recording & storage reports disk health as "not available". See docs/disk-health-and-retention-forecast.md.
+    # devices:
+    #   - /dev/sda:/dev/sda
+    # cap_add:
+    #   - SYS_RAWIO
     volumes:
       - nvr-data:/data
       - nvr-secrets:/secrets

@@ -158,6 +158,21 @@ def _storage(out: _Output) -> None:
         out.sample("nvr_storage_volume_state", 1, volume=volume["id"], state=volume["state"])
 
 
+def _disks(out: _Output, db: sqlite3.Connection, scrub: logforward.Scrubber) -> None:
+    from . import forecast
+    rows = db.execute("SELECT volume_id,state FROM disk_health ORDER BY volume_id").fetchall()
+    out.family("nvr_disk_health_state", "gauge", "1 for the SMART state of the disk behind each recording volume: healthy, warning, failing, or unavailable when it cannot be read.")
+    for row in rows:
+        out.sample("nvr_disk_health_state", 1, volume=row["volume_id"], state=row["state"])
+    result = forecast.forecast(db)
+    for name, help_text, key in (("nvr_camera_retention_policy_days", "The retention policy of each camera, in days.", "policy_days"),
+                                 ("nvr_camera_retention_forecast_days", "How many days of footage each camera is forecast to keep at its recent write rate.", "forecast_days")):
+        out.family(name, "gauge", help_text)
+        for camera in result["cameras"]:
+            if camera[key] is not None:
+                out.sample(name, camera[key], camera_id=camera["id"], camera=scrub(camera["name"]))
+
+
 def _backup(out: _Output) -> None:
     status = backup.status()
     out.family("nvr_backup_enabled", "gauge", "1 when configuration backups are configured.")
@@ -186,6 +201,8 @@ def render(supervised: bool) -> str:
     _live(out)
     _workers(out, supervised)
     _storage(out)
+    with connect() as db:
+        _disks(out, db, scrub)
     _backup(out)
     logforward.describe(out)
     return "\n".join(out.lines) + "\n"
