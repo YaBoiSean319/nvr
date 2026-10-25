@@ -13,6 +13,7 @@ import { GeneralTab } from "./GeneralTab";
 import { HealthTab } from "./HealthTab";
 import { MotionTab } from "./MotionTab";
 import { NeighboursTab } from "./NeighboursTab";
+import { PtzTab } from "./PtzTab";
 import { RecordingTab } from "./RecordingTab";
 import { ScheduleTab } from "./ScheduleTab";
 import { CONNECTION_LABEL, HEALTH_LABEL, MODE_LABEL, connectionOf, modeOf } from "./inventory";
@@ -24,6 +25,7 @@ export const TAB_LABEL: Record<EditorTab, string> = {
   recording: "Recording",
   motion: "Motion",
   ai: "AI",
+  ptz: "PTZ",
   neighbours: "Neighbours",
   schedule: "Schedule & Retention",
   health: "Health & History",
@@ -37,6 +39,7 @@ const CONTENT: TabContent = {
   recording: (camera, admin) => <RecordingTab key={camera.id} camera={camera} admin={admin} />,
   motion: (camera, admin) => <MotionTab key={camera.id} camera={camera} admin={admin} />,
   ai: (camera, admin) => <AiTab key={camera.id} camera={camera} admin={admin} />,
+  ptz: (camera, admin) => <PtzTab key={camera.id} camera={camera} admin={admin} />,
   neighbours: (camera, admin) => <NeighboursTab key={camera.id} camera={camera} admin={admin} />,
   schedule: (camera, admin) => <ScheduleTab key={camera.id} camera={camera} admin={admin} />,
   health: camera => <HealthTab key={camera.id} camera={camera} />,
