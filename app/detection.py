@@ -473,8 +473,10 @@ class DetectionManager:
             self.task_configs[camera_id] = signature
 
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
+        from . import attributes
         from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
 
+        attribute_model = await asyncio.to_thread(attributes.load_attribute_model, attributes.ATTRIBUTE_MODEL_PATH, str(config["provider"]))
         while not self.stopping:
             try:
                 source = _camera_source(camera_id, bool(config["use_substream"]))
@@ -493,6 +495,7 @@ class DetectionManager:
                             set_camera_state(camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
                         observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
+                    await asyncio.to_thread(attributes.describe, frame, observations, attribute_model)
                     at = self.clock()
                     # Analysed coverage starts no later than the detections it contains.
                     set_camera_state(camera_id, "analyzed", at=at)

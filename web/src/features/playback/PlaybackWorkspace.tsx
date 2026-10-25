@@ -6,6 +6,7 @@ import { BrowserFrame, CameraList } from "@/features/cameras/CameraBrowser";
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
 import { toLocalInput } from "@/lib/zonedTime";
 import { playbackClock } from "./clock";
+import { AttributeSearch } from "./AttributeSearch";
 import { ExportDrawer } from "./ExportDrawer";
 import { FullChooser } from "./FullChooser";
 import { MarkControls } from "./MarkControls";
@@ -55,6 +56,7 @@ export function PlaybackWorkspace() {
   const notice = usePlaybackStore(store => store.notice);
   const pendingOpen = usePlaybackStore(store => store.pendingOpen);
   const exportOpen = usePlaybackStore(store => store.exportOpen);
+  const attributeSearchOpen = usePlaybackStore(store => store.attributeSearchOpen);
   const { toggle, setSidebarOpen, clearNotice, searchLoaded } = usePlaybackStore.getState();
   const [incoming, setIncoming] = useState<string | null>(null);
   const byId = useMemo(() => new Map((cameras.data ?? []).filter(camera => !camera.archived_at).map(camera => [camera.id, camera])), [cameras.data]);
@@ -124,7 +126,7 @@ export function PlaybackWorkspace() {
   const names = useMemo(() => new Map([...byId].map(([id, camera]) => [id, camera.name])), [byId]);
 
   return (
-    <div className="workspace playback-workspace" data-sidebar={sidebarOpen ? "open" : "closed"} data-export={exportOpen && range ? "open" : "closed"}>
+    <div className="workspace playback-workspace" data-sidebar={sidebarOpen ? "open" : "closed"} data-export={(exportOpen && range) || attributeSearchOpen ? "open" : "closed"}>
       {sidebarOpen ? (
         <BrowserFrame onCollapse={() => setSidebarOpen(false)}>
           <div className="browser-heading">Cameras</div>
@@ -137,6 +139,8 @@ export function PlaybackWorkspace() {
           {!sidebarOpen ? <button type="button" className="button" onClick={() => setSidebarOpen(true)} aria-label="Show camera browser">Cameras</button> : null}
           <span className="canvas-title">Playback</span>
           {ready && display.data ? <SearchBar settings={display.data} /> : null}
+          <button type="button" className="button" aria-expanded={attributeSearchOpen} aria-controls="attribute-search"
+                  onClick={() => usePlaybackStore.getState().setAttributeSearchOpen(!attributeSearchOpen)}>Find by attributes…</button>
           {notice ? (
             <p className="canvas-notice" role="status">
               {notice}
@@ -162,6 +166,7 @@ export function PlaybackWorkspace() {
       {exportOpen && range && display.data ? (
         <ExportDrawer settings={display.data} range={range} shownIds={shownIds} cameras={byId} timeline={timeline} />
       ) : null}
+      {attributeSearchOpen && display.data ? <AttributeSearch settings={display.data} range={range} shownIds={shownIds} /> : null}
       <FullChooser incoming={incoming ? byId.get(incoming) : undefined} current={shownIds.map(id => byId.get(id)!)}
                    onClose={() => setIncoming(null)}
                    onReplace={target => { if (incoming) usePlaybackStore.getState().replaceCamera(target, incoming); setIncoming(null); }} />

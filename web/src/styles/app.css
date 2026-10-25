@@ -615,3 +615,23 @@
 .bulk-add tr[data-status="failed"] td, .bulk-add tr[data-status="invalid"] td { color: var(--n-bad); }
 .bulk-add tr[data-status="attention"] td, .bulk-add tr[data-status="skipped"] td { color: var(--n-warn); }
 @media (max-width: 760px) { .inspection-steps li { grid-template-columns: 20px minmax(0, 1fr); } .inspection-steps .step-state, .inspection-steps .step-detail { grid-column: 2; } }
+/* --- attribute search drawer ------------------------------------------------------ */
+.attr-body { align-content: start; }
+.attr-form { display: grid; gap: var(--n-space-2); }
+.attr-field { display: grid; gap: 2px; }
+.attr-field select { height: 30px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); color: inherit; }
+.attr-actions { display: flex; gap: var(--n-space-1); }
+.attr-coverage { display: grid; gap: var(--n-space-1); }
+.attr-coverage summary { cursor: pointer; font-weight: 600; }
+.attr-gaps { display: grid; gap: var(--n-space-1); margin: var(--n-space-1) 0 0; }
+.attr-gaps ul { margin: 2px 0 0; padding-left: 18px; font-size: 12px; }
+.attr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: var(--n-space-1); margin: 0; padding: 0; list-style: none; }
+.attr-card { display: grid; gap: 4px; width: 100%; padding: 4px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.attr-card:hover { border-color: var(--n-accent); }
+.attr-card:focus-visible { outline: 2px solid var(--n-focus); outline-offset: 2px; }
+.attr-thumb { position: relative; display: block; aspect-ratio: 448 / 256; overflow: hidden; border-radius: 2px; background: var(--n-line); }
+.attr-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.attr-box { position: absolute; border: 2px solid var(--n-accent); box-sizing: border-box; pointer-events: none; }
+.attr-nopicture { display: grid; place-items: center; height: 100%; font-size: 12px; }
+.attr-meta { display: grid; gap: 1px; font-size: 12px; }
+.attr-meta span { overflow-wrap: anywhere; }
