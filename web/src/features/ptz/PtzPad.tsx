@@ -27,7 +27,11 @@ function problem(error: unknown): string {
  * Pan, tilt and zoom for one camera, by buttons (press and hold), keyboard (arrows, + and −
  * while `keyTarget` has focus) and touch, through the server under the control lease.
  */
-export function PtzPad({ cameraId, keyTarget, compact = false }: { cameraId: string; keyTarget?: RefObject<HTMLElement | null>; compact?: boolean }) {
+export function PtzPad({ cameraId, keyTarget, compact = false }: {
+  cameraId: string; keyTarget?: RefObject<HTMLElement | null>;
+  /** Over a Live tile: compact, and click-to-centre is offered because there is a picture to click. */
+  compact?: boolean;
+}) {
   const client = useQueryClient();
   const me = useMe();
   const state = useQuery({ queryKey: ptzKey(cameraId), queryFn: ({ signal }) => getPtz(cameraId, signal), refetchInterval: 5_000 });
@@ -48,10 +52,17 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: { cameraId: str
     release(false);
     refresh();
   });
+  const inFlight = useRef(false);
   function press(direction: Direction) {
     if (held.current) window.clearInterval(held.current.timer);
-    void send(direction);
-    held.current = { direction, timer: window.setInterval(() => void send(direction), REPEAT_MS) };
+    const renew = () => {
+      // A slow camera must not build a backlog of moves that would still run after release.
+      if (inFlight.current) return;
+      inFlight.current = true;
+      void send(direction).finally(() => { inFlight.current = false; });
+    };
+    renew();
+    held.current = { direction, timer: window.setInterval(renew, REPEAT_MS) };
   }
   function release(sendStop = true) {
     if (!held.current) return;
@@ -68,6 +79,8 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: { cameraId: str
       event.altKey || event.ctrlKey || event.metaKey ? undefined
         : DIRECTIONS.find(item => item.key === event.key)?.direction ?? ZOOM.find(item => item.keys.includes(event.key))?.direction;
     const down = (event: KeyboardEvent) => {
+      // Only keys aimed at the tile itself: a focused select or button inside keeps its own keys.
+      if (event.target !== target) return;
       const direction = directionFor(event);
       if (!direction) return;
       event.preventDefault();
@@ -87,7 +100,18 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: { cameraId: str
     };
   }, [keyTarget, cameraId, state.data?.supported]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => () => release(), []); // eslint-disable-line react-hooks/exhaustive-deps
+  // A hold never outlives the page's attention: leaving the window or tab stops the camera.
+  useEffect(() => {
+    const away = () => release();
+    const hidden = () => { if (document.hidden) release(); };
+    window.addEventListener("blur", away);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("blur", away);
+      document.removeEventListener("visibilitychange", hidden);
+      release();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const data = state.data;
   if (!data) return null;
@@ -129,7 +153,7 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: { cameraId: str
         ) : null}
         <div className="ptz-row">
           {data.capabilities?.zoom ? ZOOM.map(item => <button key={item.label} {...holdProps(item.direction, item.label)}>{item.symbol}</button>) : null}
-          {data.capabilities?.centre ? (
+          {compact && data.capabilities?.centre ? (
             <button type="button" className="button ptz-button" aria-pressed={centring} disabled={blocked} onClick={() => setCentring(!centring)}
                     title="Click the picture to centre the camera there">Centre on click</button>
           ) : null}
@@ -141,7 +165,7 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: { cameraId: str
             </select>
           ) : null}
           {lease?.mine ? (
-            <button type="button" className="button ptz-button" onClick={() => void releaseLease(cameraId).then(refresh)} title="Let others control this camera">Release</button>
+            <button type="button" className="button ptz-button" onClick={() => void releaseLease(cameraId).then(refresh).catch(failure => setError(problem(failure)))} title="Let others control this camera">Release</button>
           ) : null}
         </div>
         {error ? <p className="ptz-error" role="alert">{error}</p> : null}

@@ -12,7 +12,7 @@ import json
 import sqlite3
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -43,7 +43,10 @@ def _now() -> datetime:
 
 
 def forget_capabilities() -> None:
+    from .onvif_ptz import _discovered
+
     _capabilities.clear()
+    _discovered.clear()
 
 
 def client_for(db: sqlite3.Connection, camera_id: str) -> PtzClient:
@@ -156,10 +159,19 @@ def _scheduled(schedule: dict[str, Any] | None, at: datetime) -> bool:
     return mode_at(intervals, schedule["timezone"], at) != "disabled"
 
 
-async def tick_tours() -> int:
-    """Advance every enabled tour that is due. Returns how many presets were recalled."""
-    now = _now()
-    moves: list[tuple[str, str, str, int, int, float]] = []
+@dataclass(frozen=True)
+class _TourMove:
+    tour_id: str
+    updated_at: str  # The tour as it was read: an edit meanwhile restarts it, so this move's result is dropped.
+    camera_id: str
+    token: str
+    step: int
+    next_step: int
+    dwell: float
+
+
+def _due_moves(now: datetime) -> list[_TourMove]:
+    moves = []
     with connect() as db:
         for tour in db.execute("SELECT * FROM ptz_tours WHERE enabled=1").fetchall():
             state = db.execute("SELECT * FROM ptz_tour_state WHERE tour_id=?", (tour["id"],)).fetchone()
@@ -175,25 +187,44 @@ async def tick_tours() -> int:
                 continue
             if state is not None and state["next_at"] and datetime.fromisoformat(state["next_at"]) > now:
                 continue
-            step = (state["step"] if state is not None else 0) % len(steps)
-            preset = db.execute("SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (steps[step]["preset_id"], tour["camera_id"])).fetchone()
-            if preset is None:
-                continue
-            moves.append((tour["id"], tour["camera_id"], preset["token"], step, (step + 1) % len(steps), float(steps[step]["dwell_seconds"])))
-    recalled = 0
-    for tour_id, camera_id, token, step, next_step, dwell in moves:
-        try:
-            with connect() as db:
-                client = client_for(db, camera_id)
-            await client.goto_preset(token)
-            recalled += 1
-        except Exception:  # noqa: BLE001 - the camera did not answer: try this step again shortly
-            next_step, dwell = step, 5.0
+            start = (state["step"] if state is not None else 0) % len(steps)
+            # A step whose preset has gone is skipped rather than holding the tour forever.
+            for offset in range(len(steps)):
+                step = (start + offset) % len(steps)
+                preset = db.execute("SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (steps[step]["preset_id"], tour["camera_id"])).fetchone()
+                if preset is not None:
+                    moves.append(_TourMove(tour["id"], tour["updated_at"], tour["camera_id"], preset["token"], step,
+                                           (step + 1) % len(steps), float(steps[step]["dwell_seconds"])))
+                    break
+    return moves
+
+
+async def _run_move(move: _TourMove, now: datetime) -> bool:
+    next_step, dwell, recalled = move.next_step, move.dwell, False
+    try:
         with connect() as db:
+            # Someone may have taken control since the tour was read: leave the camera to them.
+            if lease_held(db, move.camera_id):
+                return False
+            client = client_for(db, move.camera_id)
+        await client.goto_preset(move.token)
+        recalled = True
+    except Exception:  # noqa: BLE001 - the camera did not answer: try this step again shortly
+        next_step, dwell = move.step, 5.0
+    with connect() as db:
+        # Only if the tour is unchanged: an edited tour starts from its first step, a deleted one has no state.
+        if db.execute("SELECT 1 FROM ptz_tours WHERE id=? AND updated_at=? AND enabled=1", (move.tour_id, move.updated_at)).fetchone():
             db.execute("INSERT INTO ptz_tour_state(tour_id,step,next_at,state) VALUES(?,?,?,'running') "
                        "ON CONFLICT(tour_id) DO UPDATE SET step=excluded.step,next_at=excluded.next_at,state='running'",
-                       (tour_id, next_step, (now + timedelta(seconds=dwell)).isoformat()))
+                       (move.tour_id, next_step, (now + timedelta(seconds=dwell)).isoformat()))
     return recalled
+
+
+async def tick_tours() -> int:
+    """Advance every enabled tour that is due, cameras side by side. Returns how many presets were recalled."""
+    now = _now()
+    results = await asyncio.gather(*(_run_move(move, now) for move in await asyncio.to_thread(_due_moves, now)), return_exceptions=True)
+    return sum(1 for result in results if result is True)
 
 
 class PtzTourManager:

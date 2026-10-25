@@ -19,7 +19,7 @@ _STATEMENTS = (
     CREATE TABLE ptz_presets (
         id TEXT PRIMARY KEY,
         camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
+        name TEXT NOT NULL COLLATE NOCASE,
         token TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
         UNIQUE (camera_id, name)

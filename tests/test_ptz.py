@@ -177,6 +177,18 @@ class PtzTests(SceneTestCase):
         # A preset used by a tour cannot be deleted.
         self.assertEqual(self.client.delete(f"{self.base}/presets/{gate['id']}").status_code, 409)
 
+    def test_a_tour_skips_a_step_whose_preset_is_gone_and_names_ignore_case(self):
+        gate, yard = self.preset("Gate"), self.preset("Yard")
+        self.assertEqual(self.client.post(f"{self.base}/presets", json={"name": "gate"}).status_code, 409)
+        tour = self.client.post(f"{self.base}/tours", json={"name": "Patrol", "enabled": True, "schedule": None,
+                                                           "steps": [{"preset_id": gate["id"], "dwell_seconds": 10}, {"preset_id": yard["id"], "dwell_seconds": 10}]})
+        self.assertEqual(tour.status_code, 201, tour.text)
+        with connect() as db:  # As if the preset went while the tour was being saved.
+            db.execute("DELETE FROM ptz_presets WHERE id=?", (gate["id"],))
+        self.device.commands.clear()
+        asyncio.run(ptz.tick_tours())
+        self.assertEqual([command["token"] for command in self.device.commands if command["op"] == "GotoPreset"], [yard["token"]])
+
     def test_a_camera_without_ptz_says_so(self):
         plain = PtzDevice()
         self.addCleanup(plain.close)

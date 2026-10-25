@@ -44,6 +44,10 @@ def _envelope(action: str, body: str) -> bytes:
             f"<s:Body>{body}</s:Body></s:Envelope>").encode("utf-8")
 
 
+# Where each device's PTZ service and media profile are, once discovered: (device URL, saved profile) → (PTZ URL, profile).
+_discovered: dict[tuple[str, str | None], tuple[str, str]] = {}
+
+
 class PtzClient:
     def __init__(self, device_service_url: str, username: str, password: str, profile_token: str | None) -> None:
         self.device_service_url = device_service_url
@@ -62,6 +66,11 @@ class PtzClient:
     async def _prepare(self, client: httpx.AsyncClient) -> str:
         if self.ptz_url and self.profile_token:
             return self.ptz_url
+        known = _discovered.get((self.device_service_url, self.profile_token))
+        if known:
+            self.ptz_url, self.profile_token = known
+            return self.ptz_url
+        saved_profile = self.profile_token
         capabilities = await self._call(client, self.device_service_url, f"{DEVICE}/GetCapabilities",
                                         "<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>")
         addresses: dict[str, str] = {}
@@ -78,6 +87,7 @@ class PtzClient:
             self.profile_token = next((node.get("token") for node in profiles.iter() if _local(node.tag) == "Profiles" and node.get("token")), None)
             if not self.profile_token:
                 raise PtzUnsupported()
+        _discovered[(self.device_service_url, saved_profile)] = (self.ptz_url, self.profile_token)
         return self.ptz_url
 
     def _profile(self) -> str:

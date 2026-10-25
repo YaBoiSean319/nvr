@@ -6,6 +6,7 @@ may move cameras; presets and tours are for administrators.
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field, field_validator
@@ -164,9 +165,17 @@ async def create_preset(camera_id: str, payload: PresetRequest, user: Administra
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail="The camera did not save the preset.") from exc
     preset_id = ptz.new_id()
-    with connect() as db:
-        db.execute("INSERT INTO ptz_presets(id,camera_id,name,token) VALUES(?,?,?,?)", (preset_id, camera_id, payload.name, token))
-        return ptz.preset_view(db.execute("SELECT * FROM ptz_presets WHERE id=?", (preset_id,)).fetchone())
+    try:
+        with connect() as db:
+            db.execute("INSERT INTO ptz_presets(id,camera_id,name,token) VALUES(?,?,?,?)", (preset_id, camera_id, payload.name, token))
+            return ptz.preset_view(db.execute("SELECT * FROM ptz_presets WHERE id=?", (preset_id,)).fetchone())
+    except sqlite3.IntegrityError as exc:
+        # Someone saved this name at the same moment: keep theirs and forget ours on the camera too.
+        try:
+            await client.remove_preset(token)
+        except Exception:  # noqa: BLE001
+            pass
+        raise HTTPException(status_code=409, detail="A preset with this name exists") from exc
 
 
 @router.patch("/api/cameras/{camera_id}/ptz/presets/{preset_id}")
@@ -182,20 +191,26 @@ def rename_preset(camera_id: str, preset_id: str, payload: PresetRequest, _: Adm
 @router.delete("/api/cameras/{camera_id}/ptz/presets/{preset_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_preset(camera_id: str, preset_id: str, _: Administrator) -> Response:
     with connect() as db:
-        preset = db.execute("SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (preset_id, camera_id)).fetchone()
-        if preset is None:
-            raise HTTPException(status_code=404, detail="Preset not found")
-        for tour in db.execute("SELECT name,steps_json FROM ptz_tours WHERE camera_id=?", (camera_id,)):
-            if any(step["preset_id"] == preset_id for step in json.loads(tour["steps_json"])):
-                raise HTTPException(status_code=409, detail=f"The tour {tour['name']} uses this preset")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            preset = db.execute("SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (preset_id, camera_id)).fetchone()
+            if preset is None:
+                raise HTTPException(status_code=404, detail="Preset not found")
+            for tour in db.execute("SELECT name,steps_json FROM ptz_tours WHERE camera_id=?", (camera_id,)):
+                if any(step["preset_id"] == preset_id for step in json.loads(tour["steps_json"])):
+                    raise HTTPException(status_code=409, detail=f"The tour {tour['name']} uses this preset")
+            db.execute("DELETE FROM ptz_presets WHERE id=?", (preset_id,))
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+    # Best effort on the camera: a camera that is unreachable, or no longer ONVIF, keeps a stale preset nobody can pick.
     try:
-        await _client(camera_id).remove_preset(preset["token"])
-    except HTTPException:
-        raise
-    except Exception:  # noqa: BLE001 - a preset the camera already forgot is still removed here
+        with connect() as db:
+            client = ptz.client_for(db, camera_id)
+        await client.remove_preset(preset["token"])
+    except Exception:  # noqa: BLE001
         pass
-    with connect() as db:
-        db.execute("DELETE FROM ptz_presets WHERE id=?", (preset_id,))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -203,7 +218,7 @@ def _save_tour(camera_id: str, tour_id: str, payload: TourRequest, *, create: bo
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+            if db.execute("SELECT 1 FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone() is None:
                 raise HTTPException(status_code=404, detail="Camera not found")
             known = {row["id"] for row in db.execute("SELECT id FROM ptz_presets WHERE camera_id=?", (camera_id,))}
             if any(step.preset_id not in known for step in payload.steps):

@@ -91,3 +91,27 @@ test("one person controls a camera at a time, from Live by keyboard, and an admi
   await expect(pad.getByRole("status")).toContainText("Controlled by camera-admin", { timeout: 10_000 });
   await expect(pad.getByRole("button", { name: "Pan left" })).toBeDisabled();
 });
+
+test("on a phone a Live tile's controls work by touch, including centring on the picture", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  seedFixtures(1, { devices: { 1: device.url } });
+  await signInNext(page, "camera-operator");
+  await page.getByRole("button", { name: /^Camera 001\b/ }).click();
+  const tile = page.getByRole("group", { name: /^Camera 001:/ });
+  await tile.tap();
+  const pad = tile.getByRole("group", { name: "Camera movement" });
+  const up = pad.getByRole("button", { name: "Tilt up" });
+  await expect(up).toBeInViewport();
+  await up.tap();
+  await expect.poll(() => device.ops()).toEqual(["ContinuousMove", "Stop"]);
+  expect(device.commands[0].pan_tilt).toEqual({ x: "0.0000", y: "0.5000" });
+
+  // Centre on click: tapping the top-right quarter of the picture turns the camera up and right.
+  await pad.getByRole("button", { name: "Centre on click" }).tap();
+  const box = await tile.boundingBox();
+  await page.touchscreen.tap(box.x + box.width * 0.75, box.y + box.height * 0.25);
+  await expect.poll(() => device.ops()).toContain("RelativeMove");
+  const centred = device.commands.find(command => command.op === "RelativeMove").pan_tilt;
+  expect(Number(centred.x)).toBeGreaterThan(0.3);
+  expect(Number(centred.y)).toBeGreaterThan(0.3);
+});
