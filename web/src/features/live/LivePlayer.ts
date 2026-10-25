@@ -6,6 +6,7 @@
  * never from the connection being open. Codecs the browser cannot decode switch
  * to the server's MJPEG fallback, labelled as such.
  */
+import { withUnmasked } from "@/features/privacy/store";
 
 export type Phase = "connecting" | "live" | "stale" | "reconnecting" | "offline" | "error" | "paused";
 
@@ -89,7 +90,7 @@ export class LivePlayer {
     if (this.stopped) return;
     const { cameraId, quality } = this.options;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${location.host}/api/cameras/${encodeURIComponent(cameraId)}/live/stream?quality=${quality}`);
+    const socket = new WebSocket(withUnmasked(`${scheme}//${location.host}/api/cameras/${encodeURIComponent(cameraId)}/live/stream?quality=${quality}`, cameraId));
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.update({ phase: this.snapshot.lastFrameAt ? "reconnecting" : "connecting", detail: null });
@@ -121,7 +122,7 @@ export class LivePlayer {
         const mime = String(message.mime);
         if (!("MediaSource" in window) || !MediaSource.isTypeSupported(mime)) {
           this.closeSocket();
-          this.useFallback(`/api/cameras/${encodeURIComponent(this.options.cameraId)}/live?quality=${this.options.quality}`);
+          this.useFallback(withUnmasked(`/api/cameras/${encodeURIComponent(this.options.cameraId)}/live?quality=${this.options.quality}`, this.options.cameraId));
           return;
         }
         this.update({ transport: "mse", profile: message.profile === "sub" ? "sub" : "main", audioAvailable: Boolean(message.audio) });

@@ -7,7 +7,7 @@ import json
 import shutil
 import threading
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -17,6 +17,7 @@ from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_VIEWERS
 from app.live_hub import LiveHub, Viewer
 from app.principal import CurrentUser, current_user, requires_scope
 from app.store import connect
+from app import privacy
 from app.credentials import decrypt
 from app.recording import safe_stream_url, _manifest_bytes
 
@@ -153,7 +154,7 @@ def live_camera_audio(
     return StreamingResponse(stream(), media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
-async def _mjpeg_frames(camera_id: str, source: str, quality: str):
+async def _mjpeg_frames(camera_id: str, source: str, quality: str, zones: list | None = None):
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("Live video transcoding is unavailable")
@@ -161,7 +162,7 @@ async def _mjpeg_frames(camera_id: str, source: str, quality: str):
     args = [
         executable, "-hide_banner", "-nostats", "-loglevel", "error", "-f", "concat", "-safe", "0",
         "-protocol_whitelist", "concat,pipe,rtsp,rtsps,tcp,udp,rtp,tls,crypto", "-i", "pipe:0",
-        "-map", "0:v:0", "-an", "-vf", f"fps={fps},scale={width}:-2:force_original_aspect_ratio=decrease",
+        "-map", "0:v:0", "-an", "-vf", privacy.with_mask(f"fps={fps},scale={width}:-2:force_original_aspect_ratio=decrease", zones or []),
         "-q:v", str(jpeg_quality), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
     ]
     process = await asyncio.create_subprocess_exec(
@@ -214,8 +215,9 @@ async def _mjpeg_frames(camera_id: str, source: str, quality: str):
 @requires_scope("media")
 def live_camera(
     camera_id: str,
-    _: CurrentUser,
+    user: CurrentUser,
     quality: Literal["low", "high"] = Query(default="low"),
+    unmasked: Annotated[bool, Query()] = False,
 ) -> StreamingResponse:
     with connect() as db:
         camera = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext,archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -223,6 +225,11 @@ def live_camera(
         raise HTTPException(status_code=404, detail="Camera not found")
     if camera["archived_at"]:
         raise HTTPException(status_code=410, detail="Camera is archived")
+    try:
+        zones = privacy.zones_for(user, camera_id, unmasked=unmasked)
+    except privacy.UnmaskedRefused as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    guard = privacy.StreamGuard(user, camera_id, unmasked)
     if not shutil.which("ffmpeg"):
         raise HTTPException(status_code=503, detail="Live video transcoding is unavailable")
     if not _acquire_live_view(camera_id):
@@ -236,7 +243,9 @@ def live_camera(
 
     async def stream():
         try:
-            async for frame in _mjpeg_frames(camera_id, source, quality):
+            async for frame in _mjpeg_frames(camera_id, source, quality, zones):
+                if not guard.still_valid():
+                    return  # Masks or grants changed: the viewer reconnects under the new ones.
                 yield frame
         except (OSError, RuntimeError, asyncio.TimeoutError):
             return
@@ -280,6 +289,7 @@ async def live_stream(
     camera_id: str,
     quality: Literal["low", "high"] = "low",
     audio: bool = False,
+    unmasked: bool = False,
 ) -> None:
     """Fragmented MP4 live video for Media Source Extensions.
 
@@ -296,7 +306,7 @@ async def live_stream(
         return
     await websocket.accept()
     try:
-        current_user(websocket)
+        principal = current_user(websocket)
     except HTTPException as exc:
         code = CLOSE_UNAUTHORIZED if exc.status_code == 401 else CLOSE_FORBIDDEN
         await _refuse(websocket, code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
@@ -306,16 +316,24 @@ async def live_stream(
             "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at FROM cameras WHERE id=?",
             (camera_id,),
         ).fetchone()
-    fallback = f"/api/cameras/{camera_id}/live?quality={quality}"
+    fallback = f"/api/cameras/{camera_id}/live?quality={quality}" + ("&unmasked=true" if unmasked else "")
     if camera is None:
         await _refuse(websocket, CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
         return
     if camera["archived_at"]:
         await _refuse(websocket, CLOSE_ARCHIVED, {"type": "archived", "detail": "Camera is archived"})
         return
+    try:
+        zones = privacy.zones_for(principal, camera_id, unmasked=unmasked)
+    except privacy.UnmaskedRefused as exc:
+        await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": str(exc)})
+        return
+    guard = privacy.StreamGuard(principal, camera_id, unmasked)
+    # A masked camera is transcoded with the mask drawn in (H.264, so any camera codec plays).
+    video_filter = privacy.drawbox_filter(zones) if zones else None
     profile = "sub" if quality == "low" and camera["live_substream_url_ciphertext"] else "main"
     codec = (camera["video_codec"] or "").lower()
-    if profile == "main" and codec and codec not in {"h264", "avc", "avc1"}:
+    if not video_filter and profile == "main" and codec and codec not in {"h264", "avc", "avc1"}:
         await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback,
                                                      "detail": f"{codec.upper()} video cannot be played directly; use the fallback stream"})
         return
@@ -341,8 +359,9 @@ async def live_stream(
 
     # The source fingerprint keeps a changed stream URL (rotation, new profile) from
     # joining a stream that is still connected to the old one.
-    fingerprint = hashlib.sha256(source.encode()).hexdigest()[:16]
-    stream = hub.join((camera_id, profile, "audio" if include_audio else "video", fingerprint), source, include_audio, viewer, mark_fresh)
+    fingerprint = hashlib.sha256(f"{source}|{video_filter or ''}".encode()).hexdigest()[:16]
+    stream = hub.join((camera_id, profile, "audio" if include_audio else "video", "masked" if video_filter else "direct", fingerprint),
+                      source, include_audio, viewer, mark_fresh, video_filter)
     receiver = asyncio.create_task(websocket.receive())
     try:
         await asyncio.wait({receiver, asyncio.create_task(stream.ready.wait())}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
@@ -385,6 +404,9 @@ async def live_stream(
                 receiver = asyncio.create_task(websocket.receive())
                 continue
             item = getter.result()
+            if not guard.still_valid():
+                await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
+                return
             if item is None:
                 if viewer.closed_reason == "too_slow":
                     await _refuse(websocket, CLOSE_TOO_SLOW, {"type": "too_slow", "detail": "Video could not be delivered fast enough; reconnect to resume at live"})

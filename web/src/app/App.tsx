@@ -17,6 +17,7 @@ import { RulesWorkspace } from "@/features/admin/rules/RulesWorkspace";
 import { SettingsWorkspace } from "@/features/settings/SettingsWorkspace";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
+import { useUnmaskedStore } from "@/features/privacy/store";
 import { Shell } from "@/features/shell/Shell";
 import { applyBranding, applyTheme, storedTheme } from "@/lib/appearance";
 
@@ -63,6 +64,7 @@ function SignedIn({ me }: { me: Me }) {
     useLiveStore.getState().reset();
     usePlaybackStore.getState().reset();
     useCamerasStore.getState().reset();
+    useUnmaskedStore.getState().reset();
   }, [me.username]);
   // One router per signed-in identity, so a role change rebuilds the route table.
   const routes = useMemo(() => router(me), [me.username, me.role]); // eslint-disable-line react-hooks/exhaustive-deps

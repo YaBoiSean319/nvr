@@ -5,6 +5,7 @@ import type { Camera } from "@/api/types";
 import { LivePlayer, type PlayerSnapshot } from "./LivePlayer";
 import { CAMERA_DRAG_TYPE } from "@/features/cameras/CameraBrowser";
 import { usePlaybackStore } from "@/features/playback/store";
+import { PtzPad } from "@/features/ptz/PtzPad";
 import { useLiveStore, type Quality } from "./store";
 
 interface TileProps {
@@ -39,6 +40,7 @@ function resolveQuality(override: Quality | undefined, enlarged: boolean, substr
 export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, onReplaceRequest }: TileProps) {
   const navigate = useNavigate();
   const video = useRef<HTMLVideoElement>(null);
+  const root = useRef<HTMLDivElement>(null);
   const image = useRef<HTMLImageElement>(null);
   const player = useRef<LivePlayer | null>(null);
   const [state, setState] = useState<PlayerSnapshot | null>(null);
@@ -115,6 +117,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
 
   return (
     <div
+      ref={root}
       className="tile"
       data-active={active}
       data-phase={phase}
@@ -153,6 +156,8 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
           ) : null}
         </div>
       ) : null}
+      {/* The focused tile carries PTZ controls when its camera speaks ONVIF; the server says whether it can move. */}
+      {active && camera.device_service_url && !suspended ? <PtzPad cameraId={camera.id} keyTarget={root} compact /> : null}
       <div className="tile-actions" aria-label={`${camera.name} actions`}>
         <button type="button" className="button icon-button tile-action" onClick={() => (enlarged ? restore() : enlarge(camera.id))} aria-label={enlarged ? `Restore grid` : `Enlarge ${camera.name}`} title={enlarged ? "Restore grid (Esc)" : "Enlarge"}>
           {enlarged ? "⤡" : "⤢"}
