@@ -138,11 +138,11 @@ class LiveViewTests(unittest.TestCase):
         audio_acquired = 0
         try:
             with patch("shutil.which", return_value="/usr/bin/ffmpeg"):
-                video = live_camera(self.camera, {}, "low")
+                video = live_camera(self.camera, self.active_user, "low")
                 video_acquired = True
                 self.assertEqual(video.media_type, "multipart/x-mixed-replace; boundary=frame")
                 with self.assertRaises(HTTPException) as video_limit:
-                    live_camera(self.camera_two, {}, "low")
+                    live_camera(self.camera_two, self.active_user, "low")
                 self.assertEqual(video_limit.exception.status_code, 503)
                 for camera_id in audio_cameras[:16]:
                     audio = live_camera_audio(camera_id, {})
