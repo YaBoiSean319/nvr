@@ -177,20 +177,21 @@ async def verify_export_evidence(job_id: str, request: Request, user: CurrentUse
         body.extend(chunk)
         if len(body) > MAX_VERIFY_PACKAGE_BYTES:
             raise HTTPException(status_code=413, detail="Evidence package exceeds the verification size limit")
-    result = verify_evidence_bytes(bytes(body), job_id)
-    if result.get("chain"):
-        # A package can carry any key; only this installation's key shows the footage came from here.
-        installation_key = footage_chain.public_key()
-        for camera in result["chain"]["cameras"]:
-            if camera.get("public_key"):
-                camera["signed_by_this_installation"] = camera["public_key"] == installation_key
-    valid = result["checksums_valid"] and (not result.get("chain") or result["chain"]["valid"])
+    result = verify_evidence_bytes(bytes(body), job_id, footage_chain.public_key())
+    # The job knows which cameras its package was signed for, so a stripped or downgraded chain.json fails.
+    expected = (json.loads(row["metadata_json"]) if row["metadata_json"] else {}).get("signed_footage", {})
+    chain = result.get("chain")
+    still_signed = {camera["camera_id"] for camera in chain["cameras"] if camera["status"] == "valid"} if chain else set()
+    unsigned = sorted(camera_id for camera_id, state in expected.items() if state == "signed" and camera_id not in still_signed)
+    if unsigned and (chain is None or chain["valid"]):
+        result["chain"] = {**(chain or {"cameras": []}), "valid": False, "error": f"cameras {unsigned} were signed when exported, but are not signed in this chain.json"}
+    valid = result["checksums_valid"] and (result.get("chain") is None or result["chain"]["valid"])
     action = "evidence_verified" if valid else "evidence_verification_failed"
     with connect() as db:
         db.execute(
             "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
             (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if valid else "invalid", "file_count": len(result["files"]),
-                                                                   "chain": None if not result.get("chain") else ("valid" if result["chain"]["valid"] else "invalid")})),
+                                                                   "chain": None if result.get("chain") is None else ("valid" if result["chain"]["valid"] else "invalid")})),
         )
     return {**result, "media_validation": "not_performed", "authenticity": "Checksums are unsigned. A matching manifest detects accidental or subsequent byte changes but does not prove package origin, creation time, or camera timestamp accuracy. "
                                                                 "The signed chain (chain.json) shows the source recordings match what this NVR hashed when they were written, if signed_by_this_installation is true."}

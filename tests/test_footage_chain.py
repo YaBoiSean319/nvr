@@ -197,4 +197,108 @@ class FootageChainTests(SceneTestCase):
         with mock.patch.object(footage_chain, "BATCH", 2):
             self.chain()
         statuses = self.status_of(self.verify())
-        self.assertEqual([statuses[item] for item in self.segments], ["pending", "pending", "ok", "ok"])
+        # Long closed and gone before they could be hashed: missing, while newer footage is chained regardless.
+        self.assertEqual([statuses[item] for item in self.segments], ["missing", "missing", "ok", "ok"])
+
+    def export_package(self) -> tuple[str, bytes]:
+        job_id = create_export_record(1, [self.camera_id], START, START + timedelta(seconds=8), output_modes=["individual"])
+        asyncio.run(ExportManager()._execute(job_id))
+        result = self.client.get(f"/api/exports/{job_id}").json()
+        self.assertEqual(result["status"], "completed", result)
+        return job_id, self.client.get(result["download_url"]).content
+
+    def repack(self, package: bytes, chain: object | None) -> bytes:
+        """The package with chain.json replaced (or removed) and integrity.json recomputed to match, as a forger would."""
+        import hashlib
+
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(package)) as source, zipfile.ZipFile(output, "w") as target:
+            integrity = json.loads(source.read("integrity.json"))
+            members = {name: source.read(name) for name in source.namelist() if name not in {"integrity.json", "chain.json"}}
+            if chain is not None:
+                members["chain.json"] = json.dumps(chain).encode()
+            integrity["files"] = [{"path": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()} for name, data in members.items()]
+            for name, data in members.items():
+                target.writestr(name, data)
+            target.writestr("integrity.json", json.dumps(integrity))
+        return output.getvalue()
+
+    def verify_online(self, job_id: str, package: bytes) -> dict:
+        response = self.client.post(f"/api/exports/{job_id}/verify", content=package, headers={"Content-Type": "application/zip"})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_footage_exported_moments_after_recording_is_signed_in_the_package(self):
+        # Nothing chained yet: the export catches the chain up and signs it first.
+        job_id, package = self.export_package()
+        checked = verify_evidence_bytes(package)
+        self.assertEqual(checked["chain"]["cameras"][0]["status"], "valid", checked)
+        self.assertEqual(checked["chain"]["cameras"][0]["unsigned_segments"], [])
+        self.assertTrue(self.verify_online(job_id, package)["chain"]["valid"])
+
+    def test_a_package_re_signed_stripped_or_malformed_fails_online_verification(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        import base64
+
+        self.chain()
+        job_id, package = self.export_package()
+        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+            chain = json.loads(archive.read("chain.json"))
+        camera = chain["cameras"][0]
+        # A forger's own key: rewrite a source's hash, recompute the links and sign with a key of their making.
+        forger = Ed25519PrivateKey.generate()
+        links = camera["chain"]["links"]
+        previous = links[0]["prev_hash"]
+        camera["sources"][0]["sha256"] = links[0]["sha256"] = "d" * 64
+        for link in links:
+            link["prev_hash"] = previous
+            link["link_hash"] = previous = footage_chain.link_hash(link)
+        signature = camera["chain"]["signature"]
+        signature.update(head_hash=previous, public_key=base64.b64encode(forger.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode(),
+                         signature=base64.b64encode(forger.sign(footage_chain.signed_message(self.camera_id, signature["upto_seq"], previous))).decode())
+        forged = self.repack(package, chain)
+        self.assertEqual(verify_evidence_bytes(forged)["chain"]["cameras"][0]["status"], "valid")  # Offline, the key is all it has.
+        online = self.verify_online(job_id, forged)
+        self.assertFalse(online["chain"]["valid"])
+        self.assertFalse(online["chain"]["cameras"][0]["signed_by_this_installation"])
+
+        self.assertFalse(self.verify_online(job_id, self.repack(package, None))["chain"]["valid"])
+        downgraded = {**chain, "cameras": [{**camera, "chain": None}]}
+        self.assertFalse(self.verify_online(job_id, self.repack(package, downgraded))["chain"]["valid"])
+        self.assertFalse(self.verify_online(job_id, self.repack(package, []))["chain"]["valid"])
+        with connect() as db:
+            outcomes = [json.loads(row[0])["outcome"] for row in db.execute("SELECT details_json FROM audit_log WHERE action LIKE 'evidence_%' ORDER BY id")]
+        self.assertEqual(outcomes, ["invalid"] * 4)
+
+    def test_ranges_in_other_timezones_select_the_same_footage(self):
+        self.chain()
+        offset = timezone(timedelta(hours=2))
+        response = self.client.get(f"/api/cameras/{self.camera_id}/footage/verify",
+                                   params={"start": (START + timedelta(seconds=1.5)).astimezone(offset).isoformat(),
+                                           "end": (START + timedelta(minutes=1)).astimezone(offset).isoformat()})
+        self.assertEqual([entry["segment_id"] for entry in response.json()["segments"]], self.segments[1:])
+
+    def test_the_worker_will_not_sign_over_a_rewritten_chain(self):
+        self.chain()
+        with connect() as db:
+            link = db.execute("SELECT * FROM footage_chain WHERE seq=4").fetchone()  # The signed head the next links build on.
+            rewritten = {**dict(link), "sha256": "0" * 64}
+            db.execute("UPDATE footage_chain SET sha256=?, link_hash=? WHERE id=?", (rewritten["sha256"], footage_chain.link_hash(rewritten), link["id"]))
+        self.add_segment(8, START + timedelta(seconds=20))
+        asyncio.run(footage_chain.append_pending())
+        with self.assertLogs("app.footage_chain", "ERROR"):
+            self.assertEqual(footage_chain.sign_heads(), 0)
+        self.assertFalse(self.verify()["valid"])
+
+    def test_overdue_signatures_and_footage_lost_before_hashing_are_problems(self):
+        asyncio.run(footage_chain.append_pending())  # Hashed, never signed.
+        lost = self.add_segment(6, START + timedelta(seconds=20))
+        (self.root / self.camera_id / "segment-6.mp4").unlink()
+        with connect() as db:
+            db.execute("UPDATE footage_chain SET created_at=?", ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),))
+        result = self.verify()
+        self.assertFalse(result["valid"])
+        statuses = self.status_of(result)
+        self.assertEqual([statuses[item] for item in self.segments], ["signature_missing"] * 4)
+        self.assertEqual(statuses[lost], "missing")

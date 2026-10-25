@@ -216,6 +216,7 @@ test("Health & History verifies footage against its signed chain and names an al
   await expect(async () => {
     await region.getByRole("button", { name: "Verify footage" }).click();
     await expect(region.getByRole("status")).toContainText("2 segments checked; no tampering found", { timeout: 2000 });
+    await expect(region.getByRole("status")).toContainText(/Verified: 2|Matches the chain; signed within a minute: 2/, { timeout: 2000 });
   }).toPass({ timeout: 30_000 });
 
   const recordings = loadFixtureEnvironment().NVR_RECORDINGS_PATH;

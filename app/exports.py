@@ -36,21 +36,31 @@ MIN_EXPORT_FREE_BYTES = 256 * 1024**2
 EXPORT_RETENTION = timedelta(days=7)
 
 
-def verify_chain_member(archive: zipfile.ZipFile) -> dict[str, Any]:
-    """Check the package's signed chain extract offline, with the public key it carries."""
-    package = json.loads(archive.read("chain.json"))
-    cameras = []
-    for camera in package.get("cameras", []):
-        if not camera.get("chain"):
-            cameras.append({"camera_id": camera.get("camera_id"), "status": "not_signed", "error": None})
-            continue
-        result = footage_chain.verify_extract(camera["chain"], camera.get("sources", []))
-        cameras.append({"camera_id": camera.get("camera_id"), "status": "valid" if result["valid"] else "invalid", "error": result["error"],
-                        "public_key": result["public_key"]})
-    return {"valid": all(item["status"] != "invalid" for item in cameras), "cameras": cameras}
+def verify_chain_member(archive: zipfile.ZipFile, installation_key: str | None = None) -> dict[str, Any]:
+    """Check the package's signed chain extract offline, with the public key it carries.
+
+    With ``installation_key``, a chain signed by any other key is invalid: a package can carry a key of its own making."""
+    try:
+        package = json.loads(archive.read("chain.json"))
+        cameras = []
+        for camera in package["cameras"]:
+            if not camera.get("chain"):
+                cameras.append({"camera_id": camera.get("camera_id"), "status": "not_signed", "error": None})
+                continue
+            result = footage_chain.verify_extract(camera["chain"], camera.get("sources", []))
+            entry = {"camera_id": camera.get("camera_id"), "status": "valid" if result["valid"] else "invalid", "error": result["error"],
+                     "public_key": result["public_key"], "unsigned_segments": result["unsigned"]}
+            if installation_key is not None:
+                entry["signed_by_this_installation"] = result["public_key"] == installation_key
+                if entry["status"] == "valid" and not entry["signed_by_this_installation"]:
+                    entry.update(status="invalid", error="the chain was signed with a key that is not this installation's")
+            cameras.append(entry)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        return {"valid": False, "cameras": [], "error": f"chain.json is not a valid chain: {str(exc)[:200]}"}
+    return {"valid": all(item["status"] != "invalid" for item in cameras), "cameras": cameras, "error": None}
 
 
-def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None) -> dict[str, Any]:
+def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None, installation_key: str | None = None) -> dict[str, Any]:
     """Verify the evidence manifest against the exact uploaded ZIP member bytes.
 
     This deliberately does not extract files or validate that media is playable.
@@ -87,7 +97,7 @@ def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None)
                 matches = len(content) == entry.get("size_bytes") and digest == entry.get("sha256")
                 valid = valid and matches
                 files.append({"path": name, "size_bytes": len(content), "sha256": digest, "matches": matches})
-            chain = verify_chain_member(archive) if "chain.json" in delivered else None
+            chain = verify_chain_member(archive, installation_key) if "chain.json" in delivered else None
             return {"checksums_valid": valid, "files": files, "chain": chain,
                     "error": None if valid else "one or more file checksums do not match"}
     except (zipfile.BadZipFile, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -861,14 +871,18 @@ class ExportManager:
 
             work_dir.mkdir(parents=True, exist_ok=True)
             # Signed footage: each source segment's hash now, and the signed chain covering it, for offline checks.
+            # Catch the chain up first, so footage recorded moments ago is covered by a signature too.
+            while await footage_chain.append_pending():
+                pass
+            await asyncio.to_thread(footage_chain.sign_heads)
             chain_package: dict[str, Any] = {"schema_version": 1, "algorithm": "Ed25519", "cameras": []}
-            with connect() as db:
-                for camera in per_camera:
-                    sources = [{"segment_id": int(segment["id"]), "relative_path": segment["relative_path"],
-                                "sha256": await asyncio.to_thread(footage_chain.file_sha256, recording_file_path(segment["relative_path"]))}
-                               for segment in camera["segments"]]
+            for camera in per_camera:
+                sources = [{"segment_id": int(segment["id"]), "relative_path": segment["relative_path"],
+                            "sha256": await asyncio.to_thread(footage_chain.file_sha256, recording_file_path(segment["relative_path"]))}
+                           for segment in camera["segments"]]
+                with connect() as db:
                     extract = footage_chain.extract(db, camera["camera_id"], [source["segment_id"] for source in sources])
-                    chain_package["cameras"].append({"camera_id": camera["camera_id"], "sources": sources, "chain": extract})
+                chain_package["cameras"].append({"camera_id": camera["camera_id"], "sources": sources, "chain": extract})
             chain_path = work_dir / "chain.json"
             chain_path.write_text(json.dumps(chain_package, indent=2, sort_keys=True), encoding="utf-8")
             metadata["signed_footage"] = {camera["camera_id"]: ("signed" if camera["chain"] else "not_signed") for camera in chain_package["cameras"]}

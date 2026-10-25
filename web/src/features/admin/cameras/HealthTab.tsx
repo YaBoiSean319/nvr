@@ -25,6 +25,7 @@ interface Verification {
 const STATUS_LABEL: Record<string, string> = {
   ok: "Verified",
   ok_unsigned_yet: "Matches the chain; signed within a minute",
+  signature_missing: "Not signed: the chain has not been signed since this was recorded",
   not_signed: "Not signed (recorded before signing began)",
   pending: "Not hashed yet",
   out_of_order: "Out of order: its time range differs from the chain",
@@ -33,7 +34,7 @@ const STATUS_LABEL: Record<string, string> = {
   altered: "Altered: the file no longer matches its hash",
 };
 
-const RANGES = [{ label: "Last hour", hours: 1 }, { label: "Last 24 hours", hours: 24 }, { label: "Last 7 days", hours: 24 * 7 }, { label: "Last 31 days", hours: 24 * 31 }];
+const RANGES = [{ label: "Last hour", hours: 1 }, { label: "Last 24 hours", hours: 24 }, { label: "Last 7 days", hours: 24 * 7 }];
 
 const when = (iso: string | null | undefined) => (iso ? `${formatRelative(iso)} (${new Date(iso).toLocaleString()})` : "Never");
 
@@ -134,7 +135,7 @@ function FootageVerification({ camera }: { camera: Camera }) {
           {result.problems.length ? (
             <ul className="plain-list" aria-label="Segments that failed verification">
               {result.problems.map(problem => (
-                <li key={problem.segment_id}>
+                <li key={`${problem.segment_id}-${problem.status}`}>
                   <strong>{STATUS_LABEL[problem.status] ?? problem.status}</strong> · segment {problem.segment_id} · {new Date(problem.starts_at).toLocaleString()} to {new Date(problem.ends_at).toLocaleTimeString()}
                 </li>
               ))}

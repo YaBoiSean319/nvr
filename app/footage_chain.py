@@ -17,7 +17,7 @@ import json
 import logging
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +33,9 @@ HASH_CHUNK = 1024 * 1024
 SIGN_INTERVAL_SECONDS = 60
 BATCH = 50
 UNREADABLE_RETRY_SECONDS = 600
+# A link older than this without a signature, or footage older than this never hashed, is a problem rather than work in progress.
+OVERDUE = timedelta(minutes=10)
+PROBLEMS = frozenset({"altered", "missing", "out_of_order", "signature_missing"})
 
 logger = logging.getLogger(__name__)
 # Segments whose file could not be read, with when they were last tried: skipped for a while so they never hold back newer footage.
@@ -83,6 +86,10 @@ def public_key() -> str:
 def _head(db: sqlite3.Connection, camera_id: str) -> tuple[int, str]:
     row = db.execute("SELECT seq,link_hash FROM footage_chain WHERE camera_id=? ORDER BY seq DESC LIMIT 1", (camera_id,)).fetchone()
     return (int(row["seq"]), row["link_hash"]) if row else (0, GENESIS)
+
+
+def _latest_signature(db: sqlite3.Connection, camera_id: str) -> sqlite3.Row | None:
+    return db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? ORDER BY upto_seq DESC LIMIT 1", (camera_id,)).fetchone()
 
 
 def _append(db: sqlite3.Connection, link: dict[str, Any]) -> None:
@@ -152,17 +159,25 @@ async def append_pending() -> int:
 
 
 def sign_heads() -> int:
-    """Sign every camera head that changed since its last signature."""
+    """Sign every camera head that changed since its last signature, only where the new links extend the signed ones intact."""
     signed = 0
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
             private, public = _key(db)
             for row in db.execute("SELECT camera_id, MAX(seq) AS seq FROM footage_chain GROUP BY camera_id").fetchall():
-                last = db.execute("SELECT upto_seq FROM footage_chain_signatures WHERE camera_id=? ORDER BY upto_seq DESC LIMIT 1", (row["camera_id"],)).fetchone()
+                last = _latest_signature(db, row["camera_id"])
                 if last is not None and int(last["upto_seq"]) >= int(row["seq"]):
                     continue
-                head = db.execute("SELECT link_hash FROM footage_chain WHERE camera_id=? AND seq=?", (row["camera_id"], row["seq"])).fetchone()["link_hash"]
+                since = int(last["upto_seq"]) if last is not None else 1
+                links = [dict(link) for link in db.execute("SELECT * FROM footage_chain WHERE camera_id=? AND seq>=? ORDER BY seq", (row["camera_id"], since))]
+                error = check_links(links, None if last is not None else GENESIS)
+                if not error and last is not None and links[0]["link_hash"] != last["head_hash"]:
+                    error = f"link {since} no longer matches its signature"
+                if error:
+                    logger.error("Not signing the footage chain of camera %s: %s", row["camera_id"], error)
+                    continue
+                head = links[-1]["link_hash"]
                 signature = base64.b64encode(private.sign(signed_message(row["camera_id"], int(row["seq"]), head))).decode()
                 db.execute("INSERT INTO footage_chain_signatures(camera_id,upto_seq,head_hash,signature,public_key,signed_at) VALUES(?,?,?,?,?,?)",
                            (row["camera_id"], row["seq"], head, signature, public, _now()))
@@ -202,15 +217,17 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
     """Check a camera's footage in [start, end) against its signed chain."""
     from .storage import recording_file_path
 
+    # Stored times are UTC ISO text, so compare in UTC.
+    start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    overdue = (datetime.now(timezone.utc) - OVERDUE).isoformat()
     with connect() as db:
         links = [dict(row) for row in db.execute("SELECT * FROM footage_chain WHERE camera_id=? ORDER BY seq", (camera_id,))]
-        signature = db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? ORDER BY upto_seq DESC LIMIT 1", (camera_id,)).fetchone()
+        signature = _latest_signature(db, camera_id)
         after = db.execute("SELECT after_segment_id FROM footage_chain_start").fetchone()["after_segment_id"]
         segments = [dict(row) for row in db.execute(
             "SELECT * FROM recording_segments WHERE camera_id=? AND starts_at<? AND ends_at>? ORDER BY starts_at, id",
             (camera_id, end.isoformat(), start.isoformat()))]
         _, installation_key = _key(db)
-    problems: list[dict[str, Any]] = []
     chain_error = check_links(links, GENESIS)
     signed_upto = 0
     if signature is not None:
@@ -229,8 +246,15 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
         key = (segment["id"], segment["relative_path"])
         link = chained.get(key)
         entry = {"segment_id": segment["id"], "starts_at": segment["starts_at"], "ends_at": segment["ends_at"]}
-        if link is None:
-            entry["status"] = "not_signed" if segment["id"] <= after else "pending"
+        if link is None and segment["id"] <= after:
+            entry["status"] = "not_signed"
+        elif link is None:
+            # Not hashed yet. Footage long closed whose file is gone was lost before it could be hashed.
+            try:
+                lost = segment["ends_at"] < overdue and not recording_file_path(segment["relative_path"]).is_file()
+            except (OSError, ValueError):
+                lost = True
+            entry["status"] = "missing" if lost else "pending"
         elif (link["starts_at"], link["ends_at"]) != (segment["starts_at"], segment["ends_at"]):
             entry["status"] = "out_of_order"
         elif segment["unavailable_at"]:
@@ -242,7 +266,7 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
             except (OSError, ValueError):
                 entry["status"] = "missing"
             if entry["status"] == "ok" and link["seq"] > signed_upto:
-                entry["status"] = "ok_unsigned_yet"
+                entry["status"] = "signature_missing" if link["created_at"] < overdue else "ok_unsigned_yet"
         results.append(entry)
     # Links whose segment is gone without a removal record: deleted outside the NVR.
     for link in in_range:
@@ -250,9 +274,7 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
         if key not in present and key not in removed:
             results.append({"segment_id": link["segment_id"], "starts_at": link["starts_at"], "ends_at": link["ends_at"], "status": "missing"})
     results.sort(key=lambda item: (item["starts_at"], item["segment_id"]))
-    for entry in results:
-        if entry["status"] in {"altered", "missing", "out_of_order"}:
-            problems.append(entry)
+    problems = [entry for entry in results if entry["status"] in PROBLEMS]
     return {"camera_id": camera_id, "start": start.isoformat(), "end": end.isoformat(),
             "valid": chain_error is None and not problems, "chain_error": chain_error, "signed_upto": signed_upto,
             "public_key": installation_key, "segments": results, "problems": problems}
@@ -261,7 +283,7 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
 def extract(db: sqlite3.Connection, camera_id: str, segment_ids: Iterable[int]) -> dict[str, Any] | None:
     """The chain from the first exported segment's link to the latest signature, for offline verification."""
     wanted = set(segment_ids)
-    signature = db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? ORDER BY upto_seq DESC LIMIT 1", (camera_id,)).fetchone()
+    signature = _latest_signature(db, camera_id)
     first = db.execute(f"SELECT MIN(seq) FROM footage_chain WHERE camera_id=? AND kind='segment' AND segment_id IN ({','.join('?' * len(wanted)) or 'NULL'})",
                        (camera_id, *wanted)).fetchone()[0] if wanted else None
     if signature is None or first is None or first > signature["upto_seq"]:
@@ -273,7 +295,8 @@ def extract(db: sqlite3.Connection, camera_id: str, segment_ids: Iterable[int]) 
 
 def verify_extract(chain: dict[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any]:
     """Offline: the extract hashes correctly up to its signed head, the signature holds for its public key,
-    and every exported source segment's SHA-256 matches its link."""
+    and every exported source segment in it has the SHA-256 of its link. Sources the extract does not
+    reach (recorded before signing began, or not yet hashed) are listed as unsigned, not as mismatches."""
     links = chain.get("links") or []
     signature = chain.get("signature") or {}
     error = check_links(links)
@@ -283,11 +306,16 @@ def verify_extract(chain: dict[str, Any], sources: list[dict[str, Any]]) -> dict
                                           signature.get("head_hash", ""), signature.get("signature", "")):
         error = "the chain extract's signature is not valid"
     by_segment = {(link["segment_id"], link["relative_path"]): link for link in links if link["kind"] == "segment"}
-    mismatched = [source["segment_id"] for source in sources
-                  if (link := by_segment.get((source["segment_id"], source["relative_path"]))) is None or link["sha256"] != source["sha256"]]
+    mismatched, unsigned = [], []
+    for source in sources:
+        link = by_segment.get((source["segment_id"], source["relative_path"]))
+        if link is None:
+            unsigned.append(source["segment_id"])
+        elif link["sha256"] != source["sha256"]:
+            mismatched.append(source["segment_id"])
     if not error and mismatched:
         error = f"exported source segments {mismatched} do not match the signed chain"
-    return {"valid": error is None, "error": error, "public_key": signature.get("public_key")}
+    return {"valid": error is None, "error": error, "public_key": signature.get("public_key"), "unsigned": unsigned}
 
 
 class FootageChainManager:
