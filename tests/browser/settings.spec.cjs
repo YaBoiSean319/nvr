@@ -109,6 +109,32 @@ test("Users & access: a token's secret is shown once, it works, and revoking it 
   await outside.dispose();
 });
 
+test("Users & access: a metrics token scrapes /metrics and nothing else, and a session cannot", async ({ page, playwright }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openSettings(page, "Users & access");
+  const create = page.getByRole("form", { name: "New API token" });
+  await create.getByLabel("Name").fill("Prometheus");
+  await create.getByRole("checkbox", { name: /^read/ }).uncheck();
+  await create.getByRole("checkbox", { name: /^metrics/ }).check();
+  await press(create.getByRole("button", { name: "Create token" }));
+  const dialog = page.getByRole("dialog", { name: "API token created" });
+  const secret = await dialog.getByLabel("Secret value").inputValue();
+  await press(dialog.getByRole("button", { name: "I have stored it" }));
+  await expect(page.getByRole("table", { name: "Existing API tokens" }).getByRole("row", { name: /Prometheus/ })).toContainText("metrics");
+
+  const outside = await playwright.request.newContext({ baseURL: new URL(page.url()).origin });
+  const scrape = await outside.get("/metrics", { headers: { authorization: `Bearer ${secret}` } });
+  expect(scrape.status()).toBe(200);
+  const text = await scrape.text();
+  expect(text).toContain("nvr_camera_recording_state{");
+  expect(text).toContain("nvr_worker_up{");
+  expect(text).not.toMatch(/rtsp:|@/);
+  expect((await outside.get("/api/cameras", { headers: { authorization: `Bearer ${secret}` } })).status()).toBe(403);
+  expect((await page.request.get("/metrics")).status()).toBe(403); // The administrator's own session is not a scraper.
+  await outside.dispose();
+});
+
 test("Recording & storage: volume health, backup status and an on-demand backup", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);

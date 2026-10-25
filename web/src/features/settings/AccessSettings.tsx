@@ -18,6 +18,7 @@ const SCOPE_HINT: Record<string, string> = {
   read: "Read status, cameras and timelines",
   media: "Watch live video and recorded footage",
   export: "Create and download exports",
+  metrics: "Read Prometheus metrics at /metrics (nothing else)",
   admin: "Change configuration (acts as the administrator who created it)",
 };
 
