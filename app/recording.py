@@ -340,6 +340,8 @@ class RecordingManager:
 
     def _count_dropped(self, camera_id: str, name: str) -> None:
         if (key := f"{camera_id}/{name}") not in self._dropped:
+            if len(self._dropped) >= 10_000:
+                self._dropped.clear()
             self._dropped.add(key)
             metrics.segment_dropped(camera_id)
 
@@ -359,7 +361,9 @@ class RecordingManager:
                 continue
             media = (output_dir / candidate.name).resolve()
             if root not in media.parents or not media.is_file() or media.stat().st_size < 128:
-                self._count_dropped(camera_id, candidate.name)
+                # A file that is there but too small to be video was dropped; one that is gone was removed (retention), not lost.
+                if root in media.parents and media.is_file():
+                    self._count_dropped(camera_id, candidate.name)
                 continue
             try:
                 duration = max(0.0, float(row[2]) - float(row[1]))
@@ -370,14 +374,20 @@ class RecordingManager:
             relative = media.relative_to(root).as_posix()
             try:
                 with connect() as db:
-                    cur = db.execute(
-                        "INSERT OR IGNORE INTO recording_segments(camera_id, relative_path, starts_at, ends_at, size_bytes) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (camera_id, relative, started.isoformat(), (started + timedelta(seconds=duration)).isoformat(), media.stat().st_size),
-                    )
+                    db.execute("BEGIN IMMEDIATE")  # The segment and its counters are one change.
+                    try:
+                        cur = db.execute(
+                            "INSERT OR IGNORE INTO recording_segments(camera_id, relative_path, starts_at, ends_at, size_bytes) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (camera_id, relative, started.isoformat(), (started + timedelta(seconds=duration)).isoformat(), media.stat().st_size),
+                        )
+                        if cur.rowcount:
+                            metrics.segment_written(db, camera_id, started + timedelta(seconds=duration))
+                    except BaseException:
+                        db.execute("ROLLBACK")
+                        raise
+                    db.execute("COMMIT")
                     indexed += cur.rowcount
-                    if cur.rowcount:
-                        metrics.segment_written(db, camera_id, started + timedelta(seconds=duration))
             except sqlite3.Error:
                 continue
         if indexed:

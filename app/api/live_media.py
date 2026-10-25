@@ -30,6 +30,12 @@ _live_audio_count = 0
 _live_camera_status: dict[str, dict[str, object]] = {}
 
 
+def live_counts() -> tuple[int, int]:
+    """Live video streams and audio listeners being served right now."""
+    with _live_view_lock:
+        return _live_view_count, _live_audio_count
+
+
 def _acquire_live_view(camera_id: str) -> bool:
     global _live_view_count
     with _live_view_lock:

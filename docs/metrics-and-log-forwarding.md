@@ -18,8 +18,8 @@ scrape_configs:
 | `nvr_camera_recording_enabled` | gauge | camera | 1 when recording is on for the camera |
 | `nvr_camera_last_footage_write_timestamp_seconds` | gauge | camera | when footage was last written |
 | `nvr_segments_written_total` | counter | camera | segments that became playable |
-| `nvr_segment_write_latency_seconds` | histogram | camera, `le` | seconds from the end of a segment's footage until it was indexed and playable (buckets 1, 2, 5, 10, 30, 60, 120, 300 s) |
-| `nvr_segments_dropped_total` | counter | camera | segments the recorder produced and could not keep: a file too small or missing, an unreadable index row, or a motion clip that could not be assembled. Counted once per segment |
+| `nvr_segment_write_latency_seconds` | histogram | camera, `le` | seconds from the end of a segment's footage until it was indexed and playable (buckets 1, 2, 5, 10, 30, 60, 120, 300 s). The recorder looks for finished segments every few seconds, so this is that delay, not the disk's speed: see `nvr_storage_write_latency_seconds` for that |
+| `nvr_segments_dropped_total` | counter | camera | segments the recorder produced and could not keep: a file too small to be video, an unreadable index row, or a motion clip that could not be assembled. Counted once per segment per recorder run, so a restart can count a bad file again; a segment that retention removed is not a drop. A recording stopped by an unreachable camera or a full volume leaves no segment to count, and shows in `nvr_camera_recording_state` and the volume's state instead |
 | `nvr_live_viewers`, `nvr_live_viewer_slots` | gauge | – | live video streams and the number allowed |
 | `nvr_live_audio_listeners`, `nvr_live_audio_listener_slots` | gauge | – | live audio listeners and the number allowed |
 | `nvr_worker_up`, `nvr_worker_restarts_total`, `nvr_worker_heartbeat_timestamp_seconds` | gauge/counter | `worker` | liveness, restarts and last heartbeat of each worker |
@@ -29,12 +29,15 @@ scrape_configs:
 | `nvr_ai_backlog_cameras` | gauge | – | cameras whose analysis is delayed or failing |
 | `nvr_ai_seconds_since_last_analysis` | gauge | camera | seconds since the camera's last analysed frame |
 | `nvr_storage_free_bytes`, `nvr_storage_capacity_bytes` | gauge | `volume` | free space and capacity of each recording volume |
+| `nvr_storage_write_latency_seconds` | gauge | `volume` | how long a small write to the volume took (a probe file is written and removed on each volume at every scrape) |
 | `nvr_storage_volume_state` | gauge | `volume`, `state` | 1 for each volume's state |
 | `nvr_backup_enabled`, `nvr_backup_age_seconds`, `nvr_backup_stale` | gauge | – | configuration backups |
-| `nvr_log_forward_enabled`, `nvr_log_forward_sent_total`, `nvr_log_forward_dropped_total` | gauge/counter | – | log forwarding, for the web process |
+| `nvr_log_forward_enabled`, `nvr_log_forward_sent_total`, `nvr_log_forward_dropped_total`, `nvr_log_forward_failures_total` | gauge/counter | – | log forwarding, for the web process only |
 | `nvr_build_info` | gauge | `version` | the NVR version |
 
-The recorder's counters are kept in the database, so they survive a restart. Archived cameras are not reported. Metrics never carry a camera address, stream URL, credential or password: they read none of the columns that hold them.
+The recorder's counters are kept in the database, written in the same transaction as the segment they count, so they survive a restart and a scrape never sees half of one. Archived cameras are not reported, and a renamed camera starts new series. Without the supervisor (everything in one process, as in tests) every worker is reported up and never restarted. Numbers carry every digit.
+
+Metrics never carry a camera address, stream URL, credential or password: they read none of the columns that hold them, and a camera's name, which is free text, goes through the same scrub as a log line, so one named after its address shows as `[redacted]`.
 
 ## Log forwarding
 
@@ -52,16 +55,18 @@ Set `NVR_LOG_FORWARD_URL` on the container to send the NVR's application logs of
 | `NVR_LOG_FORWARD_CA` | system CAs | a CA bundle to trust for TLS and HTTPS |
 | `NVR_LOG_FORWARD_LEVEL` | `INFO` | the lowest level sent |
 | `NVR_LOG_FORWARD_QUEUE` | `2000` | records that may wait for the endpoint, per process |
+| `NVR_LOG_FORWARD_HEADERS` | none | `Name=value,Name2=value2` added to OTLP requests, for a collector that wants a token |
 
 Syslog messages use the daemon facility, the application name `nvr-<process>` (`nvr-web`, `nvr-recorder`, …), the logger as the message id, and octet-counting framing (RFC 6587, as RFC 5425 requires over TLS). A traceback is part of its message. OTLP records carry the severity, the logger name, and `service.name=nvr`, `service.version` and `nvr.process` as resource attributes.
 
-**Forwarding never blocks the NVR.** A log call only puts the record on a bounded queue; a thread sends it. When the queue is full, the endpoint is unreachable or it refuses a batch, records are dropped and counted, the connection is retried with a backoff up to 30 seconds, and requests and recording carry on. A connection the collector has closed is replaced before the next batch. A bad `NVR_LOG_FORWARD_URL` is reported at start-up and forwarding stays off.
+**Forwarding never blocks the NVR.** A log call only puts the record on a bounded queue; a thread sends it. When the queue is full, the endpoint is unreachable or it refuses a batch, records are dropped and counted, the connection is retried with a backoff up to 30 seconds, and requests and recording carry on. A connection the collector has closed is replaced before the next batch, and a batch is retried once on a fresh connection. What is queued is given a second to go out when the process ends. A message is cut at 8,000 characters. A bad `NVR_LOG_FORWARD_URL` is reported at start-up and forwarding stays off. The web process forwards uvicorn's server and error log (start-up failures, "Exception in ASGI application") as well as the application's; the one-line-per-request access log is not forwarded.
 
-**What leaves the process is scrubbed.** Before sending, every URL (`rtsp://…`, `http://…`) becomes `[url redacted]`, and so does any occurrence of a configured camera's host or address, ONVIF service address, user name or password (of four characters or more, matched as whole words), read from the cameras every minute. The scrub applies to forwarded logs only; the container's own log output is unchanged. Uvicorn's access log is not forwarded.
+**What leaves the process is scrubbed.** Before sending, every URL (`rtsp://…`, `http://…`) becomes `[url redacted]`; a value written as `password=…`, `token: …`, `api_key=…` or `Authorization: Bearer …` becomes `[redacted]`; and so does any occurrence of a configured camera's host or address, ONVIF service address, user name or password (of four characters or more, matched as whole words, any case), read from the cameras every ten seconds. A camera added in the last ten seconds can therefore appear once, beyond what the URL and credential patterns catch. The scrub applies to forwarded logs only; the container's own log output is unchanged. The application does not log user passwords, and the request-validation error handler never echoes what was submitted.
 
 ## Not covered
 
 - Syslog over UDP, and OTLP over gRPC or protobuf.
 - Delivery is at most once: records dropped while the endpoint is down are not replayed, and a batch in flight when a connection breaks may be lost.
-- A secret shorter than four characters is not matched by value, though it normally sits inside a URL, which is always removed.
+- A secret shorter than four characters is not matched by value, though it normally sits inside a URL, which is always removed. A percent-encoded password is matched only inside a URL.
+- OTLP batches that the collector answers with an error are dropped, not retried later; `partialSuccess` is not read.
 - Metrics for the live viewers and log forwarding describe the web process only.

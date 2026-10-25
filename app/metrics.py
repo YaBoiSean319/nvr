@@ -25,11 +25,21 @@ def bump(db: sqlite3.Connection, name: str, camera_id: str = "", amount: float =
 def segment_written(db: sqlite3.Connection, camera_id: str, ends_at: datetime) -> None:
     """A segment became playable: count it and when, relative to when its footage ended."""
     latency = max(0.0, (datetime.now(timezone.utc) - ends_at).total_seconds())
-    bump(db, SEGMENTS_WRITTEN, camera_id)
-    bump(db, LATENCY_SUM, camera_id, latency)
-    for bound in LATENCY_BUCKETS:
-        if latency <= bound:
-            bump(db, f"{LATENCY_BUCKET}:{bound}", camera_id)
+    own = not db.in_transaction  # Inside the caller's transaction the counters commit with the segment; otherwise a scrape must not see half of them.
+    if own:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        bump(db, SEGMENTS_WRITTEN, camera_id)
+        bump(db, LATENCY_SUM, camera_id, latency)
+        for bound in LATENCY_BUCKETS:
+            if latency <= bound:
+                bump(db, f"{LATENCY_BUCKET}:{bound}", camera_id)
+    except BaseException:
+        if own:
+            db.execute("ROLLBACK")
+        raise
+    if own:
+        db.execute("COMMIT")
 
 
 def segment_dropped(camera_id: str) -> None:

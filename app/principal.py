@@ -84,7 +84,7 @@ class Principal:
 
 
 def requires_scope(scope: Scope) -> Callable[[Endpoint], Endpoint]:
-    """Mark an endpoint as needing a specific token scope (media or export)."""
+    """Mark an endpoint as needing a specific token scope (media, export or metrics)."""
 
     def mark(endpoint: Endpoint) -> Endpoint:
         endpoint.required_scope = scope  # type: ignore[attr-defined]

@@ -103,7 +103,7 @@ class SeriesTests(MetricsCase):
                      "nvr_segments_written_total", "nvr_segments_dropped_total", "nvr_segment_write_latency_seconds_bucket", "nvr_segment_write_latency_seconds_sum",
                      "nvr_segment_write_latency_seconds_count", "nvr_live_viewers", "nvr_live_viewer_slots", "nvr_live_audio_listeners", "nvr_live_audio_listener_slots",
                      "nvr_worker_up", "nvr_worker_restarts_total", "nvr_export_jobs", "nvr_export_oldest_queued_age_seconds", "nvr_ai_cameras", "nvr_ai_backlog_cameras",
-                     "nvr_ai_seconds_since_last_analysis", "nvr_storage_free_bytes", "nvr_storage_capacity_bytes", "nvr_backup_enabled", "nvr_backup_stale", "nvr_log_forward_enabled"):
+                     "nvr_ai_seconds_since_last_analysis", "nvr_storage_free_bytes", "nvr_storage_capacity_bytes", "nvr_storage_write_latency_seconds", "nvr_backup_enabled", "nvr_backup_stale", "nvr_log_forward_enabled"):
             self.assertTrue(self.samples(text, name), name)
         for name in ("nvr_camera_recording_state", "nvr_segments_written_total"):
             self.assertEqual({labels["camera_id"] for labels, _ in self.samples(text, name)}, {self.d1, self.d2, self.y1, self.loose})
@@ -123,6 +123,48 @@ class SeriesTests(MetricsCase):
             self.assertRegex(line, r'^[a-zA-Z_:][a-zA-Z0-9_:]*(\{(\w+="([^"\\]|\\.)*",?)*\})? -?[0-9.e+-]+$', line)
             self.assertTrue(any(line.startswith(name) for name in declared), line)
         self.assertTrue(text.endswith("\n"))
+
+    def test_every_family_is_written_whole_with_its_help_and_type_first(self):
+        text = self.scrape()
+        seen, current = set(), None
+        for line in text.splitlines():
+            if line.startswith("# HELP "):
+                family = line.split()[2]
+                self.assertNotIn(family, seen, f"{family} appears twice")
+                seen.add(family)
+                current = family
+            elif line.startswith("# TYPE "):
+                self.assertEqual(line.split()[2], current)
+            else:
+                name = re.match(r"[a-zA-Z_:][a-zA-Z0-9_:]*", line).group(0)
+                self.assertEqual(re.sub(r"_(bucket|sum|count)$", "", name) if name.startswith(current) else name, current, line)
+        self.assertGreater(len(self.samples(text, "nvr_camera_recording_enabled")), 1)  # Several cameras, still one block each.
+
+    def test_numbers_keep_every_digit(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET last_footage_write_at='2026-10-25T13:45:46.500Z' WHERE id=?", (self.d1,))
+            db.execute("INSERT INTO metric_counters(name,camera_id,value) VALUES('segments_written',?,1234567)", (self.d1,))
+            db.execute("INSERT INTO metric_counters(name,camera_id,value) VALUES('segments_dropped',?,1000001)", (self.d1,))
+        text = self.scrape()
+        stamp = [value for labels, value in self.samples(text, "nvr_camera_last_footage_write_timestamp_seconds") if labels["camera_id"] == self.d1][0]
+        self.assertEqual(stamp, datetime(2026, 10, 25, 13, 45, 46, 500000, tzinfo=timezone.utc).timestamp())
+        self.assertIn(f'nvr_segments_written_total{{camera_id="{self.d1}",camera="Dock 1"}} 1234567\n', text + "\n")
+        self.assertIn(" 1000001\n", text)
+        free = self.samples(text, "nvr_storage_free_bytes")[0][1]
+        self.assertEqual(free, int(free))
+        self.assertGreater(free, 10 ** 6)
+        self.assertNotIn("e+", text)
+
+    def test_a_camera_named_with_its_address_does_not_leak_it_through_a_label(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET name=? WHERE id=?", ("Lobby 192.0.2.50 viewer", self.d1))
+            db.execute("UPDATE cameras SET name=? WHERE id=?", (STREAM, self.d2))
+            db.execute("INSERT INTO ai_camera_settings(camera_id,enabled,status) VALUES(?,1,'analyzed')", (self.d1,))
+        text = self.scrape()
+        for secret in SECRETS:
+            self.assertNotIn(secret, text, secret)
+        self.assertIn("Lobby [redacted] [redacted]", text)
+        self.assertIn("[url redacted]", text)
 
     def test_recording_state_is_one_state_per_camera_and_follows_it(self):
         with connect() as db:
@@ -213,6 +255,25 @@ class DroppedAndWrittenTests(MetricsCase):
         self.assertEqual(self.index("segment-20260101T000010Z.mp4", b"x" * 500, [["segment-20260101T000010Z.mp4", "0", "10"]], manager), 1)
         counters = self.counters()
         self.assertEqual((counters["segments_dropped"], counters["segments_written"]), (1, 1))
+
+    def test_a_segment_retention_removed_is_not_a_dropped_one(self):
+        manager = RecordingManager()
+        rows = [["segment-20260101T000030Z.mp4", "0", "10"]]
+        root = Path(self.environment["NVR_RECORDINGS_PATH"])
+        index = root / "index.csv"
+        index.write_text("\n".join(",".join(row) for row in rows))
+        manager._index_csv(self.d1, index, root / self.d1)  # Listed, but no such file any more.
+        self.assertNotIn("segments_dropped", self.counters())
+
+    def test_a_segment_and_its_counters_are_one_change(self):
+        import sqlite3
+        manager = RecordingManager()
+        with mock.patch("app.metrics.bump", side_effect=sqlite3.OperationalError("database is locked")):
+            self.index("segment-20260101T000040Z.mp4", b"x" * 500, [["segment-20260101T000040Z.mp4", "0", "10"]], manager)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM recording_segments WHERE camera_id=?", (self.d1,)).fetchone()[0], 0)
+        self.assertEqual(self.index("segment-20260101T000040Z.mp4", b"x" * 500, [["segment-20260101T000040Z.mp4", "0", "10"]], manager), 1)
+        self.assertEqual(self.counters()["segments_written"], 1)
 
     def test_a_written_segment_is_counted_once_even_when_the_index_is_read_again(self):
         manager = RecordingManager()
@@ -452,8 +513,23 @@ class OtlpTests(ForwardCase):
         path, headers, body = collector.posts[0]
         self.assertEqual(path, "/v1/logs")
         self.assertEqual(headers["Content-Type"], "application/json")
-        attributes = {item["key"]: item["value"]["stringValue"] for item in body["resourceLogs"][0]["resource"]["attributes"]}
+        attributes = {item["key"]: item["value"].get("stringValue") for item in body["resourceLogs"][0]["resource"]["attributes"]}
         self.assertEqual((attributes["service.name"], attributes["nvr.process"]), ("nvr", "test"))
+        pid = [item for item in body["resourceLogs"][0]["resource"]["attributes"] if item["key"] == "process.pid"][0]
+        self.assertEqual(pid["value"], {"intValue": str(__import__("os").getpid())})
+        self.assertGreater(int(record["observedTimeUnixNano"]), 0)
+
+    def test_configured_headers_are_sent_with_every_request(self):
+        collector = OtlpCollector()
+        self.cleanups.append(collector.stop)
+        forwarder = logforward.Forwarder(logforward.parse(f"otlp+http://127.0.0.1:{collector.port}"), "test", logging.INFO, 10, None, {"Authorization": "Bearer collector-token"})
+        forwarder.start()
+        handler = logforward.ForwardHandler(forwarder)
+        self.logger.addHandler(handler)
+        self.cleanups.append(lambda: (self.logger.removeHandler(handler), forwarder.stop()))
+        self.logger.error("needs a token")
+        collector.wait_for("needs a token")
+        self.assertEqual(collector.posts[0][1]["Authorization"], "Bearer collector-token")
 
     def test_a_custom_path_is_used(self):
         collector = OtlpCollector()
@@ -515,6 +591,37 @@ class ScrubbingTests(ForwardCase):
         for kept in ("stream failed", "Traceback (most recent call last)", "refused, and", "login", "rejected", "was wrong for"):
             self.assertIn(kept, text)
 
+    def test_a_credential_written_as_a_setting_is_removed_whatever_it_is(self):
+        collector = self.collector()
+        self.forward(f"syslog+tcp://127.0.0.1:{collector.port}")
+        self.logger.error("login failed password=Sup3r-Secret! for someone")
+        self.logger.error('request had "token": "abc123def" and Authorization: Bearer eyJhbGciOi.payload.sig attached')
+        self.logger.error("api_key=k-9999 and the token expired yesterday")
+        self.logger.error("end of the credentials")
+        collector.wait_for("end of the credentials")
+        text = b"\n".join(collector.frames).decode()
+        for leaked in ("Sup3r-Secret", "abc123def", "eyJhbGciOi", "k-9999"):
+            self.assertNotIn(leaked, text)
+        self.assertIn("password=[redacted] for someone", text)
+        self.assertIn("the token expired yesterday", text)  # Ordinary prose is left alone.
+
+    def test_a_camera_added_a_moment_ago_is_scrubbed_after_the_next_refresh(self):
+        new = self.add_camera("Fresh")
+        with connect() as db:
+            db.execute("UPDATE cameras SET camera_ip='192.0.2.99' WHERE id=?", (new,))
+        scrub = logforward.Scrubber()
+        self.assertIn("192.0.2.99", scrub("seen 192.0.2.99"))  # Not known yet.
+        scrub.refresh()
+        self.assertEqual(scrub("seen 192.0.2.99 and 192.0.2.99:8080"), "seen [redacted] and [redacted]:8080")
+        self.assertTrue(logforward.SECRETS_REFRESH_SECONDS <= 10)
+
+    def test_a_very_long_message_is_cut(self):
+        collector = self.collector()
+        self.forward(f"syslog+tcp://127.0.0.1:{collector.port}")
+        self.logger.error("long " + "x" * 50_000)
+        frame = collector.wait_for("long xxx")
+        self.assertLess(len(frame), logforward.MAX_MESSAGE + 200)
+
     def test_otlp_is_scrubbed_the_same_way(self):
         collector = OtlpCollector()
         self.cleanups.append(collector.stop)
@@ -569,16 +676,58 @@ class NeverBlockingTests(ForwardCase):
             forwarder.submit(logforward.Entry(time.time(), logging.INFO, "x", str(index)))
         self.assertEqual((forwarder.entries.qsize(), forwarder.dropped), (3, 7))
 
-    def test_requests_are_served_while_the_endpoint_is_down(self):
-        self.forward("syslog+tcp://127.0.0.1:9")  # The discard port: refused.
-        handler = logging.getLogger()
-        forwarding = logforward.ForwardHandler(self.forward("otlp+http://127.0.0.1:9"))
-        handler.addHandler(forwarding)
-        self.cleanups.append(lambda: handler.removeHandler(forwarding))
+    def jammed(self) -> logforward.Forwarder:
+        """Forwarding to a collector that accepts the connection and never reads, attached to the root logger."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        held = []
+        threading.Thread(target=lambda: held.append(listener.accept()), daemon=True).start()
+        forwarder = logforward.Forwarder(logforward.parse(f"syslog+tcp://127.0.0.1:{listener.getsockname()[1]}"), "test", logging.DEBUG, 50, None)
+        forwarder.start()
+        root = logging.getLogger()
+        handler = logforward.ForwardHandler(forwarder)
+        previous = root.level
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+        self.cleanups += [listener.close, lambda: (root.removeHandler(handler), root.setLevel(previous), forwarder.stop())]
+        return forwarder
+
+    def test_requests_that_log_are_served_at_the_same_speed_while_the_collector_is_jammed(self):
+        def timed() -> float:
+            began = time.monotonic()
+            for _ in range(15):
+                self.assertEqual(self.admin.get("/api/cameras").status_code, 200)
+                logging.getLogger("nvr.request").warning("handled a request %s", "x" * 4000)
+            return time.monotonic() - began
+        baseline = timed()
+        forwarder = self.jammed()
+        jammed = timed()
+        self.assertLess(jammed, baseline * 3 + 1.0)
+        for index in range(500):
+            logging.getLogger("nvr.request").warning("%s %s", index, "y" * 4000)
+        end = time.monotonic() + 15
+        while forwarder.dropped == 0 and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertGreater(forwarder.dropped, 0)
+
+    def test_recording_is_not_slowed_by_a_jammed_collector(self):
+        self.jammed()
+        manager = RecordingManager()
+        root = Path(self.environment["NVR_RECORDINGS_PATH"])
+        output = root / self.d1
+        output.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for index in range(40):
+            name = f"segment-20260102T00{index:02d}00Z.mp4"
+            (output / name).write_bytes(b"x" * 500)
+            rows.append(f"{name},0,10")
+        (root / "index.csv").write_text("\n".join(rows))
         began = time.monotonic()
-        for _ in range(20):
-            self.assertEqual(self.admin.get("/api/cameras").status_code, 200)
-        self.assertLess(time.monotonic() - began, 20)
+        for _ in range(30):
+            logging.getLogger("nvr.recording").warning("%s", "z" * 4000)
+        self.assertEqual(manager._index_csv(self.d1, root / "index.csv", output), 40)
+        self.assertLess(time.monotonic() - began, 5)
 
     def test_the_handler_never_raises_into_the_caller(self):
         class Unprintable:
@@ -635,6 +784,90 @@ class ConfigurationTests(unittest.TestCase):
     def test_the_supervisor_and_each_worker_install_it(self):
         for module in ("app/workers/supervisor.py", "app/workers/runtime.py", "app/workers/web.py"):
             self.assertIn("logforward.install(", Path(module).read_text(), module)
+
+
+class WiringTests(ForwardCase):
+    """The real installation, as a worker does it: the application's own loggers and uvicorn's reach the collector."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = logging.getLogger()
+        before_handlers, before_level = list(self.root.handlers), self.root.level
+        self.cleanups.append(lambda: (self.root.handlers.__setitem__(slice(None), before_handlers), self.root.setLevel(before_level),
+                                      setattr(logforward, "_forwarder", None)))
+        logforward._forwarder = None
+
+    def installed(self, process: str, collector: Collector, **extra: str) -> logforward.Forwarder:
+        with mock.patch.dict("os.environ", {"NVR_LOG_FORWARD_URL": f"syslog+tcp://127.0.0.1:{collector.port}", **extra}):
+            forwarder = logforward.install(process)
+        self.assertIsNotNone(forwarder)
+        self.cleanups.append(forwarder.stop)
+        return forwarder
+
+    def test_an_application_logger_at_info_is_delivered_from_a_process_that_never_configured_logging(self):
+        self.root.setLevel(logging.NOTSET)  # What the web process starts with.
+        collector = self.collector()
+        self.installed("web", collector)
+        logging.getLogger("nvr.recording").info("recorder says hello")
+        frame = collector.wait_for("recorder says hello")
+        self.assertIn(b" nvr-web ", frame)
+
+    def test_uvicorns_error_log_is_delivered_after_uvicorn_configures_logging(self):
+        import logging.config
+        from app.workers import web
+        collector = self.collector()
+        self.installed("web", collector)
+        logging.config.dictConfig(web.log_config())  # What uvicorn.run does at start-up.
+        logging.getLogger("uvicorn.error").error("Exception in ASGI application: %s", STREAM)
+        logging.getLogger("nvr.after").warning("still delivered after uvicorn's setup")
+        frame = collector.wait_for("Exception in ASGI application")
+        collector.wait_for("still delivered after uvicorn's setup")
+        self.assertNotIn(b"hunter2", frame)
+        self.assertIn(b"[url redacted]", frame)
+
+    def test_the_access_log_is_not_forwarded(self):
+        import logging.config
+        from app.workers import web
+        collector = self.collector()
+        self.installed("web", collector)
+        logging.config.dictConfig(web.log_config())
+        logging.getLogger("uvicorn.access").info('127.0.0.1:1234 - "GET /api/cameras?x=1 HTTP/1.1" 200')
+        logging.getLogger("nvr.after").warning("marker after the access line")
+        collector.wait_for("marker after the access line")
+        self.assertFalse(any(b"GET /api/cameras" in frame for frame in collector.frames))
+
+    def test_headers_come_from_the_environment(self):
+        collector = OtlpCollector()
+        self.cleanups.append(collector.stop)
+        with mock.patch.dict("os.environ", {"NVR_LOG_FORWARD_URL": f"otlp+http://127.0.0.1:{collector.port}", "NVR_LOG_FORWARD_HEADERS": "Authorization=Bearer abc,X-Tenant=nvr"}):
+            forwarder = logforward.install("web")
+        self.cleanups.append(forwarder.stop)
+        logging.getLogger("nvr.x").warning("with headers")
+        collector.wait_for("with headers")
+        headers = collector.posts[0][1]
+        self.assertEqual((headers["Authorization"], headers["X-Tenant"]), ("Bearer abc", "nvr"))
+
+    def test_what_is_queued_goes_out_at_exit(self):
+        collector = self.collector()
+        forwarder = self.installed("web", collector)
+        for index in range(30):
+            logging.getLogger("nvr.exit").error("closing line %s", index)
+        forwarder.flush(10)
+        self.assertEqual(forwarder.entries.unfinished_tasks, 0)
+        collector.wait_for("closing line 29", timeout=5)
+
+    def test_a_tls_connection_is_kept_between_batches(self):
+        directory = Path(tempfile.mkdtemp())
+        cert, key = SyslogTests.certificate(directory)
+        server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server.load_cert_chain(cert, key)
+        collector = self.collector(server)
+        self.forward(f"syslog+tls://localhost:{collector.port}", ca=str(cert))
+        for index in range(4):
+            self.logger.error("tls batch %s", index)
+            collector.wait_for(f"tls batch {index}")
+            time.sleep(0.3)
+        self.assertEqual(collector.connections, 1)
 
 
 if __name__ == "__main__":

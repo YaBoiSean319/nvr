@@ -13,7 +13,8 @@ router = APIRouter()
 @router.get("/metrics", include_in_schema=False)
 @requires_scope("metrics")
 def prometheus_metrics(user: CurrentUser) -> Response:
-    # A person's session is never a scraper: the scope is one only a token can hold.
-    if user.scopes is None or user.wall:
+    # The scope is checked for a token; a person's browser session has none, so it is refused here.
+    if user.scopes is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Metrics need an API token with the 'metrics' scope")
-    return Response(prometheus.render(supervised()), media_type="text/plain; version=0.0.4; charset=utf-8", headers={"Cache-Control": "no-store"})
+    return Response(prometheus.render(supervised()), media_type="text/plain; version=0.0.4; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
