@@ -19,6 +19,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .attributes import TrackProfile
 from .detection import MODEL_HEIGHT, MODEL_WIDTH, box_iou
 
 HISTOGRAM_BINS = 8
@@ -74,10 +75,17 @@ class Tracker:
         self.min_similarity = min_similarity
         self.max_jump = max_jump
         self.active: list[_ActiveTrack] = []
+        self.profiles: dict[str, TrackProfile] = {}
+
+    def profile(self, track_id: str) -> TrackProfile:
+        """What a live track has shown so far (its attribute votes, direction and places passed)."""
+        return self.profiles.setdefault(track_id, TrackProfile())
 
     def assign(self, detections: list[dict[str, Any]], at: datetime, frame: bytes | None = None) -> list[tuple[str, bool]]:
         """Return ``(track_id, is_new)`` for each detection, in order."""
         self.active = [track for track in self.active if at - track.seen_at <= self.max_gap]
+        live = {track.id for track in self.active}
+        self.profiles = {track_id: profile for track_id, profile in self.profiles.items() if track_id in live}
         looks = [appearance(frame, item["box"]) for item in detections]
         candidates: list[tuple[float, int, int]] = []
         for d_index, item in enumerate(detections):
@@ -141,7 +149,20 @@ def record_detections(
              json.dumps(item.get("attributes") or {}, separators=(",", ":"), sort_keys=True), model_id, model_version, provider),
         )
         track_ids.append(track_id)
+        tracker.profile(track_id).add(item.get("attributes") or {}, box)
+    for track_id in dict.fromkeys(track_ids):
+        _store_attributes(db, track_id, tracker.profile(track_id))
     return track_ids
+
+
+def _store_attributes(db: sqlite3.Connection, track_id: str, profile: TrackProfile) -> None:
+    """Write the track's attributes when they have changed since they were last written."""
+    summary = profile.summary()
+    if summary == profile.stored:
+        return
+    db.execute("UPDATE ai_tracks SET upper_colour=?,lower_colour=?,vehicle_colour=?,vehicle_type=?,direction=?,zone_mask=? WHERE id=?",
+               (summary["upper_colour"], summary["lower_colour"], summary["vehicle_colour"], summary["vehicle_type"], summary["direction"], summary["zone_mask"], track_id))
+    profile.stored = summary
 
 
 def purge_expired_detections(db: sqlite3.Connection, camera_id: str, before: datetime) -> int:
@@ -165,8 +186,10 @@ def detection_view(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def track_view(row: sqlite3.Row) -> dict[str, Any]:
-    return {key: row[key] for key in ("id", "camera_id", "label", "first_seen_at", "last_seen_at", "detection_count",
+    view = {key: row[key] for key in ("id", "camera_id", "label", "first_seen_at", "last_seen_at", "detection_count",
                                       "max_confidence", "model_id", "model_version", "provider")}
+    view["attributes"] = {key: row[key] for key in ("upper_colour", "lower_colour", "vehicle_colour", "vehicle_type", "direction") if row[key]}
+    return view
 
 
 def iter_unanalyzed(db: sqlite3.Connection, camera_id: str, start: str, end: str) -> Iterable[dict[str, Any]]:
