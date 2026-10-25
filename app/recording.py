@@ -228,15 +228,18 @@ class RecordingManager:
 
     async def _retention_loop(self) -> None:
         from .retention import cleanup_expired_recordings
+        started = False
         while not self.stopping:
             try:
                 await asyncio.to_thread(cleanup_expired_recordings)
                 await asyncio.to_thread(self._prune_viewing_audit)
-                await asyncio.to_thread(self._watch_disks)
+                if started:  # Not at startup: the disks are read from the second pass, five minutes in, so starting up runs no external command.
+                    await asyncio.to_thread(self._watch_disks)
             except asyncio.CancelledError:
                 raise
             except (OSError, sqlite3.Error):
                 pass
+            started = True
             await asyncio.sleep(300)
 
     @staticmethod
