@@ -24,6 +24,7 @@ from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
 from .push import PushManager
 from .footage_chain import FootageChainManager
+from .hardening import HardeningManager
 from .self_test import SelfTestManager
 from .ptz import PtzTourManager
 from .rule_actions import RuleActionManager
@@ -44,6 +45,7 @@ STARTUP_ORDER = (
     ("ptz_tours", PtzTourManager),
     ("footage_chain", FootageChainManager),
     ("self_test", SelfTestManager),
+    ("hardening", HardeningManager),
     ("heartbeat", HeartbeatManager),
     ("recorders", RecordingManager),
     ("detectors", DetectionManager),

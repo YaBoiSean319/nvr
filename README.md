@@ -33,6 +33,7 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |
 | `NVR_TRUST_FORWARDED_FOR` | false | Count sign-in attempts by the last `X-Forwarded-For` address; only behind a proxy you control |
 | `NVR_LOG_FORWARD_URL` | unset | Forward logs off-host: `syslog+tcp://host:514`, `syslog+tls://host:6514`, `otlp+http://host:4318` or `otlp+https://…`; see [metrics and log forwarding](docs/metrics-and-log-forwarding.md) |
+| `NVR_HARDENING_PROBE_GAP_SECONDS` | `3600` | The least time between two hardening probes of the same camera (asking whether it offers RTSPS or HTTPS); see [camera hardening](docs/camera-hardening.md) |
 | `NVR_SMART_DEVICES` | unset | Which disk holds each storage volume, for SMART disk health: JSON from volume name to device, such as `{"default":"/dev/sda"}`; see [disk health](docs/disk-health-and-retention-forecast.md) |
 | `NVR_LOG_FORWARD_CA` / `NVR_LOG_FORWARD_LEVEL` / `NVR_LOG_FORWARD_QUEUE` | system CAs / `INFO` / `2000` | CA bundle for TLS, lowest level forwarded, records allowed to wait |
 | `NVR_OIDC_TENANT_ID` | unset | Microsoft Entra workforce tenant GUID |
@@ -74,6 +75,8 @@ The viewing audit records who watched which camera live or in playback, from whe
 Camera tamper detection notices a covered, moved or defocused camera by comparing a small frame from it with a learned view, raises an incident that recovers when the view returns, and can trigger rules; it is off until switched on per camera (see [camera tamper detection](docs/tamper-detection.md)).
 
 Disk health reads SMART for the disks behind the recording volumes where the container is given them (and says "not available" where it is not), and a retention forecast shows which cameras will not keep their policy at their recent write rate and what to change; both raise incidents (see [disk health and retention forecast](docs/disk-health-and-retention-forecast.md)).
+
+Settings > Camera hardening reports cameras using well-known default passwords, plain RTSP or ONVIF over HTTP where a secure alternative is offered, and addresses outside the camera network; findings can be acknowledged with a reason and stay hidden until their condition changes. Nothing is tried against a camera, and checks never contact one more than once an hour (see [camera hardening](docs/camera-hardening.md)).
 
 Local accounts can add passkeys or an authenticator app with one-time recovery codes; administrators can require them, reset them, and sign-in attempts are rate limited per account and per address (see [passkeys and authenticator apps](docs/second-factors.md)).
 
