@@ -4,6 +4,7 @@ import { createBrowserRouter, Navigate, Outlet, RouterProvider } from "react-rou
 import { onSessionExpired } from "@/api/client";
 import { keys, useMe, usePublicBranding, useSetupStatus } from "@/api/queries";
 import type { Me } from "@/api/types";
+import { EnrolmentRequired } from "@/features/auth/EnrolmentRequired";
 import { SetupPage } from "@/features/auth/SetupPage";
 import { SignInPage } from "@/features/auth/SignInPage";
 import { AdministratorOnly, NotFound } from "@/features/placeholders/Pages";
@@ -97,5 +98,6 @@ export function App() {
   }
   if (setup.data?.setup_required) return <SetupPage />;
   if (!me.data) return <SignInPage />;
+  if (me.data.mfa_enrolment_required) return <EnrolmentRequired me={me.data} />;
   return <SignedIn me={me.data} />;
 }

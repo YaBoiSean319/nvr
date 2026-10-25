@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
 import { forgetThisDevice } from "@/features/alarms/pushDevice";
-import type { Branding, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, SavedView, ThemePreference } from "./types";
+import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, SavedView, ThemePreference } from "./types";
 
 export const keys = {
   setup: ["setup"] as const,
@@ -77,8 +77,9 @@ export function useSignIn() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (credentials: { username: string; password: string }) =>
-      api<Me>("/api/auth/login", { method: "POST", body: credentials, quietUnauthorized: true }),
-    onSuccess: () => client.invalidateQueries(),
+      api<Me | MfaChallenge>("/api/auth/login", { method: "POST", body: credentials, quietUnauthorized: true }),
+    // A second factor still owed is not a session yet.
+    onSuccess: result => (("mfa_required" in result) ? undefined : client.invalidateQueries()),
   });
 }
 

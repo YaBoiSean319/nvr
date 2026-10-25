@@ -67,6 +67,8 @@ class Principal:
     token_id: str | None = None
     # Signed in as a video wall: watching only, never the main interface.
     wall: bool = False
+    # Signed in without the second factor the administrator requires: only enrolment is open until one is set up.
+    mfa_enrolment_required: bool = False
 
     def __getitem__(self, key: str) -> object:
         # Routes historically received a database row; keep subscript access.
@@ -110,13 +112,18 @@ def current_user(request: HTTPConnection) -> Principal:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     with connect() as db:
         row = db.execute(
-            "SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id=s.user_id "
-            "WHERE s.token_hash=? AND s.expires_at>?",
+            "SELECT u.id, u.username, u.role, u.provider_issuer, (SELECT mfa_policy FROM security_settings WHERE singleton_id=1) AS mfa_policy, "
+            "(SELECT COUNT(*) FROM user_totp t WHERE t.user_id=u.id AND t.confirmed_at IS NOT NULL) + "
+            "(SELECT COUNT(*) FROM user_passkeys p WHERE p.user_id=u.id) AS factor_count "
+            "FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
             (token_digest(raw), datetime.now(timezone.utc).isoformat()),
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
-    return _principal(row)
+    principal = _principal(row)
+    if principal.mfa_enrolment_required and not _enrolment_route(request.scope.get("route")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Set up a second factor to continue")
+    return principal
 
 
 def administrator(user: Annotated[Principal, Depends(current_user)]) -> Principal:
@@ -177,8 +184,17 @@ def depends_on(dependant: Dependant, target: Callable[..., object]) -> bool:
     return any(dependency.call is target or depends_on(dependency, target) for dependency in dependant.dependencies)
 
 
+def _enrolment_route(route: object) -> bool:
+    """What a session still owing its second factor may reach: who it is, signing out, and enrolling."""
+    path = getattr(route, "path", "") or ""
+    return path in {"/api/auth/me", "/api/auth/logout"} or path.startswith("/api/me/security")
+
+
 def _principal(row: sqlite3.Row) -> Principal:
-    return Principal(id=row["id"], username=row["username"], role=row["role"])
+    from .mfa import required_for
+
+    owes = required_for(row["mfa_policy"], row["role"], local=row["provider_issuer"] is None) and row["factor_count"] == 0
+    return Principal(id=row["id"], username=row["username"], role=row["role"], mfa_enrolment_required=owes)
 
 
 CurrentUser = Annotated[Principal, Depends(current_user)]
