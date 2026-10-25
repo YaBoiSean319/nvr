@@ -149,6 +149,12 @@ def download_export(job_id: str, user: CurrentUser) -> FileResponse:
         raise HTTPException(status_code=410, detail="Export file is unavailable") from exc
     if not path.is_file():
         raise HTTPException(status_code=410, detail="Export file is unavailable")
+    # A package made before a camera's privacy masks were set or changed carries footage they now hide.
+    with connect() as db:
+        for camera_id in json.loads(row["camera_ids_json"]):
+            masks = db.execute("SELECT zones_json,updated_at FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
+            if masks and json.loads(masks["zones_json"]) and masks["updated_at"] > row["created_at"]:
+                raise HTTPException(status_code=409, detail="This export was made before the camera's current privacy masks; export again to download it masked")
     acquire_playback(path)
     return FileResponse(path, media_type="application/zip", filename=f"nvr-export-{job_id}.zip", background=BackgroundTask(release_playback, path))
 

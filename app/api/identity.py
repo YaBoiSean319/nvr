@@ -171,7 +171,12 @@ def logout(request: Request, response: Response) -> Response:
     raw = request.cookies.get(COOKIE_NAME)
     if raw:
         with connect() as db:
+            signed_in = db.execute("SELECT user_id FROM sessions WHERE token_hash=?", (token_digest(raw),)).fetchone()
             db.execute("DELETE FROM sessions WHERE token_hash=?", (token_digest(raw),))
+        if signed_in:
+            # Signing out ends any unmasked viewing this person was given.
+            from app.privacy import revoke_unmasked
+            revoke_unmasked(int(signed_in["user_id"]))
     request.session.clear()
     response.delete_cookie(COOKIE_NAME, path="/", secure=secure_cookie(), httponly=True, samesite="strict")
     response.status_code = status.HTTP_204_NO_CONTENT

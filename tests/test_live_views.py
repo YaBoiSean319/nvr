@@ -98,7 +98,7 @@ class LiveViewTests(unittest.TestCase):
             )
         observed = []
 
-        async def fake_frames(camera_id, source, quality):
+        async def fake_frames(camera_id, source, quality, zones=None):
             observed.append((camera_id, source, quality))
             yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 2\r\n\r\nxx\r\n"
 

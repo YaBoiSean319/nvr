@@ -187,8 +187,10 @@ class Viewer:
 
 class LiveStream:
     def __init__(self, key: tuple[str, ...], source: str, include_audio: bool,
-                 on_fragment: Callable[[], None] | None = None) -> None:
+                 on_fragment: Callable[[], None] | None = None, video_filter: str | None = None) -> None:
         self.key = key
+        # A privacy mask: the video is transcoded with it drawn in, instead of passed through.
+        self.video_filter = video_filter
         self.source = source
         self.include_audio = include_audio
         self.on_fragment = on_fragment
@@ -239,8 +241,13 @@ class LiveStream:
             args = [
                 executable, "-hide_banner", "-nostats", "-loglevel", "error", "-fflags", "+genpts",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS, "-i", "pipe:0",
-                "-map", "0:v:0", "-c:v", "copy",
+                "-map", "0:v:0",
             ]
+            if self.video_filter:
+                args += ["-vf", self.video_filter, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                         "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-g", "30"]
+            else:
+                args += ["-c:v", "copy"]
             if self.include_audio:
                 args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "64k", "-ac", "1"]
             else:
@@ -301,10 +308,10 @@ class LiveHub:
         self.streams: dict[tuple[str, ...], LiveStream] = {}
 
     def join(self, key: tuple[str, ...], source: str, include_audio: bool, viewer: Viewer,
-             on_fragment: Callable[[], None] | None = None) -> LiveStream:
+             on_fragment: Callable[[], None] | None = None, video_filter: str | None = None) -> LiveStream:
         stream = self.streams.get(key)
         if stream is None or stream.failed:
-            stream = LiveStream(key, source, include_audio, on_fragment)
+            stream = LiveStream(key, source, include_audio, on_fragment, video_filter)
             self.streams[key] = stream
             stream.start()
         stream.add(viewer)
