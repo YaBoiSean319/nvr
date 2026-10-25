@@ -64,6 +64,8 @@ Privacy masks black out areas of a camera's picture everywhere: written to camer
 
 Access grants limit which cameras an operator sees, by camera group or for everyone holding an Entra role, optionally until an expiry; hidden cameras, their footage, alarms and exports behave as if they did not exist (see [camera access grants](docs/access-grants.md)).
 
+The viewing audit records who watched which camera live or in playback, from when to when, and every export, download and snapshot; administrators report it per person or per camera for a date range, download it as CSV, and set how long it is kept apart from footage (see [viewing audit](docs/viewing-audit.md)).
+
 Local accounts can add passkeys or an authenticator app with one-time recovery codes; administrators can require them, reset them, and sign-in attempts are rate limited per account and per address (see [passkeys and authenticator apps](docs/second-factors.md)).
 
 Every recording segment is hashed into a signed per-camera chain, so altered, missing or reordered footage can be found from a camera's Health & History tab, and evidence packages carry the chain and public key to verify offline (see [signed footage](docs/signed-footage.md)).

@@ -18,7 +18,7 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
-from . import coverage
+from . import coverage, viewing_audit
 from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
@@ -145,6 +145,8 @@ class RecordingManager:
         self.stopping = False
         self._mark_restart_gaps()
         with connect() as db:
+            viewing_audit.close_orphans(db)
+        with connect() as db:
             rows = db.execute("SELECT id FROM cameras").fetchall()
         for row in rows:
             await self.sync_camera(row["id"])
@@ -224,11 +226,17 @@ class RecordingManager:
         while not self.stopping:
             try:
                 await asyncio.to_thread(cleanup_expired_recordings)
+                await asyncio.to_thread(self._prune_viewing_audit)
             except asyncio.CancelledError:
                 raise
             except (OSError, sqlite3.Error):
                 pass
             await asyncio.sleep(300)
+
+    @staticmethod
+    def _prune_viewing_audit() -> None:
+        with connect() as db:
+            viewing_audit.prune(db)
 
     async def _storage_loop(self) -> None:
         while not self.stopping:

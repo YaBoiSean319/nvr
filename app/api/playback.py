@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
-from app import privacy
+from app import privacy, viewing_audit
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -122,7 +122,9 @@ async def play_segment(
             raise HTTPException(status_code=503, detail="The masked recording could not be prepared") from exc
         finally:
             release_playback(path)
+        await asyncio.to_thread(viewing_audit.safely, viewing_audit.touch_playback, user.id, camera_id)
         return FileResponse(masked, media_type="video/mp4", filename=path.name, content_disposition_type="inline")
+    await asyncio.to_thread(viewing_audit.safely, viewing_audit.touch_playback, user.id, camera_id)
     return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="inline", background=BackgroundTask(release_playback,path))
 
 
@@ -177,6 +179,7 @@ async def snapshot_segment(
                  json.dumps({"camera_id": camera_id, "source_time": source_time})),
             )
             audit_reference = f"audit-{cursor.lastrowid}"
+            viewing_audit.record_events(db, int(user["id"]), [camera_id], "snapshot", audit_reference)
         return Response(image, media_type="image/jpeg", headers={
             "Cache-Control": "no-store", "X-Source-Time": source_time, "X-Audit-Reference": audit_reference,
         })

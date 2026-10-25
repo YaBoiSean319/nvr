@@ -167,7 +167,8 @@ class GapReasonTests(CoverageCase):
 
     def test_coverage_responses_keep_their_fields_and_add_the_reason_code(self):
         self.sync()
-        start, end = NOW - timedelta(minutes=5), NOW + timedelta(minutes=5)
+        now = datetime.now(timezone.utc)  # Not NOW: a long run starts this test well after the module was imported.
+        start, end = now - timedelta(minutes=5), now + timedelta(minutes=5)
         timeline = self.client.post("/api/playback/timeline", json={"camera_ids": [self.camera_id], "start": start.isoformat(), "end": end.isoformat()}).json()
         camera = timeline["cameras"][0]
         self.assertEqual(set(camera["gaps"][0]), {"starts_at", "ends_at", "state", "reason", "reason_code"})
