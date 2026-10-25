@@ -19,8 +19,7 @@ class TamperSettings(BaseModel):
 
 
 def _camera(db, camera_id: str) -> None:
-    row = db.execute("SELECT archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
-    if row is None:
+    if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
         raise HTTPException(status_code=404, detail="Camera not found")
 
 

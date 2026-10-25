@@ -20,7 +20,7 @@ from app.store import connect
 from tests.test_access_grants import GrantCase
 
 FFMPEG = shutil.which("ffmpeg")
-START = datetime.now(timezone.utc).replace(microsecond=0)  # A rule only fires for moments after it was saved, so the samples are dated from now.
+START = datetime(2026, 3, 1, 8, 0, 0, tzinfo=timezone.utc)
 STEP = timedelta(seconds=15)
 SCENE: Path
 FRAMES: dict[str, list[bytes]] = {}
@@ -58,7 +58,7 @@ class TamperCase(GrantCase):
     def setUp(self):
         super().setUp()
         self.camera = self.d1
-        self.at = START
+        self.at = datetime.now(timezone.utc)  # Samples are dated from now: a rule only fires for moments after it was saved.
 
     def enable(self, camera: str | None = None, **settings) -> dict:
         body = {"enabled": True, "sensitivity": 50, "sustain_seconds": 60, **settings}
@@ -336,15 +336,25 @@ class RuleTests(TamperCase):
         self.trip("shifted")
         self.assertEqual([alarm["label"] for alarm in self.alarms()], ["moved"])
 
-    def test_scope_group_and_other_cameras(self):
-        group = self.admin.get("/api/camera-groups").json()
+    def test_a_rule_watching_another_camera_raises_no_alarm_though_the_incident_stands(self):
         self.rule(camera_ids=[self.d2])
         self.enable()
         self.learn()
         self.trip()
-        self.assertEqual(self.alarms(), [])  # The rule watches another camera.
-        self.assertEqual(len(self.incidents(active=True)), 1)  # The incident still exists: rules only add an alarm.
-        self.assertIsNotNone(group)
+        self.assertEqual(self.alarms(), [])
+        self.assertEqual(len(self.incidents(active=True)), 1)  # Rules only add an alarm to the incident.
+
+    def test_a_rule_can_watch_a_group(self):
+        self.rule(camera_ids=[], group_ids=[self.dock])
+        self.enable()
+        self.learn()
+        self.trip()
+        self.assertEqual([alarm["camera_id"] for alarm in self.alarms()], [self.camera])
+        self.enable(self.camera, enabled=False)  # The sampler gives every watched camera the same frames in these tests.
+        self.enable(self.y1)  # In the other group.
+        self.feed(FRAMES["normal"][:tamper.LEARN_SAMPLES], self.y1)
+        self.feed(FRAMES["black"][:6], self.y1)
+        self.assertEqual([alarm["camera_id"] for alarm in self.alarms()], [self.camera])
 
     def test_a_cooldown_holds_back_the_next_alarm_on_the_camera(self):
         self.rule(cooldown_seconds=3600)
@@ -396,7 +406,8 @@ class ApiTests(TamperCase):
     def test_a_camera_someone_cannot_see_does_not_exist_for_them(self):
         hidden = self.limited.get(f"/api/cameras/{self.y1}/tamper")
         missing = self.limited.get(f"/api/cameras/{self.y1[:-1]}x/tamper")
-        self.assertEqual((hidden.status_code, hidden.json()), (404, missing.json() and hidden.json()))
+        self.assertEqual((hidden.status_code, hidden.json()), (missing.status_code, missing.json()))
+        self.assertEqual(hidden.status_code, 404)
         self.assertEqual(self.admin.get("/api/cameras/nope/tamper").status_code, 404)
         self.assertEqual(self.admin.put("/api/cameras/nope/tamper", json={"enabled": True, "sensitivity": 50, "sustain_seconds": 60}).status_code, 404)
 
@@ -410,11 +421,7 @@ class ApiTests(TamperCase):
         self.assertIsNotNone(body["reference_at"])
         self.assertGreater(body["last_metrics"]["layout_match"], 0.9)
 
-    def test_webhook_event_types_and_the_incident_feed_know_tamper(self):
-        types = self.admin.get("/api/webhooks/event-types").json()["event_types"] if self.admin.get("/api/webhooks/event-types").status_code == 200 else None
-        from app.webhooks import EVENT_TYPES
-        self.assertTrue({"tamper.detected", "tamper.recovered"} <= EVENT_TYPES)
-        self.assertTrue(types is None or {"tamper.detected", "tamper.recovered"} <= set(types))
+    def test_the_incident_feed_lists_a_detection(self):
         self.enable()
         self.learn()
         self.feed(FRAMES["black"][:6])
@@ -475,7 +482,6 @@ class RecordingContinuityTests(TamperCase):
             rows.append(f"{name},0,10")
         (root / "index.csv").write_text("\n".join(rows))
         self.enable()
-        entered = asyncio.Event
 
         async def stuck(_camera: str) -> bytes:
             await asyncio.sleep(3600)
@@ -491,7 +497,6 @@ class RecordingContinuityTests(TamperCase):
             await sampler.stop()
             return indexed
         self.assertEqual(asyncio.run(scenario()), 5)
-        self.assertIsNotNone(entered)
 
     def test_one_camera_failing_does_not_stop_the_others_or_the_loop(self):
         self.enable(self.d1)
@@ -558,6 +563,262 @@ class GrabTests(unittest.TestCase):
             began = time.monotonic()
             self.assertIsNone(asyncio.run(tamper.grab_frame("rtsp://192.0.2.1:554/never")))
             self.assertLess(time.monotonic() - began, 5)
+
+
+class RobustnessTests(TamperCase):
+    def test_saving_settings_during_a_detection_does_not_strand_its_incident(self):
+        self.enable()
+        self.learn()
+        self.feed(FRAMES["black"][:6])
+        self.assertEqual(len(self.incidents(active=True)), 1)
+        self.enable(sensitivity=70)  # Only a threshold changed.
+        self.assertEqual(self.incidents(active=True), [])
+        (incident,) = self.incidents()
+        self.assertEqual(incident["state"], "recovered")
+        self.feed(FRAMES["normal"][5:9])
+        self.assertEqual(self.incidents(active=True), [])  # And nothing is left open when the view returns.
+        self.feed(FRAMES["black"][:6])  # A fresh detection raises a fresh (recurred) incident, once.
+        self.assertEqual(len(self.incidents(active=True)), 1)
+
+    def test_switching_it_back_on_learns_the_view_afresh(self):
+        self.enable()
+        self.learn()
+        self.enable(enabled=False)
+        self.assertEqual(self.enable()["state"], "learning")  # Not the reference from before it was off.
+        self.assertEqual(self.feed(FRAMES["shifted"][:tamper.LEARN_SAMPLES + 3]).count("ok"), 4)
+        self.assertEqual(self.incidents(), [])
+
+    def test_time_nobody_was_watching_does_not_count_towards_a_change_lasting(self):
+        self.enable()
+        self.learn()
+        self.feed(FRAMES["black"][:2])  # A change begins...
+        self.at += timedelta(hours=1)  # ...the recorder is down for an hour...
+        self.assertEqual(self.feed(FRAMES["black"][:1])[-1], "ok")  # ...and it has to last a whole minute from here.
+        self.assertEqual(self.incidents(), [])
+        self.assertEqual(self.feed(FRAMES["black"][:5])[-1], "covered")
+
+    def test_a_frame_grabbed_before_the_reference_was_forgotten_is_dropped(self):
+        self.enable()
+        self.learn()
+        taken = datetime.now(timezone.utc) - timedelta(seconds=30)
+        self.admin.post(f"/api/cameras/{self.camera}/tamper/relearn")
+        with connect() as db:
+            tamper.process_sample(db, self.camera, FRAMES["shifted"][0], self.at, taken)
+            row = db.execute("SELECT reference_samples,state FROM tamper_settings").fetchone()
+        self.assertEqual((row["reference_samples"], row["state"]), (0, "learning"))  # The old view did not leak into the new reference.
+        with connect() as db:
+            tamper.process_sample(db, self.camera, FRAMES["shifted"][0], self.at, datetime.now(timezone.utc) + timedelta(seconds=1))
+            self.assertEqual(db.execute("SELECT reference_samples FROM tamper_settings").fetchone()[0], 1)
+
+    def test_a_frame_that_arrives_after_detection_was_switched_off_is_dropped(self):
+        self.enable()
+        self.learn()
+        self.enable(enabled=False)
+        with connect() as db:
+            before = dict(db.execute("SELECT * FROM tamper_settings").fetchone())
+            tamper.process_sample(db, self.camera, FRAMES["black"][0], self.at)
+            self.assertEqual(dict(db.execute("SELECT * FROM tamper_settings").fetchone()), before)
+
+    def test_a_rule_that_cannot_run_does_not_stop_the_detection_being_recorded(self):
+        self.admin.post("/api/rules", json={"name": "Tamper", "camera_ids": [self.camera], "condition": {"type": "tamper"}})
+        self.enable()
+        self.learn()
+        with mock.patch("app.rules.create_alarm", side_effect=RuntimeError("alarm queue broke")), self.assertLogs("nvr.tamper", "ERROR"):
+            states = self.feed(FRAMES["black"][:6])
+        self.assertEqual(states[-1], "covered")
+        self.assertEqual(len(self.incidents(active=True)), 1)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM alarms").fetchone()[0], 0)
+
+    def test_the_view_is_read_only(self):
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tamper_settings").fetchone()[0], 0)
+        self.assertEqual(self.admin.get(f"/api/cameras/{self.camera}/tamper").status_code, 200)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tamper_settings").fetchone()[0], 0)
+
+    def test_recovery_works_for_every_kind(self):
+        for name, kind in (("shifted", "moved"), ("blurred", "defocused")):
+            with self.subTest(kind):
+                self.at = datetime.now(timezone.utc)
+                with connect() as db:
+                    db.execute("DELETE FROM tamper_settings")
+                    db.execute("DELETE FROM incidents")
+                self.enable()
+                self.learn()
+                self.assertEqual(self.feed(FRAMES[name][:6])[-1], kind)
+                self.assertEqual(self.feed(FRAMES["normal"][5:8])[-1], "ok")
+                self.assertEqual(self.incidents(active=True), [])
+
+    def test_a_stored_sensitivity_changes_what_a_camera_reports(self):
+        self.enable(self.d1, sensitivity=90)
+        self.enable(self.d2, sensitivity=10)
+        for camera in (self.d1, self.d2):
+            self.assertEqual(self.feed(FRAMES["normal"][:tamper.LEARN_SAMPLES], camera)[-1], "ok")
+        mild = [bytes(min(255, int(value * 0.35)) for value in frame) for frame in FRAMES["normal"][5:12]]  # Dimmer by 65%.
+        self.assertEqual(self.feed(mild, self.d1)[-1], "covered")
+        self.assertEqual(self.feed(mild, self.d2)[-1], "ok")
+
+    def test_cameras_with_recording_off_are_still_watched_and_disabled_ones_are_not(self):
+        self.enable(self.d1)
+        self.enable(self.d2)
+        with connect() as db:
+            db.execute("UPDATE cameras SET recording_enabled=0 WHERE id=?", (self.d1,))
+            db.execute("UPDATE cameras SET enabled=0 WHERE id=?", (self.d2,))
+            self.assertEqual(tamper._eligible(db), [self.d1])  # A covered camera matters most when it is not recording.
+
+
+class ProductionPathTests(TamperCase):
+    """No stub: the camera's stored address, the lookup, ffmpeg and the sampler as the recorder runs them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = Path(tempfile.mkdtemp(prefix="tamper-streams-"))
+        for name, filters in {"normal": ["noise=alls=10:allf=t"], "black": ["lutyuv=y=val*0.02:u=128:v=128"], "moved": ["crop=iw*0.7:ih*0.7:iw*0.25:ih*0.15", "scale=640:360"],
+                              "blurred": ["boxblur=30:3"]}.items():
+            subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-i", str(SCENE), "-t", "1", "-r", "5", "-vf", ",".join(filters + ["format=yuv420p"]),
+                            "-c:v", "libx264", str(cls.directory / f"{name}.mp4")], check=True)
+
+    def setUp(self):
+        super().setUp()
+        patches = [mock.patch("app.recording.safe_stream_url", lambda url: url), mock.patch.object(tamper, "STREAM_PROTOCOLS", "concat,pipe,file")]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def point_at(self, name: str, camera: str | None = None) -> None:
+        from app.credentials import encrypt
+        with connect() as db:
+            db.execute("UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL WHERE id=?", (encrypt(f"file:{self.directory / (name + '.mp4')}"), camera or self.camera))
+
+    def sample(self, count: int) -> list[str]:
+        states = []
+        for _ in range(count):
+            asyncio.run(tamper.TamperManager().sample_all(self.at))
+            self.at += STEP
+            with connect() as db:
+                states.append(db.execute("SELECT state FROM tamper_settings WHERE camera_id=?", (self.camera,)).fetchone()["state"])
+        return states
+
+    def test_footage_that_goes_black_moves_or_blurs_raises_the_matching_incident_in_the_configured_time(self):
+        for name, kind in (("black", "covered"), ("moved", "moved"), ("blurred", "defocused")):
+            with self.subTest(kind):
+                self.at = datetime.now(timezone.utc)
+                with connect() as db:
+                    db.execute("DELETE FROM tamper_settings")
+                    db.execute("DELETE FROM incidents")
+                self.point_at("normal")
+                self.enable(sustain_seconds=60)
+                self.assertEqual(self.sample(tamper.LEARN_SAMPLES + 2)[-1], "ok")
+                self.point_at(name)
+                states = self.sample(6)
+                self.assertEqual(states[:4], ["ok"] * 4)
+                self.assertEqual(states[4], kind)  # Sixty seconds after the first changed sample.
+                (incident,) = self.incidents(active=True)
+                self.assertEqual(incident["fault_type"], f"tamper_{kind}")
+
+    def test_a_camera_that_is_off_archived_or_unreadable_gives_no_frame(self):
+        async def grab(camera: str):
+            return await tamper.grab_camera_frame(camera)
+        self.point_at("normal")
+        self.assertEqual(len(asyncio.run(grab(self.camera))), tamper.FRAME_BYTES)
+        with connect() as db:
+            db.execute("UPDATE cameras SET enabled=0 WHERE id=?", (self.camera,))
+        self.assertIsNone(asyncio.run(grab(self.camera)))
+        with connect() as db:
+            db.execute("UPDATE cameras SET enabled=1,archived_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), self.camera))
+        self.assertIsNone(asyncio.run(grab(self.camera)))
+        with connect() as db:
+            db.execute("UPDATE cameras SET archived_at=NULL WHERE id=?", (self.camera,))
+        with mock.patch("app.recording.safe_stream_url", side_effect=ValueError("not a camera address")):
+            self.assertIsNone(asyncio.run(grab(self.camera)))
+        self.assertIsNone(asyncio.run(grab("no-such-camera")))
+
+    def test_the_low_resolution_stream_is_used_when_there_is_one(self):
+        from app.credentials import encrypt
+        self.point_at("black")
+        with connect() as db:
+            db.execute("UPDATE cameras SET live_substream_url_ciphertext=? WHERE id=?", (encrypt(f"file:{self.directory / 'normal.mp4'}"), self.camera))
+        frame = asyncio.run(tamper.grab_camera_frame(self.camera))
+        self.assertGreater(tamper.features(frame).mean, 50)  # The normal one, not the black main stream.
+
+
+class WiringTests(TamperCase):
+    def test_the_recorder_samples_by_default(self):
+        from app.recording import RecordingManager
+        from app.workers.recorder import RecorderService
+        calls = []
+
+        async def counting(self, now=None):
+            calls.append(1)
+            return 0
+
+        async def scenario():
+            service = RecorderService()
+            self.assertIsInstance(service.manager.tamper, tamper.TamperManager)
+            with mock.patch.object(tamper.TamperManager, "sample_all", counting), mock.patch.object(tamper, "SAMPLE_SECONDS", 0.02):
+                service.manager.tamper.interval = 0.02
+                await service.start()
+                await asyncio.sleep(0.3)
+                running = service.manager.tamper.task is not None and not service.manager.tamper.task.done()
+                await service.stop()
+            self.assertTrue(running)
+            self.assertIsNone(service.manager.tamper.task)
+        asyncio.run(scenario())
+        self.assertGreater(len(calls), 2)
+        self.assertIsNotNone(RecordingManager)
+
+
+class NotificationTests(TamperCase):
+    def endpoint(self) -> str:
+        from app import webhooks
+        endpoint, _ = webhooks.create_endpoint("Tamper hook", "https://93.184.216.34/in", ["tamper.detected", "tamper.recovered"], False, 1)
+        return endpoint["id"]
+
+    def deliveries(self) -> list[dict]:
+        with connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM webhook_deliveries ORDER BY created_at,id")]
+
+    def test_webhook_event_types_include_tamper(self):
+        from app.webhooks import EVENT_TYPES
+        self.assertTrue({"tamper.detected", "tamper.recovered"} <= EVENT_TYPES)
+        listed = self.admin.get("/api/webhooks/event-types")
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue({"tamper.detected", "tamper.recovered"} <= set(listed.json()["event_types"]))
+
+    def test_a_detection_and_its_recovery_are_sent_to_subscribed_webhooks(self):
+        self.endpoint()
+        self.enable()
+        self.learn()
+        self.feed(FRAMES["black"][:6])
+        self.assertEqual([delivery["event_type"] for delivery in self.deliveries()], ["tamper.detected"])
+        self.feed(FRAMES["normal"][5:9])
+        deliveries = self.deliveries()
+        self.assertEqual([delivery["event_type"] for delivery in deliveries], ["tamper.detected", "tamper.recovered"])
+        with connect() as db:
+            payload = json.loads(db.execute("SELECT payload_json FROM webhook_deliveries WHERE event_type='tamper.detected'").fetchone()[0])
+        self.assertEqual((payload["fault_type"], payload["camera_id"]), ("tamper_covered", self.camera))
+        self.assertEqual(payload["details"]["kind"], "covered")
+        self.assertIn("Camera covered", payload["summary"])
+
+    def test_alarm_wording_names_what_happened_to_the_camera(self):
+        from app import alarms
+        self.assertEqual([alarms.label_text(label) for label in ("person", "vehicle", "covered", "moved", "defocused", None)],
+                         ["Person", "Vehicle", "Camera covered", "Camera moved", "Camera defocused", "Object"])
+
+    def test_a_tamper_alarm_reads_the_same_in_a_push_and_in_a_rule_action_message(self):
+        self.admin.post("/api/rules", json={"name": "Tamper", "camera_ids": [self.camera], "condition": {"type": "tamper"}})
+        self.enable()
+        self.learn()
+        self.feed(FRAMES["black"][:6])
+        from app import rule_actions
+        message = rule_actions._message({"occurred_at": "2026-03-01T08:00:00+00:00", "rule_name": "Tamper", "label": "covered", "camera_name": "Dock 1"})
+        self.assertEqual(message, "Tamper: Camera covered on Dock 1 at 08:00:00 UTC")
+        with connect() as db:
+            alarm = db.execute("SELECT id FROM alarms").fetchone()
+            self.assertIsNotNone(alarm)
+            from app import push
+            self.assertEqual(push.queue_for_alarm(db, alarm["id"]), 0)  # No device is subscribed; the wording itself is label_text's.
 
 
 class UpgradeTests(unittest.TestCase):

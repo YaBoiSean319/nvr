@@ -14,7 +14,7 @@ NAME = "tamper"
 TRANSACTIONAL = False
 
 _SETTINGS = """
-CREATE TABLE tamper_settings (
+CREATE TABLE IF NOT EXISTS tamper_settings (
     camera_id TEXT PRIMARY KEY REFERENCES cameras(id) ON DELETE CASCADE,
     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
     sensitivity INTEGER NOT NULL DEFAULT 50 CHECK (sensitivity BETWEEN 1 AND 100),
@@ -22,6 +22,8 @@ CREATE TABLE tamper_settings (
     reference_json TEXT,
     reference_samples INTEGER NOT NULL DEFAULT 0,
     reference_at TEXT,
+    -- When the reference was last forgotten (re-learn, or switching detection on), so a frame grabbed before is not blended into the new one.
+    reset_at TEXT,
     state TEXT NOT NULL DEFAULT 'learning' CHECK (state IN ('learning','ok','covered','moved','defocused')),
     state_since TEXT,
     candidate TEXT,
@@ -36,8 +38,11 @@ CREATE TABLE tamper_settings (
 
 def upgrade(db: sqlite3.Connection) -> None:
     db.execute("PRAGMA foreign_keys = OFF")
-    db.execute("BEGIN IMMEDIATE")
     try:
+        if db.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
+            # Dropping rules with this on would delete its actions and detach its events: refuse rather than do that.
+            raise RuntimeError("Foreign keys could not be switched off for the rules rebuild")
+        db.execute("BEGIN IMMEDIATE")
         db.execute(_SETTINGS)
         sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='rules'").fetchone()[0]
         if "'tamper'" not in sql:
@@ -51,15 +56,16 @@ def upgrade(db: sqlite3.Connection) -> None:
             db.execute("ALTER TABLE rules_new RENAME TO rules")
             for index in indexes:
                 db.execute(index)
-        broken = db.execute("PRAGMA foreign_key_check").fetchall()
+        broken = [row for row in db.execute("PRAGMA foreign_key_check") if row[2] == "rules"]
         if broken:
-            raise RuntimeError(f"Rebuilding rules left {len(broken)} broken references")
+            raise RuntimeError(f"Rebuilding rules left {len(broken)} broken references to it")
+        db.execute("COMMIT")
     except BaseException:
-        db.execute("ROLLBACK")
-        db.execute("PRAGMA foreign_keys = ON")
+        if db.in_transaction:
+            db.execute("ROLLBACK")
         raise
-    db.execute("COMMIT")
-    db.execute("PRAGMA foreign_keys = ON")
+    finally:
+        db.execute("PRAGMA foreign_keys = ON")
 
 
 def verify(db: sqlite3.Connection) -> None:

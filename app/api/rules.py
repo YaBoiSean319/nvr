@@ -147,7 +147,7 @@ class RuleDefinition(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def has_scope(self) -> "RuleDefinition":
+    def valid_definition(self) -> "RuleDefinition":
         if not self.camera_ids and not self.group_ids:
             raise ValueError("Choose at least one camera or group")
         if self.condition.type == "tamper":

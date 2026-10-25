@@ -12,7 +12,8 @@ change of light alone cannot fake:
 - **defocused**: the layout still matches but the edges have softened, measured by the average edge strength relative
   to the contrast, which is also unchanged by brightening or darkening.
 
-A change must last ``sustain_seconds`` before it counts, and then raises a per-camera incident (``tamper_covered``,
+A change must last ``sustain_seconds`` before it counts (a gap in the sampling, such as the recorder being down, ends the
+count: time not watched is not time tampered), and then raises a per-camera incident (``tamper_covered``,
 ``tamper_moved`` or ``tamper_defocused``) and fires any rule with the ``tamper`` condition. It recovers when the view
 returns. After an intentional change, *re-learn the reference* starts the learning again and clears the incident.
 Sensitivity (1 to 100, more is more sensitive) moves all the thresholds together.
@@ -41,8 +42,10 @@ FRAME_BYTES = FRAME_WIDTH * FRAME_HEIGHT
 LEARN_SAMPLES = 5
 ADOPT_RATE = 0.08  # How much of each unchanged sample the reference takes on.
 CLEAR_SAMPLES = 2  # Consecutive unchanged samples that end a detection.
+MAX_SAMPLE_GAP = timedelta(seconds=max(4 * float(os.environ.get("NVR_TAMPER_SAMPLE_SECONDS", "15")), 90))  # Longer without a sample and a pending change starts over.
 SAMPLE_SECONDS = float(os.environ.get("NVR_TAMPER_SAMPLE_SECONDS", "15"))
 GRAB_TIMEOUT_SECONDS = 20
+STREAM_PROTOCOLS: str | None = None  # Camera protocols only; the tests widen it to read generated files.
 CONCURRENT_GRABS = 2
 KINDS = ("covered", "moved", "defocused")
 SUMMARY = {"covered": "Camera covered", "moved": "Camera moved", "defocused": "Camera defocused"}
@@ -161,6 +164,10 @@ def settings(db: sqlite3.Connection, camera_id: str) -> sqlite3.Row:
     return db.execute("SELECT * FROM tamper_settings WHERE camera_id=?", (camera_id,)).fetchone()
 
 
+DEFAULTS = {"enabled": 0, "sensitivity": 50, "sustain_seconds": 60, "state": "learning", "state_since": None, "reference_samples": 0, "reference_at": None,
+            "last_sample_at": None, "last_metrics_json": None}
+
+
 def _camera_name(db: sqlite3.Connection, camera_id: str) -> str:
     row = db.execute("SELECT name FROM cameras WHERE id=?", (camera_id,)).fetchone()
     return row["name"] if row else camera_id
@@ -176,15 +183,16 @@ def _recover_all(db: sqlite3.Connection, camera_id: str, only: str | None = None
         _incident(db, camera_id, kind, False, {})
 
 
-def process_sample(db: sqlite3.Connection, camera_id: str, frame: bytes, now: datetime | None = None) -> str:
+def process_sample(db: sqlite3.Connection, camera_id: str, frame: bytes, now: datetime | None = None, taken_at: datetime | None = None) -> str:
     """Judge one sample, move the camera's state on, and raise or recover incidents. Returns the state afterwards.
 
-    Runs in its own transaction so a settings change or a re-learn cannot interleave with it."""
+    Runs in its own transaction so a settings change or a re-learn cannot interleave with it. A frame ``taken_at`` before the
+    reference was last forgotten, or for a camera that has since been switched off, is dropped: it shows a view that no longer counts."""
     now = now or datetime.now(timezone.utc)
     sample = features(frame)
     db.execute("BEGIN IMMEDIATE")
     try:
-        state = _advance(db, camera_id, sample, now)
+        state = _advance(db, camera_id, sample, now, taken_at)
     except BaseException:
         db.execute("ROLLBACK")
         raise
@@ -192,10 +200,15 @@ def process_sample(db: sqlite3.Connection, camera_id: str, frame: bytes, now: da
     return state
 
 
-def _advance(db: sqlite3.Connection, camera_id: str, sample: Features, now: datetime) -> str:
+def _advance(db: sqlite3.Connection, camera_id: str, sample: Features, now: datetime, taken_at: datetime | None = None) -> str:
     row = settings(db, camera_id)
-    changes: dict[str, Any] = {"last_sample_at": _stamp(now)}
     state = row["state"]
+    if not row["enabled"] or (taken_at is not None and row["reset_at"] and taken_at < _parse(row["reset_at"])):
+        return state
+    changes: dict[str, Any] = {"last_sample_at": _stamp(now)}
+    if state not in KINDS and row["candidate_since"] and row["last_sample_at"] and now - _parse(row["last_sample_at"]) > MAX_SAMPLE_GAP:
+        changes.update(candidate=None, candidate_since=None)  # Time nobody was watching does not count towards a change lasting.
+        row = {**dict(row), "candidate": None, "candidate_since": None}
     reference = Features.from_json(json.loads(row["reference_json"])) if row["reference_json"] else None
 
     if reference is None or row["reference_samples"] < LEARN_SAMPLES:
@@ -236,11 +249,23 @@ def _advance(db: sqlite3.Connection, camera_id: str, sample: Features, now: date
         changes.update(state=kind, state_since=_stamp(now), candidate=None, candidate_since=None, clear_samples=0)
         state = kind
         _incident(db, camera_id, kind, True, metrics)
-        from .rules import fire_tamper
-        fire_tamper(db, camera_id, kind, now)
+        _fire_rules(db, camera_id, kind, now)
     elif row["candidate"] != kind:
         changes.update(candidate=kind, candidate_since=_stamp(now))
     return _save(db, camera_id, changes, state)
+
+
+def _fire_rules(db: sqlite3.Connection, camera_id: str, kind: str, at: datetime) -> None:
+    """A rule that cannot fire (or an alarm that cannot be queued) must not stop the detection from being recorded."""
+    from .rules import fire_tamper
+    db.execute("SAVEPOINT tamper_rules")
+    try:
+        fire_tamper(db, camera_id, kind, at)
+    except Exception:  # noqa: BLE001 - the incident stands; the failure is logged
+        db.execute("ROLLBACK TO tamper_rules")
+        logger.exception("The rules for a %s camera %s could not be run", kind, camera_id)
+    finally:
+        db.execute("RELEASE tamper_rules")
 
 
 def _save(db: sqlite3.Connection, camera_id: str, changes: dict[str, Any], state: str) -> str:
@@ -255,8 +280,9 @@ def relearn(db: sqlite3.Connection, camera_id: str) -> None:
     try:
         settings(db, camera_id)
         _recover_all(db, camera_id)
-        db.execute("UPDATE tamper_settings SET reference_json=NULL,reference_samples=0,reference_at=NULL,state='learning',state_since=NULL,candidate=NULL,"
-                   "candidate_since=NULL,clear_samples=0,last_metrics_json=NULL,updated_at=? WHERE camera_id=?", (_stamp(datetime.now(timezone.utc)), camera_id))
+        now = _stamp(datetime.now(timezone.utc))
+        db.execute("UPDATE tamper_settings SET reference_json=NULL,reference_samples=0,reference_at=NULL,reset_at=?,state='learning',state_since=NULL,candidate=NULL,"
+                   "candidate_since=NULL,clear_samples=0,last_metrics_json=NULL,updated_at=? WHERE camera_id=?", (now, now, camera_id))
     except BaseException:
         db.execute("ROLLBACK")
         raise
@@ -267,11 +293,14 @@ def configure(db: sqlite3.Connection, camera_id: str, *, enabled: bool, sensitiv
     db.execute("BEGIN IMMEDIATE")
     try:
         row = settings(db, camera_id)
-        if not enabled:
-            _recover_all(db, camera_id)
-        changes = {"enabled": int(enabled), "sensitivity": sensitivity, "sustain_seconds": sustain_seconds, "updated_at": _stamp(datetime.now(timezone.utc))}
+        now = _stamp(datetime.now(timezone.utc))
+        changes: dict[str, Any] = {"enabled": int(enabled), "sensitivity": sensitivity, "sustain_seconds": sustain_seconds, "updated_at": now}
         if not enabled or row["state"] in KINDS:
+            _recover_all(db, camera_id)  # A detection the state machine is about to forget would otherwise stay open for ever.
             changes.update(state="ok" if row["reference_json"] and row["reference_samples"] >= LEARN_SAMPLES else "learning", candidate=None, candidate_since=None, clear_samples=0)
+        if enabled and not row["enabled"]:
+            # Switched on again after a while off: the scene may have changed since the reference was learned.
+            changes.update(reference_json=None, reference_samples=0, reference_at=None, reset_at=now, state="learning", state_since=None, last_metrics_json=None)
         db.execute(f"UPDATE tamper_settings SET {','.join(f'{column}=?' for column in changes)} WHERE camera_id=?", (*changes.values(), camera_id))
     except BaseException:
         db.execute("ROLLBACK")
@@ -280,7 +309,7 @@ def configure(db: sqlite3.Connection, camera_id: str, *, enabled: bool, sensitiv
 
 
 def view(db: sqlite3.Connection, camera_id: str) -> dict[str, Any]:
-    row = settings(db, camera_id)
+    row = db.execute("SELECT * FROM tamper_settings WHERE camera_id=?", (camera_id,)).fetchone() or DEFAULTS
     return {"enabled": bool(row["enabled"]), "sensitivity": row["sensitivity"], "sustain_seconds": row["sustain_seconds"], "state": row["state"] if row["enabled"] else "off",
             "state_since": row["state_since"], "learning_progress": min(row["reference_samples"], LEARN_SAMPLES), "learning_samples": LEARN_SAMPLES,
             "reference_at": row["reference_at"], "last_sample_at": row["last_sample_at"],
@@ -318,15 +347,17 @@ async def grab_camera_frame(camera_id: str) -> bytes | None:
     """A frame from the camera's low-resolution stream, or its main one when it has none."""
     from .credentials import decrypt
     from .recording import safe_stream_url
-    with connect() as db:
-        row = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext FROM cameras WHERE id=? AND enabled=1 AND archived_at IS NULL", (camera_id,)).fetchone()
-    if row is None:
-        return None
-    try:
-        source = safe_stream_url(decrypt(row["live_substream_url_ciphertext"] or row["stream_url_ciphertext"]))
-    except (RuntimeError, ValueError):
-        return None
-    return await grab_frame(source)
+    def lookup() -> str | None:
+        with connect() as db:
+            row = db.execute("SELECT stream_url_ciphertext,live_substream_url_ciphertext FROM cameras WHERE id=? AND enabled=1 AND archived_at IS NULL", (camera_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            return safe_stream_url(decrypt(row["live_substream_url_ciphertext"] or row["stream_url_ciphertext"]))
+        except (RuntimeError, ValueError):
+            return None
+    source = await asyncio.to_thread(lookup)  # Off the loop: a busy database must not stall the recorder.
+    return await grab_frame(source, STREAM_PROTOCOLS) if source else None
 
 
 def _eligible(db: sqlite3.Connection) -> list[str]:
@@ -390,10 +421,11 @@ class TamperManager:
         async def one(camera_id: str) -> bool:
             async with slots:
                 try:
+                    taken_at = datetime.now(timezone.utc)
                     frame = await self.grabber(camera_id)
                     if frame is None:
                         return False  # No picture is the recorder's fault to report, not a tamper.
-                    await asyncio.to_thread(self._judge, camera_id, frame, now)
+                    await asyncio.to_thread(self._judge, camera_id, frame, now, taken_at)
                     return True
                 except asyncio.CancelledError:
                     raise
@@ -403,6 +435,6 @@ class TamperManager:
         return sum(await asyncio.gather(*(one(camera_id) for camera_id in cameras)))
 
     @staticmethod
-    def _judge(camera_id: str, frame: bytes, now: datetime | None) -> None:
+    def _judge(camera_id: str, frame: bytes, now: datetime | None, taken_at: datetime | None = None) -> None:
         with connect() as db:
-            process_sample(db, camera_id, frame, now)
+            process_sample(db, camera_id, frame, now, taken_at)

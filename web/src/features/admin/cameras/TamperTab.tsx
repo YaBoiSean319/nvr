@@ -48,8 +48,10 @@ export function TamperTab({ camera, admin }: { camera: Camera; admin: boolean })
   if (config.isPending) return <p className="muted">Loading tamper detection…</p>;
   if (config.error || !tab.draft) return <p className="notice" data-tone="bad" role="alert">{failureText(config.error, "Tamper detection could not be loaded.")}</p>;
   const draft = tab.draft;
-  const data = config.data!;
+  const data = config.data;
   const readOnly = !admin;
+  const invalid = !(draft.sensitivity >= 1 && draft.sensitivity <= 100) ? "Sensitivity is a number from 1 to 100."
+    : !(draft.sustain_seconds >= 10 && draft.sustain_seconds <= 3600) ? "A change must last between 10 and 3600 seconds." : null;
   const tampered = data.state === "covered" || data.state === "moved" || data.state === "defocused";
   return (
     <form className="tab-form" aria-label="Tamper detection" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
@@ -57,7 +59,7 @@ export function TamperTab({ camera, admin }: { camera: Camera; admin: boolean })
         The recorder looks at a small frame from this camera every {data.sample_seconds} seconds and compares it with a view it has learned: a covered lens, a camera turned or knocked,
         or a lens out of focus raises an incident once it has lasted long enough. Gradual changes of light, such as dusk, are followed and raise nothing.
       </p>
-      <p className="notice" role="note" data-tone={tampered ? "bad" : data.state === "ok" ? "good" : undefined}>
+      <p className="notice" role="note" aria-live="polite" data-tone={tampered ? "bad" : data.state === "ok" ? "good" : undefined}>
         {STATE_TEXT[data.state]}
         {data.state === "learning" ? ` · ${data.learning_progress} of ${data.learning_samples} frames` : ""}
         {tampered && data.state_since ? ` · since ${formatRelative(data.state_since)}` : ""}
@@ -91,6 +93,7 @@ export function TamperTab({ camera, admin }: { camera: Camera; admin: boolean })
           </div>
         </section>
       ) : null}
+      {admin && invalid && draft.enabled ? <p className="notice" data-tone="warn" role="alert">{invalid}</p> : null}
       {admin ? <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} /> : null}
     </form>
   );

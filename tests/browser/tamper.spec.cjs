@@ -88,5 +88,5 @@ test("a rule on tampering raises an alarm the inbox names, and test mode replays
   const testing = page.getByRole("region", { name: "Test mode" });
   await testing.getByRole("button", { name: "Test against the last 24 hours" }).click();
   await expect(testing.getByRole("status")).toContainText("The rule would have fired 1 time.");
-  await expect(testing.getByRole("table")).toContainText("Camera covered".replace("Camera covered", "Covered"));
+  await expect(testing.getByRole("table")).toContainText("Covered");
 });

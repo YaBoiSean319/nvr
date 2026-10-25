@@ -14,7 +14,7 @@ A frame is judged on three measurements that a change of light alone cannot fake
 | **Moved** | the camera was turned, knocked or taken down | the picture's layout no longer matches: the correlation of the average brightness of a 32 × 18 grid of blocks, which brightening or darkening the whole scene does not change |
 | **Defocused** | lens out of focus, smeared or fogged | the layout still matches but the edges have softened, measured by edge strength relative to contrast (also unchanged by brightening or darkening) |
 
-A change must last **the configured time** (default 60 seconds, 10 to 3,600) before it counts, so a passing lorry, a flash or a moment of glare raises nothing. Then:
+A change must last **the configured time** (default 60 seconds, 10 to 3,600) before it counts, so a passing lorry, a flash or a moment of glare raises nothing. Time nobody was watching does not count towards it: if no sample was taken for a while (the recorder was down, or the camera gave no picture), a change that had begun starts over. Then:
 
 - an **incident** is raised for the camera, `tamper_covered`, `tamper_moved` or `tamper_defocused`, which shows with the other incidents and sends a `tamper.detected` webhook;
 - any **rule** with the *Camera is covered, moved or defocused* condition fires (see below);
@@ -24,13 +24,15 @@ A change must last **the configured time** (default 60 seconds, 10 to 3,600) bef
 
 A camera with a very flat or very dark view (nothing for the comparison to hold on to) is not judged for the thing it cannot measure: a scene with no contrast cannot show a lost contrast, and one with no layout cannot show a move.
 
+A camera is watched whether or not it is recording, since a covered camera matters most when it is not; a camera that is disabled or archived is not. Switching detection off ends any open detection and forgets nothing but the state; switching it on again learns the view afresh, because the scene may have changed meanwhile. Saving other settings while a detection is open ends it too (it is raised again if the camera is still tampered with). When one kind gives way to another, the first incident recovers and the second is raised once it has lasted the configured time.
+
 ## After a deliberate change
 
-If you move the camera or rearrange what it watches on purpose, choose **Re-learn reference**. The view is learned again from the next five frames and any detection ends at once; nothing is judged while it learns.
+If you move the camera or rearrange what it watches on purpose, choose **Re-learn reference**. The view is learned again from the next five frames and any detection ends at once; nothing is judged while it learns, and a frame that was already being fetched when you asked is thrown away rather than mixed into the new view.
 
 ## Rules
 
-A rule can use the condition *Camera is covered, moved or defocused*, with the kinds it should act on (all three by default). It needs no object classes. It fires once when a detection is confirmed, honours the rule's cameras and groups, schedule and cooldown, raises an alarm labelled with the kind (shown in the alarm inbox, pop-in and push as for any other alarm) and runs the rule's actions. A rule only fires for detections after it was saved. **Test mode** replays the tamper incidents of the last 24 hours.
+A rule can use the condition *Camera is covered, moved or defocused*, with the kinds it should act on (all three by default). It needs no object classes. It fires once when a detection is confirmed, honours the rule's cameras and groups, schedule and cooldown, raises an alarm labelled with the kind ("Camera covered", "Camera moved" or "Camera defocused" in the alarm inbox, the Live banner, push messages and rule-action messages) and runs the rule's actions. If a rule cannot be run, the incident is still recorded and the failure is logged. A rule only fires for detections after it was saved. **Test mode** replays the tamper incidents of the last 24 hours.
 
 ## API
 
