@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.principal import administrator, current_user
+from tests.test_support import principal
 from app.store import connect, initialize
 
 
@@ -27,7 +28,7 @@ class RetentionApiTests(unittest.TestCase):
         with connect() as db:
             db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (self.group,"API group"))
             db.execute("INSERT INTO cameras(id,name,group_id,stream_url_ciphertext) VALUES(?,?,?,X'01')", (self.camera,"API camera",self.group))
-        app.dependency_overrides[current_user] = lambda: None
+        app.dependency_overrides[current_user] = lambda: principal(1, "tester", "administrator")
         app.dependency_overrides[administrator] = lambda: None
         self.context = TestClient(app)
         self.client = self.context.__enter__()

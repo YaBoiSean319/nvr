@@ -382,6 +382,8 @@ def list_cameras(user: CurrentUser) -> dict[str, object]:
         cameras = []
         for row in rows:
             camera = camera_view(row)
+            if row["group_id"] and not user.access.can_see_group(row["group_id"]):
+                camera["group_name"] = None  # Visible through another group; the name of the one that is not is not theirs to see.
             schedule = effective_schedule_view(db, row["id"])
             camera.update(schedule)
             retention_days, retention_source = effective_retention(db, row["id"])

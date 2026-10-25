@@ -4,7 +4,9 @@ A grant gives a user (or everyone holding an Entra role) access to every camera,
 camera group, optionally until an expiry. Administrators need none. Every operator that
 exists at upgrade gets an "all cameras" grant, so nothing changes until an administrator
 narrows it, and a trigger gives each operator created later the same default (unless
-they hold an Entra role that has grants of its own). An operator with no grants sees no cameras.
+they hold an Entra role that has grants of its own). Those automatic grants are marked as
+defaults and yield to any grant given to an Entra role the person holds. An operator with
+no grants sees no cameras.
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ _STATEMENTS = (
         scope_type TEXT NOT NULL CHECK (scope_type IN ('all','group')),
         group_id TEXT REFERENCES camera_groups(id) ON DELETE CASCADE,
         expires_at TEXT,
+        -- Given automatically (every operator at upgrade, each created later), not chosen: it yields to a grant given to an Entra role the person holds.
+        default_grant INTEGER NOT NULL DEFAULT 0,
         created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
         CHECK ((scope_type='all' AND group_id IS NULL) OR (scope_type='group' AND group_id IS NOT NULL))
@@ -30,13 +34,13 @@ _STATEMENTS = (
     """,
     "CREATE INDEX access_grants_subject_idx ON access_grants(subject_type, subject)",
     "CREATE INDEX access_grants_group_idx ON access_grants(group_id)",
-    "INSERT INTO access_grants(subject_type,subject,scope_type) SELECT 'user', CAST(id AS TEXT), 'all' FROM users WHERE role='operator'",
+    "INSERT INTO access_grants(subject_type,subject,scope_type,default_grant) SELECT 'user', CAST(id AS TEXT), 'all', 1 FROM users WHERE role='operator'",
     """
     CREATE TRIGGER access_grants_default_operator AFTER INSERT ON users
     WHEN NEW.role='operator' AND NOT EXISTS (
         SELECT 1 FROM access_grants g WHERE g.subject_type='role' AND g.subject IN (SELECT value FROM json_each(NEW.provider_roles_json)))
     BEGIN
-        INSERT INTO access_grants(subject_type,subject,scope_type) VALUES ('user', CAST(NEW.id AS TEXT), 'all');
+        INSERT INTO access_grants(subject_type,subject,scope_type,default_grant) VALUES ('user', CAST(NEW.id AS TEXT), 'all', 1);
     END
     """,
     # A grant for a user who is deleted goes with them.

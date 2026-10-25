@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import os
 import tempfile
 import unittest
@@ -33,7 +35,7 @@ class LiveViewTests(unittest.TestCase):
             db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(2,'other','unused','operator')")
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')", (self.camera, "Front Door"))
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')", (self.camera_two, "Loading Bay"))
-        self.active_user = {"id": self.user_id, "username": "viewer", "role": "operator"}
+        self.active_user = principal(self.user_id, "viewer", "operator")
         app.dependency_overrides[current_user] = lambda: self.active_user
         self.context = TestClient(app)
         self.client = self.context.__enter__()
@@ -53,11 +55,11 @@ class LiveViewTests(unittest.TestCase):
         saved = self.client.put("/api/live/layouts/Opening%20shift", json={"camera_ids": payload["camera_ids"]})
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertEqual(saved.json(), {"name": "Opening shift", "camera_ids": payload["camera_ids"]})
-        self.active_user = {"id": self.other_user_id, "username": "other", "role": "operator"}
+        self.active_user = principal(self.other_user_id, "other", "operator")
         self.assertEqual(self.client.get("/api/live/layouts").json(), {"layouts": []})
         invalid = self.client.put("/api/live/layouts/Bad", json={"camera_ids": [str(uuid.uuid4())]})
         self.assertEqual(invalid.status_code, 422, invalid.text)
-        self.active_user = {"id": self.user_id, "username": "viewer", "role": "operator"}
+        self.active_user = principal(self.user_id, "viewer", "operator")
         self.assertEqual(self.client.get("/api/live/layouts").json()["layouts"], [{"name": "Opening shift", "camera_ids": payload["camera_ids"]}])
 
     def test_saved_live_grid_accepts_sixteen_cameras_and_rejects_seventeen(self):

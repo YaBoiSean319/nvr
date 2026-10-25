@@ -590,6 +590,171 @@ class LiveSocketTests(GrantCase):
             self.assertEqual(self.limited.get(f"/api/cameras/{self.d1}/live/status").status_code, 200)
 
 
+class EntraAndDefaultsTests(GrantCase):
+    def sign_in_with_entra(self, claims_roles: list[str], subject: str = "object-1") -> dict:
+        from unittest.mock import AsyncMock, patch
+        from tests.test_bootstrap import OIDC_TEST_TENANT
+        from tests.test_support import TEST_OIDC_CLIENT_SECRET, TEST_OIDC_SESSION_SECRET
+        os.environ.update({"NVR_PUBLIC_URL": "https://nvr.example.test", "NVR_OIDC_TENANT_ID": OIDC_TEST_TENANT, "NVR_OIDC_CLIENT_ID": "client-id",
+                           "NVR_OIDC_CLIENT_SECRET": TEST_OIDC_CLIENT_SECRET, "NVR_OIDC_SESSION_SECRET": TEST_OIDC_SESSION_SECRET,
+                           "NVR_OIDC_OPERATOR_ROLES": "NVR.Operator,NVR.Contractor", "NVR_OIDC_ADMIN_ROLES": "NVR.Admin"})
+        for key in ("NVR_PUBLIC_URL", "NVR_OIDC_TENANT_ID", "NVR_OIDC_CLIENT_ID", "NVR_OIDC_CLIENT_SECRET", "NVR_OIDC_SESSION_SECRET", "NVR_OIDC_OPERATOR_ROLES", "NVR_OIDC_ADMIN_ROLES"):
+            self.addCleanup(os.environ.pop, key, None)
+        claims = {"sub": subject, "tid": OIDC_TEST_TENANT, "iss": f"https://login.microsoftonline.com/{OIDC_TEST_TENANT}/v2.0", "preferred_username": f"{subject}@example.test", "roles": claims_roles}
+        fake = type("FakeOIDC", (), {"authorize_access_token": AsyncMock(return_value={"userinfo": claims})})()
+        client = TestClient(self.app, base_url="https://testserver.local")  # The session cookie is Secure under an https public URL.
+        with patch("app.api.identity._oidc_client", return_value=fake):
+            self.assertEqual(client.get("/api/auth/oidc/callback?code=fake&state=fake", follow_redirects=False).status_code, 303)
+        return client
+
+    def entra_user(self, subject: str = "object-1") -> int:
+        with connect() as db:
+            return int(db.execute("SELECT id FROM users WHERE provider_subject=?", (subject,)).fetchone()[0])
+
+    def test_an_entra_operators_roles_are_stored_and_their_role_grants_apply(self):
+        self.grant("NVR.Contractor", [{"scope_type": "group", "group_id": self.yard}], subject_type="role")
+        client = self.sign_in_with_entra(["NVR.Contractor"])
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), {self.y1})  # Their role's grant, not everything.
+        with connect() as db:
+            self.assertEqual(json.loads(db.execute("SELECT provider_roles_json FROM users WHERE id=?", (self.entra_user(),)).fetchone()[0]), ["NVR.Contractor"])
+
+    def test_a_role_grant_given_later_narrows_existing_entra_operators_who_only_have_the_default(self):
+        client = self.sign_in_with_entra(["NVR.Contractor"])  # No role grants yet: the default, every camera.
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), {self.d1, self.d2, self.y1, self.loose})
+        self.grant("NVR.Contractor", [{"scope_type": "group", "group_id": self.dock}], subject_type="role")
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), {self.d1, self.d2})  # The default yields to the role's grant.
+        # A grant an administrator chose for the person themselves does not.
+        self.grant(self.entra_user(), [{"scope_type": "all"}])
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), {self.d1, self.d2, self.y1, self.loose})
+
+    def test_an_operator_an_administrator_left_with_no_cameras_stays_that_way_at_next_sign_in(self):
+        self.sign_in_with_entra(["NVR.Operator"])
+        self.grant(self.entra_user(), [])
+        client = self.sign_in_with_entra(["NVR.Operator"])
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), set())
+
+    def test_a_role_dropped_in_entra_stops_applying_at_next_sign_in_without_a_default_taking_its_place(self):
+        self.grant("NVR.Contractor", [{"scope_type": "group", "group_id": self.yard}], subject_type="role")
+        self.sign_in_with_entra(["NVR.Contractor"])
+        client = self.sign_in_with_entra(["NVR.Operator"])  # Still an operator, no longer a contractor.
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), set())
+
+    def test_a_demoted_administrator_gets_the_default_once(self):
+        admin = self.sign_in_with_entra(["NVR.Admin"], subject="object-2")
+        self.assertEqual(admin.get("/api/admin/access-grants").status_code, 200)
+        client = self.sign_in_with_entra(["NVR.Operator"], subject="object-2")
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), {self.d1, self.d2, self.y1, self.loose})
+        self.grant(self.entra_user("object-2"), [])
+        client = self.sign_in_with_entra(["NVR.Operator"], subject="object-2")
+        self.assertEqual(self.ids(client.get("/api/cameras"), "cameras"), set())
+
+    def test_the_listing_marks_automatic_grants_as_defaults(self):
+        grants = {grant["subject"]: grant for grant in self.admin.get("/api/admin/access-grants").json()["grants"]}
+        self.assertTrue(grants[str(self.full_id)]["default"])
+        self.assertFalse(grants[str(self.limited_id)]["default"])  # Chosen by an administrator.
+
+
+class LeakTests(GrantCase):
+    """What a restricted operator's responses say about cameras they cannot see, route by route."""
+
+    def test_no_listing_names_or_identifies_a_hidden_camera_group_rule_or_incident(self):
+        from app.incidents import sync_incident
+        hidden_alarm = self.add_alarm(self.y1)
+        self.add_alarm(self.loose)
+        self.add_observation(self.y1)
+        self.add_track(self.y1)
+        self.add_segment(self.y1)
+        self.admin.put(f"/api/cameras/{self.d1}/neighbours", json={"camera_ids": [self.d2, self.y1]})
+        with connect() as db:
+            sync_incident(db, incident_key="leak:y", camera_id=self.y1, fault_type="recording_failure", summary="Yard 1 is failing", active=True)
+            db.execute("UPDATE cameras SET group_id=? WHERE id=?", (self.yard, self.d2))  # Visible through Dock membership, primary group Yard.
+            db.execute("INSERT INTO camera_group_memberships(group_id,camera_id) VALUES(?,?)", (self.dock, self.d2))
+        self.grant(self.limited_id, [{"scope_type": "all"}])
+        layout = {"camera_ids": [self.d1, self.y1], "grid_size": 4, "tile_camera_ids": [self.d1, self.y1, None, None], "layout_mode": "manual"}
+        self.limited.put("/api/live/layouts/Mixed", json=layout)
+        self.limited.put("/api/live/workspace", json={"camera_ids": [self.d1, self.y1], "grid_size": 4, "tile_camera_ids": [self.d1, self.y1, None, None]})
+        self.grant(self.limited_id, [{"scope_type": "group", "group_id": self.dock}])
+
+        forbidden = [self.y1, self.loose, "Yard 1", "Loose", "Yard", hidden_alarm, "leak:y", "Yard 1 is failing"]
+        start, end = (START - timedelta(hours=1)).isoformat(), (START + timedelta(hours=1)).isoformat()
+        calls = [("GET", "/api/cameras", {}), ("GET", "/api/camera-groups", {}), (  "GET", f"/api/camera-groups/{self.dock}/members", {}), ("GET", "/api/ai/events", {}),
+                 ("GET", "/api/alarms", {"state": "all"}), ("GET", "/api/incidents", {}), ("GET", "/api/exports", {}), ("GET", "/api/live/layouts", {}),
+                 ("GET", "/api/live/views", {}), ("GET", "/api/live/workspace", {}), ("GET", "/api/live/alarm-pop-ins", {}), ("GET", "/api/push/preferences", {}),
+                 ("GET", f"/api/cameras/{self.d1}/neighbours", {}), ("GET", f"/api/cameras/{self.d1}/segments", {}), ("GET", f"/api/cameras/{self.d1}/coverage", {}),
+                 ("GET", "/api/alarms/assignees", {"camera_id": self.d1}), ("GET", "/api/ai/tracks", {"camera_id": self.d1, "start": start, "end": end})]
+        for method, path, params in calls:
+            response = self.limited.request(method, path, params=params)
+            self.assertEqual(response.status_code, 200, f"{path}: {response.text[:200]}")
+            for word in forbidden:
+                self.assertNotIn(word, response.text, f"{path} mentions {word!r}")
+        timeline = self.limited.post("/api/playback/timeline", json={"camera_ids": [self.d1], "start": start, "end": end})
+        for word in forbidden:
+            self.assertNotIn(word, timeline.text)
+        # Dock 2 is visible but its primary group, Yard, is not: the camera shows without Yard's name.
+        cameras = {camera["id"]: camera for camera in self.limited.get("/api/cameras").json()["cameras"]}
+        self.assertIsNone(cameras[self.d2]["group_name"])
+
+    def test_push_options_hide_groups_and_rules_that_are_not_theirs(self):
+        self.add_alarm(self.y1)  # Creates a rule about the Yard camera only.
+        self.add_alarm(self.d1)
+        options = self.limited.get("/api/push/preferences").json()
+        self.assertEqual([group["name"] for group in options["group_options"]], ["Dock"])
+        self.assertEqual(len(options["rule_options"]), 1)  # The rule about the Dock camera, not the Yard one.
+        self.assertEqual(len(self.admin.get("/api/push/preferences").json()["rule_options"]), 2)
+
+    def test_incidents_and_exports_are_filtered_before_the_page_is_cut(self):
+        from app.incidents import sync_incident
+        with connect() as db:
+            for index in range(230):  # Newer incidents of hidden cameras than the one the operator may see.
+                sync_incident(db, incident_key=f"noise:{index}", camera_id=self.y1, fault_type="recording_failure", summary=f"noise {index}", active=True)
+            sync_incident(db, incident_key="mine", camera_id=self.d1, fault_type="recording_failure", summary="mine", active=True)
+            db.execute("UPDATE incidents SET last_seen_at='2000-01-01T00:00:00+00:00' WHERE incident_key='mine'")  # The oldest of all.
+        self.assertEqual([incident["summary"] for incident in self.limited.get("/api/incidents").json()["incidents"]], ["mine"])
+
+    def test_an_alarm_can_only_be_assigned_to_someone_who_can_see_its_camera(self):
+        alarm = self.add_alarm(self.d1)
+        self.grant(self.full_id, [{"scope_type": "group", "group_id": self.yard}])
+        refused = self.limited.post(f"/api/alarms/{alarm}/assign", json={"user_id": self.full_id})
+        self.assertEqual((refused.status_code, refused.json()["detail"]), (422, "That person cannot see this camera"))
+        self.assertEqual(self.limited.post(f"/api/alarms/{alarm}/assign", json={"user_id": self.limited_id}).status_code, 200)
+        names = {user["username"] for user in self.limited.get("/api/alarms/assignees", params={"camera_id": self.d1}).json()["users"]}
+        self.assertEqual(names, {"keeper", "limited"})  # Not the operator who cannot see the Dock.
+
+    def test_an_export_of_a_hidden_camera_fails_exactly_as_one_of_a_missing_camera_even_when_the_queue_is_full(self):
+        window = {"start": (START - timedelta(minutes=5)).isoformat(), "end": (START + timedelta(minutes=5)).isoformat(), "output_modes": ["individual"]}
+        with mock.patch("app.api.export_jobs.create_export_record", side_effect=OverflowError("The export queue is full")):
+            hidden = self.limited.post("/api/exports", json={**window, "camera_ids": [self.y1]})
+            missing = self.limited.post("/api/exports", json={**window, "camera_ids": [str(uuid.uuid4())]})
+        self.assertEqual((hidden.status_code, hidden.json()), (missing.status_code, missing.json()))
+        self.assertEqual(hidden.status_code, 429)
+
+    def test_an_open_stream_ends_when_a_grants_expiry_passes(self):
+        import time
+        from starlette.websockets import WebSocketDisconnect
+        soon = (datetime.now(timezone.utc) + timedelta(seconds=2.5)).isoformat()
+        with connect() as db:  # Written directly: the API takes expiries a minute or more ahead in practice, and this one is seconds.
+            db.execute("DELETE FROM access_grants WHERE subject=?", (str(self.limited_id),))
+            db.execute("INSERT INTO access_grants(subject_type,subject,scope_type,group_id,expires_at) VALUES('user',?,'group',?,?)", (str(self.limited_id), self.dock, soon))
+        stream = LiveSocketTests.StubStream()
+
+        def join(key, source, include_audio, viewer, on_fragment=None, video_filter=None):
+            viewer.offer(b"fragment")
+            return stream
+
+        began = time.monotonic()
+        with mock.patch.multiple(self.app.state.live_hub, join=join, leave=lambda stream, viewer: None), \
+                self.limited.websocket_connect(f"/api/cameras/{self.d1}/live/stream") as websocket:
+            websocket.receive_json()
+            websocket.receive_bytes()
+            websocket.receive_bytes()
+            self.assertEqual(websocket.receive_json()["type"], "forbidden")
+            with self.assertRaises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+        self.assertEqual(closed.exception.code, 4403)
+        self.assertGreater(time.monotonic() - began, 1.5)  # It ran until the expiry, not before.
+        self.assertLess(time.monotonic() - began, 8)
+
+
 class UpgradeTests(unittest.TestCase):
     def test_upgrading_gives_existing_operators_everything_and_administrators_nothing_to_need(self):
         from app import migrations

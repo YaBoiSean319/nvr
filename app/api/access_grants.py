@@ -51,6 +51,7 @@ def _view(db: sqlite3.Connection, row: sqlite3.Row, now: str) -> dict[str, Any]:
         names["group"] = group["name"] if group else None
     return {"id": row["id"], "subject_type": row["subject_type"], "subject": row["subject"], "subject_name": names["user"] or row["subject"],
             "scope_type": row["scope_type"], "group_id": row["group_id"], "group_name": names["group"], "expires_at": row["expires_at"],
+            "default": bool(row["default_grant"]),
             "expired": bool(row["expires_at"] and row["expires_at"] <= now), "created_at": row["created_at"]}
 
 

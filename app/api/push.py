@@ -1,6 +1,8 @@
 """Push notifications: device subscriptions, each person's choices, and notification thumbnails."""
 from __future__ import annotations
 
+import json
+
 import re
 
 from fastapi import APIRouter, HTTPException, Response, status
@@ -65,12 +67,21 @@ def get_public_key(_: CurrentUser) -> dict[str, object]:
     return {"public_key": push.public_key()}
 
 
+def _rule_is_theirs(row, access) -> bool:
+    """A rule that covers every camera, or at least one this person may see; not one only about cameras they cannot."""
+    cameras, groups = json.loads(row["camera_ids_json"]), json.loads(row["group_ids_json"])
+    return (not cameras and not groups) or any(access.can_see(camera_id) for camera_id in cameras) or any(access.can_see_group(group_id) for group_id in groups)
+
+
 @router.get("/api/push/preferences")
 def get_preferences(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        rules = db.execute("SELECT id,name FROM rules WHERE enabled=1 ORDER BY name COLLATE NOCASE").fetchall()
-        groups = db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE").fetchall()
-        return {**push.preferences(db, int(user["id"])), "rule_options": [dict(row) for row in rules], "group_options": [dict(row) for row in groups]}
+        access = user.access
+        rules = [row for row in db.execute("SELECT id,name,camera_ids_json,group_ids_json FROM rules WHERE enabled=1 ORDER BY name COLLATE NOCASE")
+                 if access.unrestricted or _rule_is_theirs(row, access)]
+        groups = [row for row in db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE") if access.can_see_group(row["id"])]
+        return {**push.preferences(db, int(user["id"])), "rule_options": [{"id": row["id"], "name": row["name"]} for row in rules],
+                "group_options": [dict(row) for row in groups]}
 
 
 @router.put("/api/push/preferences")

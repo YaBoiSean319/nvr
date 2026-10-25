@@ -56,9 +56,10 @@ def get_incidents(
     state: str | None = Query(default=None, pattern="^(active|acknowledged|recovered)$"),
 ) -> dict[str, object]:
     with connect() as db:
-        incidents = list_incidents(db, state=state)
-    # Someone limited to some cameras sees the incidents of those cameras, not the system's or other cameras'.
-    return {"incidents": [incident for incident in incidents if user.access.unrestricted or (incident["camera_id"] and user.access.can_see(incident["camera_id"]))]}
+        # Someone limited to some cameras sees the incidents of those cameras, not the system's or other cameras'. They are
+        # filtered before the page is cut, or newer incidents of hidden cameras could push all of theirs off it.
+        incidents = list_incidents(db, state=state, limit=200 if user.access.unrestricted else 5000)
+    return {"incidents": [incident for incident in incidents if user.access.unrestricted or (incident["camera_id"] and user.access.can_see(incident["camera_id"]))][:200]}
 
 
 @router.post("/api/incidents/{incident_id}/acknowledge")

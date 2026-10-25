@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from app import alarms
+from app.access import may_view_camera
 from app.principal import Administrator, CurrentUser, Principal
 from app.store import connect
 
@@ -78,11 +79,14 @@ def list_alarms(
         if value:
             scope.append(f"{column}=?")
             scope_values.append(value)
+    permission, permission_values = [], []
     if not user.access.unrestricted:
         # Only alarms of cameras this person may see, in the list, the counts and the rule filter alike.
         permitted = sorted(user.access.cameras or ())
-        scope.append("camera_id IN (%s)" % ",".join("?" * len(permitted)) if permitted else "0")
-        scope_values.extend(permitted)
+        permission.append("camera_id IN (%s)" % ",".join("?" * len(permitted)) if permitted else "0")
+        permission_values.extend(permitted)
+    scope.extend(permission)
+    scope_values.extend(permission_values)
     clauses, values = list(scope), list(scope_values)
     if state == "open":
         clauses.append("state IN ('new','acknowledged','assigned')")
@@ -95,17 +99,20 @@ def list_alarms(
         rows = db.execute("SELECT * FROM alarms" + where + " ORDER BY occurred_at DESC,id LIMIT ?", (*values, limit)).fetchall()
         counts = {row["state"]: row["count"] for row in db.execute("SELECT state,count(*) AS count FROM alarms" + scoped + " GROUP BY state", scope_values)}
         # Every rule that has raised an alarm, for the rule filter (operators cannot list rules).
-        rules = db.execute("SELECT rule_id AS id,max(rule_name) AS name FROM alarms" + (scoped + " AND" if scoped else " WHERE") + " rule_id IS NOT NULL GROUP BY rule_id ORDER BY name COLLATE NOCASE",
-                           scope_values).fetchall()
+        rules = db.execute("SELECT rule_id AS id,max(rule_name) AS name FROM alarms WHERE " + "".join(f"{clause} AND " for clause in permission) + "rule_id IS NOT NULL GROUP BY rule_id ORDER BY name COLLATE NOCASE",
+                           permission_values).fetchall()
         return {"alarms": [alarms.alarm_view(db, row) for row in rows],
                 "counts": {key: counts.get(key, 0) for key in ("new", "acknowledged", "assigned", "resolved")},
                 "rules": [dict(rule) for rule in rules]}
 
 
 @router.get("/api/alarms/assignees")
-def list_assignees(_: CurrentUser) -> dict[str, object]:
+def list_assignees(_: CurrentUser, camera_id: str | None = Query(default=None, max_length=64)) -> dict[str, object]:
+    """Who an alarm can be assigned to: with a camera, the people who can see it."""
     with connect() as db:
         rows = db.execute("SELECT id,username FROM users ORDER BY username COLLATE NOCASE").fetchall()
+        if camera_id:
+            rows = [row for row in rows if may_view_camera(db, int(row["id"]), camera_id)]
     return {"users": [dict(row) for row in rows]}
 
 
@@ -144,6 +151,11 @@ def acknowledge_alarm(alarm_id: str, user: CurrentUser) -> dict[str, object]:
 
 @router.post("/api/alarms/{alarm_id}/assign")
 def assign_alarm(alarm_id: str, payload: AssignRequest, user: CurrentUser) -> dict[str, object]:
+    with connect() as db:
+        alarm = _visible_alarm(db, alarm_id, user)
+        # Someone who cannot see the camera cannot be handed its alarm.
+        if db.execute("SELECT 1 FROM users WHERE id=?", (payload.user_id,)).fetchone() and not may_view_camera(db, payload.user_id, alarm["camera_id"]):
+            raise HTTPException(status_code=422, detail="That person cannot see this camera")
     return _act(alarm_id, user, lambda: alarms.assign(alarm_id, int(user["id"]), payload.user_id))
 
 

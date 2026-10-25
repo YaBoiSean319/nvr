@@ -300,7 +300,7 @@ async def oidc_callback(request: Request) -> RedirectResponse:
     display = claims.get("preferred_username")
     username = display.strip()[:128] if isinstance(display, str) and display.strip() else f"entra-{subject[:112]}"
     with connect() as db:
-        user = db.execute("SELECT id, username FROM users WHERE provider_issuer=? AND provider_subject=?", (issuer, subject)).fetchone()
+        user = db.execute("SELECT id, username, role FROM users WHERE provider_issuer=? AND provider_subject=?", (issuer, subject)).fetchone()
         if user is None:
             if db.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone():
                 username = f"entra-{subject[:112]}"
@@ -315,7 +315,10 @@ async def oidc_callback(request: Request) -> RedirectResponse:
         else:
             user_id = int(user["id"])
             db.execute("UPDATE users SET role=?,provider_roles_json=? WHERE id=?", (role, json.dumps(_claimed_roles(claims)), user_id))
-            ensure_default_grant(db, user_id)  # Someone newly an operator has the access operators always had, until narrowed.
+            if user["role"] != "operator":
+                # Someone who has just become an operator has the access operators always had, until narrowed. Only then:
+                # an operator an administrator left with no grant stays with none at their next sign-in.
+                ensure_default_grant(db, user_id)
     redirect = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
     start_session(redirect, user_id)
     return redirect

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import os
 import tempfile
 import unittest
@@ -40,7 +42,7 @@ class IncidentApiTests(unittest.TestCase):
                 "VALUES(?,?,X'01',1,'continuous','reconnecting',?,?)",
                 (self.camera_id, "Incident camera", now, now),
             )
-        self.active_user = {"id": self.operator_id, "username": "operator", "role": "operator"}
+        self.active_user = principal(self.operator_id, "operator", "operator")
         app.dependency_overrides[current_user] = lambda: self.active_user
         def require_admin():
             if self.active_user["role"] != "administrator":
@@ -118,19 +120,19 @@ class IncidentApiTests(unittest.TestCase):
 
     def test_storage_pressure_groups_affected_cameras_and_recovers(self):
         os.environ["NVR_STORAGE_PRESSURE_FREE_BYTES"] = "9999999999999999"
-        self.active_user = {"id": self.admin_id, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(self.admin_id, "administrator", "administrator")
         volume = self.client.get("/api/storage")
         self.assertEqual(volume.status_code, 200, volume.text)
-        self.active_user = {"id": self.operator_id, "username": "operator", "role": "operator"}
+        self.active_user = principal(self.operator_id, "operator", "operator")
         incident = self.client.get("/api/incidents").json()["incidents"][0]
         self.assertEqual(incident["fault_type"], "storage")
         self.assertTrue(incident["fault_active"])
         self.assertEqual(incident["details"]["affected_cameras"][0]["id"], self.camera_id)
 
         os.environ["NVR_STORAGE_PRESSURE_FREE_BYTES"] = "0"
-        self.active_user = {"id": self.admin_id, "username": "administrator", "role": "administrator"}
+        self.active_user = principal(self.admin_id, "administrator", "administrator")
         self.client.get("/api/storage")
-        self.active_user = {"id": self.operator_id, "username": "operator", "role": "operator"}
+        self.active_user = principal(self.operator_id, "operator", "operator")
         incident = self.client.get("/api/incidents").json()["incidents"][0]
         self.assertEqual(incident["state"], "recovered")
 

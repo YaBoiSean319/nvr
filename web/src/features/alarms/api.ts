@@ -63,10 +63,11 @@ export function useAlarm(id: string | null) {
   });
 }
 
-export function useAssignees(enabled: boolean) {
+/** The people an alarm of this camera can be assigned to: those who can see the camera. */
+export function useAssignees(cameraId: string | undefined) {
   return useQuery({
-    queryKey: alarmKeys.assignees, enabled,
-    queryFn: ({ signal }) => api<{ users: { id: number; username: string }[] }>("/api/alarms/assignees", { signal }).then(body => body.users),
+    queryKey: [...alarmKeys.assignees, cameraId], enabled: cameraId !== undefined,
+    queryFn: ({ signal }) => api<{ users: { id: number; username: string }[] }>(`/api/alarms/assignees?camera_id=${encodeURIComponent(cameraId ?? "")}`, { signal }).then(body => body.users),
   });
 }
 

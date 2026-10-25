@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import os
 import tempfile
 import unittest
@@ -29,7 +31,7 @@ class SavedViewsTests(unittest.TestCase):
                 "INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES(?,?,X'01','disabled')",
                 [(camera_id, f"Camera {index}") for index, camera_id in enumerate(self.camera_ids)],
             )
-        self.active_user = {"id": 1, "username": "operator", "role": "operator"}
+        self.active_user = principal(1, "operator", "operator")
         app.dependency_overrides[current_user] = lambda: self.active_user
         self.context = TestClient(app)
         self.client = self.context.__enter__()
@@ -57,19 +59,19 @@ class SavedViewsTests(unittest.TestCase):
         self.assertEqual(detail["grid_size"], 4)
         self.assertEqual(detail["layout_mode"], "auto")
 
-        self.active_user = {"id": 2, "username": "other", "role": "operator"}
+        self.active_user = principal(2, "other", "operator")
         other_views = self.client.get("/api/live/views").json()
         self.assertEqual(other_views["layouts"], [])
         self.assertEqual(other_views["shared_views"], [])
 
-        self.active_user = {"id": 1, "username": "operator", "role": "operator"}
+        self.active_user = principal(1, "operator", "operator")
         saved = self.client.get("/api/live/views").json()["layouts"][0]
         self.assertEqual(saved["camera_ids"], [camera_b, camera_a])
         self.assertEqual(saved["tile_camera_ids"], [camera_b, None, camera_a, None])
 
     def test_admin_can_create_shared_views_that_operators_can_open_but_not_change(self):
         camera_a, camera_b, _ = self.camera_ids
-        self.active_user = {"id": 3, "username": "admin", "role": "administrator"}
+        self.active_user = principal(3, "admin", "administrator")
         created = self.client.put(
             "/api/live/shared-layouts/Front%20desk",
             json={"camera_ids": [camera_a, camera_b], "grid_size": 4, "tile_camera_ids": [camera_b, camera_a, None, None], "layout_mode":"manual"},
@@ -78,7 +80,7 @@ class SavedViewsTests(unittest.TestCase):
         self.assertEqual(created.json()["scope"], "shared")
         self.assertEqual(self.client.get("/api/live/views").json()["shared_views"][0]["layout_mode"], "manual")
 
-        self.active_user = {"id": 1, "username": "operator", "role": "operator"}
+        self.active_user = principal(1, "operator", "operator")
         views = self.client.get("/api/live/views").json()
         self.assertEqual(views["shared_views"][0]["name"], "Front desk")
         self.assertEqual(views["shared_views"][0]["tile_camera_ids"], [camera_b, camera_a, None, None])
@@ -90,7 +92,7 @@ class SavedViewsTests(unittest.TestCase):
         self.assertEqual(denied_delete.status_code, 403)
 
     def test_shared_view_cannot_reference_unknown_cameras_and_admin_can_delete_it(self):
-        self.active_user = {"id": 3, "username": "admin", "role": "administrator"}
+        self.active_user = principal(3, "admin", "administrator")
         invalid = self.client.put(
             "/api/live/shared-layouts/Invalid", json={"camera_ids": [str(uuid.uuid4())], "grid_size": 1}
         )
@@ -131,7 +133,7 @@ class SavedViewsTests(unittest.TestCase):
         self.assertEqual(restored["camera_ids"], [camera_b, camera_a])
         self.assertNotIn("audio_enabled", restored)
 
-        self.active_user = {"id": 2, "username": "other", "role": "operator"}
+        self.active_user = principal(2, "other", "operator")
         self.assertIsNone(self.client.get("/api/live/workspace").json()["camera_ids"])
 
     def test_existing_personal_layouts_migrate_to_exact_grid_size_and_tiles(self):

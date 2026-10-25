@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import os
 import json
 import tempfile
@@ -38,7 +40,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
                        (self.cameras[0], "uncertain", "Motion source degraded", "2026-10-20T12:03:20+00:00", "2026-10-20T12:03:40+00:00"))
             db.execute("INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,actual_start,actual_end,pre_roll_complete,status,segment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (str(uuid.uuid4()), self.cameras[1], "onvif", "motion", "2026-10-20T12:00:40+00:00", "2026-10-20T12:00:41+00:00", "2026-10-20T12:00:30+00:00", "2026-10-20T12:01:30+00:00", "2026-10-20T12:00:30+00:00", "2026-10-20T12:01:30+00:00", 1, "complete", second_camera_segment))
-        app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "viewer", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(1, "viewer", "operator")
         self.context = TestClient(app)
         self.client = self.context.__enter__()
 
@@ -184,7 +186,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         try:
             denied = self.client.get(url)
         finally:
-            app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "viewer", "role": "operator"}
+            app.dependency_overrides[current_user] = lambda: principal(1, "viewer", "operator")
         self.assertEqual(denied.status_code, 401)
 
     def test_frame_neighbor_uses_decoded_frame_timestamps_and_protects_recording(self):
@@ -225,7 +227,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         try:
             denied = self.client.get(f"{base}?at=2026-10-20T12:00:30Z&direction=next")
         finally:
-            app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "viewer", "role": "operator"}
+            app.dependency_overrides[current_user] = lambda: principal(1, "viewer", "operator")
         self.assertEqual(denied.status_code, 401)
 
     def test_timeline_requires_authentication(self):
@@ -235,7 +237,7 @@ class SynchronizedPlaybackTests(unittest.TestCase):
                 "camera_ids": [self.cameras[0]], "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",
             })
         finally:
-            app.dependency_overrides[current_user] = lambda: {"id": 1, "username": "viewer", "role": "operator"}
+            app.dependency_overrides[current_user] = lambda: principal(1, "viewer", "operator")
         self.assertEqual(denied.status_code, 401)
 
 

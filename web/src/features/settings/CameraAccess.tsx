@@ -6,7 +6,7 @@ import { failureText } from "@/features/admin/tabDraft";
 
 interface Grant {
   id: number; subject_type: "user" | "role"; subject: string; subject_name: string; scope_type: "all" | "group";
-  group_id: string | null; group_name: string | null; expires_at: string | null; expired: boolean;
+  group_id: string | null; group_name: string | null; expires_at: string | null; expired: boolean; default: boolean;
 }
 interface Listing {
   grants: Grant[];
@@ -29,7 +29,7 @@ const when = (iso: string) => new Date(iso).toLocaleString();
 function describe(grants: Grant[]): string {
   if (!grants.length) return "No cameras";
   return grants.map(grant => {
-    const scope = grant.scope_type === "all" ? "All cameras" : grant.group_name ?? "A removed group";
+    const scope = grant.scope_type === "all" ? (grant.default ? "All cameras (default)" : "All cameras") : grant.group_name ?? "A removed group";
     return grant.expires_at ? `${scope} ${grant.expired ? `(expired ${when(grant.expires_at)})` : `until ${when(grant.expires_at)}`}` : scope;
   }).join(", ");
 }
@@ -117,7 +117,8 @@ function GrantDialog({ subject, listing, grants, onClose, onSaved }: { subject: 
   );
 }
 
-function GrantForm({ subject, listing, grants, onSaved }: { subject: Subject; listing: Listing; grants: Grant[]; onSaved: (message: string) => void }) {
+function GrantForm({ subject, listing, grants: all, onSaved }: { subject: Subject; listing: Listing; grants: Grant[]; onSaved: (message: string) => void }) {
+  const grants = all.filter(grant => !grant.expired); // An expired grant gives nothing and cannot be saved again: saving drops it.
   const initialMode: Mode = grants.some(grant => grant.scope_type === "all") ? "all" : grants.length ? "groups" : "none";
   const [mode, setMode] = useState<Mode>(initialMode);
   const [allExpiry, setAllExpiry] = useState(toLocalInput(grants.find(grant => grant.scope_type === "all")?.expires_at ?? null));

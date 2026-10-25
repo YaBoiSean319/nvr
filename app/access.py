@@ -64,11 +64,19 @@ def live_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = Non
                       ((now or _now()).isoformat(), str(user_id), *roles)).fetchall()
 
 
+def effective_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = None) -> list[sqlite3.Row]:
+    """The grants that count: the automatic "all cameras" default gives way once a role the person holds has grants of its own."""
+    grants = live_grants(db, user_id, now)
+    if any(grant["subject_type"] == "role" for grant in grants):
+        grants = [grant for grant in grants if not grant["default_grant"]]
+    return grants
+
+
 def resolve(db: sqlite3.Connection, user_id: int, role: str, now: datetime | None = None) -> Access:
     """What this person may see right now."""
     if role == "administrator":
         return EVERYTHING
-    grants = live_grants(db, user_id, now)
+    grants = effective_grants(db, user_id, now)
     if any(grant["scope_type"] == "all" for grant in grants):
         return EVERYTHING
     groups = frozenset(grant["group_id"] for grant in grants if grant["scope_type"] == "group")
@@ -91,7 +99,8 @@ def may_view_camera(db: sqlite3.Connection, user_id: int, camera_id: str) -> boo
 def ensure_default_grant(db: sqlite3.Connection, user_id: int) -> None:
     """Give an operator who has no grant at all (a user or role grant) access to every camera, as before grants existed.
 
-    Used when an account becomes an operator after being created as something else."""
+    For an account that has just become an operator after being something else (an administrator demoted by Entra).
+    It is never a repair for an operator who was left with none: that is an administrator's decision and stands."""
     user = db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
     if user is None or user["role"] != "operator":
         return
@@ -101,4 +110,4 @@ def ensure_default_grant(db: sqlite3.Connection, user_id: int) -> None:
     if roles:
         clause += " OR (subject_type='role' AND subject IN (%s))" % ",".join("?" * len(roles))
     if not db.execute(f"SELECT 1 FROM access_grants WHERE {clause}", (str(user_id), *roles)).fetchone():
-        db.execute("INSERT INTO access_grants(subject_type,subject,scope_type) VALUES ('user',?,'all')", (str(user_id),))
+        db.execute("INSERT INTO access_grants(subject_type,subject,scope_type,default_grant) VALUES ('user',?,'all',1)", (str(user_id),))

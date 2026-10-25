@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.test_support import principal
+
 import asyncio
 import io
 import json
@@ -61,7 +63,7 @@ class ExportJobTests(unittest.TestCase):
                 "INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
                 (self.camera, f"{self.camera}/clip.mp4", "2026-10-20T10:00:00+00:00", "2026-10-20T10:00:01+00:00", self.media.stat().st_size),
             ).lastrowid
-        app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "operator")
         self.context = TestClient(app)
         self.client = self.context.__enter__()
 
@@ -77,7 +79,7 @@ class ExportJobTests(unittest.TestCase):
 
     def _create(self, actor_id: int | None = None) -> str:
         if actor_id is not None and actor_id != self.user_id:
-            app.dependency_overrides[current_user] = lambda: {"id": actor_id, "username": "second", "role": "operator"}
+            app.dependency_overrides[current_user] = lambda: principal(actor_id, "second", "operator")
         response = self.client.post("/api/exports", json={
             "camera_ids": [self.camera],
             "start": "2026-10-20T09:59:59.500000Z",
@@ -442,14 +444,14 @@ class ExportJobTests(unittest.TestCase):
         job_id = self._create()
         own = self.client.get(f"/api/exports/{job_id}")
         self.assertEqual(own.status_code, 200)
-        app.dependency_overrides[current_user] = lambda: {"id": self.other_user_id, "username": "second", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.other_user_id, "second", "operator")
         hidden = self.client.get(f"/api/exports/{job_id}")
         self.assertEqual(hidden.status_code, 404)
         app.dependency_overrides.pop(current_user, None)
         try:
             denied = self.client.get(f"/api/exports/{job_id}")
         finally:
-            app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+            app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "operator")
         self.assertEqual(denied.status_code, 401)
         cancelled = self.client.post(f"/api/exports/{job_id}/cancel")
         self.assertEqual(cancelled.status_code, 200, cancelled.text)
@@ -481,9 +483,9 @@ class ExportJobTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/exports/{job_id}/retry").status_code, 409)
         with connect() as db:
             db.execute("UPDATE exports SET status='cancelled' WHERE id=?", (job_id,))
-        app.dependency_overrides[current_user] = lambda: {"id": self.other_user_id, "username": "second", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.other_user_id, "second", "operator")
         self.assertEqual(self.client.post(f"/api/exports/{job_id}/retry").status_code, 404)
-        app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "operator")
         # Retrying revalidates the media: footage that is gone now cannot be exported.
         with connect() as db:
             db.execute("UPDATE recording_segments SET unavailable_at='2026-10-21T00:00:00+00:00',unavailable_reason='restored' WHERE id=?", (self.segment_id,))
@@ -498,10 +500,10 @@ class ExportJobTests(unittest.TestCase):
         package.write_bytes(b"test evidence zip")
         with connect() as db:
             db.execute("UPDATE exports SET status='completed',output_relative_path=? WHERE id=?", (f"exports/{job_id}.zip", job_id))
-        app.dependency_overrides[current_user] = lambda: {"id": self.other_user_id, "username": "second", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.other_user_id, "second", "operator")
         denied = self.client.get(f"/api/exports/{job_id}/download")
         self.assertEqual(denied.status_code, 404)
-        app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "operator")
         allowed = self.client.get(f"/api/exports/{job_id}/download")
         self.assertEqual(allowed.status_code, 200, allowed.text)
         self.assertEqual(allowed.content, b"test evidence zip")
@@ -577,16 +579,12 @@ class ExportJobTests(unittest.TestCase):
         self.assertEqual(accepted.json()["tile_camera_ids"], [self.camera, None, None, None])
 
     def test_export_captures_site_display_preferences_at_submission(self):
-        app.dependency_overrides[current_user] = lambda: {
-            "id": self.user_id, "username": "exporter", "role": "administrator",
-        }
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "administrator")
         configured = self.client.put("/api/settings/display", json={
             "time_zone": "America/New_York", "date_format": "day-month", "clock_format": "24",
         })
         self.assertEqual(configured.status_code, 200, configured.text)
-        app.dependency_overrides[current_user] = lambda: {
-            "id": self.user_id, "username": "exporter", "role": "operator",
-        }
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "operator")
         with patch.object(self.client.app.state.exports, "enqueue"):
             accepted = self.client.post("/api/exports", json={
                 "camera_ids": [self.camera],
@@ -595,9 +593,7 @@ class ExportJobTests(unittest.TestCase):
             })
         self.assertEqual(accepted.status_code, 202, accepted.text)
         job_id = accepted.json()["id"]
-        app.dependency_overrides[current_user] = lambda: {
-            "id": self.user_id, "username": "exporter", "role": "administrator",
-        }
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "administrator")
         changed = self.client.put("/api/settings/display", json={
             "time_zone": "UTC", "date_format": "friendly", "clock_format": "12",
         })
@@ -632,12 +628,12 @@ class ExportJobTests(unittest.TestCase):
                 "INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
                 (self.camera, f"{self.camera}/overlap.mp4", "2026-10-20T10:00:00.500000+00:00", "2026-10-20T10:00:01.500000+00:00", overlap_media.stat().st_size),
             )
-        app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "administrator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "administrator")
         configured = self.client.put("/api/settings/display", json={
             "time_zone": "America/New_York", "date_format": "iso", "clock_format": "24",
         })
         self.assertEqual(configured.status_code, 200, configured.text)
-        app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "operator")
         with patch.object(self.client.app.state.exports, "enqueue", wraps=self.client.app.state.exports.enqueue):
             accepted = self.client.post("/api/exports", json={
                 "camera_ids": [self.camera, empty_camera],
@@ -756,14 +752,14 @@ class ExportJobTests(unittest.TestCase):
         job_id = self._create()
         response = self.client.post(f"/api/exports/{job_id}/verify", content=b"", headers={"content-type": "application/zip"})
         self.assertEqual(response.status_code, 409)
-        app.dependency_overrides[current_user] = lambda: {"id": self.other_user_id, "username": "second", "role": "operator"}
+        app.dependency_overrides[current_user] = lambda: principal(self.other_user_id, "second", "operator")
         denied = self.client.post(f"/api/exports/{job_id}/verify", content=b"", headers={"content-type": "application/zip"})
         self.assertEqual(denied.status_code, 404)
         app.dependency_overrides.pop(current_user, None)
         try:
             unauthenticated = self.client.post(f"/api/exports/{job_id}/verify", content=b"", headers={"content-type": "application/zip"})
         finally:
-            app.dependency_overrides[current_user] = lambda: {"id": self.user_id, "username": "exporter", "role": "operator"}
+            app.dependency_overrides[current_user] = lambda: principal(self.user_id, "exporter", "operator")
         self.assertEqual(unauthenticated.status_code, 401)
 
 

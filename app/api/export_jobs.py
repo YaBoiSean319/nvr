@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Callable, Literal
 
@@ -69,8 +70,9 @@ class ExportRequest(BaseModel):
 @router.get("/api/exports")
 @requires_scope("export")
 def get_exports(user: CurrentUser) -> dict[str, object]:
-    return {"exports": [job for job in list_exports(int(user["id"]), user["role"] == "administrator")
-                        if all(user.access.can_see(camera_id) for camera_id in job["camera_ids"])]}
+    # Filtered before the page is cut, so exports of hidden cameras cannot push a person's own off it.
+    jobs = list_exports(int(user["id"]), user["role"] == "administrator", limit=50 if user.access.unrestricted else 1000)
+    return {"exports": [job for job in jobs if all(user.access.can_see(camera_id) for camera_id in job["camera_ids"])][:50]}
 
 
 @router.post("/api/exports", status_code=status.HTTP_202_ACCEPTED)
@@ -81,11 +83,16 @@ async def create_export(
     user: CurrentUser,
 ) -> dict[str, object]:
     start, end = payload.start.astimezone(timezone.utc), payload.end.astimezone(timezone.utc)
-    if not all(user.access.can_see(camera_id) for camera_id in payload.camera_ids):
-        raise HTTPException(status_code=422, detail="Export request contains an unknown camera")  # As for a camera that does not exist.
+    # A camera this person may not see goes down exactly the path of one that does not exist, whatever the queue's state.
+    unknown = {camera_id: f"hidden-{uuid.uuid4()}" for camera_id in payload.camera_ids if not user.access.can_see(camera_id)}
+
+    def swap(camera_id: str) -> str:
+        return unknown.get(camera_id, camera_id)
+
     return _submit(request, user, lambda: create_export_record(
-        int(user["id"]), payload.camera_ids, start, end, payload.output_modes, payload.tile_camera_ids,
-        payload.grid_resolution, payload.include_audio, payload.audio_camera_id))
+        int(user["id"]), [swap(camera_id) for camera_id in payload.camera_ids], start, end, payload.output_modes,
+        [None if camera_id is None else swap(camera_id) for camera_id in payload.tile_camera_ids],
+        payload.grid_resolution, payload.include_audio, swap(payload.audio_camera_id) if payload.audio_camera_id else None))
 
 
 def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str, object]:
