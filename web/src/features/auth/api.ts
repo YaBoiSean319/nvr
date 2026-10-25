@@ -58,14 +58,15 @@ export function useSecurityActions() {
     return result;
   };
   return {
-    beginTotp: useMutation({ mutationFn: () => api<{ secret: string; otpauth_uri: string }>("/api/me/security/totp/begin", { method: "POST" }) }),
+    // The password is asked for only when adding to an account that already has a factor.
+    beginTotp: useMutation({ mutationFn: (password?: string) => api<{ secret: string; otpauth_uri: string }>("/api/me/security/totp/begin", { method: "POST", body: password ? { password } : undefined }) }),
     confirmTotp: useMutation({ mutationFn: (code: string) => api<SecurityResult>("/api/me/security/totp/confirm", { method: "POST", body: { code } }).then(done) }),
     removeTotp: useMutation({ mutationFn: (password: string) => api<SecurityResult>("/api/me/security/totp", { method: "DELETE", body: { password } }).then(done) }),
     addPasskey: useMutation({
-      mutationFn: async (name: string) => {
-        const options = await api<CreationOptionsJson>("/api/me/security/passkeys/options", { method: "POST" });
+      mutationFn: async (input: { name: string; password?: string }) => {
+        const options = await api<CreationOptionsJson>("/api/me/security/passkeys/options", { method: "POST", body: input.password ? { password: input.password } : undefined });
         const credential: CredentialJson = await createPasskey(options);
-        return api<SecurityResult>("/api/me/security/passkeys", { method: "POST", body: { credential, name } }).then(done);
+        return api<SecurityResult>("/api/me/security/passkeys", { method: "POST", body: { credential, name: input.name } }).then(done);
       },
     }),
     removePasskey: useMutation({ mutationFn: (input: { id: number; password: string }) => api<SecurityResult>(`/api/me/security/passkeys/${input.id}`, { method: "DELETE", body: { password: input.password } }).then(done) }),

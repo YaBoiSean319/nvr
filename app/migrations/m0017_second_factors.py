@@ -59,6 +59,7 @@ _STATEMENTS = (
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     )
     """,
+    "CREATE INDEX mfa_challenges_expiry_idx ON mfa_challenges(expires_at)",
     # The challenge of a passkey being registered, which belongs to a signed-in session rather than a sign-in.
     "ALTER TABLE users ADD COLUMN passkey_registration_challenge TEXT",
     "ALTER TABLE users ADD COLUMN passkey_registration_expires_at TEXT",
@@ -74,7 +75,7 @@ _STATEMENTS = (
     "INSERT INTO security_settings(singleton_id) VALUES (1)",
     """
     CREATE TABLE auth_failures (
-        scope TEXT NOT NULL CHECK (scope IN ('account','address')),
+        scope TEXT NOT NULL CHECK (scope IN ('account','pair','address')),
         key TEXT NOT NULL,
         failures INTEGER NOT NULL,
         last_failure_at TEXT NOT NULL,

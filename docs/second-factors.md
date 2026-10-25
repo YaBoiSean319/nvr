@@ -10,7 +10,7 @@ Open the account menu and choose **Security…**.
 - **Passkeys.** Choose **Add a passkey** and follow the browser's prompt. Give it a name so you can tell several apart. Any attestation format is accepted and ignored: the NVR only needs the passkey to prove it holds its private key. ES256, RS256 and EdDSA keys are supported.
 - **Recovery codes.** Ten codes are made when you set up your first factor, and shown once. Each works once. Use **Make new recovery codes** to replace them all. They are stored only as digests.
 
-Removing a factor, making new recovery codes, and turning on passkey-only sign-in ask for your password again, so a borrowed session cannot weaken sign-in.
+Removing a factor, making new recovery codes, turning passkey-only sign-in on or off, and **adding another factor to an account that already has one**, all ask for your password again, so a borrowed session cannot weaken sign-in or add a factor of its own. After any change to how you sign in, your other sessions end; the one making the change stays. Setting up sign-in security needs a browser session: an API token, which acts for its creator, cannot.
 
 ## Signing in
 
@@ -37,9 +37,21 @@ python -m app.mfa reset USERNAME
 
 ## Rate limiting
 
-Every failed password, authenticator or recovery code, and passkey check counts against the **account** named and the **address** it came from. After 4 failures on an account (19 on an address) each further attempt must wait, twice as long each time: 2, 4, 8 … seconds, capped at 5 minutes. A throttled attempt is refused with `429` and a `Retry-After`, even with the right password, or the throttle would not slow guessing. Failures are forgotten after 15 quiet minutes, and a completed sign-in clears the account's count. Nobody, including the emergency administrator, is ever locked out for longer than the cap. An attacker can keep an account waiting by guessing, but never longer than five minutes at a time.
+Every password, authenticator or recovery code, passkey and password-confirmation attempt is counted **before** it is judged, in the same transaction that checks whether it may proceed, so a burst of parallel guesses cannot all slip past a check made before any was counted. A right answer takes its own count back. Each challenge also allows only five answers, shared by parallel requests.
 
-The address is the connection's peer address. Behind a reverse proxy that is the proxy, so every user shares one address bucket; keep the address limit in mind there (its threshold is deliberately high).
+Three buckets are kept:
+
+| Bucket | Allowed before waiting | Why |
+| --- | --- | --- |
+| This account from this address | 4 | Stops a guesser quickly |
+| The account, from anywhere | 19 | Guesses spread over many addresses |
+| The address, for any account | 19 | One machine trying many accounts |
+
+After the allowance each further attempt must wait, twice as long each time: 2, 4, 8 … seconds, capped at **5 minutes**. A throttled attempt is refused with `429` and a `Retry-After`, even with the right password, or the throttle would not slow guessing. Because the first bucket is per address, an attacker guessing from one address cannot keep the real person waiting when they sign in from another; only guessing spread over many addresses (which reaches the account bucket) can, and then for at most five minutes at a time. Nobody, including the emergency administrator, is ever locked out for good. Failures are forgotten after 15 quiet minutes, a completed sign-in clears the account's buckets, and old rows are pruned.
+
+Refusing an unknown username takes as long as refusing a wrong password, so the two cannot be told apart by timing; the responses are identical.
+
+**Behind a reverse proxy** every connection comes from the proxy, so every person would share one address bucket. Set `NVR_TRUST_FORWARDED_FOR=true` only when the NVR is reachable solely through a proxy you control: the address is then the last `X-Forwarded-For` entry, which is the one your proxy added and a client cannot forge. Without a proxy, leave it unset, or clients could choose their own address.
 
 ## Passkeys and web addresses
 

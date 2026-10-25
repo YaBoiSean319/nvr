@@ -12,7 +12,8 @@ function RecoveryCodesDialog({ codes, onClose }: { codes: string[] | null; onClo
   const [copied, setCopied] = useState(false);
   const text = (codes ?? []).join("\n");
   return (
-    <Modal open={codes !== null} onOpenChange={open => { if (!open) onClose(); }} title="Save your recovery codes"
+    // Escape and clicking outside do nothing: the codes are shown once, so only "I have saved them" closes this.
+    <Modal open={codes !== null} onOpenChange={() => undefined} title="Save your recovery codes"
            description="If you lose your authenticator or passkey, each of these signs you in once. They are shown only now."
            footer={<button type="button" className="button" data-variant="primary" onClick={() => { setCopied(false); onClose(); }}>I have saved them</button>}>
       <ul className="recovery-codes mono" aria-label="Recovery codes">
@@ -27,10 +28,10 @@ function RecoveryCodesDialog({ codes, onClose }: { codes: string[] | null; onClo
   );
 }
 
-interface Reauth { title: string; description: string; run: (password: string) => Promise<SecurityResult> }
+interface Reauth { title: string; description: string; run: (password: string) => Promise<void> }
 
 /** Changing how someone signs in asks for their password again. */
-function PasswordDialog({ pending, onDone, onClose }: { pending: Reauth | null; onDone: (result: SecurityResult) => void; onClose: () => void }) {
+function PasswordDialog({ pending, onClose }: { pending: Reauth | null; onClose: () => void }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -40,9 +41,9 @@ function PasswordDialog({ pending, onDone, onClose }: { pending: Reauth | null; 
     setBusy(true);
     setError(null);
     try {
-      const result = await pending.run(password);
+      await pending.run(password);
       setPassword("");
-      onDone(result);
+      onClose();
     } catch (failure) {
       setError(message(failure));
     } finally {
@@ -110,17 +111,22 @@ export function SecurityPanel({ onChange }: { onChange?: () => void }) {
     }
   }
 
-  async function begin() {
+  async function begin(password?: string) {
     setError(null);
     try {
-      setTotp(await actions.beginTotp.mutateAsync());
+      setTotp(await actions.beginTotp.mutateAsync(password));
       setCode("");
     } catch (failure) {
       setError(message(failure));
     }
   }
 
-  const ask = (title: string, description: string, run: (password: string) => Promise<SecurityResult>) => setPending({ title, description, run });
+  // Adding to an account that already has a factor asks for the password, so a borrowed session cannot add its own.
+  const addingNeedsPassword = (title: string, description: string, run: (password: string) => Promise<void>) =>
+    setPending({ title, description, run });
+
+  const ask = (title: string, description: string, run: (password: string) => Promise<SecurityResult>) =>
+    setPending({ title, description, run: async password => { finished(await run(password)); } });
 
   return (
     <div className="settings-stack security-panel">
@@ -153,7 +159,8 @@ export function SecurityPanel({ onChange }: { onChange?: () => void }) {
           </form>
         ) : (
           <div className="field-actions">
-            <button type="button" className="button" onClick={() => void begin()}>Set up an authenticator app</button>
+            <button type="button" className="button"
+                    onClick={() => (hasFactor ? addingNeedsPassword("Set up an authenticator app", "Confirm your password to add another way to sign in.", password => begin(password)) : void begin())}>Set up an authenticator app</button>
           </div>
         )}
       </Section>
@@ -171,7 +178,13 @@ export function SecurityPanel({ onChange }: { onChange?: () => void }) {
           </ul>
         ) : <p className="muted">No passkeys yet.</p>}
         {passkeysSupported() ? (
-          <form className="field-actions" aria-label="Add a passkey" onSubmit={event => { event.preventDefault(); void attempt(() => actions.addPasskey.mutateAsync(passkeyName.trim() || "Passkey").then(result => { setPasskeyName(""); return result; })); }}>
+          <form className="field-actions" aria-label="Add a passkey" onSubmit={event => {
+            event.preventDefault();
+            const name = passkeyName.trim() || "Passkey";
+            const add = (password?: string) => actions.addPasskey.mutateAsync({ name, password }).then(result => { setPasskeyName(""); return result; });
+            if (hasFactor) addingNeedsPassword("Add a passkey", "Confirm your password to add another way to sign in.", async password => { finished(await add(password)); });
+            else void attempt(() => add());
+          }}>
             <label className="field"><span>Name</span><input value={passkeyName} maxLength={64} placeholder="Laptop" onChange={event => setPasskeyName(event.target.value)} /></label>
             <button type="submit" className="button" disabled={actions.addPasskey.isPending}>Add a passkey</button>
           </form>
@@ -200,7 +213,7 @@ export function SecurityPanel({ onChange }: { onChange?: () => void }) {
       ) : null}
 
       <RecoveryCodesDialog codes={codes} onClose={() => { setCodes(null); onChange?.(); }} />
-      <PasswordDialog pending={pending} onClose={() => setPending(null)} onDone={result => { setPending(null); finished(result); }} />
+      <PasswordDialog pending={pending} onClose={() => setPending(null)} />
     </div>
   );
 }

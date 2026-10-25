@@ -151,12 +151,24 @@ def new_challenge(db: sqlite3.Connection, kind: str, user_id: int | None) -> str
 
 
 def get_challenge(db: sqlite3.Connection, raw: str, kind: str) -> sqlite3.Row | None:
+    """A challenge that is still open, without spending an attempt (for asking for passkey options)."""
     return db.execute("SELECT * FROM mfa_challenges WHERE token_hash=? AND kind=? AND expires_at>? AND attempts<?",
                       (token_digest(raw), kind, _now().isoformat(), MAX_CHALLENGE_ATTEMPTS)).fetchone()
 
 
-def burn_challenge(db: sqlite3.Connection, raw: str) -> None:
-    db.execute("DELETE FROM mfa_challenges WHERE token_hash=?", (token_digest(raw),))
+def claim_attempt(db: sqlite3.Connection, raw: str, kind: str) -> sqlite3.Row | None:
+    """Spend one of a challenge's attempts before an answer is judged, so parallel guesses share the cap
+    instead of each seeing an attempt left."""
+    spent = db.execute("UPDATE mfa_challenges SET attempts=attempts+1 WHERE token_hash=? AND kind=? AND expires_at>? AND attempts<?",
+                       (token_digest(raw), kind, _now().isoformat(), MAX_CHALLENGE_ATTEMPTS))
+    if spent.rowcount != 1:
+        return None
+    return db.execute("SELECT * FROM mfa_challenges WHERE token_hash=?", (token_digest(raw),)).fetchone()
+
+
+def burn_challenge(db: sqlite3.Connection, raw: str) -> bool:
+    """Use a challenge up. Only one caller can: a sign-in is accepted only by the one that gets True."""
+    return db.execute("DELETE FROM mfa_challenges WHERE token_hash=?", (token_digest(raw),)).rowcount == 1
 
 
 def main(argv: list[str] | None = None) -> int:

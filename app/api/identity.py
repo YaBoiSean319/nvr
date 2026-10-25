@@ -17,7 +17,7 @@ from authlib.integrations.starlette_client import OAuth
 
 from app import auth_limits as limits, mfa
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
-from app.security import hash_password, new_session_token, token_digest, verify_password
+from app.security import hash_password, new_session_token, spend_password_time, token_digest, verify_password
 from app.store import connect
 
 router = APIRouter()
@@ -154,10 +154,10 @@ def bootstrap(payload: BootstrapRequest, response: Response) -> dict[str, str]:
     return {"username": username, "role": "administrator"}
 
 
-def signed_in(response: Response, user: sqlite3.Row, account: str) -> dict[str, object]:
+def signed_in(response: Response, user: sqlite3.Row, account: str, address: str) -> dict[str, object]:
     """Start the session, clear the account's failures, and say whether the policy still owes a second factor."""
     start_session(response, int(user["id"]))
-    limits.record_success(account)
+    limits.succeeded(account, address)
     with connect() as db:
         owes = mfa.required_for(mfa.policy(db), user["role"], local=user["provider_issuer"] is None) and not mfa.has_factor(db, int(user["id"]))
     return {"username": user["username"], "role": user["role"], **({"mfa_enrolment_required": True} if owes else {})}
@@ -167,21 +167,23 @@ def signed_in(response: Response, user: sqlite3.Row, account: str) -> dict[str, 
 def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, object]:
     """The password step. An account with a second factor gets a challenge to answer instead of a session."""
     account, address = limits.account_key(payload.username), limits.client_address(request)
-    limits.check(account, address)
+    limits.begin(account, address)  # Counted as a failure until it turns out right.
     with connect() as db:
         user = db.execute(
             "SELECT id, username, password_hash, role, provider_issuer FROM users WHERE username=? COLLATE NOCASE",
             (payload.username.strip(),),
         ).fetchone()
+    if user is None:
+        spend_password_time(payload.password)  # An unknown name takes as long to refuse as a wrong password, so names cannot be told apart.
     if user is None or not verify_password(payload.password, user["password_hash"]):
-        limits.record_failure(account, address)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     with connect() as db:
         found = mfa.factors(db, int(user["id"]))
         if found["totp"] or found["passkeys"]:
+            limits.release(account, address)  # The password was right; the second step is where guessing continues.
             methods = [name for name, available in (("passkey", bool(found["passkeys"])), ("totp", found["totp"]), ("recovery", found["recovery_codes_remaining"] > 0)) if available]
             return {"mfa_required": True, "challenge": mfa.new_challenge(db, "login", int(user["id"])), "methods": methods}
-    return signed_in(response, user, account)
+    return signed_in(response, user, account, address)
 
 
 @router.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)

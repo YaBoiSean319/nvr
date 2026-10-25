@@ -19,11 +19,11 @@ export function SignInPage() {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    signIn.mutate({ username: username.trim(), password }, { onSuccess: result => { if ("mfa_required" in result) setChallenge(result); } });
+    signIn.mutate({ username: username.trim(), password }, { onSuccess: result => { if ("mfa_required" in result) { setChallenge(result); setPassword(""); } } });
   }
 
   if (challenge) {
-    return <SecondFactorStep challenge={challenge} username={username.trim()} onBack={() => { setChallenge(null); setPassword(""); signIn.reset(); }} />;
+    return <SecondFactorStep challenge={challenge} username={username.trim()} onBack={() => { setChallenge(null); signIn.reset(); }} />;
   }
 
   const error = messageOf(signIn.error) ?? messageOf(passkey.error);

@@ -66,16 +66,16 @@ class SecondFactorCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
-    def enrol_totp(self, client: TestClient) -> tuple[bytes, list[str]]:
-        begun = client.post("/api/me/security/totp/begin")
+    def enrol_totp(self, client: TestClient, password: str | None = None) -> tuple[bytes, list[str]]:
+        begun = client.post("/api/me/security/totp/begin", json={"password": password} if password else None)
         self.assertEqual(begun.status_code, 200, begun.text)
         secret = decode_secret(begun.json()["secret"])
         confirmed = client.post("/api/me/security/totp/confirm", json={"code": mfa.totp_code(secret, mfa.totp_step())})
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         return secret, confirmed.json()["recovery_codes"]
 
-    def enrol_passkey(self, client: TestClient, authenticator: SoftwareAuthenticator, name: str = "Laptop") -> dict:
-        options = client.post("/api/me/security/passkeys/options").json()
+    def enrol_passkey(self, client: TestClient, authenticator: SoftwareAuthenticator, name: str = "Laptop", password: str | None = None) -> dict:
+        options = client.post("/api/me/security/passkeys/options", json={"password": password} if password else None).json()
         registered = client.post("/api/me/security/passkeys", json={"credential": authenticator.create(options), "name": name})
         self.assertEqual(registered.status_code, 201, registered.text)
         return registered.json()
@@ -256,7 +256,7 @@ class PasskeyTests(SecondFactorCase):
     def test_a_passkey_cannot_be_registered_twice(self):
         authenticator = SoftwareAuthenticator()
         self.enrol_passkey(self.admin, authenticator)
-        options = self.admin.post("/api/me/security/passkeys/options").json()
+        options = self.admin.post("/api/me/security/passkeys/options", json={"password": TEST_PASSWORD}).json()
         self.assertEqual(self.admin.post("/api/me/security/passkeys", json={"credential": authenticator.create(options), "name": "again"}).status_code, 409)
 
     def test_the_relying_party_follows_the_public_address_when_set(self):
@@ -343,7 +343,7 @@ class ResetTests(SecondFactorCase):
         operator = self.browser()
         self.sign_in(operator, "operator", OPERATOR_PASSWORD)
         self.enrol_totp(operator)
-        self.enrol_passkey(operator, SoftwareAuthenticator())
+        self.enrol_passkey(operator, SoftwareAuthenticator(), password=OPERATOR_PASSWORD)
         listed = {user["username"]: user for user in self.admin.get("/api/admin/users").json()["users"]}
         self.assertEqual((listed["operator"]["totp"], listed["operator"]["passkeys"]), (True, 1))
         self.assertTrue(listed["operator"]["local"])
@@ -379,7 +379,7 @@ class ResetTests(SecondFactorCase):
 class AuditTests(SecondFactorCase):
     def test_enrolment_use_and_failures_are_audited(self):
         secret, _ = self.enrol_totp(self.admin)
-        self.enrol_passkey(self.admin, SoftwareAuthenticator())
+        self.enrol_passkey(self.admin, SoftwareAuthenticator(), password=TEST_PASSWORD)
         client = self.browser()
         challenge = self.sign_in(client)["challenge"]
         client.post("/api/auth/mfa/verify", json={"challenge": challenge, "method": "totp", "code": "000000"})
@@ -410,15 +410,15 @@ class RateLimitTests(SecondFactorCase):
         right = self.browser().post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD})
         self.assertEqual(right.status_code, 429)  # A throttle that let the right password through would not slow guessing.
         throttled = self.audit("auth_throttled")
-        self.assertEqual([(entry["resource_type"], entry["resource_id"]) for entry in throttled], [("account", "keeper")])
+        self.assertEqual([(entry["resource_type"], entry["resource_id"]) for entry in throttled], [("pair", "keeper|testclient")])
 
     def test_the_wait_grows_and_is_capped_so_nobody_is_locked_out_for_good(self):
         now = datetime.now(timezone.utc)
         waits = []
-        for failures in range(1, 40):
-            auth_limits.record_failure("keeper", f"10.0.0.{failures}")
+        for _ in range(40):
+            auth_limits.record_failure("keeper", "10.0.0.1")
             with connect() as db:
-                row = db.execute("SELECT blocked_until FROM auth_failures WHERE scope='account' AND key='keeper'").fetchone()
+                row = db.execute("SELECT blocked_until FROM auth_failures WHERE scope='pair' AND key='keeper|10.0.0.1'").fetchone()
             waits.append(0 if row["blocked_until"] is None else (datetime.fromisoformat(row["blocked_until"]) - now).total_seconds())
         self.assertEqual([round(wait) for wait in waits[:8]], [0, 0, 0, 0, 2, 4, 8, 16])
         self.assertTrue(all(second >= first - 1 for first, second in zip(waits, waits[1:])))
@@ -481,3 +481,144 @@ class MigrationTests(SecondFactorCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HardeningTests(SecondFactorCase):
+    """Races, re-authentication and the other edges a determined attacker would try."""
+
+    def parallel(self, calls):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+            return [future.result() for future in [pool.submit(call) for call in calls]]
+
+    def test_parallel_guesses_share_one_challenges_five_attempts(self):
+        self.enrol_totp(self.admin)
+        challenge = self.sign_in(self.browser())["challenge"]
+        clients = [self.browser() for _ in range(30)]
+        responses = self.parallel([lambda client=client: client.post("/api/auth/mfa/verify", json={"challenge": challenge, "method": "totp", "code": "123456"}) for client in clients])
+        self.assertEqual({response.status_code for response in responses} - {401, 429}, set())
+        self.assertEqual(len(self.audit("mfa_failed")), 5)  # Not thirty guesses: the cap was shared.
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT attempts FROM mfa_challenges").fetchone()[0], 5)
+
+    def test_one_challenge_gives_one_session_even_with_two_valid_answers_at_once(self):
+        _, codes = self.enrol_totp(self.admin)
+        challenge = self.sign_in(self.browser())["challenge"]
+        clients = [self.browser(), self.browser()]
+        responses = self.parallel([lambda client=client, code=code: client.post("/api/auth/mfa/verify", json={"challenge": challenge, "method": "recovery", "code": code})
+                                   for client, code in zip(clients, codes[:2])])
+        self.assertEqual(sorted(response.status_code for response in responses), [200, 401])
+        self.assertEqual(sum(client.get("/api/auth/me").status_code == 200 for client in clients), 1)
+
+    def test_the_same_assertion_cannot_sign_in_twice_at_once(self):
+        authenticator = SoftwareAuthenticator()
+        self.enrol_passkey(self.admin, authenticator)
+        challenge = self.sign_in(self.browser())["challenge"]
+        options = self.browser().post("/api/auth/mfa/passkey/options", json={"challenge": challenge}).json()
+        assertion = authenticator.get(options, sign_count=0)  # An authenticator that never counts: the replay case.
+        clients = [self.browser(), self.browser()]
+        responses = self.parallel([lambda client=client: client.post("/api/auth/mfa/passkey/verify", json={"challenge": challenge, "credential": assertion}) for client in clients])
+        self.assertEqual(sorted(response.status_code for response in responses), [200, 401])
+
+    def test_parallel_wrong_passwords_are_throttled_not_all_judged(self):
+        clients = [self.browser() for _ in range(12)]
+        responses = self.parallel([lambda client=client: client.post("/api/auth/login", json={"username": "keeper", "password": "wrong password 12345"}) for client in clients])
+        self.assertEqual(sorted(response.status_code for response in responses).count(401), 5)  # The fifth starts the wait; the rest never reach the password.
+        self.assertEqual(sorted(response.status_code for response in responses).count(429), 7)
+
+    def test_an_attacker_at_one_address_does_not_keep_the_real_user_out_from_another(self):
+        os.environ["NVR_TRUST_FORWARDED_FOR"] = "1"
+        self.addCleanup(os.environ.pop, "NVR_TRUST_FORWARDED_FOR", None)
+        for _ in range(5):
+            self.browser().post("/api/auth/login", json={"username": "keeper", "password": "wrong password 12345"}, headers={"X-Forwarded-For": "203.0.113.9"})
+        attacker = self.browser().post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD}, headers={"X-Forwarded-For": "203.0.113.9"})
+        self.assertEqual(attacker.status_code, 429)
+        real = self.browser().post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD}, headers={"X-Forwarded-For": "198.51.100.4"})
+        self.assertEqual(real.status_code, 200)
+
+    def test_guesses_spread_over_many_addresses_still_slow_the_account(self):
+        os.environ["NVR_TRUST_FORWARDED_FOR"] = "1"
+        self.addCleanup(os.environ.pop, "NVR_TRUST_FORWARDED_FOR", None)
+        for index in range(20):
+            self.browser().post("/api/auth/login", json={"username": "keeper", "password": "wrong password 12345"}, headers={"X-Forwarded-For": f"203.0.113.{index}"})
+        fresh = self.browser().post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD}, headers={"X-Forwarded-For": "198.51.100.77"})
+        self.assertEqual(fresh.status_code, 429)
+
+    def test_the_forwarded_address_is_only_trusted_when_asked_and_cannot_be_forged_by_prepending(self):
+        for _ in range(5):
+            self.browser().post("/api/auth/login", json={"username": "keeper", "password": "wrong password 12345"}, headers={"X-Forwarded-For": "1.2.3.4"})
+        with connect() as db:  # Ignored by default: the peer is who counts.
+            self.assertEqual([row[0] for row in db.execute("SELECT key FROM auth_failures WHERE scope='address'")], ["testclient"])
+        os.environ["NVR_TRUST_FORWARDED_FOR"] = "1"
+        self.addCleanup(os.environ.pop, "NVR_TRUST_FORWARDED_FOR", None)
+        self.browser().post("/api/auth/login", json={"username": "nobody", "password": "wrong password 12345"}, headers={"X-Forwarded-For": "6.6.6.6, 198.51.100.4"})
+        with connect() as db:  # The last entry is the one the trusted proxy added.
+            self.assertIn("198.51.100.4", [row[0] for row in db.execute("SELECT key FROM auth_failures WHERE scope='address'")])
+
+    def test_an_unknown_name_costs_the_same_as_a_wrong_password(self):
+        from app.api import identity
+        with mock.patch.object(identity, "spend_password_time") as spent:
+            self.assertEqual(self.browser().post("/api/auth/login", json={"username": "nobody", "password": "wrong password 12345"}).status_code, 401)
+            self.assertEqual(spent.call_count, 1)
+            self.browser().post("/api/auth/login", json={"username": "keeper", "password": "wrong password 12345"})
+            self.assertEqual(spent.call_count, 1)
+
+    def test_old_failures_are_pruned(self):
+        auth_limits.record_failure("someone", "10.1.1.1")
+        later = datetime.now(timezone.utc) + auth_limits.FORGET_AFTER + timedelta(minutes=1)
+        with mock.patch.object(auth_limits, "_now", return_value=later):
+            auth_limits.record_failure("another", "10.1.1.2")
+        with connect() as db:
+            self.assertEqual(sorted(row[0] for row in db.execute("SELECT key FROM auth_failures WHERE scope='account'")), ["another"])
+
+    def test_pending_passkey_sign_ins_are_capped(self):
+        from app.api import mfa as mfa_api
+        with mock.patch.object(mfa_api, "MAX_PENDING_PASSKEY_SIGN_INS", 2):
+            statuses = [self.browser().post("/api/auth/passkey/options").status_code for _ in range(4)]
+        self.assertEqual(statuses, [200, 200, 429, 429])
+
+    def test_adding_a_factor_to_a_protected_account_needs_the_password(self):
+        self.enrol_totp(self.admin)
+        refused = self.admin.post("/api/me/security/passkeys/options")
+        self.assertEqual(refused.status_code, 403)
+        wrong = self.admin.post("/api/me/security/passkeys/options", json={"password": "wrong password 12345"})
+        self.assertEqual(wrong.status_code, 403)
+        self.assertEqual(self.admin.post("/api/me/security/passkeys/options", json={"password": TEST_PASSWORD}).status_code, 200)
+        self.admin.request("DELETE", "/api/me/security/totp", json={"password": TEST_PASSWORD})
+        self.enrol_passkey(self.admin, SoftwareAuthenticator())
+        self.assertEqual(self.admin.post("/api/me/security/totp/begin").status_code, 403)  # A passkey protects it now.
+        self.assertEqual(self.admin.post("/api/me/security/totp/begin", json={"password": TEST_PASSWORD}).status_code, 200)
+        self.assertEqual(self.audit("mfa_failed")[-1]["details"]["method"], "password_confirmation")
+
+    def test_changing_how_you_sign_in_ends_your_other_sessions_but_not_this_one(self):
+        self.enrol_totp(self.admin)
+        elsewhere = self.browser()
+        challenge = self.sign_in(elsewhere)["challenge"]
+        with connect() as db:
+            secret = mfa.stored_totp(db, 1, confirmed=True)[0]
+        elsewhere.post("/api/auth/mfa/verify", json={"challenge": challenge, "method": "totp", "code": mfa.totp_code(secret, mfa.totp_step() + 1)})
+        self.assertEqual(elsewhere.get("/api/auth/me").status_code, 200)
+        self.admin.post("/api/me/security/recovery-codes", json={"password": TEST_PASSWORD})
+        self.assertEqual(elsewhere.get("/api/auth/me").status_code, 401)
+        self.assertEqual(self.admin.get("/api/auth/me").status_code, 200)
+
+    def test_an_api_token_cannot_change_sign_in_security(self):
+        created = self.admin.post("/api/admin/api-tokens", json={"name": "ci", "scopes": ["admin"]})
+        self.assertEqual(created.status_code, 201, created.text)
+        headers = {"Authorization": f"Bearer {created.json()['secret']}"}
+        client = self.browser()
+        self.assertEqual(client.post("/api/me/security/totp/begin", headers=headers).status_code, 403)
+        self.assertEqual(client.post("/api/me/security/passkeys/options", headers=headers).status_code, 403)
+
+    def test_a_restricted_session_reaches_exactly_the_enrolment_routes(self):
+        from app import principal
+        for path, allowed in (("/api/auth/me", True), ("/api/auth/logout", True), ("/api/me/security", True), ("/api/me/security/totp/begin", True),
+                              ("/api/me/security/passkeys/12", True), ("/api/me/security-extra", False), ("/api/me/preferences", False), ("/api/cameras", False)):
+            self.assertEqual(principal._enrolment_route(type("Route", (), {"path": path})()), allowed, path)
+        self.assertFalse(principal._enrolment_route(None))
+
+    def test_passkey_sign_in_changes_are_audited(self):
+        authenticator = SoftwareAuthenticator()
+        self.enrol_passkey(self.admin, authenticator)
+        self.admin.put("/api/me/security/passkey-sign-in", json={"enabled": True, "password": TEST_PASSWORD})
+        self.assertEqual([entry["details"]["enabled"] for entry in self.audit("mfa_passkey_sign_in_changed")], [True])

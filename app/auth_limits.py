@@ -1,14 +1,22 @@
-"""Sign-in rate limiting, per account and per address.
+"""Sign-in rate limiting, per account, per account-and-address pair, and per address.
 
-Each failed attempt counts against both the account named and the address it came from.
-After a few failures every further attempt waits, twice as long each time, up to a cap: a
-guessing attacker is slowed to a handful of tries an hour, while the account (above all the
-emergency administrator) is never locked out for longer than the cap. Failures are forgotten
-after a quiet spell, and a completed sign-in clears the account's count. A throttled
-attempt is refused even with the right credentials, or the throttle would not slow guessing.
+Every attempt is counted before it is judged, in the same transaction that checks whether it
+may go ahead, so parallel guesses cannot all slip past a check made before any was counted.
+A success undoes its own count. After a few failures every further attempt waits, twice as
+long each time, up to a cap: a guessing attacker is slowed to a handful of tries an hour, and
+no one is ever locked out for longer than the cap.
+
+Three buckets are kept. The pair (this account from this address) has a low threshold, so an
+attacker is stopped quickly yet cannot keep the real person, signing in from elsewhere, waiting.
+The account on its own has a high threshold, which spreading guesses over many addresses
+reaches. The address has a high threshold too, for one machine trying many accounts. Failures
+are forgotten after a quiet spell, and a completed sign-in clears the account's buckets. A
+throttled attempt is refused even with the right credentials, or the throttle would not slow
+guessing.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,7 +27,7 @@ from .audit import record
 from .store import connect
 
 # (failures allowed before waiting starts, first wait in seconds)
-LIMITS = {"account": (4, 2), "address": (19, 2)}
+LIMITS = {"pair": (4, 2), "account": (19, 2), "address": (19, 2)}
 MAX_WAIT_SECONDS = 300
 FORGET_AFTER = timedelta(minutes=15)
 
@@ -33,6 +41,13 @@ def _parse(value: str) -> datetime:
 
 
 def client_address(request: Request) -> str:
+    """The peer's address; behind a reverse proxy you trust, the address it saw (``NVR_TRUST_FORWARDED_FOR``).
+
+    The last ``X-Forwarded-For`` entry is the one the nearest proxy added, which a client cannot forge."""
+    if os.environ.get("NVR_TRUST_FORWARDED_FOR", "").lower() in {"1", "true", "yes"}:
+        forwarded = request.headers.get("x-forwarded-for", "").split(",")[-1].strip()
+        if forwarded:
+            return forwarded[:64]
     return request.client.host if request.client else "unknown"
 
 
@@ -40,10 +55,13 @@ def account_key(username: str) -> str:
     return username.strip().casefold()[:128]
 
 
-@dataclass(frozen=True)
-class Throttle:
-    scope: str
-    retry_after: int
+def _buckets(account: str, address: str, include_address: bool = True) -> list[tuple[str, str]]:
+    buckets = []
+    if account:
+        buckets += [("pair", f"{account}|{address}"), ("account", account)]
+    if include_address and address:
+        buckets.append(("address", address))
+    return buckets
 
 
 def _wait(scope: str, failures: int) -> int:
@@ -53,10 +71,15 @@ def _wait(scope: str, failures: int) -> int:
     return min(MAX_WAIT_SECONDS, first * 2 ** (failures - allowed - 1))
 
 
-def blocked(db: sqlite3.Connection, account: str, address: str) -> Throttle | None:
-    now = _now()
+@dataclass(frozen=True)
+class Throttle:
+    scope: str
+    retry_after: int
+
+
+def _blocked(db: sqlite3.Connection, buckets: list[tuple[str, str]], now: datetime) -> Throttle | None:
     longest: Throttle | None = None
-    for scope, key in (("account", account), ("address", address)):
+    for scope, key in buckets:
         row = db.execute("SELECT blocked_until FROM auth_failures WHERE scope=? AND key=?", (scope, key)).fetchone()
         if row and row["blocked_until"] and _parse(row["blocked_until"]) > now:
             wait = int((_parse(row["blocked_until"]) - now).total_seconds()) + 1
@@ -65,40 +88,87 @@ def blocked(db: sqlite3.Connection, account: str, address: str) -> Throttle | No
     return longest
 
 
-def check(account: str, address: str) -> None:
-    """Refuse (429, with Retry-After) while this account or address is waiting out failures."""
+def _count(db: sqlite3.Connection, buckets: list[tuple[str, str]], address: str, now: datetime) -> None:
+    db.execute("DELETE FROM auth_failures WHERE last_failure_at<? AND (blocked_until IS NULL OR blocked_until<?)",
+               ((now - FORGET_AFTER).isoformat(), now.isoformat()))
+    for scope, key in buckets:
+        row = db.execute("SELECT failures,last_failure_at FROM auth_failures WHERE scope=? AND key=?", (scope, key)).fetchone()
+        failures = 1 if row is None or now - _parse(row["last_failure_at"]) > FORGET_AFTER else int(row["failures"]) + 1
+        wait = _wait(scope, failures)
+        db.execute("INSERT INTO auth_failures(scope,key,failures,last_failure_at,blocked_until) VALUES(?,?,?,?,?) "
+                   "ON CONFLICT(scope,key) DO UPDATE SET failures=excluded.failures,last_failure_at=excluded.last_failure_at,blocked_until=excluded.blocked_until",
+                   (scope, key, failures, now.isoformat(), (now + timedelta(seconds=wait)).isoformat() if wait else None))
+        if wait and failures - 1 == LIMITS[scope][0]:
+            record(db, None, "auth_throttled", scope, key, failures=failures, wait_seconds=wait, address=address)
+
+
+def _attempt(account: str, address: str, include_address: bool) -> None:
+    now = _now()
+    buckets = _buckets(account, address, include_address)
     with connect() as db:
-        throttle = blocked(db, account, address)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            throttle = _blocked(db, buckets, now)
+            if throttle is None:
+                _count(db, buckets, address, now)
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
     if throttle:
         raise HTTPException(status_code=429, detail=f"Too many failed attempts. Try again in {throttle.retry_after} seconds.",
                             headers={"Retry-After": str(throttle.retry_after)})
 
 
+def begin(account: str, address: str) -> None:
+    """Count an attempt, or refuse it (429, with Retry-After) while the account, the pair or the address is waiting.
+
+    The attempt counts as a failure until ``release`` or ``succeeded`` says otherwise. ``account`` may be empty
+    when it is not yet known (a passkey on its own): only the address is counted."""
+    _attempt(account, address, include_address=True)
+
+
+def begin_account(account: str, address: str) -> None:
+    """Count an attempt against an account that has just been identified, not the address (already counted by ``begin``)."""
+    _attempt(account, address, include_address=False)
+
+
 def record_failure(account: str, address: str) -> None:
-    """Count a failure against the address, and against the account when it names one."""
-    now = _now()
+    """Count a failure without judging it (for callers that already know it failed)."""
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            for scope, key in (("account", account), ("address", address)):
-                if not key:
-                    continue
-                row = db.execute("SELECT failures,last_failure_at FROM auth_failures WHERE scope=? AND key=?", (scope, key)).fetchone()
-                failures = 1 if row is None or now - _parse(row["last_failure_at"]) > FORGET_AFTER else int(row["failures"]) + 1
-                wait = _wait(scope, failures)
-                until = (now + timedelta(seconds=wait)).isoformat() if wait else None
-                db.execute("INSERT INTO auth_failures(scope,key,failures,last_failure_at,blocked_until) VALUES(?,?,?,?,?) "
-                           "ON CONFLICT(scope,key) DO UPDATE SET failures=excluded.failures,last_failure_at=excluded.last_failure_at,blocked_until=excluded.blocked_until",
-                           (scope, key, failures, now.isoformat(), until))
-                if wait and failures - 1 == LIMITS[scope][0]:
-                    record(db, None, "auth_throttled", scope, key, failures=failures, wait_seconds=wait, **({"address": address} if scope == "account" else {}))
+            _count(db, _buckets(account, address), address, _now())
         except BaseException:
             db.execute("ROLLBACK")
             raise
         db.execute("COMMIT")
 
 
-def record_success(account: str) -> None:
-    """A completed sign-in clears the account's failures; the address keeps counting until it goes quiet."""
+def release(account: str, address: str, include_address: bool = True) -> None:
+    """Take back an attempt's count because it was right, leaving earlier failures in place."""
     with connect() as db:
-        db.execute("DELETE FROM auth_failures WHERE scope='account' AND key=?", (account,))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for scope, key in _buckets(account, address, include_address):
+                row = db.execute("SELECT failures,last_failure_at FROM auth_failures WHERE scope=? AND key=?", (scope, key)).fetchone()
+                if row is None:
+                    continue
+                failures = max(0, int(row["failures"]) - 1)
+                if failures == 0:
+                    db.execute("DELETE FROM auth_failures WHERE scope=? AND key=?", (scope, key))
+                    continue
+                wait = _wait(scope, failures)
+                until = (_parse(row["last_failure_at"]) + timedelta(seconds=wait)).isoformat() if wait else None
+                db.execute("UPDATE auth_failures SET failures=?,blocked_until=? WHERE scope=? AND key=?", (failures, until, scope, key))
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+
+
+def succeeded(account: str, address: str) -> None:
+    """A completed sign-in: this attempt's count goes, and the account's failures with it."""
+    release(account, address)
+    with connect() as db:
+        db.execute("DELETE FROM auth_failures WHERE (scope='account' AND key=?) OR (scope='pair' AND key=?)", (account, f"{account}|{address}"))

@@ -27,6 +27,7 @@ from starlette.requests import HTTPConnection
 from fastapi.dependencies.models import Dependant
 
 from .api_tokens import TokenRejected, authenticate, grants, token_scopes, usable_token
+from .mfa import required_for
 from .security import token_digest
 from .store import connect
 
@@ -187,12 +188,10 @@ def depends_on(dependant: Dependant, target: Callable[..., object]) -> bool:
 def _enrolment_route(route: object) -> bool:
     """What a session still owing its second factor may reach: who it is, signing out, and enrolling."""
     path = getattr(route, "path", "") or ""
-    return path in {"/api/auth/me", "/api/auth/logout"} or path.startswith("/api/me/security")
+    return path in {"/api/auth/me", "/api/auth/logout", "/api/me/security"} or path.startswith("/api/me/security/")
 
 
 def _principal(row: sqlite3.Row) -> Principal:
-    from .mfa import required_for
-
     owes = required_for(row["mfa_policy"], row["role"], local=row["provider_issuer"] is None) and row["factor_count"] == 0
     return Principal(id=row["id"], username=row["username"], role=row["role"], mfa_enrolment_required=owes)
 

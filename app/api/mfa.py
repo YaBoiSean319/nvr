@@ -1,6 +1,7 @@
 """Second factors: the sign-in steps after the password, enrolment from the account menu, and administrator controls."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -11,8 +12,8 @@ from pydantic import BaseModel, Field
 from app import auth_limits as limits, mfa, webauthn
 from app.api.identity import signed_in
 from app.audit import record
-from app.principal import Administrator, CurrentUser, Principal
-from app.security import verify_password
+from app.principal import COOKIE_NAME, Administrator, CurrentUser, Principal
+from app.security import token_digest, verify_password
 from app.store import connect
 
 router = APIRouter()
@@ -53,31 +54,35 @@ class PasskeyAssertion(BaseModel):
     credential: dict[str, Any]
 
 
-def _pending_sign_in(raw: str, kind: str = "login") -> tuple[sqlite3.Row, sqlite3.Row | None]:
+def _open_challenge(raw: str, kind: str = "login", *, claim: bool = False) -> tuple[sqlite3.Row, sqlite3.Row | None]:
+    """The sign-in a challenge belongs to. ``claim`` spends one of its attempts first, atomically, for steps that judge an answer."""
     with connect() as db:
-        challenge = mfa.get_challenge(db, raw, kind)
+        challenge = mfa.claim_attempt(db, raw, kind) if claim else mfa.get_challenge(db, raw, kind)
         if challenge is None:
             raise _expired()
         user = db.execute("SELECT id,username,role,provider_issuer FROM users WHERE id=?", (challenge["user_id"],)).fetchone() if challenge["user_id"] else None
     return challenge, user
 
 
-def _failed(user_id: int | None, username: str, address: str, method: str, reason: str, raw: str | None = None) -> None:
-    """Count a failed step against the account and the address, burn a try on the challenge, and audit it."""
-    limits.record_failure(limits.account_key(username), address)
+def _consume(db: sqlite3.Connection, raw: str) -> None:
+    """Use the challenge up. Of several answers racing for one challenge, only one gets a session."""
+    if not mfa.burn_challenge(db, raw):
+        raise _expired()
+
+
+def _failed(user_id: int | None, username: str, address: str, method: str, reason: str) -> None:
+    """Audit a wrong answer. The attempt was already counted against the throttle when it began."""
     with connect() as db:
-        if raw:
-            db.execute("UPDATE mfa_challenges SET attempts=attempts+1 WHERE token_hash=?", (mfa.token_digest(raw),))
         record(db, user_id, "mfa_failed", "user", user_id if user_id is not None else username, method=method, reason=reason, address=address)
 
 
 @router.post("/api/auth/mfa/verify")
 def verify_second_factor(payload: SecondFactorRequest, request: Request, response: Response) -> dict[str, object]:
     """Answer a sign-in's challenge with an authenticator code, or with a recovery code (each works once)."""
-    challenge, user = _pending_sign_in(payload.challenge)
+    _, user = _open_challenge(payload.challenge, claim=True)
     assert user is not None
     address, account = limits.client_address(request), limits.account_key(user["username"])
-    limits.check(account, address)
+    limits.begin(account, address)
     user_id = int(user["id"])
     with connect() as db:
         if payload.method == "totp":
@@ -88,16 +93,15 @@ def verify_second_factor(payload: SecondFactorRequest, request: Request, respons
         else:
             accepted = mfa.use_recovery_code(db, user_id, payload.code)
     if not accepted:
-        _failed(user_id, user["username"], address, payload.method, "wrong_code", payload.challenge)
+        _failed(user_id, user["username"], address, payload.method, "wrong_code")
         raise HTTPException(status_code=401, detail="That code is not right")
     with connect() as db:
-        mfa.burn_challenge(db, payload.challenge)
+        _consume(db, payload.challenge)
         record(db, user_id, "mfa_recovery_code_used" if payload.method == "recovery" else "mfa_used", "user", user_id, method=payload.method, address=address)
-    return signed_in(response, user, account)
+    return signed_in(response, user, account, address)
 
 
 def _passkeys_of(db: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
-    import json
     return [{"credential_id": row["credential_id"], "transports": json.loads(row["transports_json"])}
             for row in db.execute("SELECT credential_id,transports_json FROM user_passkeys WHERE user_id=? ORDER BY id", (user_id,))]
 
@@ -108,7 +112,7 @@ def _store_challenge(db: sqlite3.Connection, raw: str, value: bytes) -> None:
 
 @router.post("/api/auth/mfa/passkey/options")
 def second_factor_passkey_options(payload: ChallengeRequest, request: Request) -> dict[str, Any]:
-    challenge, user = _pending_sign_in(payload.challenge)
+    _, user = _open_challenge(payload.challenge)
     assert user is not None
     value = webauthn.new_challenge()
     with connect() as db:
@@ -129,37 +133,45 @@ def _check_assertion(db: sqlite3.Connection, credential: dict[str, Any], webauth
         raise webauthn.WebAuthnError("This passkey is not registered for this account")
     count = webauthn.verify_assertion(credential, webauthn.unb64url(webauthn_challenge), _relying_party(request), bytes(row["public_key"]),
                                       int(row["sign_count"]), require_verified)
-    db.execute("UPDATE user_passkeys SET sign_count=?,last_used_at=? WHERE id=?", (count, datetime.now(timezone.utc).isoformat(), row["id"]))
+    swapped = db.execute("UPDATE user_passkeys SET sign_count=?,last_used_at=? WHERE id=? AND sign_count=?",
+                         (count, datetime.now(timezone.utc).isoformat(), row["id"], row["sign_count"]))
+    if swapped.rowcount != 1:
+        raise webauthn.WebAuthnError("This passkey was just used for another sign-in")
     return row
 
 
 @router.post("/api/auth/mfa/passkey/verify")
 def verify_passkey_second_factor(payload: PasskeyAssertion, request: Request, response: Response) -> dict[str, object]:
-    challenge, user = _pending_sign_in(payload.challenge)
+    challenge, user = _open_challenge(payload.challenge, claim=True)
     assert user is not None
     address, account = limits.client_address(request), limits.account_key(user["username"])
-    limits.check(account, address)
+    limits.begin(account, address)
     user_id = int(user["id"])
     try:
         with connect() as db:
             _check_assertion(db, payload.credential, challenge["webauthn_challenge"], request, user_id, require_verified=False)
-            mfa.burn_challenge(db, payload.challenge)  # One answer per challenge, right or wrong, from here on.
+            _consume(db, payload.challenge)
     except webauthn.WebAuthnError as exc:
-        _failed(user_id, user["username"], address, "passkey", str(exc), payload.challenge)
+        _failed(user_id, user["username"], address, "passkey", str(exc))
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     with connect() as db:
         record(db, user_id, "mfa_used", "user", user_id, method="passkey", address=address)
-    return signed_in(response, user, account)
+    return signed_in(response, user, account, address)
 
 
 # --- Sign-in: a passkey alone -----------------------------------------------------------
 
+MAX_PENDING_PASSKEY_SIGN_INS = 1000
+
+
 @router.post("/api/auth/passkey/options")
 def passkey_sign_in_options(request: Request) -> dict[str, Any]:
     """Options for signing in with only a passkey, for people who turned that on."""
-    limits.check("", limits.client_address(request))
     value = webauthn.new_challenge()
     with connect() as db:
+        pending = db.execute("SELECT COUNT(*) FROM mfa_challenges WHERE kind='passkey_login' AND expires_at>?", (datetime.now(timezone.utc).isoformat(),)).fetchone()[0]
+        if pending >= MAX_PENDING_PASSKEY_SIGN_INS:
+            raise HTTPException(status_code=429, detail="Too many sign-ins are waiting. Try again in a few minutes.", headers={"Retry-After": "60"})
         raw = mfa.new_challenge(db, "passkey_login", None)
         _store_challenge(db, raw, value)
     return {"challenge": raw, "options": webauthn.request_options(_relying_party(request), value, [], "required")}
@@ -167,32 +179,36 @@ def passkey_sign_in_options(request: Request) -> dict[str, Any]:
 
 @router.post("/api/auth/passkey/login")
 def passkey_sign_in(payload: PasskeyAssertion, request: Request, response: Response) -> dict[str, object]:
-    challenge, _ = _pending_sign_in(payload.challenge, "passkey_login")
+    challenge, _ = _open_challenge(payload.challenge, "passkey_login", claim=True)
     address = limits.client_address(request)
-    limits.check("", address)
+    limits.begin("", address)  # Counts the address; the account is counted once the passkey says whose it is.
     try:
         with connect() as db:
             row = db.execute("SELECT user_id FROM user_passkeys WHERE credential_id=?", (str(payload.credential.get("id", "")),)).fetchone()
             user = db.execute("SELECT id,username,role,provider_issuer,passkey_sign_in FROM users WHERE id=?", (row["user_id"],)).fetchone() if row else None
-            if user is None:
-                raise webauthn.WebAuthnError("This passkey is not registered")
-            account = limits.account_key(user["username"])
-            limits.check(account, address)
-            if not user["passkey_sign_in"]:
-                raise webauthn.WebAuthnError("Signing in with only a passkey is turned off for this account")
+        if user is None:
+            raise webauthn.WebAuthnError("This passkey is not registered")
+        account = limits.account_key(user["username"])
+        limits.begin_account(account, address)
+        if not user["passkey_sign_in"]:
+            raise webauthn.WebAuthnError("Signing in with only a passkey is turned off for this account")
+        with connect() as db:
             _check_assertion(db, payload.credential, challenge["webauthn_challenge"], request, int(user["id"]), require_verified=True)
-            mfa.burn_challenge(db, payload.challenge)
+            _consume(db, payload.challenge)
     except webauthn.WebAuthnError as exc:
-        _failed(None, "", address, "passkey_sign_in", str(exc), payload.challenge)
+        _failed(int(user["id"]) if user else None, user["username"] if user else "", address, "passkey_sign_in", str(exc))
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     with connect() as db:
         record(db, int(user["id"]), "mfa_used", "user", int(user["id"]), method="passkey_sign_in", address=address)
-    return signed_in(response, user, account)
+    return signed_in(response, user, account, address)
 
 
 # --- Enrolment, from the account menu ---------------------------------------------------
 
 def _local_account(user: Principal) -> sqlite3.Row:
+    if user.scopes is not None:
+        # An API token acts for its creator but is not a person at a keyboard: sign-in is changed from a browser session.
+        raise HTTPException(status_code=403, detail="Change sign-in security from a browser session, not an API token")
     with connect() as db:
         row = db.execute("SELECT id,username,role,provider_issuer,password_hash,passkey_sign_in FROM users WHERE id=?", (user.id,)).fetchone()
     if row is None:
@@ -205,16 +221,36 @@ def _local_account(user: Principal) -> sqlite3.Row:
 def _confirm_password(account: sqlite3.Row, password: str, request: Request) -> None:
     """Changing how someone signs in needs their password again, so a borrowed session cannot strip a factor."""
     key, address = limits.account_key(account["username"]), limits.client_address(request)
-    limits.check(key, address)
+    limits.begin(key, address)
     if not verify_password(password, account["password_hash"]):
-        limits.record_failure(key, address)
         with connect() as db:
             record(db, int(account["id"]), "mfa_failed", "user", int(account["id"]), method="password_confirmation", reason="wrong_password", address=address)
         raise HTTPException(status_code=403, detail="That password is not right")
+    limits.release(key, address)
+
+
+def _confirm_password_to_add(account: sqlite3.Row, password: str | None, request: Request) -> None:
+    """Adding a factor to an account that already has one needs the password too, or a borrowed session could add its own."""
+    with connect() as db:
+        protected = mfa.has_factor(db, int(account["id"]))
+    if protected:
+        if not password:
+            raise HTTPException(status_code=403, detail="Confirm your password to add another factor")
+        _confirm_password(account, password, request)
+
+
+def _end_other_sessions(db: sqlite3.Connection, user_id: int, request: Request) -> None:
+    """After a change to how someone signs in, every other session of theirs ends; the one making the change stays."""
+    raw = request.cookies.get(COOKIE_NAME)
+    db.execute("DELETE FROM sessions WHERE user_id=? AND token_hash!=?", (user_id, token_digest(raw) if raw else ""))
 
 
 class PasswordRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
+
+
+class OptionalPassword(BaseModel):
+    password: str | None = Field(default=None, max_length=1024)
 
 
 class TotpConfirmRequest(BaseModel):
@@ -263,8 +299,9 @@ def _first_codes(db: sqlite3.Connection, user_id: int) -> list[str] | None:
 
 
 @router.post("/api/me/security/totp/begin")
-def begin_totp(user: CurrentUser) -> dict[str, str]:
+def begin_totp(request: Request, user: CurrentUser, payload: OptionalPassword | None = None) -> dict[str, str]:
     account = _local_account(user)
+    _confirm_password_to_add(account, payload.password if payload else None, request)
     with connect() as db:
         if mfa.stored_totp(db, user.id, confirmed=True):
             raise HTTPException(status_code=409, detail="An authenticator app is already set up; remove it first to set up another")
@@ -277,17 +314,17 @@ def begin_totp(user: CurrentUser) -> dict[str, str]:
 def confirm_totp(payload: TotpConfirmRequest, request: Request, user: CurrentUser) -> dict[str, object]:
     account = _local_account(user)
     key, address = limits.account_key(account["username"]), limits.client_address(request)
-    limits.check(key, address)
+    limits.begin(key, address)
     with connect() as db:
         stored = mfa.stored_totp(db, user.id, confirmed=False)
         if stored is None:
             raise HTTPException(status_code=409, detail="Start setting up the authenticator app first")
         step = mfa.matching_totp_step(stored[0], payload.code, 0)
         if step is None:
-            limits.record_failure(key, address)
             record(db, user.id, "mfa_failed", "user", user.id, method="totp_enrolment", reason="wrong_code", address=address)
             raise HTTPException(status_code=422, detail="That code is not right. Check the app's clock and try the next code.")
         db.execute("UPDATE user_totp SET confirmed_at=?,last_step=? WHERE user_id=?", (datetime.now(timezone.utc).isoformat(), step, user.id))
+        limits.release(key, address)
         record(db, user.id, "mfa_totp_enrolled", "user", user.id)
         codes = _first_codes(db, user.id)
     return {"recovery_codes": codes, **_summary(user)}
@@ -300,6 +337,7 @@ def remove_totp(payload: PasswordRequest, request: Request, user: CurrentUser) -
     with connect() as db:
         db.execute("DELETE FROM user_totp WHERE user_id=?", (user.id,))
         _after_removal(db, user.id, "totp")
+        _end_other_sessions(db, user.id, request)
     return _summary(user)
 
 
@@ -314,8 +352,9 @@ def _after_removal(db: sqlite3.Connection, user_id: int, factor: str) -> None:
 
 
 @router.post("/api/me/security/passkeys/options")
-def passkey_creation_options(request: Request, user: CurrentUser) -> dict[str, Any]:
+def passkey_creation_options(request: Request, user: CurrentUser, payload: OptionalPassword | None = None) -> dict[str, Any]:
     account = _local_account(user)
+    _confirm_password_to_add(account, payload.password if payload else None, request)
     value = webauthn.new_challenge()
     with connect() as db:
         existing = [item["credential_id"] for item in _passkeys_of(db, user.id)]
@@ -339,7 +378,6 @@ def register_passkey(payload: PasskeyRegistration, request: Request, user: Curre
         with connect() as db:
             record(db, user.id, "mfa_failed", "user", user.id, method="passkey_enrolment", reason=str(exc), address=address)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    import json
     with connect() as db:
         try:
             db.execute("INSERT INTO user_passkeys(user_id,credential_id,public_key,algorithm,sign_count,transports_json,name) VALUES(?,?,?,?,?,?,?)",
@@ -360,6 +398,7 @@ def remove_passkey(passkey_id: int, payload: PasswordRequest, request: Request, 
         if db.execute("DELETE FROM user_passkeys WHERE id=? AND user_id=?", (passkey_id, user.id)).rowcount == 0:
             raise HTTPException(status_code=404, detail="Passkey not found")
         _after_removal(db, user.id, "passkey")
+        _end_other_sessions(db, user.id, request)
     return _summary(user)
 
 
@@ -372,6 +411,7 @@ def set_passkey_sign_in(payload: PasskeySignInRequest, request: Request, user: C
             raise HTTPException(status_code=409, detail="Add a passkey first")
         db.execute("UPDATE users SET passkey_sign_in=? WHERE id=?", (int(payload.enabled), user.id))
         record(db, user.id, "mfa_passkey_sign_in_changed", "user", user.id, enabled=payload.enabled)
+        _end_other_sessions(db, user.id, request)
     return _summary(user)
 
 
@@ -385,6 +425,7 @@ def regenerate_recovery_codes(payload: PasswordRequest, request: Request, user: 
             raise HTTPException(status_code=409, detail="Set up a second factor first")
         codes = mfa.new_recovery_codes(db, user.id)
         record(db, user.id, "mfa_recovery_codes_generated", "user", user.id, reason="regenerated")
+        _end_other_sessions(db, user.id, request)
     return {"recovery_codes": codes, **_summary(user)}
 
 

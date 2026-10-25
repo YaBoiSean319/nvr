@@ -171,16 +171,22 @@ test("when required, someone without a second factor must set one up first; an a
   await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
   await page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Users & access" }).click();
   const policy = page.getByRole("region", { name: "Sign-in security" });
-  await policy.getByLabel("Second factor for local accounts").selectOption("all");
-  await expect(policy.getByRole("status")).toContainText("required for all local accounts");
+  await policy.getByLabel("Second factor for local accounts").selectOption("administrators");
+  await expect(policy.getByRole("status")).toContainText("required for administrators");
 
-  // The operator reaches nothing but enrolment until they have a factor.
+  // Administrators only: an operator signs straight in.
   const operatorContext = await browser.newContext({ baseURL: page.url().split("/").slice(0, 3).join("/") });
   const operator = await operatorContext.newPage();
   await operator.goto("/");
   await operator.getByLabel("Username").fill("camera-operator");
   await operator.getByLabel("Password").fill(FIXTURE_PASSWORD);
   await operator.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(nav(operator)).toBeVisible();
+
+  // Required for all: the operator, already signed in, reaches nothing but enrolment on their next load.
+  await policy.getByLabel("Second factor for local accounts").selectOption("all");
+  await expect(policy.getByRole("status")).toContainText("required for all local accounts");
+  await operator.reload();
   await expect(operator.getByRole("heading", { name: "Set up a second factor" })).toBeVisible();
   await expect(nav(operator)).toHaveCount(0);
   expect((await operator.request.get("/api/cameras")).status()).toBe(403);
