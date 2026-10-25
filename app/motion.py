@@ -213,6 +213,8 @@ class MotionClipAssembler:
                 (self.camera_id, relative, actual_start.isoformat(), actual_end.isoformat(), output.stat().st_size),
             )
             segment_id = cursor.lastrowid
+            from . import metrics
+            metrics.segment_written(db, self.camera_id, actual_end)
             db.execute(
                 "UPDATE motion_events SET actual_start=?,actual_end=?,pre_roll_complete=?,status='complete',segment_id=?,failure_reason=NULL WHERE id=?",
                 (actual_start.isoformat(), actual_end.isoformat(), int(pre_roll_complete), segment_id, capture.event_id),
@@ -221,6 +223,8 @@ class MotionClipAssembler:
         shutil.rmtree(staging, ignore_errors=True)
 
     async def _mark_failed(self, capture: _Capture, reason: str) -> None:
+        from . import metrics
+        metrics.segment_dropped(self.camera_id)
         with connect() as db:
             db.execute("UPDATE motion_events SET status='failed',failure_reason=? WHERE id=?", (reason, capture.event_id))
         shutil.rmtree(capture.staging_dir, ignore_errors=True)

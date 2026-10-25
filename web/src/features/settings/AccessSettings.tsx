@@ -102,7 +102,7 @@ export function AccessSettings() {
           <label className="field"><span>Name</span><input value={name} maxLength={80} onChange={event => setName(event.target.value)} /></label>
           <fieldset className="plain">
             <legend className="field-heading">Scopes</legend>
-            {(tokens.data?.scopes ?? ["read", "media", "export", "admin"]).map(scope => (
+            {(tokens.data?.scopes ?? ["read", "media", "export", "metrics", "admin"]).map(scope => (
               <label key={scope} className="check">
                 <input type="checkbox" checked={scopes.includes(scope)} onChange={event => setScopes(event.target.checked ? [...scopes, scope] : scopes.filter(item => item !== scope))} />
                 {scope} <span className="muted">· {SCOPE_HINT[scope] ?? ""}</span>

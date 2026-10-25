@@ -49,7 +49,7 @@ WALL_ROUTES = frozenset({
     "/api/settings/display",
 })
 Role = Literal["administrator", "operator"]
-Scope = Literal["read", "media", "export", "admin"]
+Scope = Literal["read", "media", "export", "metrics", "admin"]
 Endpoint = TypeVar("Endpoint", bound=Callable[..., object])
 
 

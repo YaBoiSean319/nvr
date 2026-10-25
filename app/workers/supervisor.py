@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app import backup, migrations
+from app import backup, logforward, migrations
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
@@ -165,6 +165,7 @@ class Supervisor:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logforward.install("supervisor")
     os.umask(0o077)
     if backup.pre_migration_backup not in migrations.pre_migration_hooks:
         migrations.pre_migration_hooks.append(backup.pre_migration_backup)

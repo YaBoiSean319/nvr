@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from .credentials import derived_key
 from .store import connect
 
-SCOPES = ("read", "media", "export", "admin")
+SCOPES = ("read", "media", "export", "metrics", "admin")
 TOKEN_PREFIX = "nvrt"
 LAST_USED_WRITE_INTERVAL = timedelta(seconds=60)
 
