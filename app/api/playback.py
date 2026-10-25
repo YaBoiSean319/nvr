@@ -14,6 +14,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
 from app import privacy
+from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
@@ -52,28 +53,9 @@ def synchronized_playback_timeline(
             camera = db.execute("SELECT id,name,recording_status,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
             if camera is None:
                 raise HTTPException(status_code=422, detail="Playback request contains an unknown camera")
-            segment_rows = db.execute(
-                "SELECT id,starts_at,ends_at,size_bytes FROM recording_segments "
-                "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at LIMIT 500",
-                (camera_id, end_text, start_text),
-            ).fetchall()
-            segments = [{
-                "id": row["id"], "starts_at": row["starts_at"], "ends_at": row["ends_at"],
-                "size_bytes": row["size_bytes"],
-                "media_url": f"/api/cameras/{camera_id}/segments/{row['id']}/media",
-            } for row in segment_rows]
-            coverage_rows = db.execute(
-                "SELECT coverage_kind,reason,starts_at,ends_at FROM coverage_intervals "
-                "WHERE camera_id=? AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
-                (camera_id, end_text, start_text),
-            ).fetchall()
-            coverage = [dict(row) for row in coverage_rows]
-            # Indexed footage whose file is gone (for example after a restore) is a known failure, not footage.
-            coverage += [{"coverage_kind": "failure", "reason": row["unavailable_reason"], "starts_at": row["starts_at"], "ends_at": row["ends_at"]}
-                         for row in db.execute(
-                             "SELECT starts_at,ends_at,unavailable_reason FROM recording_segments "
-                             "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NOT NULL ORDER BY starts_at LIMIT 500",
-                             (camera_id, end_text, start_text))]
+            recorded = coverage_timeline(db, camera_id, start, end)
+            segments = [{**row, "media_url": f"/api/cameras/{camera_id}/segments/{row['id']}/media"} for row in recorded["segments"]]
+            coverage, gaps = recorded["coverage"], recorded["gaps"]
             event_rows = db.execute(
                 "SELECT id,source_event_at,requested_start,requested_end,actual_start,actual_end,"
                 "pre_roll_complete,status,failure_reason,segment_id FROM motion_events "
@@ -92,38 +74,6 @@ def synchronized_playback_timeline(
                 "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
                 "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
                 (camera_id, end_text, start_text))]
-            spans = sorted((max(start, datetime.fromisoformat(row["starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)),
-                            min(end, datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00")).astimezone(timezone.utc)))
-                           for row in segment_rows)
-            gaps: list[dict[str, object]] = []
-            def append_gap(gap_start: datetime, gap_end: datetime) -> None:
-                if gap_end <= gap_start:
-                    return
-                boundaries = {gap_start, gap_end}
-                normalized = []
-                for item in coverage:
-                    item_start = datetime.fromisoformat(item["starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
-                    item_end = datetime.fromisoformat(item["ends_at"].replace("Z", "+00:00")).astimezone(timezone.utc) if item["ends_at"] else end
-                    item_start, item_end = max(gap_start, item_start), min(gap_end, item_end)
-                    if item_end > item_start:
-                        boundaries.update((item_start, item_end))
-                        normalized.append((item_start, item_end, item))
-                ordered = sorted(boundaries)
-                for piece_start, piece_end in zip(ordered, ordered[1:]):
-                    midpoint = piece_start + (piece_end - piece_start) / 2
-                    active = [item for item_start, item_end, item in normalized if item_start <= midpoint < item_end]
-                    kinds = {item["coverage_kind"] for item in active}
-                    kind = "failure" if "failure" in kinds else "uncertain" if "uncertain" in kinds or "covered" in kinds else "expected_idle" if "expected_idle" in kinds else "missing"
-                    reason = next((item["reason"] for item in active if item["coverage_kind"] == kind),
-                                  "Coverage is uncertain where recording is expected" if kind == "uncertain" else "No indexed footage covers this interval")
-                    gaps.append({"starts_at": piece_start.isoformat(), "ends_at": piece_end.isoformat(), "state": kind, "reason": reason})
-            cursor = start
-            for span_start, span_end in spans:
-                if span_start > cursor:
-                    append_gap(cursor, span_start)
-                cursor = max(cursor, span_end)
-            if cursor < end:
-                append_gap(cursor, end)
             cameras.append({"camera_id": camera_id, "name": camera["name"], "recording_status": camera["recording_status"],
                             "audio_supported": None if camera["audio_supported"] is None else bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
                             "segments": segments, "coverage": coverage, "motion_events": events, "gaps": gaps,

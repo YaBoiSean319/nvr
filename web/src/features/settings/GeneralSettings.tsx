@@ -1,5 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router";
+import { formatRelative } from "@/lib/time";
 import { api } from "@/api/client";
 import type { DisplaySettings } from "@/api/types";
 import { TabFooter } from "@/features/admin/TabFooter";
@@ -24,6 +26,7 @@ interface SystemStatus {
   workers: { name: string; mode: "process" | "in_process"; alive: boolean; state?: string; restarts?: number }[];
   configured_administrators: number;
   configured_cameras: number;
+  self_test: { passed: boolean; finished_at: string; results: { passed: boolean | null }[] } | null;
 }
 
 /** Site date/time display with a server-rendered preview, and the system's own status. */
@@ -96,6 +99,12 @@ export function GeneralSettings() {
             <ul className="plain-list">
               {system.data.workers.map(worker => <li key={worker.name}>{worker.name}: {worker.alive ? "running" : "not running"}{worker.state ? ` · ${worker.state}` : ""}{worker.restarts ? ` · restarted ${worker.restarts} time${worker.restarts === 1 ? "" : "s"}` : ""}</li>)}
             </ul>
+            <p data-testid="self-test-summary">
+              {system.data.self_test
+                ? `Self-test ${system.data.self_test.passed ? "passed" : `failed ${system.data.self_test.results.filter(result => result.passed === false).length} check(s)`} ${formatRelative(system.data.self_test.finished_at)}.`
+                : "The self-test has not run yet."}{" "}
+              <Link to="/settings/coverage">Coverage &amp; self-test</Link>
+            </p>
           </>
         ) : <p className="muted">{system.error ? failureText(system.error) : "Loading…"}</p>}
       </section>

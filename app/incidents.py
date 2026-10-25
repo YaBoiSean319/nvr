@@ -8,7 +8,7 @@ from typing import Any
 
 
 # Process faults that do not stop recording or analysis.
-SYSTEM_FAULT_TYPES = {"worker_web", "worker_exporter", "worker_rules", "worker_background", "backup"}
+SYSTEM_FAULT_TYPES = {"worker_web", "worker_exporter", "worker_rules", "worker_background", "backup", "self_test"}
 
 
 def _now() -> str:

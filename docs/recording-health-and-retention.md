@@ -1,6 +1,6 @@
 # Recording health and retention
 
-Camera status distinguishes the stream connection from persisted footage. The camera inventory returns video freshness, last indexed footage write, and a coverage state. Coverage history records transitions as covered, expected idle, known failure, or uncertain. Motion-only idle is expected when the ONVIF event source and video stream remain healthy; a stale continuous write while video is fresh is reported as a recording failure.
+Camera status distinguishes the stream connection from persisted footage. The camera inventory returns video freshness, last indexed footage write, and a coverage state. Coverage history records transitions as covered, expected idle, known failure, or uncertain. Motion-only idle is expected when the ONVIF event source and video stream remain healthy; a stale continuous write while video is fresh is reported as a recording failure. Each interval also records why footage is missing; see [coverage and self-test](coverage-and-self-test.md).
 
 Retention defaults to 30 days. An administrator may override the target for a camera group or an individual camera. A camera override wins over its group; removing it restores inheritance. The authenticated camera retention endpoint reports the effective target, achieved time span, indexed bytes, free filesystem capacity, and a projection based on observed indexed bitrate. The projection is an estimate and does not promise a fixed retention duration.
 

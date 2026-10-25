@@ -4,6 +4,7 @@ import { formatSiteDate, formatSiteDateTime, formatSiteTime, sameSiteDay, siteOf
 import { playbackClock } from "./clock";
 import { useClockTime, usePlaybackStore, type TimeWindow } from "./store";
 import { isWholeRange, pan, percent, tickStep, ticks, visibleSpan, zoom } from "./timescale";
+import { REASON_LABEL } from "./gapReasons";
 
 const GAP_LABEL: Record<string, string> = {
   failure: "Recording failure",
@@ -182,8 +183,8 @@ function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWin
       })}
       {row.gaps.map(gap => {
         const span = visibleSpan(at(gap.starts_at), at(gap.ends_at), window);
-        return span ? <span key={`g${gap.starts_at}`} className="timeline-mark" data-mark={gap.state}
-                            title={`${GAP_LABEL[gap.state] ?? gap.state}: ${gap.reason} (${describe(at(gap.starts_at), at(gap.ends_at))})`}
+        return span ? <span key={`g${gap.starts_at}`} className="timeline-mark" data-mark={gap.state} data-reason={gap.reason_code}
+                            title={`${GAP_LABEL[gap.state] ?? gap.state}: ${REASON_LABEL[gap.reason_code] ?? gap.reason_code}. ${gap.reason} (${describe(at(gap.starts_at), at(gap.ends_at))})`}
                             style={{ left: `${span.left}%`, width: `${span.width}%` }} /> : null;
       })}
       {row.ai_unanalyzed.map(interval => {

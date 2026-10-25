@@ -158,12 +158,14 @@ export interface DisplaySettings {
 
 export type GapState = "failure" | "uncertain" | "expected_idle" | "missing";
 
+export type GapReason = "camera_offline" | "stream_error" | "disk_unavailable" | "outside_schedule" | "recording_disabled" | "worker_restart" | "no_motion" | "unknown";
+
 export interface TimelineCamera {
   camera_id: string;
   name: string;
   recording_status: string;
   segments: { id: number; starts_at: string; ends_at: string; size_bytes: number; media_url: string }[];
-  gaps: { starts_at: string; ends_at: string; state: GapState; reason: string }[];
+  gaps: { starts_at: string; ends_at: string; state: GapState; reason: string; reason_code: GapReason }[];
   motion_events: { id: string; source_event_at: string; status: string }[];
   ai_detections: { id: string; label: "person" | "vehicle"; confidence: number; first_seen_at: string; last_seen_at: string }[];
   ai_unanalyzed: { state: string; starts_at: string; ends_at: string | null; detail: string }[];

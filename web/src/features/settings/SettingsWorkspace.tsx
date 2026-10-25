@@ -2,6 +2,7 @@ import { NavLink, Navigate, useParams } from "react-router";
 import { DraftGuard } from "@/features/admin/drafts";
 import { AccessSettings } from "./AccessSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
+import { CoverageSettings } from "./CoverageSettings";
 import { DiagnosticsSettings } from "./DiagnosticsSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
@@ -13,6 +14,7 @@ const CATEGORIES = {
   appearance: { label: "Appearance & branding", page: AppearanceSettings },
   access: { label: "Users & access", page: AccessSettings },
   recording: { label: "Recording & storage", page: StorageSettings },
+  coverage: { label: "Coverage & self-test", page: CoverageSettings },
   notifications: { label: "Notifications", page: NotificationsSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },
   diagnostics: { label: "Diagnostics", page: DiagnosticsSettings },

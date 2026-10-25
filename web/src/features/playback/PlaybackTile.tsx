@@ -2,6 +2,7 @@ import { withUnmasked } from "@/features/privacy/store";
 import { useEffect, useRef, useState } from "react";
 import type { TimelineCamera } from "@/api/types";
 import { playbackClock } from "./clock";
+import { REASON_LABEL } from "./gapReasons";
 import { usePlaybackStore } from "./store";
 
 type Phase = "no-footage" | "no-recording" | "loading" | "ready" | "error";
@@ -33,6 +34,7 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
   const video = useRef<HTMLVideoElement>(null);
   const [phase, setPhase] = useState<Phase>("loading");
   const [segmentStart, setSegmentStart] = useState<number | null>(null);
+  const [gapReason, setGapReason] = useState<string | null>(null);
   const { setActive, enlarge, unenlarge, remove } = usePlaybackStore.getState();
 
   useEffect(() => {
@@ -62,6 +64,8 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
           setSegmentStart(null);
         }
         setPhase(list.length ? "no-recording" : "no-footage");
+        const gap = camera.gaps.find(item => Date.parse(item.starts_at) <= time && time < Date.parse(item.ends_at));
+        setGapReason(gap ? REASON_LABEL[gap.reason_code] ?? null : null);
         return;
       }
       if (current?.id !== interval.id) {
@@ -109,7 +113,7 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
     };
   }, [camera]);
 
-  const label = PHASE_LABEL[phase];
+  const label = phase === "no-recording" && gapReason ? `No recording: ${gapReason}` : PHASE_LABEL[phase];
   return (
     <div className="tile playback-tile" role="group" aria-label={`${name}: playback`} data-active={active} data-phase={phase}
          data-segment-start={segmentStart ?? undefined} data-camera-id={id} hidden={hidden}

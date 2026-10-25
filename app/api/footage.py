@@ -271,7 +271,7 @@ def list_camera_coverage(
             last_video_at=camera["last_video_at"], last_footage_write_at=camera["last_footage_write_at"],
         )
         rows = db.execute(
-            "SELECT coverage_kind,reason,starts_at,ends_at FROM coverage_intervals WHERE camera_id=? ORDER BY starts_at DESC LIMIT 200",
+            "SELECT coverage_kind,reason,reason_code,starts_at,ends_at FROM coverage_intervals WHERE camera_id=? ORDER BY starts_at DESC LIMIT 200",
             (camera_id,),
         ).fetchall()
     return {"camera_id": camera_id, "current": health, "intervals": [dict(row) for row in reversed(rows)]}

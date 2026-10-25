@@ -198,3 +198,25 @@ test("operators cannot reach Settings and the server refuses their changes", asy
   expect((await page.request.post("/api/admin/api-tokens", { data: { name: "x", scopes: ["read"] } })).status()).toBe(403);
   expect((await page.request.post("/api/backups")).status()).toBe(403);
 });
+
+test("Coverage & self-test: a self-test run on demand, and coverage per camera with its largest gaps and their reasons", async ({ page }) => {
+  seedFixtures(1, { footage: true });
+  await signInNext(page);
+  await openSettings(page, "Coverage & self-test");
+  const selfTest = page.getByRole("region", { name: "Self-test" });
+  await press(selfTest.getByRole("button", { name: "Run self-test now" }));
+  await expect(selfTest.getByRole("status")).toContainText(/run by hand/);
+  const checks = selfTest.getByRole("list", { name: "Self-test checks" });
+  // The fixture's archive volume folder does not exist: that check fails, with its reason.
+  await expect(checks.getByRole("listitem")).toContainText(["Passed · Recording volume default is writable",
+    "Failed · Recording volume archive is not writable (missing)", /Configuration backup|configuration backup/]);
+  await expect(selfTest.getByRole("status")).toContainText("Failed 1 check(s)");
+
+  const report = page.getByRole("region", { name: "Coverage report" });
+  const row = report.getByRole("table", { name: "Coverage per camera" }).getByRole("row", { name: /Camera 001/ });
+  await expect(row).toContainText("%");
+  await expect(row).toContainText("Camera offline");
+
+  await openSettings(page, "General");
+  await expect(page.getByTestId("self-test-summary")).toContainText(/Self-test (passed|failed)/);
+});

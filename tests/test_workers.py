@@ -156,7 +156,8 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(self.nvr.worker("recorder")["last_exit_code"], -signal.SIGKILL)
         recovered = _wait(lambda: (row := self.nvr.incident("worker_recorder")) and row["state"] == "recovered" and row, 10, "incident did not recover")
         self.assertEqual(recovered["recurrence_count"], 1)
-        events = [row["event_type"] for row in self.nvr.query("SELECT event_type FROM incident_events ORDER BY occurred_at")]
+        events = [row["event_type"] for row in self.nvr.query(
+            "SELECT e.event_type FROM incident_events e JOIN incidents i ON i.id=e.incident_id WHERE i.incident_key='worker:recorder' ORDER BY e.occurred_at")]
         self.assertEqual(events, ["raised", "recovered"])
 
     def test_web_crash_leaves_the_recorder_running(self):
