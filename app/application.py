@@ -140,7 +140,7 @@ def _openapi_with_scopes(app: FastAPI) -> dict[str, object]:
         "apiToken": {
             "type": "http",
             "scheme": "bearer",
-            "description": "Scoped API token created by an administrator. Scopes: read, media, export, admin (admin implies all).",
+            "description": "Scoped API token created by an administrator. Scopes: read, media, export, metrics, admin (admin implies all).",
         },
     }
     for route in app.routes:

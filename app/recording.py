@@ -18,7 +18,7 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
-from . import coverage, viewing_audit
+from . import coverage, metrics, viewing_audit
 from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
@@ -138,6 +138,7 @@ class RecordingManager:
         self.task_modes: dict[str, str] = {}
         self.scheduler_task: asyncio.Task[None] | None = None
         self.retention_task: asyncio.Task[None] | None = None
+        self._dropped: set[str] = set()  # Segments already counted as dropped: the index is re-read every few seconds.
         self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
 
@@ -337,6 +338,13 @@ class RecordingManager:
         with connect() as db:
             db.execute("UPDATE cameras SET last_video_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (camera_id,))
 
+    def _count_dropped(self, camera_id: str, name: str) -> None:
+        if (key := f"{camera_id}/{name}") not in self._dropped:
+            if len(self._dropped) >= 10_000:
+                self._dropped.clear()
+            self._dropped.add(key)
+            metrics.segment_dropped(camera_id)
+
     def _index_csv(self, camera_id: str, index_path: Path, output_dir: Path) -> int:
         indexed = 0
         try:
@@ -353,20 +361,32 @@ class RecordingManager:
                 continue
             media = (output_dir / candidate.name).resolve()
             if root not in media.parents or not media.is_file() or media.stat().st_size < 128:
+                # A file that is there but too small to be video was dropped; one that is gone was removed (retention), not lost.
+                if root in media.parents and media.is_file():
+                    self._count_dropped(camera_id, candidate.name)
                 continue
             try:
                 duration = max(0.0, float(row[2]) - float(row[1]))
                 started = datetime.strptime(candidate.stem, "segment-%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
             except (ValueError, OverflowError):
+                self._count_dropped(camera_id, candidate.name)
                 continue
             relative = media.relative_to(root).as_posix()
             try:
                 with connect() as db:
-                    cur = db.execute(
-                        "INSERT OR IGNORE INTO recording_segments(camera_id, relative_path, starts_at, ends_at, size_bytes) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (camera_id, relative, started.isoformat(), (started + timedelta(seconds=duration)).isoformat(), media.stat().st_size),
-                    )
+                    db.execute("BEGIN IMMEDIATE")  # The segment and its counters are one change.
+                    try:
+                        cur = db.execute(
+                            "INSERT OR IGNORE INTO recording_segments(camera_id, relative_path, starts_at, ends_at, size_bytes) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (camera_id, relative, started.isoformat(), (started + timedelta(seconds=duration)).isoformat(), media.stat().st_size),
+                        )
+                        if cur.rowcount:
+                            metrics.segment_written(db, camera_id, started + timedelta(seconds=duration))
+                    except BaseException:
+                        db.execute("ROLLBACK")
+                        raise
+                    db.execute("COMMIT")
                     indexed += cur.rowcount
             except sqlite3.Error:
                 continue

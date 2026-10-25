@@ -60,7 +60,7 @@ class APITokenTests(unittest.TestCase):
         self.assertEqual(token["created_by"], "keeper")
 
         listed = self.client.get("/api/admin/api-tokens").json()
-        self.assertEqual(listed["scopes"], ["read", "media", "export", "admin"])
+        self.assertEqual(listed["scopes"], ["read", "media", "export", "metrics", "admin"])
         self.assertNotIn(secret, str(listed))
         self.assertNotIn("secret", listed["tokens"][0])
         self.assertNotIn("secret_digest", listed["tokens"][0])

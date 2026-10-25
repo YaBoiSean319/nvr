@@ -7,6 +7,7 @@ import os
 import signal
 from typing import Protocol
 
+from app import logforward
 from app.workers import control, liveness
 
 
@@ -37,4 +38,5 @@ async def run(name: str, service: Service) -> None:
 
 def main(name: str, service: Service) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logforward.install(name)
     asyncio.run(run(name, service))

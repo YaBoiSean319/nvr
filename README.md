@@ -32,6 +32,8 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_PUBLIC_URL` | unset | Public HTTPS origin used to construct the fixed Entra callback URL, and the origin and relying party of passkeys |
 | `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |
 | `NVR_TRUST_FORWARDED_FOR` | false | Count sign-in attempts by the last `X-Forwarded-For` address; only behind a proxy you control |
+| `NVR_LOG_FORWARD_URL` | unset | Forward logs off-host: `syslog+tcp://host:514`, `syslog+tls://host:6514`, `otlp+http://host:4318` or `otlp+https://…`; see [metrics and log forwarding](docs/metrics-and-log-forwarding.md) |
+| `NVR_LOG_FORWARD_CA` / `NVR_LOG_FORWARD_LEVEL` / `NVR_LOG_FORWARD_QUEUE` | system CAs / `INFO` / `2000` | CA bundle for TLS, lowest level forwarded, records allowed to wait |
 | `NVR_OIDC_TENANT_ID` | unset | Microsoft Entra workforce tenant GUID |
 | `NVR_OIDC_CLIENT_ID` | unset | Entra app registration client ID |
 | `NVR_OIDC_CLIENT_SECRET` | unset | Entra app registration client secret; supply through a secret manager |
@@ -65,6 +67,8 @@ Privacy masks black out areas of a camera's picture everywhere: written to camer
 Access grants limit which cameras an operator sees, by camera group or for everyone holding an Entra role, optionally until an expiry; hidden cameras, their footage, alarms and exports behave as if they did not exist (see [camera access grants](docs/access-grants.md)).
 
 The viewing audit records who watched which camera live or in playback, from when to when, and every export, download and snapshot; administrators report it per person or per camera for a date range, download it as CSV, and set how long it is kept apart from footage (see [viewing audit](docs/viewing-audit.md)).
+
+`/metrics` serves Prometheus metrics to an API token with the `metrics` scope, and the logs can be forwarded as syslog (TCP or TLS) or OTLP, scrubbed of camera addresses and credentials and never blocking the NVR (see [metrics and log forwarding](docs/metrics-and-log-forwarding.md)).
 
 Local accounts can add passkeys or an authenticator app with one-time recovery codes; administrators can require them, reset them, and sign-in attempts are rate limited per account and per address (see [passkeys and authenticator apps](docs/second-factors.md)).
 
