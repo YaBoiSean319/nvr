@@ -58,7 +58,7 @@ def list_camera_motion_events(
 
 @router.get("/api/ai/events")
 def search_ai_observations(
-    _: CurrentUser,
+    user: CurrentUser,
     camera_id: str | None = Query(default=None, max_length=64),
     label: Literal["person", "vehicle"] | None = None,
     start: str | None = Query(default=None, max_length=64),
@@ -84,6 +84,11 @@ def search_ai_observations(
     if label:
         clauses.append("o.label=?")
         values.append(label)
+    if not user.access.unrestricted:
+        # Only the cameras this person may see: a search across every camera must not reach the others.
+        permitted = sorted(user.access.cameras or ())
+        clauses.append("o.camera_id IN (%s)" % ",".join("?" * len(permitted)) if permitted else "0")
+        values.extend(permitted)
     for column, raw, operator in (("o.first_seen_at", start, ">="), ("o.first_seen_at", end, "<=")):
         if raw:
             try:

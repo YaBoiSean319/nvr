@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 
+from app.access import EVERYTHING, Access
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.scheduling import effective_policy, validate_schedule
@@ -78,32 +79,32 @@ class CameraScheduleRequest(GroupScheduleRequest):
 
 
 @router.get("/api/camera-groups")
-def list_camera_groups(_: CurrentUser) -> dict[str, object]:
+def list_camera_groups(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        groups = db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE").fetchall()
-        return {"groups": [_camera_group_view(db, group) for group in groups]}
+        groups = [group for group in db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE") if user.access.can_see_group(group["id"])]
+        return {"groups": [_camera_group_view(db, group, user.access) for group in groups]}
 
 
-def _camera_group_view(db: sqlite3.Connection, group: sqlite3.Row) -> dict[str, object]:
+def _camera_group_view(db: sqlite3.Connection, group: sqlite3.Row, access: Access = EVERYTHING) -> dict[str, object]:
     members = db.execute(
         "SELECT id FROM cameras WHERE group_id=? "
         "UNION SELECT camera_id FROM camera_group_memberships WHERE group_id=?",
         (group["id"], group["id"]),
     ).fetchall()
-    camera_ids = [row["id"] for row in members]
+    camera_ids = access.only(row["id"] for row in members)
     return {"id": group["id"], "name": group["name"], "camera_ids": camera_ids, "camera_count": len(camera_ids)}
 
 
 @router.get("/api/camera-groups/{group_id}/members")
 def list_camera_group_members(
     group_id: str,
-    _: CurrentUser,
+    user: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
         group = db.execute("SELECT id,name FROM camera_groups WHERE id=?", (group_id,)).fetchone()
         if group is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
-        return _camera_group_view(db, group)
+        return _camera_group_view(db, group, user.access)
 
 
 @router.post("/api/camera-groups", status_code=status.HTTP_201_CREATED)

@@ -62,6 +62,8 @@ ONVIF PTZ cameras can be moved from Live and the camera editor (buttons, keyboar
 
 Privacy masks black out areas of a camera's picture everywhere: written to cameras that support ONVIF masks, and otherwise drawn by the NVR into every live view, recording, snapshot and export. Administrators can see unmasked footage only for a stated, audited reason (see [privacy masks](docs/privacy-masks.md)).
 
+Access grants limit which cameras an operator sees, by camera group or for everyone holding an Entra role, optionally until an expiry; hidden cameras, their footage, alarms and exports behave as if they did not exist (see [camera access grants](docs/access-grants.md)).
+
 Local accounts can add passkeys or an authenticator app with one-time recovery codes; administrators can require them, reset them, and sign-in attempts are rate limited per account and per address (see [passkeys and authenticator apps](docs/second-factors.md)).
 
 Every recording segment is hashed into a signed per-camera chain, so altered, missing or reordered footage can be found from a camera's Health & History tab, and evidence packages carry the chain and public key to verify offline (see [signed footage](docs/signed-footage.md)).

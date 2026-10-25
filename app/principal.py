@@ -26,6 +26,7 @@ from fastapi import Depends, HTTPException, status
 from starlette.requests import HTTPConnection
 from fastapi.dependencies.models import Dependant
 
+from .access import EVERYTHING, Access, resolve as resolve_access
 from .api_tokens import TokenRejected, authenticate, grants, token_scopes, usable_token
 from .mfa import required_for
 from .security import token_digest
@@ -70,6 +71,8 @@ class Principal:
     wall: bool = False
     # Signed in without the second factor the administrator requires: only enrolment is open until one is set up.
     mfa_enrolment_required: bool = False
+    # The cameras and camera groups this person may see, resolved once for the request (tokens use their creator's).
+    access: Access = EVERYTHING
 
     def __getitem__(self, key: str) -> object:
         # Routes historically received a database row; keep subscript access.
@@ -100,16 +103,32 @@ def scope_for(route: object, method: str) -> Scope:
     return "read" if method.upper() in {"GET", "HEAD"} else "admin"
 
 
+def _within_access(request: HTTPConnection, principal: Principal) -> Principal:
+    """Hidden cameras and camera groups are indistinguishable from ones that do not exist.
+
+    Any ``camera_id`` or ``group_id`` in the path or query is checked here, before the route runs, so a route
+    that names a camera is protected by default. Routes that find cameras in other ways filter for themselves."""
+    access = principal.access
+    if not access.unrestricted:
+        camera_id = request.path_params.get("camera_id") or request.query_params.get("camera_id")
+        if camera_id and not access.can_see(camera_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+        group_id = request.path_params.get("group_id")
+        if group_id and not access.can_see_group(group_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera group not found")
+    return principal
+
+
 def current_user(request: HTTPConnection) -> Principal:
     """Resolve the caller of an HTTP request or WebSocket handshake."""
     authorization = request.headers.get("authorization")
     if authorization is not None:
-        return _token_principal(request, authorization)
+        return _within_access(request, _token_principal(request, authorization))
     raw = request.cookies.get(COOKIE_NAME)
     if not raw:
         wall = request.cookies.get(WALL_COOKIE_NAME)
         if wall:
-            return wall_principal(request, wall)
+            return _within_access(request, wall_principal(request, wall))
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     with connect() as db:
         row = db.execute(
@@ -124,7 +143,7 @@ def current_user(request: HTTPConnection) -> Principal:
     principal = _principal(row)
     if principal.mfa_enrolment_required and not _enrolment_route(request.scope.get("route")):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Set up a second factor to continue")
-    return principal
+    return _within_access(request, principal)
 
 
 def administrator(user: Annotated[Principal, Depends(current_user)]) -> Principal:
@@ -166,6 +185,8 @@ def _scoped(request: HTTPConnection, row: sqlite3.Row, *, wall: bool = False) ->
     required = scope_for(request.scope.get("route"), getattr(request, "method", "GET"))
     if not grants(scopes, required):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"API token lacks the '{required}' scope")
+    with connect() as db:
+        access = resolve_access(db, int(row["created_by"]), row["owner_role"])
     return Principal(
         id=row["created_by"],
         username=row["owner_username"],
@@ -173,6 +194,7 @@ def _scoped(request: HTTPConnection, row: sqlite3.Row, *, wall: bool = False) ->
         scopes=scopes,
         token_id=row["id"],
         wall=wall,
+        access=access,
     )
 
 
@@ -193,7 +215,9 @@ def _enrolment_route(route: object) -> bool:
 
 def _principal(row: sqlite3.Row) -> Principal:
     owes = required_for(row["mfa_policy"], row["role"], local=row["provider_issuer"] is None) and row["factor_count"] == 0
-    return Principal(id=row["id"], username=row["username"], role=row["role"], mfa_enrolment_required=owes)
+    with connect() as db:
+        access = resolve_access(db, int(row["id"]), row["role"])
+    return Principal(id=row["id"], username=row["username"], role=row["role"], mfa_enrolment_required=owes, access=access)
 
 
 CurrentUser = Annotated[Principal, Depends(current_user)]

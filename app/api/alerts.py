@@ -52,11 +52,13 @@ class HeartbeatConfigRequest(BaseModel):
 
 @router.get("/api/incidents")
 def get_incidents(
-    _: CurrentUser,
+    user: CurrentUser,
     state: str | None = Query(default=None, pattern="^(active|acknowledged|recovered)$"),
 ) -> dict[str, object]:
     with connect() as db:
-        return {"incidents": list_incidents(db, state=state)}
+        incidents = list_incidents(db, state=state)
+    # Someone limited to some cameras sees the incidents of those cameras, not the system's or other cameras'.
+    return {"incidents": [incident for incident in incidents if user.access.unrestricted or (incident["camera_id"] and user.access.can_see(incident["camera_id"]))]}
 
 
 @router.post("/api/incidents/{incident_id}/acknowledge")
@@ -65,7 +67,9 @@ def post_incident_acknowledgement(
     user: CurrentUser,
 ) -> dict[str, object]:
     with connect() as db:
-        incident = acknowledge_incident(db, incident_id, int(user["id"]))
+        known = db.execute("SELECT camera_id FROM incidents WHERE id=?", (incident_id,)).fetchone()
+        hidden = known is not None and not user.access.unrestricted and not (known["camera_id"] and user.access.can_see(known["camera_id"]))
+        incident = None if hidden else acknowledge_incident(db, incident_id, int(user["id"]))
         if incident is None:
             raise HTTPException(status_code=404, detail="Incident not found")
         if incident.pop("acknowledgement_conflict", False):

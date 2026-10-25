@@ -1,6 +1,7 @@
 """First-run setup, local and Entra sign-in, and session administration."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 from authlib.integrations.starlette_client import OAuth
 
 from app import auth_limits as limits, mfa
+from app.access import ensure_default_grant
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
 from app.security import hash_password, new_session_token, spend_password_time, token_digest, verify_password
 from app.store import connect
@@ -65,6 +67,14 @@ def _oidc_client():
         server_metadata_url=config["discovery_url"],
         client_kwargs={"scope": "openid profile email", "code_challenge_method": "S256", "trust_env": False},
     )
+
+
+def _claimed_roles(claims: dict[str, object]) -> list[str]:
+    """The app roles in the token, kept so access grants given to a role apply to everyone who holds it."""
+    roles = claims.get("roles", [])
+    if isinstance(roles, str):
+        roles = [roles]
+    return [role[:200] for role in roles if isinstance(role, str)][:50] if isinstance(roles, list) else []
 
 
 def _mapped_role(claims: dict[str, object]) -> str | None:
@@ -296,15 +306,16 @@ async def oidc_callback(request: Request) -> RedirectResponse:
                 username = f"entra-{subject[:112]}"
             try:
                 cur = db.execute(
-                    "INSERT INTO users(username,password_hash,role,provider_issuer,provider_subject) VALUES (?,?,?,?,?)",
-                    (username, hash_password(secrets.token_urlsafe(48)), role, issuer, subject),
+                    "INSERT INTO users(username,password_hash,role,provider_issuer,provider_subject,provider_roles_json) VALUES (?,?,?,?,?,?)",
+                    (username, hash_password(secrets.token_urlsafe(48)), role, issuer, subject, json.dumps(_claimed_roles(claims))),
                 )
                 user_id = int(cur.lastrowid)
             except sqlite3.IntegrityError as exc:
                 raise HTTPException(status_code=403, detail="Unable to provision this Entra identity") from exc
         else:
             user_id = int(user["id"])
-            db.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
+            db.execute("UPDATE users SET role=?,provider_roles_json=? WHERE id=?", (role, json.dumps(_claimed_roles(claims)), user_id))
+            ensure_default_grant(db, user_id)  # Someone newly an operator has the access operators always had, until narrowed.
     redirect = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
     start_session(redirect, user_id)
     return redirect

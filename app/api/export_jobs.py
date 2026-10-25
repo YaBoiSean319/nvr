@@ -19,6 +19,20 @@ from app.exports import create_export_record, export_output_path, get_export, li
 router = APIRouter()
 
 
+def _visible_export(row, user):
+    """An export of cameras this person may all see; any other is indistinguishable from one that does not exist."""
+    if row is not None and not user.access.unrestricted and not all(user.access.can_see(camera_id) for camera_id in json.loads(row["camera_ids_json"])):
+        return None
+    return row
+
+
+def _export_for(job_id: str, user):
+    row = _visible_export(get_export(job_id, int(user["id"]), user["role"] == "administrator"), user)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    return row
+
+
 class ExportRequest(BaseModel):
     camera_ids: list[str] = Field(min_length=1, max_length=MAX_EXPORT_CAMERAS)
     start: datetime
@@ -55,7 +69,8 @@ class ExportRequest(BaseModel):
 @router.get("/api/exports")
 @requires_scope("export")
 def get_exports(user: CurrentUser) -> dict[str, object]:
-    return {"exports": list_exports(int(user["id"]), user["role"] == "administrator")}
+    return {"exports": [job for job in list_exports(int(user["id"]), user["role"] == "administrator")
+                        if all(user.access.can_see(camera_id) for camera_id in job["camera_ids"])]}
 
 
 @router.post("/api/exports", status_code=status.HTTP_202_ACCEPTED)
@@ -66,6 +81,8 @@ async def create_export(
     user: CurrentUser,
 ) -> dict[str, object]:
     start, end = payload.start.astimezone(timezone.utc), payload.end.astimezone(timezone.utc)
+    if not all(user.access.can_see(camera_id) for camera_id in payload.camera_ids):
+        raise HTTPException(status_code=422, detail="Export request contains an unknown camera")  # As for a camera that does not exist.
     return _submit(request, user, lambda: create_export_record(
         int(user["id"]), payload.camera_ids, start, end, payload.output_modes, payload.tile_camera_ids,
         payload.grid_resolution, payload.include_audio, payload.audio_camera_id))
@@ -96,9 +113,7 @@ def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str
 @requires_scope("export")
 async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     """Repeat a finished-unsuccessfully job as a new attempt; the original stays as it was."""
-    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
-    if row is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
+    row = _export_for(job_id, user)
     if row["status"] not in {"failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="Only failed or cancelled exports can be retried")
     original = _job_view(row)
@@ -112,15 +127,14 @@ async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict
 @router.get("/api/exports/{job_id}")
 @requires_scope("export")
 def get_export_status(job_id: str, user: CurrentUser) -> dict[str, object]:
-    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
-    if row is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
+    row = _export_for(job_id, user)
     return _job_view(row)
 
 
 @router.post("/api/exports/{job_id}/cancel")
 @requires_scope("export")
 async def cancel_export(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
+    _export_for(job_id, user)
     try:
         state = request_cancel(job_id, int(user["id"]), user["role"] == "administrator")
     except LookupError as exc:
@@ -134,9 +148,7 @@ async def cancel_export(job_id: str, request: Request, user: CurrentUser) -> dic
 @router.get("/api/exports/{job_id}/download")
 @requires_scope("export")
 def download_export(job_id: str, user: CurrentUser) -> FileResponse:
-    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
-    if row is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
+    row = _export_for(job_id, user)
     if row["status"] == "completed" and row["expires_at"] and datetime.now(timezone.utc) >= datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00")):
         from app.exports import expire_exports
         expire_exports()
@@ -164,9 +176,7 @@ def download_export(job_id: str, user: CurrentUser) -> FileResponse:
 @requires_scope("export")
 async def verify_export_evidence(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     """Check manifest checksums against uploaded package bytes; media probing is separate."""
-    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
-    if row is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
+    row = _export_for(job_id, user)
     if row["status"] != "completed":
         raise HTTPException(status_code=409, detail="Evidence package is not ready")
     content_length = request.headers.get("content-length")

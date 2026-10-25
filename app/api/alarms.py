@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from app import alarms
-from app.principal import Administrator, CurrentUser
+from app.principal import Administrator, CurrentUser, Principal
 from app.store import connect
 
 router = APIRouter()
@@ -38,27 +39,34 @@ class AlarmSettingsRequest(BaseModel):
     resolved_footage_days: int = Field(ge=0, le=3650)
 
 
-def _detail(alarm_id: str) -> dict[str, object]:
+def _visible_alarm(db, alarm_id: str, user: Principal) -> sqlite3.Row:
+    """An alarm of a camera this person may see; any other is indistinguishable from one that does not exist."""
+    row = db.execute("SELECT * FROM alarms WHERE id=?", (alarm_id,)).fetchone()
+    if row is None or not user.access.can_see(row["camera_id"]):
+        raise HTTPException(status_code=404, detail="Alarm not found")
+    return row
+
+
+def _detail(alarm_id: str, user: Principal) -> dict[str, object]:
     with connect() as db:
-        row = db.execute("SELECT * FROM alarms WHERE id=?", (alarm_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Alarm not found")
-        return alarms.alarm_detail(db, row)
+        return alarms.alarm_detail(db, _visible_alarm(db, alarm_id, user))
 
 
-def _act(alarm_id: str, action) -> dict[str, object]:
+def _act(alarm_id: str, user: Principal, action) -> dict[str, object]:
+    with connect() as db:
+        _visible_alarm(db, alarm_id, user)
     try:
         action()
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except alarms.AlarmError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _detail(alarm_id)
+    return _detail(alarm_id, user)
 
 
 @router.get("/api/alarms")
 def list_alarms(
-    _: CurrentUser,
+    user: CurrentUser,
     state: Literal["open", "new", "acknowledged", "assigned", "resolved", "all"] = "open",
     camera_id: str | None = Query(default=None, max_length=64),
     rule_id: str | None = Query(default=None, max_length=64),
@@ -70,6 +78,11 @@ def list_alarms(
         if value:
             scope.append(f"{column}=?")
             scope_values.append(value)
+    if not user.access.unrestricted:
+        # Only alarms of cameras this person may see, in the list, the counts and the rule filter alike.
+        permitted = sorted(user.access.cameras or ())
+        scope.append("camera_id IN (%s)" % ",".join("?" * len(permitted)) if permitted else "0")
+        scope_values.extend(permitted)
     clauses, values = list(scope), list(scope_values)
     if state == "open":
         clauses.append("state IN ('new','acknowledged','assigned')")
@@ -82,7 +95,8 @@ def list_alarms(
         rows = db.execute("SELECT * FROM alarms" + where + " ORDER BY occurred_at DESC,id LIMIT ?", (*values, limit)).fetchall()
         counts = {row["state"]: row["count"] for row in db.execute("SELECT state,count(*) AS count FROM alarms" + scoped + " GROUP BY state", scope_values)}
         # Every rule that has raised an alarm, for the rule filter (operators cannot list rules).
-        rules = db.execute("SELECT rule_id AS id,max(rule_name) AS name FROM alarms WHERE rule_id IS NOT NULL GROUP BY rule_id ORDER BY name COLLATE NOCASE").fetchall()
+        rules = db.execute("SELECT rule_id AS id,max(rule_name) AS name FROM alarms" + (scoped + " AND" if scoped else " WHERE") + " rule_id IS NOT NULL GROUP BY rule_id ORDER BY name COLLATE NOCASE",
+                           scope_values).fetchall()
         return {"alarms": [alarms.alarm_view(db, row) for row in rows],
                 "counts": {key: counts.get(key, 0) for key in ("new", "acknowledged", "assigned", "resolved")},
                 "rules": [dict(rule) for rule in rules]}
@@ -119,29 +133,29 @@ def put_alarm_settings(payload: AlarmSettingsRequest, user: Administrator) -> di
 
 
 @router.get("/api/alarms/{alarm_id}")
-def get_alarm(alarm_id: str, _: CurrentUser) -> dict[str, object]:
-    return _detail(alarm_id)
+def get_alarm(alarm_id: str, user: CurrentUser) -> dict[str, object]:
+    return _detail(alarm_id, user)
 
 
 @router.post("/api/alarms/{alarm_id}/acknowledge")
 def acknowledge_alarm(alarm_id: str, user: CurrentUser) -> dict[str, object]:
-    return _act(alarm_id, lambda: alarms.acknowledge(alarm_id, int(user["id"])))
+    return _act(alarm_id, user, lambda: alarms.acknowledge(alarm_id, int(user["id"])))
 
 
 @router.post("/api/alarms/{alarm_id}/assign")
 def assign_alarm(alarm_id: str, payload: AssignRequest, user: CurrentUser) -> dict[str, object]:
-    return _act(alarm_id, lambda: alarms.assign(alarm_id, int(user["id"]), payload.user_id))
+    return _act(alarm_id, user, lambda: alarms.assign(alarm_id, int(user["id"]), payload.user_id))
 
 
 @router.post("/api/alarms/{alarm_id}/comments", status_code=status.HTTP_201_CREATED)
 def comment_on_alarm(alarm_id: str, payload: CommentRequest, user: CurrentUser) -> dict[str, object]:
-    return _act(alarm_id, lambda: alarms.comment(alarm_id, int(user["id"]), payload.body))
+    return _act(alarm_id, user, lambda: alarms.comment(alarm_id, int(user["id"]), payload.body))
 
 
 @router.post("/api/alarms/{alarm_id}/resolve")
 def resolve_alarm(alarm_id: str, payload: ResolveRequest, user: CurrentUser) -> dict[str, object]:
     note = payload.note.strip() if payload.note else None
-    return _act(alarm_id, lambda: alarms.resolve(alarm_id, int(user["id"]), note or None))
+    return _act(alarm_id, user, lambda: alarms.resolve(alarm_id, int(user["id"]), note or None))
 
 
 @router.delete("/api/alarms/{alarm_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -308,6 +308,9 @@ async def live_stream(
     try:
         principal = current_user(websocket)
     except HTTPException as exc:
+        if exc.status_code == 404:  # A camera this person may not see, refused exactly as one that does not exist.
+            await _refuse(websocket, CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
+            return
         code = CLOSE_UNAUTHORIZED if exc.status_code == 401 else CLOSE_FORBIDDEN
         await _refuse(websocket, code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
         return
@@ -363,6 +366,7 @@ async def live_stream(
     stream = hub.join((camera_id, profile, "audio" if include_audio else "video", "masked" if video_filter else "direct", fingerprint),
                       source, include_audio, viewer, mark_fresh, video_filter)
     receiver = asyncio.create_task(websocket.receive())
+    getter: asyncio.Task | None = None
     try:
         await asyncio.wait({receiver, asyncio.create_task(stream.ready.wait())}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
         if receiver.done():
@@ -383,10 +387,16 @@ async def live_stream(
         await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening})
         await websocket.send_bytes(stream.init)
         while True:
-            getter = asyncio.create_task(viewer.queue.get())
-            done, _ = await asyncio.wait({getter, receiver}, return_when=asyncio.FIRST_COMPLETED)
+            if getter is None:
+                getter = asyncio.create_task(viewer.queue.get())
+            # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once.
+            done, _ = await asyncio.wait({getter, receiver}, timeout=privacy.ACCESS_RECHECK_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                if not guard.still_valid() and guard.reason == "access":
+                    await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": "Your access to this camera has ended"})
+                    return
+                continue
             if receiver in done:
-                getter.cancel()
                 message = receiver.result()
                 if message["type"] == "websocket.disconnect":
                     return
@@ -404,8 +414,12 @@ async def live_stream(
                 receiver = asyncio.create_task(websocket.receive())
                 continue
             item = getter.result()
+            getter = None
             if not guard.still_valid():
-                await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
+                if guard.reason == "access":
+                    await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": "Your access to this camera has ended"})
+                else:
+                    await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
                 return
             if item is None:
                 if viewer.closed_reason == "too_slow":
@@ -418,6 +432,8 @@ async def live_stream(
         return
     finally:
         receiver.cancel()
+        if getter is not None:
+            getter.cancel()
         hub.leave(stream, viewer)
         if listening:
             _release_live_audio()

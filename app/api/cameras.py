@@ -375,9 +375,10 @@ async def _resolve_camera_source(payload: CameraProbeRequest, service_url: str |
 
 
 @router.get("/api/cameras")
-def list_cameras(_: CurrentUser) -> dict[str, object]:
+def list_cameras(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        rows = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE").fetchall()
+        rows = [row for row in db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE")
+                if user.access.can_see(row["id"])]
         cameras = []
         for row in rows:
             camera = camera_view(row)
