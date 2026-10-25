@@ -70,8 +70,14 @@ def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
         (alarm_id, event["id"], event["rule_id"], event["rule_name"], event["camera_id"], event["track_id"], event["label"], event["condition_type"],
          occurred.isoformat(), event["box_json"], (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(), stamp, stamp),
     )
+    if db.execute("SELECT 1 FROM rules WHERE id=? AND pop_into_live=1", (event["rule_id"],)).fetchone():
+        db.execute("INSERT INTO alarm_pop_ins(alarm_id) VALUES(?)", (alarm_id,))
     _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"]})
     _notify(db, alarm_id, "alarm.created", None)
+    from .push import queue_for_alarm
+    from .rule_actions import queue_for_event
+    queue_for_alarm(db, alarm_id)
+    queue_for_event(db, event["id"], alarm_id)
     return alarm_id
 
 

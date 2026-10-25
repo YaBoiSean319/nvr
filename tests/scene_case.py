@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tempfile
 import unittest
 import uuid
@@ -132,6 +133,17 @@ class SceneTestCase(unittest.TestCase):
                 db.execute("UPDATE ai_tracks SET first_seen_at=?,last_seen_at=? WHERE id=?",
                            (shifted(row["first_seen_at"]), shifted(row["last_seen_at"]), row["id"]))
         self.scene_start -= by
+
+    def record_scene_footage(self) -> int:
+        """Index the fixture footage as the camera's recording of the scene."""
+        relative = f"{self.camera_id}/scene.mp4"
+        target = Path(os.environ["NVR_RECORDINGS_PATH"]) / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.footage, target)
+        with connect() as db:
+            return db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
+                              (self.camera_id, relative, self.scene_start.isoformat(), (self.scene_start + scene.FRAME_INTERVAL * scene.FRAME_COUNT).isoformat(),
+                               target.stat().st_size)).lastrowid
 
     def scene_range(self) -> dict[str, str]:
         return {"camera_id": self.camera_id, "start": iso(self.scene_start - timedelta(minutes=1)),

@@ -9,7 +9,9 @@ analysis loop; after a restart, objects start new tracks.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -172,3 +174,21 @@ def iter_unanalyzed(db: sqlite3.Connection, camera_id: str, start: str, end: str
         "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
         "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
         (camera_id, end, start)))
+
+
+def encode_jpeg(frame: bytes) -> bytes | None:
+    """A detector-sized BGR frame as a JPEG, or None when it cannot be encoded."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or len(frame) != MODEL_WIDTH * MODEL_HEIGHT * 3:
+        return None
+    try:
+        result = subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{MODEL_WIDTH}x{MODEL_HEIGHT}",
+                                 "-i", "pipe:0", "-frames:v", "1", "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                                input=frame, capture_output=True, timeout=5, check=False)
+    except subprocess.TimeoutExpired:
+        return None
+    return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None
+
+
+def store_keyframe(db: sqlite3.Connection, track_id: str, at: datetime, jpeg: bytes) -> None:
+    db.execute("INSERT OR IGNORE INTO track_keyframes(track_id,captured_at,jpeg) VALUES(?,?,?)", (track_id, at.astimezone(timezone.utc).isoformat(), jpeg))

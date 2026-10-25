@@ -180,29 +180,37 @@ def logout(request: Request, response: Response) -> Response:
 
 @router.get("/api/auth/me")
 def me(user: CurrentUser) -> dict[str, str]:
+    if user.wall:
+        # A video wall watches through /wall; it never signs in to the main interface.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     return {"username": user["username"], "role": user["role"]}
 
 
 class PreferencesRequest(BaseModel):
-    theme: Literal["system", "light", "dark"]
+    theme: Literal["system", "light", "dark"] | None = None
+    # Whether alarms from pop-in rules bring their cameras into this person's Live.
+    live_alarm_pop_in: bool | None = None
 
 
-def _preferences(user_id: int) -> dict[str, str]:
+def _preferences(user_id: int) -> dict[str, object]:
     with connect() as db:
-        row = db.execute("SELECT theme_preference FROM users WHERE id=?", (user_id,)).fetchone()
-    return {"theme": row["theme_preference"] if row else "system"}
+        row = db.execute("SELECT theme_preference,live_alarm_pop_in FROM users WHERE id=?", (user_id,)).fetchone()
+    return {"theme": row["theme_preference"] if row else "system", "live_alarm_pop_in": bool(row and row["live_alarm_pop_in"])}
 
 
 @router.get("/api/me/preferences")
-def get_preferences(user: CurrentUser) -> dict[str, str]:
+def get_preferences(user: CurrentUser) -> dict[str, object]:
     return _preferences(int(user["id"]))
 
 
 @router.put("/api/me/preferences")
-def put_preferences(payload: PreferencesRequest, user: CurrentUser) -> dict[str, str]:
-    """Personal appearance only; every role may change its own theme."""
+def put_preferences(payload: PreferencesRequest, user: CurrentUser) -> dict[str, object]:
+    """Personal choices only; every role may change its own. Fields left out keep their value."""
     with connect() as db:
-        db.execute("UPDATE users SET theme_preference=? WHERE id=?", (payload.theme, int(user["id"])))
+        if payload.theme is not None:
+            db.execute("UPDATE users SET theme_preference=? WHERE id=?", (payload.theme, int(user["id"])))
+        if payload.live_alarm_pop_in is not None:
+            db.execute("UPDATE users SET live_alarm_pop_in=? WHERE id=?", (int(payload.live_alarm_pop_in), int(user["id"])))
     return _preferences(int(user["id"]))
 
 

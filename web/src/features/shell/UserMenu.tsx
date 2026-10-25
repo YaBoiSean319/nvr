@@ -16,7 +16,7 @@ export function UserMenu({ me, theme }: { me: Me; theme: ThemePreference }) {
   function choose(value: string) {
     const next = value as ThemePreference;
     applyTheme(next);
-    save.mutate(next);
+    save.mutate({ theme: next });
   }
   return (
     <Menu.Root>
