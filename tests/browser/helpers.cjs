@@ -39,6 +39,22 @@ function feedTamper(camera, pattern, count = 1) {
   return JSON.parse(result.stdout);
 }
 
+/** Give fixture camera `camera` a 48-hour history of writing `tbPerDay` terabytes a day, for the retention forecast. */
+function writeHistory(camera, tbPerDay) {
+  const result = spawnSync("python", ["-m", "tests.browser.seed_disks", "history", "--camera", String(camera), "--tb-per-day", String(tbPerDay)],
+    { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, `writing history failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
+/** Store a fixture SMART reading ("failing" or "healthy") for the default volume's disk. */
+function smartReading(state) {
+  const result = spawnSync("python", ["-m", "tests.browser.seed_disks", "smart", "--state", state],
+    { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, `storing a SMART reading failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 /** Raise a new alarm on fixture camera `camera` from a rule that pops into Live, with those neighbours. */
 function raiseAlarm(camera, { neighbours = [], rule = "Gate entry" } = {}) {
   const args = ["-m", "tests.browser.raise_alarm", "--camera", String(camera), "--neighbours", neighbours.join(","), "--rule", rule];
@@ -100,4 +116,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

@@ -1,10 +1,10 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { keys, useCameraGroups } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { TabFooter } from "../TabFooter";
 import { failureText, useTabDraft } from "../tabDraft";
-import { assignGroup, probeAudio, updateRecording, type ScheduleMode } from "./api";
+import { assignGroup, getRetentionForecast, probeAudio, updateRecording, type ScheduleMode } from "./api";
 import { MODE_LABEL } from "./inventory";
 
 interface Draft {
@@ -95,11 +95,23 @@ export function RecordingTab({ camera, admin }: { camera: Camera; admin: boolean
   const effective = camera.effective_recording_mode ?? camera.recording_mode;
   const audioStatus = camera.audio_status ?? "unknown";
   const readOnly = !admin;
+  const forecast = useQuery({ queryKey: ["cameras", camera.id, "retention-forecast"], queryFn: ({ signal }) => getRetentionForecast(camera.id, signal), refetchInterval: 5 * 60_000 });
+  const shown = forecast.data?.camera;
   return (
     <form className="tab-form" aria-label="Recording settings" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
       <p className="notice">
         Effective now: <strong>{MODE_LABEL[effective]}</strong> from the {policy}. Storage volume: {camera.storage_volume_id ?? "default"} (set by the policy group).
       </p>
+      {shown ? (
+        <section className="field-group" aria-label="Retention forecast">
+          <h3 className="field-heading">Retention forecast</h3>
+          <p className="notice" role="note" data-tone={shown.below_policy ? "warn" : shown.state === "ok" ? "good" : undefined}>
+            {shown.message}
+            {shown.below_policy && shown.days_until_shortfall !== null ? (shown.days_until_shortfall < 1 ? " · the disk is already full or will be within a day" : ` · the disk fills in about ${Math.round(shown.days_until_shortfall)} days`) : ""}
+          </p>
+          {shown.suggestions.length ? <ul className="plain-list" aria-label="Ways to keep the policy">{shown.suggestions.map(suggestion => <li key={suggestion}>{suggestion}</li>)}</ul> : null}
+        </section>
+      ) : null}
       <fieldset className="field-group" disabled={readOnly}>
         <legend>Recording</legend>
         <label className="check"><input type="checkbox" checked={draft.recording_enabled} onChange={event => tab.change({ recording_enabled: event.target.checked })} /> Record this camera</label>

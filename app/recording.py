@@ -4,6 +4,7 @@ import asyncio
 import csv
 import contextlib
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -227,15 +228,33 @@ class RecordingManager:
 
     async def _retention_loop(self) -> None:
         from .retention import cleanup_expired_recordings
+        started = False
         while not self.stopping:
             try:
                 await asyncio.to_thread(cleanup_expired_recordings)
                 await asyncio.to_thread(self._prune_viewing_audit)
+                if started:  # Not at startup: the disks are read from the second pass, five minutes in, so starting up runs no external command.
+                    await asyncio.to_thread(self._watch_disks)
             except asyncio.CancelledError:
                 raise
             except (OSError, sqlite3.Error):
                 pass
+            started = True
             await asyncio.sleep(300)
+
+    @staticmethod
+    def _watch_disks() -> None:
+        """The retention forecast every pass, and the disks' SMART health when it is due: an incident for each failing disk or camera that will not keep its policy."""
+        from . import forecast, smart
+        try:
+            volumes = smart.volumes_to_read()
+            with connect() as db:
+                forecast.sync_incidents(db, forecast.forecast(db))
+                due = smart.due(db, volume_ids=volumes)
+            if due:
+                smart.refresh(volumes)
+        except Exception:  # noqa: BLE001 - watching the disks must never stop the retention pass that shares this loop
+            logging.getLogger("nvr.recording").exception("The disk watch failed")
 
     @staticmethod
     def _prune_viewing_audit() -> None:

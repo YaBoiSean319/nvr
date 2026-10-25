@@ -17,6 +17,18 @@ interface BackupStatus {
   stale: boolean; stored: { file_name: string; size_bytes: number }[]; runs: Run[]; footage_included: boolean;
 }
 
+interface DiskReading {
+  volume_id: string; available: boolean; state: "healthy" | "warning" | "failing" | "unavailable"; reason: string | null; model: string | null;
+  temperature_c: number | null; power_on_hours: number | null; findings: string[]; checked_at: string; device: string | null;
+}
+interface CameraForecast {
+  id: string; name: string; volume_id: string; policy_days: number; forecast_days: number | null; write_bytes_per_day: number; state: "ok" | "below_policy" | "not_forecast";
+  below_policy: boolean; days_until_shortfall: number | null; message: string; suggestions: string[];
+}
+interface Forecast { cameras: CameraForecast[]; disks: { volume_ids: string[]; free_bytes: number; budget_bytes: number; needed_bytes: number; fits: boolean }[]; warn_days: number; window_hours: number; note: string }
+
+const DISK_STATE = { healthy: "Healthy", warning: "Warning", failing: "Failing", unavailable: "Not available" } as const;
+
 const size = (bytes: number | null | undefined) => {
   if (bytes === null || bytes === undefined) return "unknown";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -38,8 +50,24 @@ export function StorageSettings() {
     queryFn: ({ signal }) => api<BackupStatus>("/api/backups", { signal }),
     refetchInterval: query => (query.state.data?.runs.some(run => run.status === "queued" || run.status === "running") ? 2_000 : 30_000),
   });
+  const disks = useQuery({ queryKey: ["storage", "disk-health"], queryFn: ({ signal }) => api<{ disks: DiskReading[] }>("/api/storage/disk-health", { signal }).then(body => body.disks), refetchInterval: 60_000 });
+  const forecast = useQuery({ queryKey: ["storage", "forecast"], queryFn: ({ signal }) => api<Forecast>("/api/storage/forecast", { signal }), refetchInterval: 5 * 60_000 });
   const [backupError, setBackupError] = useState<string | null>(null);
   const [queued, setQueued] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+
+  async function checkDisks() {
+    setChecking(true);
+    setCheckError(null);
+    try {
+      client.setQueryData(["storage", "disk-health"], (await api<{ disks: DiskReading[] }>("/api/storage/disk-health/refresh", { method: "POST" })).disks);
+      void client.invalidateQueries({ queryKey: ["incidents"] });
+    } catch (error) {
+      setCheckError(failureText(error));
+    }
+    setChecking(false);
+  }
 
   async function backupNow() {
     setBackupError(null);
@@ -75,6 +103,68 @@ export function StorageSettings() {
           </table>
         ) : <p className="muted">{storage.error ? failureText(storage.error) : "Loading…"}</p>}
         <p className="muted field-hint">Volumes are configured on the NVR host. Assign a policy group to a volume in Groups &amp; Policies.</p>
+      </section>
+
+      <section className="field-group" aria-label="Disk health">
+        <h2 className="field-heading">Disk health</h2>
+        <p className="muted field-hint">
+          SMART health of the disk behind each volume, read where the container can reach the disk. A failing disk, or signs that usually come before failure, raises an incident.
+          Where it cannot, it says so here: it is never assumed healthy.
+        </p>
+        {disks.data && disks.data.length ? (
+          <table className="inventory-table" aria-label="Disk health by volume">
+            <thead><tr><th scope="col">Volume</th><th scope="col">Disk</th><th scope="col">Health</th><th scope="col">Details</th><th scope="col">Read</th></tr></thead>
+            <tbody>
+              {disks.data.map(disk => (
+                <tr key={disk.volume_id} data-state={disk.state}>
+                  <th scope="row">{disk.volume_id}</th>
+                  <td>{disk.model ?? disk.device ?? "—"}{disk.temperature_c !== null ? ` · ${disk.temperature_c} °C` : ""}</td>
+                  <td>{DISK_STATE[disk.state]}</td>
+                  <td>
+                    {disk.available
+                      ? (disk.findings.length ? <ul className="plain-list">{disk.findings.map(finding => <li key={finding}>{finding}</li>)}</ul> : "No problems reported")
+                      : <span className="muted">Not available: {disk.reason}</span>}
+                  </td>
+                  <td>{formatRelative(disk.checked_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p className="muted">{disks.error ? failureText(disks.error) : disks.isPending ? "Loading…" : "Disk health is not available: no disk has been read yet. Use Check disks now."}</p>}
+        <div className="field-actions">
+          <button type="button" className="button" onClick={() => void checkDisks()} disabled={checking}>{checking ? "Checking…" : "Check disks now"}</button>
+          {checkError ? <span className="field-error" role="alert">{checkError}</span> : null}
+        </div>
+      </section>
+
+      <section className="field-group" aria-label="Retention forecast">
+        <h2 className="field-heading">Retention forecast</h2>
+        {forecast.data ? (
+          <>
+            <p className="muted field-hint">{forecast.data.note}</p>
+            {forecast.data.cameras.some(camera => camera.below_policy) ? null : <p className="notice" data-tone="good" role="note">Every camera that can be forecast keeps its retention policy.</p>}
+            <table className="inventory-table" aria-label="Retention forecast by camera">
+              <thead><tr><th scope="col">Camera</th><th scope="col">Policy</th><th scope="col">Kept</th><th scope="col">Writes</th><th scope="col">Forecast</th></tr></thead>
+              <tbody>
+                {forecast.data.cameras.map(camera => (
+                  <tr key={camera.id} data-state={camera.state}>
+                    <th scope="row">{camera.name}</th>
+                    <td>{camera.policy_days} days</td>
+                    <td>{camera.forecast_days === null ? "—" : `about ${Math.round(camera.forecast_days)} days`}</td>
+                    <td>{camera.write_bytes_per_day ? `${size(camera.write_bytes_per_day)} a day` : "—"}</td>
+                    <td>{camera.message}{camera.below_policy && camera.days_until_shortfall !== null ? ` · ${camera.days_until_shortfall < 1 ? "the disk is already full or will be within a day" : `the disk fills in about ${Math.round(camera.days_until_shortfall)} days`}` : ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {forecast.data.cameras.filter(camera => camera.suggestions.length).map(camera => (
+              <div key={camera.id} className="field-hint">
+                <strong>To fix {camera.name}:</strong>
+                <ul className="plain-list">{camera.suggestions.map(suggestion => <li key={suggestion}>{suggestion}</li>)}</ul>
+              </div>
+            ))}
+          </>
+        ) : <p className="muted">{forecast.error ? failureText(forecast.error) : "Loading…"}</p>}
       </section>
 
       <section className="field-group" aria-label="Retention default">

@@ -121,3 +121,10 @@ export interface CameraTamper {
 export const getTamper = (id: string, signal?: AbortSignal) => api<CameraTamper>(`${at(id)}/tamper`, { signal });
 export const putTamper = (id: string, body: Pick<CameraTamper, "enabled" | "sensitivity" | "sustain_seconds">) => api<CameraTamper>(`${at(id)}/tamper`, { method: "PUT", body });
 export const relearnTamper = (id: string) => api<CameraTamper>(`${at(id)}/tamper/relearn`, { method: "POST" });
+
+export interface RetentionForecast {
+  camera: { id: string; name: string; policy_days: number; forecast_days: number | null; state: "ok" | "below_policy" | "not_forecast"; below_policy: boolean;
+            days_until_shortfall: number | null; message: string; suggestions: string[] };
+  warn_days: number;
+}
+export const getRetentionForecast = (id: string, signal?: AbortSignal) => api<RetentionForecast>(`${at(id)}/retention-forecast`, { signal });
