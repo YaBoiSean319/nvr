@@ -35,3 +35,14 @@ def new_session_token() -> str:
 
 def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+_decoy: str | None = None
+
+
+def spend_password_time(password: str) -> None:
+    """Do the work of checking a password against nothing, so refusing an unknown name takes as long as a wrong password."""
+    global _decoy
+    if _decoy is None:
+        _decoy = hash_password(secrets.token_urlsafe(16))
+    verify_password(password, _decoy)

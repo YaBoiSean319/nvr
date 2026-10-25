@@ -188,8 +188,11 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DROP TRIGGER IF EXISTS camera_browser_fixture_reject_name_save")
         db.execute("DELETE FROM discovery_candidates")
         # Settings state from earlier journeys.
-        for table in ("api_tokens", "webhook_deliveries", "webhook_endpoints", "heartbeat_configuration", "backup_runs", "diagnostic_settings", "coverage_reports"):
+        for table in ("api_tokens", "webhook_deliveries", "webhook_endpoints", "heartbeat_configuration", "backup_runs", "diagnostic_settings", "coverage_reports",
+                      "user_totp", "user_passkeys", "user_recovery_codes", "mfa_challenges", "auth_failures"):
             db.execute(f"DELETE FROM {table}")
+        db.execute("UPDATE users SET passkey_sign_in=0")
+        db.execute("UPDATE security_settings SET mfa_policy='off' WHERE singleton_id=1")
         db.execute("UPDATE ai_runtime_settings SET max_active_cameras=4 WHERE singleton_id=1")
         db.execute("DELETE FROM export_sources")
         db.execute("DELETE FROM exports")

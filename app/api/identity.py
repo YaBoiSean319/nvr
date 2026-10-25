@@ -15,8 +15,9 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from authlib.integrations.starlette_client import OAuth
 
+from app import auth_limits as limits, mfa
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
-from app.security import hash_password, new_session_token, token_digest, verify_password
+from app.security import hash_password, new_session_token, spend_password_time, token_digest, verify_password
 from app.store import connect
 
 router = APIRouter()
@@ -99,7 +100,7 @@ def _session_hours() -> int:
         return 12
 
 
-def _new_session(response: Response, user_id: int) -> None:
+def start_session(response: Response, user_id: int) -> None:
     raw = new_session_token()
     session_id = str(uuid.uuid4())
     expires = datetime.now(timezone.utc) + timedelta(hours=_session_hours())
@@ -149,21 +150,40 @@ def bootstrap(payload: BootstrapRequest, response: Response) -> dict[str, str]:
         except sqlite3.IntegrityError as exc:
             db.rollback()
             raise HTTPException(status_code=409, detail="Initial setup is already complete") from exc
-    _new_session(response, user_id)
+    start_session(response, user_id)
     return {"username": username, "role": "administrator"}
 
 
+def signed_in(response: Response, user: sqlite3.Row, account: str, address: str) -> dict[str, object]:
+    """Start the session, clear the account's failures, and say whether the policy still owes a second factor."""
+    start_session(response, int(user["id"]))
+    limits.succeeded(account, address)
+    with connect() as db:
+        owes = mfa.required_for(mfa.policy(db), user["role"], local=user["provider_issuer"] is None) and not mfa.has_factor(db, int(user["id"]))
+    return {"username": user["username"], "role": user["role"], **({"mfa_enrolment_required": True} if owes else {})}
+
+
 @router.post("/api/auth/login")
-def login(payload: LoginRequest, response: Response) -> dict[str, str]:
+def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, object]:
+    """The password step. An account with a second factor gets a challenge to answer instead of a session."""
+    account, address = limits.account_key(payload.username), limits.client_address(request)
+    limits.begin(account, address)  # Counted as a failure until it turns out right.
     with connect() as db:
         user = db.execute(
-            "SELECT id, username, password_hash, role FROM users WHERE username=? COLLATE NOCASE",
+            "SELECT id, username, password_hash, role, provider_issuer FROM users WHERE username=? COLLATE NOCASE",
             (payload.username.strip(),),
         ).fetchone()
+    if user is None:
+        spend_password_time(payload.password)  # An unknown name takes as long to refuse as a wrong password, so names cannot be told apart.
     if user is None or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    _new_session(response, user["id"])
-    return {"username": user["username"], "role": user["role"]}
+    with connect() as db:
+        found = mfa.factors(db, int(user["id"]))
+        if found["totp"] or found["passkeys"]:
+            limits.release(account, address)  # The password was right; the second step is where guessing continues.
+            methods = [name for name, available in (("passkey", bool(found["passkeys"])), ("totp", found["totp"]), ("recovery", found["recovery_codes_remaining"] > 0)) if available]
+            return {"mfa_required": True, "challenge": mfa.new_challenge(db, "login", int(user["id"])), "methods": methods}
+    return signed_in(response, user, account, address)
 
 
 @router.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -184,11 +204,12 @@ def logout(request: Request, response: Response) -> Response:
 
 
 @router.get("/api/auth/me")
-def me(user: CurrentUser) -> dict[str, str]:
+def me(user: CurrentUser) -> dict[str, object]:
     if user.wall:
         # A video wall watches through /wall; it never signs in to the main interface.
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    return {"username": user["username"], "role": user["role"]}
+    # Present only for a session that still owes its second factor, so the response is unchanged for everyone else.
+    return {"username": user["username"], "role": user["role"], **({"mfa_enrolment_required": True} if user.mfa_enrolment_required else {})}
 
 
 class PreferencesRequest(BaseModel):
@@ -285,7 +306,7 @@ async def oidc_callback(request: Request) -> RedirectResponse:
             user_id = int(user["id"])
             db.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
     redirect = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    _new_session(redirect, user_id)
+    start_session(redirect, user_id)
     return redirect
 
 

@@ -4,6 +4,25 @@ export type ThemePreference = "system" | "light" | "dark";
 export interface Me {
   username: string;
   role: Role;
+  /** The administrator requires a second factor and this account has none yet: only enrolment is open. */
+  mfa_enrolment_required?: boolean;
+}
+
+/** The password was right but the account has a second factor to answer before it gets a session. */
+export interface MfaChallenge {
+  mfa_required: true;
+  challenge: string;
+  methods: ("passkey" | "totp" | "recovery")[];
+}
+
+export interface SecuritySummary {
+  local: boolean;
+  policy: "off" | "administrators" | "all";
+  required: boolean;
+  totp: boolean;
+  passkeys: { id: number; name: string; created_at: string; last_used_at: string | null }[];
+  recovery_codes_remaining: number;
+  passkey_sign_in: boolean;
 }
 
 export interface Branding {

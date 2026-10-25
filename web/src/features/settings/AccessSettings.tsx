@@ -5,6 +5,7 @@ import { Modal } from "@/components/Modal";
 import { failureText } from "@/features/admin/tabDraft";
 import { formatRelative } from "@/lib/time";
 import { SecretDialog } from "./SecretDialog";
+import { SignInSecurity } from "./SignInSecurity";
 
 interface Session { session_id: string; created_at: string; expires_at: string; username: string; role: string }
 interface Token {
@@ -71,6 +72,8 @@ export function AccessSettings() {
         <p>{sso.data?.enabled ? "Microsoft Entra sign-in is enabled." : "Microsoft Entra sign-in is not configured."}</p>
         <p className="muted field-hint">Sign-in providers are configured with environment variables on the NVR host. Their secrets cannot be viewed or changed here.</p>
       </section>
+
+      <SignInSecurity />
 
       <section className="field-group" aria-label="Active sessions">
         <h2 className="field-heading">Active sessions</h2>

@@ -29,7 +29,9 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_PORT` | `8280` | Host listening port for the web application |
 | `NVR_SESSION_HOURS` | `12` | Session lifetime, clamped to 1–168 hours |
 | `NVR_COOKIE_SECURE` | `false` | Set `true` behind HTTPS so session cookies are HTTPS-only |
-| `NVR_PUBLIC_URL` | unset | Public HTTPS origin used to construct the fixed Entra callback URL |
+| `NVR_PUBLIC_URL` | unset | Public HTTPS origin used to construct the fixed Entra callback URL, and the origin and relying party of passkeys |
+| `NVR_WEBAUTHN_RP_ID` | unset | Optional parent domain for passkeys, to share them between hosts |
+| `NVR_TRUST_FORWARDED_FOR` | false | Count sign-in attempts by the last `X-Forwarded-For` address; only behind a proxy you control |
 | `NVR_OIDC_TENANT_ID` | unset | Microsoft Entra workforce tenant GUID |
 | `NVR_OIDC_CLIENT_ID` | unset | Entra app registration client ID |
 | `NVR_OIDC_CLIENT_SECRET` | unset | Entra app registration client secret; supply through a secret manager |
@@ -59,6 +61,8 @@ Rules can pop their alarms into Live: each person who opts in sees the alarm's c
 ONVIF PTZ cameras can be moved from Live and the camera editor (buttons, keyboard and touch, click-to-centre), with presets, scheduled patrol tours and a control lease so one person drives a camera at a time (see [PTZ](docs/ptz.md)).
 
 Privacy masks black out areas of a camera's picture everywhere: written to cameras that support ONVIF masks, and otherwise drawn by the NVR into every live view, recording, snapshot and export. Administrators can see unmasked footage only for a stated, audited reason (see [privacy masks](docs/privacy-masks.md)).
+
+Local accounts can add passkeys or an authenticator app with one-time recovery codes; administrators can require them, reset them, and sign-in attempts are rate limited per account and per address (see [passkeys and authenticator apps](docs/second-factors.md)).
 
 Every recording segment is hashed into a signed per-camera chain, so altered, missing or reordered footage can be found from a camera's Health & History tab, and evidence packages carry the chain and public key to verify offline (see [signed footage](docs/signed-footage.md)).
 

@@ -1,8 +1,10 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
+import { useState } from "react";
 import { useSavePreferences, useSignOut } from "@/api/queries";
 import { guarded } from "@/features/admin/drafts";
 import type { Me, ThemePreference } from "@/api/types";
 import { applyTheme } from "@/lib/appearance";
+import { SecurityDialog } from "@/features/auth/SecurityDialog";
 
 const THEMES: { value: ThemePreference; label: string }[] = [
   { value: "system", label: "Match system" },
@@ -13,12 +15,14 @@ const THEMES: { value: ThemePreference; label: string }[] = [
 export function UserMenu({ me, theme }: { me: Me; theme: ThemePreference }) {
   const save = useSavePreferences();
   const signOut = useSignOut();
+  const [securityOpen, setSecurityOpen] = useState(false);
   function choose(value: string) {
     const next = value as ThemePreference;
     applyTheme(next);
     save.mutate({ theme: next });
   }
   return (
+    <>
     <Menu.Root>
       <Menu.Trigger className="button user-trigger" data-variant="ghost" aria-label={`Account menu for ${me.username}`}>
         <span className="user-initial" aria-hidden="true">{me.username.charAt(0).toUpperCase()}</span>
@@ -41,9 +45,12 @@ export function UserMenu({ me, theme }: { me: Me; theme: ThemePreference }) {
           </Menu.RadioGroup>
           {save.isError ? <p className="menu-label error">Theme could not be saved.</p> : null}
           <Menu.Separator className="menu-separator" />
+          <Menu.Item className="menu-item" onSelect={() => setSecurityOpen(true)}>Security…</Menu.Item>
           <Menu.Item className="menu-item" onSelect={() => void guarded(() => signOut.mutate())}>Sign out</Menu.Item>
         </Menu.Content>
       </Menu.Portal>
     </Menu.Root>
+    <SecurityDialog open={securityOpen} onOpenChange={setSecurityOpen} />
+    </>
   );
 }
