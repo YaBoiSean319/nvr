@@ -578,3 +578,19 @@
 .rule-action { display: grid; gap: var(--n-space-2); padding: var(--n-space-2) var(--n-space-3); border: 1px solid var(--n-line); border-radius: var(--n-radius); }
 .rule-action-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--n-space-2); }
 .rule-action-head .button { margin-left: auto; }
+
+/* PTZ: a press-and-hold pad on the focused Live tile and in the camera editor. */
+.ptz-pad { display: grid; gap: var(--n-space-1); justify-items: start; }
+.ptz-pad[data-compact] { position: absolute; left: var(--n-space-2); bottom: var(--n-space-2); z-index: 3; padding: var(--n-space-1); border-radius: var(--n-radius); background: color-mix(in srgb, #000 55%, transparent); color: #fff; max-width: calc(100% - 2 * var(--n-space-2)); }
+.ptz-arrows { display: grid; grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); gap: 2px; }
+.ptz-arrows [data-direction="ArrowUp"] { grid-column: 2; grid-row: 1; }
+.ptz-arrows [data-direction="ArrowLeft"] { grid-column: 1; grid-row: 2; }
+.ptz-arrows [data-direction="ArrowRight"] { grid-column: 3; grid-row: 2; }
+.ptz-arrows [data-direction="ArrowDown"] { grid-column: 2; grid-row: 3; }
+.ptz-button { min-width: 40px; min-height: 40px; touch-action: none; }
+.ptz-row { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; }
+.ptz-presets { min-height: 40px; max-width: 12rem; }
+.ptz-lease, .ptz-error { margin: 0; font-size: 12px; display: flex; gap: var(--n-space-2); align-items: center; }
+.ptz-centre-layer { position: absolute; inset: 0; z-index: 2; cursor: crosshair; }
+.ptz-preset-row, .ptz-step { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--n-space-2); min-height: 40px; }
+.ptz-tab .ptz-pad .ptz-button { min-width: 44px; min-height: 44px; }
