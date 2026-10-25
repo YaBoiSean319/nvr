@@ -121,7 +121,7 @@ class ExportJobTests(unittest.TestCase):
             self.assertIn(video_name, archive.namelist())
             self.assertTrue(video_name.startswith("camera-export-camera-01-"))
             integrity = json.loads(archive.read("integrity.json"))
-            self.assertEqual({item["path"] for item in integrity["files"]}, {"metadata.json", video_name, "grid.mp4"})
+            self.assertEqual({item["path"] for item in integrity["files"]}, {"metadata.json", "chain.json", video_name, "grid.mp4"})
             exported_video = Path(self.temporary.name) / "camera.mp4"
             exported_video.write_bytes(archive.read(video_name))
         self.assertEqual(metadata["cameras"][0]["actual_intervals"], [{"start": "2026-10-20T10:00:00+00:00", "end": "2026-10-20T10:00:00.800000+00:00"}])

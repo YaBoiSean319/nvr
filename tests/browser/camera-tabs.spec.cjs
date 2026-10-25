@@ -1,6 +1,9 @@
 // Real-browser journeys for the camera editor tabs (#99): Recording, Motion, AI,
 // Schedule & Retention and Health & History. Odd-numbered fixture cameras belong to "Operations".
+const fs = require("node:fs");
+const path = require("node:path");
 const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
+const { loadFixtureEnvironment } = require("./fixture_environment.cjs");
 
 const nav = page => page.getByRole("navigation", { name: "Workspaces" });
 const editor = page => page.locator(".editor");
@@ -201,4 +204,27 @@ test("operators see effective values read-only on every tab", async ({ page }) =
     await expect(controls.first()).toBeVisible();
     for (const control of await controls.all()) await expect(control).toBeDisabled();
   }
+});
+
+test("Health & History verifies footage against its signed chain and names an altered segment", async ({ page }) => {
+  seedFixtures(1, { footage: true });
+  await signInNext(page);
+  await openTab(page, "Camera 001", "Health & History");
+  const region = editor(page).getByRole("region", { name: "Footage verification" });
+  await region.getByLabel("Range").selectOption({ label: "Last 24 hours" });
+  // The background worker hashes new footage within a few seconds.
+  await expect(async () => {
+    await region.getByRole("button", { name: "Verify footage" }).click();
+    await expect(region.getByRole("status")).toContainText("2 segments checked; no tampering found", { timeout: 2000 });
+  }).toPass({ timeout: 30_000 });
+
+  const recordings = loadFixtureEnvironment().NVR_RECORDINGS_PATH;
+  const cameraId = (await (await page.request.get("/api/cameras")).json()).cameras.find(item => item.name === "Camera 001").id;
+  const altered = path.join(recordings, cameraId, "fixture-0150.mp4");
+  const bytes = fs.readFileSync(altered);
+  bytes[Math.floor(bytes.length / 2)] ^= 0xff;
+  fs.writeFileSync(altered, bytes);
+  await region.getByRole("button", { name: "Verify footage" }).click();
+  await expect(region.getByRole("status")).toContainText("1 segment failed verification");
+  await expect(region.getByRole("list", { name: "Segments that failed verification" }).getByRole("listitem")).toHaveText([/^Altered: the file no longer matches its hash · segment \d+/]);
 });

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
+from app import footage_chain
 from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 
 router = APIRouter()
@@ -177,10 +178,19 @@ async def verify_export_evidence(job_id: str, request: Request, user: CurrentUse
         if len(body) > MAX_VERIFY_PACKAGE_BYTES:
             raise HTTPException(status_code=413, detail="Evidence package exceeds the verification size limit")
     result = verify_evidence_bytes(bytes(body), job_id)
-    action = "evidence_verified" if result["checksums_valid"] else "evidence_verification_failed"
+    if result.get("chain"):
+        # A package can carry any key; only this installation's key shows the footage came from here.
+        installation_key = footage_chain.public_key()
+        for camera in result["chain"]["cameras"]:
+            if camera.get("public_key"):
+                camera["signed_by_this_installation"] = camera["public_key"] == installation_key
+    valid = result["checksums_valid"] and (not result.get("chain") or result["chain"]["valid"])
+    action = "evidence_verified" if valid else "evidence_verification_failed"
     with connect() as db:
         db.execute(
             "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-            (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if result["checksums_valid"] else "invalid", "file_count": len(result["files"])})),
+            (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if valid else "invalid", "file_count": len(result["files"]),
+                                                                   "chain": None if not result.get("chain") else ("valid" if result["chain"]["valid"] else "invalid")})),
         )
-    return {**result, "media_validation": "not_performed", "authenticity": "Checksums are unsigned. A matching manifest detects accidental or subsequent byte changes but does not prove package origin, creation time, or camera timestamp accuracy."}
+    return {**result, "media_validation": "not_performed", "authenticity": "Checksums are unsigned. A matching manifest detects accidental or subsequent byte changes but does not prove package origin, creation time, or camera timestamp accuracy. "
+                                                                "The signed chain (chain.json) shows the source recordings match what this NVR hashed when they were written, if signed_by_this_installation is true."}
