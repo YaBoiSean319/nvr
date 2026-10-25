@@ -243,18 +243,12 @@ class RecordingManager:
     def _watch_disks() -> None:
         """The retention forecast every pass, and the disks' SMART health when it is due: an incident for each failing disk or camera that will not keep its policy."""
         from . import forecast, smart
-        from .storage import configured_volumes, volume_path
         try:
+            volumes = smart.volumes_to_read()
             with connect() as db:
                 forecast.sync_incidents(db, forecast.forecast(db))
-                due = smart.due(db)
+                due = smart.due(db, volume_ids=volumes)
             if due:
-                volumes = {}
-                for volume_id in configured_volumes():
-                    try:
-                        volumes[volume_id] = volume_path(volume_id)
-                    except OSError:
-                        continue
                 smart.refresh(volumes)
         except Exception:  # noqa: BLE001 - watching the disks must never stop the retention pass that shares this loop
             logging.getLogger("nvr.recording").exception("The disk watch failed")

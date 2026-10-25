@@ -46,7 +46,7 @@ test("a camera that will not keep its policy is shown in Settings and on its Rec
   await openStorage(page);
   const forecast = page.getByRole("region", { name: "Retention forecast" });
   const table = forecast.getByRole("table", { name: "Retention forecast by camera" });
-  await expect(table.getByRole("row", { name: /Camera 001/ })).toContainText(/keeps about \d+ days, below its 30-day policy/);
+  await expect(table.getByRole("row", { name: /Camera 001/ })).toContainText(/can hold about \d+ days at the current write rate, below its 30-day policy/);
   await expect(table.getByRole("row", { name: /Camera 002/ })).toContainText("Collecting data");
   await expect(forecast).toContainText("To fix Camera 001:");
   await expect(forecast).toContainText("Lower Camera 001's bitrate");
@@ -55,7 +55,7 @@ test("a camera that will not keep its policy is shown in Settings and on its Rec
   await page.getByRole("region", { name: "Camera inventory" }).getByRole("button", { name: "Camera 001", exact: true }).click();
   await page.getByRole("tab", { name: "Recording" }).click();
   const section = page.getByRole("region", { name: "Retention forecast" });
-  await expect(section.getByRole("note")).toContainText(/Camera 001 keeps about \d+ days, below its 30-day policy/);
+  await expect(section.getByRole("note")).toContainText(/Camera 001's disk can hold about \d+ days at the current write rate, below its 30-day policy/);
   await expect(section.getByRole("list", { name: "Ways to keep the policy" })).toContainText("Lower Camera 001's bitrate");
   const api = await (await page.request.get(`/api/cameras/${fixtures.camera_ids[0]}/retention-forecast`)).json();
   expect(api.camera.below_policy).toBe(true);

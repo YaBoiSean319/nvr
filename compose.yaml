@@ -37,6 +37,8 @@ services:
     #   - /dev/sda:/dev/sda
     # cap_add:
     #   - SYS_RAWIO
+    # group_add:
+    #   - "6"  # the host's disk group id (getent group disk): the NVR does not run as root, and block devices are group-readable
     volumes:
       - nvr-data:/data
       - nvr-secrets:/secrets

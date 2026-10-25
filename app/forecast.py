@@ -7,12 +7,12 @@ This works out, from each camera's recent write rate, what the disk can hold:
 - a **write rate** per camera: the bytes of footage indexed in the last 48 hours over the time it has been recording in that window (at least
   ``MIN_HISTORY`` of footage is needed before it forecasts);
 - a **budget** per disk: its free space (less the reserve below which the NVR reports storage pressure) plus the footage already stored on it by
-  the cameras that write to it. Volumes on the same disk share one budget;
+  the cameras that write to it, less footage under a hold. Volumes on the same disk share one budget;
 - the **retention a camera keeps**: if every camera's policy fits in the budget, its policy. If not, the disk's cameras share the shortfall by
   each keeping the same number of days, no more than its policy (the water-filling level ``D`` with ``sum(rate * min(policy, D)) = budget``);
 - **when the shortfall begins**: footage grows towards each policy at the camera's write rate, so the days until the stored footage first exceeds the budget.
 
-A camera whose forecast is below its policy shows "Camera X keeps about N days, below its M-day policy", with the changes that would fix it,
+A camera whose disk cannot hold its policy shows "Camera X's disk can hold about N days at the current write rate, below its M-day policy", with the changes that would fix it,
 and raises an incident when the shortfall begins within ``WARN_DAYS`` (7 days).
 """
 from __future__ import annotations
@@ -29,6 +29,7 @@ from .incidents import sync_incident
 WINDOW = timedelta(hours=48)
 MIN_HISTORY = timedelta(hours=6)
 WARN_DAYS = 7
+SEGMENT_SLACK = timedelta(hours=1)  # No segment is longer than this, so one that ends in the window started within an hour of it.
 TOLERANCE = 0.005  # A forecast within half a percent of the policy is the policy.
 
 
@@ -74,27 +75,36 @@ def days_until_shortfall(rates: list[float], policies: list[float], ages: list[f
     return None
 
 
-def _volume_of(db: sqlite3.Connection, camera_id: str) -> str:
-    row = db.execute("SELECT g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return (row["storage_volume_id"] if row and row["storage_volume_id"] else "default")
-
-
 def measure(db: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
-    """Each camera's policy, write rate, stored footage and age, as the forecast needs them."""
+    """Each camera's policy, write rate, stored footage and age, as the forecast needs them (a few grouped queries, whatever the camera count)."""
     from .retention import effective_retention
-    window_start = _parse((now - WINDOW).isoformat()).isoformat()
+    window_start = (now - WINDOW).isoformat()
+    earliest_start = (now - WINDOW - SEGMENT_SLACK).isoformat()  # Keeps the recent-footage scan off the whole of a camera's history.
+    totals = {row["camera_id"]: row for row in db.execute(
+        "SELECT camera_id,COALESCE(SUM(size_bytes),0) AS stored,MIN(starts_at) AS first FROM recording_segments WHERE unavailable_at IS NULL GROUP BY camera_id")}
+    recent = {row["camera_id"]: row["written"] for row in db.execute(
+        "SELECT camera_id,COALESCE(SUM(size_bytes),0) AS written FROM recording_segments WHERE unavailable_at IS NULL AND starts_at>=? AND ends_at>=? GROUP BY camera_id",
+        (earliest_start, window_start))}
+    # Footage under a hold is never removed by age, so it is not room the disk will get back.
+    held = {row["camera_id"]: row["held"] for row in db.execute(
+        "SELECT s.camera_id,COALESCE(SUM(s.size_bytes),0) AS held FROM recording_segments s WHERE s.unavailable_at IS NULL AND EXISTS("
+        "SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) GROUP BY s.camera_id",
+        (now.astimezone(timezone.utc).isoformat(),))}
+    volume_ids = {row["id"]: row["storage_volume_id"] for row in db.execute("SELECT c.id,g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id")}
     cameras = []
-    for camera in db.execute("SELECT id,name,archived_at FROM cameras ORDER BY name,id"):
-        total = db.execute("SELECT COALESCE(SUM(size_bytes),0) AS stored,MIN(starts_at) AS first FROM recording_segments WHERE camera_id=? AND unavailable_at IS NULL", (camera["id"],)).fetchone()
-        recent = db.execute("SELECT COALESCE(SUM(size_bytes),0) AS written FROM recording_segments WHERE camera_id=? AND unavailable_at IS NULL AND ends_at>=?", (camera["id"], window_start)).fetchone()
-        history = (now - _parse(total["first"])) if total["first"] else timedelta(0)
+    for camera in db.execute("SELECT id,name,archived_at FROM cameras ORDER BY name,id").fetchall():
+        total = totals.get(camera["id"])
+        try:
+            history = max(timedelta(0), now - _parse(total["first"])) if total and total["first"] else timedelta(0)
+        except ValueError:
+            history = timedelta(0)
         span = min(WINDOW, history)
         policy, source = effective_retention(db, camera["id"])
         collecting = camera["archived_at"] is not None or span < MIN_HISTORY
         cameras.append({
-            "id": camera["id"], "name": camera["name"], "volume_id": _volume_of(db, camera["id"]), "policy_days": policy, "policy_source": source,
-            "stored_bytes": int(total["stored"]), "age_days": min(policy, history.total_seconds() / 86400),
-            "write_bytes_per_day": 0.0 if collecting else recent["written"] / (span.total_seconds() / 86400), "collecting": collecting, "archived": camera["archived_at"] is not None,
+            "id": camera["id"], "name": camera["name"], "volume_id": volume_ids.get(camera["id"]) or "default", "policy_days": policy, "policy_source": source,
+            "stored_bytes": int(total["stored"]) if total else 0, "held_bytes": int(held.get(camera["id"], 0)), "age_days": min(policy, history.total_seconds() / 86400),
+            "write_bytes_per_day": 0.0 if collecting else recent.get(camera["id"], 0) / (span.total_seconds() / 86400), "collecting": collecting, "archived": camera["archived_at"] is not None,
         })
     return cameras
 
@@ -133,7 +143,7 @@ def forecast(db: sqlite3.Connection, now: datetime | None = None, usage: Callabl
     disk_of: dict[str, dict[str, Any]] = {}
     for key, ids in groups.items():
         members = [camera for volume_id in ids for camera in by_volume.get(volume_id, [])]
-        budget = max(0, volumes[ids[0]]["free_bytes"] - reserve) + sum(camera["stored_bytes"] for camera in members)
+        budget = max(0, volumes[ids[0]]["free_bytes"] - reserve) + sum(camera["stored_bytes"] - camera["held_bytes"] for camera in members)
         active = [camera for camera in members if camera["write_bytes_per_day"] > 0]
         rates, policies = [c["write_bytes_per_day"] for c in active], [float(c["policy_days"]) for c in active]
         ages = [c["age_days"] for c in active]
@@ -151,22 +161,24 @@ def forecast(db: sqlite3.Connection, now: datetime | None = None, usage: Callabl
         entry = {key: camera[key] for key in ("id", "name", "volume_id", "policy_days", "policy_source", "stored_bytes")}
         entry.update(write_bytes_per_day=round(camera["write_bytes_per_day"]), age_days=round(camera["age_days"], 2))
         context = disk_of.get(camera["volume_id"])
-        if camera["archived"] or camera["collecting"] or context is None:
+        if camera["archived"] or camera["collecting"] or context is None or camera["write_bytes_per_day"] == 0:
             entry.update(state="not_forecast", forecast_days=None, below_policy=False, days_until_shortfall=None, suggestions=[],
                          message=("Archived: its footage ages out under its policy." if camera["archived"] else
-                                  "Collecting data: a forecast needs at least 6 hours of footage." if context else "The volume this camera records to is not available."))
+                                  "The volume this camera records to is not available." if context is None else
+                                  "Collecting data: a forecast needs at least 6 hours of footage." if camera["collecting"] else
+                                  "Not writing: no footage was recorded in the last 48 hours."))
             cameras.append(entry)
             continue
         level = context["level"]
         kept = float(camera["policy_days"]) if level is None else min(float(camera["policy_days"]), level)
         below = kept < camera["policy_days"] * (1 - TOLERANCE)
         entry.update(forecast_days=_shape_days(kept), below_policy=below, days_until_shortfall=_shape_days(context["until"]) if below else None, state="below_policy" if below else "ok")
-        entry["message"] = (f"{camera['name']} keeps about {kept:.0f} days, below its {camera['policy_days']}-day policy" if below
+        entry["message"] = (f"{camera['name']}'s disk can hold about {kept:.0f} days at the current write rate, below its {camera['policy_days']}-day policy" if below
                             else f"{camera['name']} keeps its {camera['policy_days']}-day policy")
         entry["suggestions"] = suggest(camera, measured, context, volumes, groups, headroom, reserve) if below else []
         cameras.append(entry)
     return {"as_of": now.isoformat(), "window_hours": int(WINDOW.total_seconds() // 3600), "warn_days": WARN_DAYS, "reserve_bytes": reserve, "disks": disks, "cameras": cameras,
-            "note": "Footage is removed only when it passes its policy; when the disk fills first, retention falls short of the policy. Estimates use the last 48 hours of writing."}
+            "note": "Footage is removed only when it passes its policy, never to make room: when the disk fills first, recording on it stops. Estimates use the last 48 hours of writing, and footage under a hold is not counted as room."}
 
 
 def suggest(camera: dict[str, Any], measured: list[dict[str, Any]], context: dict[str, Any], volumes: dict[str, dict[str, Any]], groups: dict[Any, list[str]],
@@ -186,7 +198,7 @@ def suggest(camera: dict[str, Any], measured: list[dict[str, Any]], context: dic
             names = ", ".join(groups[key])
             suggestions.append(f"Move {camera['name']} to the volume {names}: its disk has room for about {spare / 1e9:.0f} GB more than its cameras need.")
             break
-    longer = sorted((c for c in measured if c["id"] != camera["id"] and c["volume_id"] in groups.get(context["key"], []) and not c["collecting"] and c["policy_days"] > (context["level"] or 0)),
+    longer = sorted((c for c in measured if c["id"] != camera["id"] and c["volume_id"] in groups.get(context["key"], []) and not c["collecting"] and c["write_bytes_per_day"] > 0 and c["policy_days"] > (context["level"] or 0)),
                     key=lambda c: -c["policy_days"])
     if longer and context["level"] is not None:
         suggestions.append("Shorten the retention of " + ", ".join(f"{c['name']} ({c['policy_days']} days)" for c in longer[:3]) + f" to about {context['level']:.0f} days.")

@@ -26,6 +26,8 @@ services:
       - /dev/sda:/dev/sda      # the whole disk, not a partition
     cap_add:
       - SYS_RAWIO              # smartctl's ATA commands need it; some NVMe drives need SYS_ADMIN instead
+    group_add:
+      - "6"                    # the host's disk group (getent group disk): the NVR does not run as root and opens the device as that group
     environment:
       NVR_SMART_DEVICES: '{"default":"/dev/sda","archive":"/dev/sdb"}'
 ```
@@ -37,11 +39,11 @@ services:
 Footage is removed only when it is older than its camera's retention policy; nothing removes it to make room. When the cameras on a disk write faster than the disk can hold their policies' worth, the disk fills and what the policy promised is not kept. The forecast works out what the disk can really hold:
 
 - **Write rate** per camera: the footage indexed in the last 48 hours over the time it has been recording in that window (a camera needs 6 hours of footage before it is forecast; a motion camera's rate is what it writes, not what it would write recording all day).
-- **Budget** per disk: free space, less the reserve at which storage pressure is reported (`NVR_STORAGE_PRESSURE_FREE_BYTES`, 1 GiB), plus the footage already stored on it. Volumes on the same disk share one budget.
-- **What a camera keeps**: its policy if all policies fit. If not, the cameras on the disk share the shortfall by each keeping the same number of days, no more than its own policy. For example, with a 300 GB budget, a camera writing 10 GB a day with a 30-day policy and another writing 5 GB a day with a 14-day policy need 370 GB; the second keeps its 14 days and the first keeps (300 − 70) / 10 = 23.
+- **Budget** per disk: free space, less the reserve at which storage pressure is reported (`NVR_STORAGE_PRESSURE_FREE_BYTES`, 1 GiB), plus the footage already stored on it, less footage under a hold (which age never removes). Volumes on the same disk share one budget.
+- **What the disk can hold**: every policy, if they all fit. If not, the number of days the disk can hold for its cameras at their current rates, no more than a camera's own policy. For example, with a 300 GB budget, a camera writing 10 GB a day with a 30-day policy and another writing 5 GB a day with a 14-day policy need 370 GB; the disk holds 14 days of the second and (300 − 70) / 10 = 23 of the first. Because nothing is removed to make room, once the disk is full recording on it stops, so every camera writing to that disk is affected, not only the heaviest.
 - **When it begins**: footage grows towards each policy at the camera's write rate; the forecast gives the days until what is stored first exceeds the budget.
 
-A camera that will not keep its policy shows "Camera X keeps about N days, below its M-day policy", how far away the shortfall is, and what would fix it: lowering its bitrate by about a percentage (to a number of GB a day), moving it to another volume on a different disk that has the room, or shortening the retention of the cameras whose policy exceeds what the disk can hold.
+A camera that will not keep its policy shows "Camera X's disk can hold about N days at the current write rate, below its M-day policy", how far away the shortfall is, and what would fix it: lowering its bitrate by about a percentage (to a number of GB a day), moving it to another volume on a different disk that has the room, or shortening the retention of the cameras whose policy exceeds what the disk can hold.
 
 An **incident** (`retention_forecast`, also sent as `storage.failure` and `storage.recovered`) is raised for a camera that will fall below its policy within **7 days**, and recovers when it no longer will: after lowering a bitrate, shortening a policy, freeing space or adding a disk. A shortfall further away is shown but not raised.
 
@@ -56,5 +58,7 @@ Metrics: `nvr_disk_health_state{volume,state}`, `nvr_camera_retention_policy_day
 
 - The forecast assumes the last 48 hours are typical; a change in scene, schedule or bitrate changes it, and it is recalculated every five minutes.
 - Other things stored on the same disk count against free space, which is why free space is measured rather than assumed.
-- It does not model footage kept longer by holds, alarms or exports, which makes it a little optimistic.
+- Footage under a hold is not counted as room; footage kept longer by alarms or exports is, which makes the forecast a little optimistic.
+- A camera that has written nothing in the last 48 hours is shown as "Not writing" rather than forecast.
+- A volume added after the last reading is read at the next five-minute pass; a volume whose disk cannot be read is shown as not available with the reason. A disk that was failing or warning and then stops answering keeps its incident until a clean reading.
 - A volume that is not mounted is not forecast.

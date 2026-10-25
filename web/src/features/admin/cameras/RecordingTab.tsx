@@ -107,7 +107,7 @@ export function RecordingTab({ camera, admin }: { camera: Camera; admin: boolean
           <h3 className="field-heading">Retention forecast</h3>
           <p className="notice" role="note" data-tone={shown.below_policy ? "warn" : shown.state === "ok" ? "good" : undefined}>
             {shown.message}
-            {shown.below_policy && shown.days_until_shortfall !== null ? (shown.days_until_shortfall <= 0 ? " · already" : ` · from about ${Math.round(shown.days_until_shortfall)} days away`) : ""}
+            {shown.below_policy && shown.days_until_shortfall !== null ? (shown.days_until_shortfall < 1 ? " · the disk is already full or will be within a day" : ` · the disk fills in about ${Math.round(shown.days_until_shortfall)} days`) : ""}
           </p>
           {shown.suggestions.length ? <ul className="plain-list" aria-label="Ways to keep the policy">{shown.suggestions.map(suggestion => <li key={suggestion}>{suggestion}</li>)}</ul> : null}
         </section>

@@ -164,7 +164,10 @@ def _disks(out: _Output, db: sqlite3.Connection, scrub: logforward.Scrubber) -> 
     out.family("nvr_disk_health_state", "gauge", "1 for the SMART state of the disk behind each recording volume: healthy, warning, failing, or unavailable when it cannot be read.")
     for row in rows:
         out.sample("nvr_disk_health_state", 1, volume=row["volume_id"], state=row["state"])
-    result = forecast.forecast(db)
+    try:
+        result = forecast.forecast(db)
+    except (sqlite3.Error, ValueError, OSError):
+        return  # The forecast families are skipped; the rest of the scrape stands.
     for name, help_text, key in (("nvr_camera_retention_policy_days", "The retention policy of each camera, in days.", "policy_days"),
                                  ("nvr_camera_retention_forecast_days", "How many days of footage each camera is forecast to keep at its recent write rate.", "forecast_days")):
         out.family(name, "gauge", help_text)

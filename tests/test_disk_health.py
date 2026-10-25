@@ -111,6 +111,11 @@ class DiscoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(smart.Unavailable, "cannot see which disk"):
             self.find(sysfs, dev, number=os.makedev(9, 9))
 
+    def test_a_configuration_that_is_not_an_object_is_unavailable_not_a_crash(self):
+        for raw in ('["/dev/sda"]', '"default"', "7", "null"):
+            with self.assertRaises(smart.Unavailable, msg=raw):
+                smart.device_for("default", Path("/tmp"), environment={"NVR_SMART_DEVICES": raw})
+
     def test_a_configured_device_wins_and_is_validated(self):
         sysfs, dev = self.tree(device=False)
         configured = lambda value: smart.device_for("archive", Path("/x"), sysfs=sysfs, dev=dev, environment={"NVR_SMART_DEVICES": value}, stat_device=lambda path: 0)
@@ -197,6 +202,26 @@ class DiskHealthTests(DiskCase):
         (incident,) = self.incidents("disk_health")
         self.assertEqual((incident["state"], incident["fault_active"]), ("recovered", 0))
 
+    def test_a_disk_that_stops_answering_does_not_clear_its_incident(self):
+        self.refresh(ata([attribute(197, "Current_Pending_Sector", raw=7)], passed=False))
+        self.refresh(None, "The disk did not answer in time")
+        (incident,) = self.incidents("disk_health")
+        self.assertTrue(incident["fault_active"])
+        (disk,) = self.admin.get("/api/storage/disk-health").json()["disks"]
+        self.assertEqual(disk["state"], "failing")  # The last real reading stands, with its findings.
+        self.assertIn("The drive's own health assessment is FAILED", disk["findings"])
+        self.assertIn("did not answer in time", disk["reason"])
+        self.refresh(ata())  # Only a clean reading recovers it.
+        self.assertEqual(self.incidents("disk_health")[0]["fault_active"], 0)
+
+    def test_a_volume_whose_path_cannot_be_used_is_still_reported_and_a_new_volume_is_due(self):
+        with self.reading(ata()):
+            self.assertEqual(smart.refresh({"default": Path("/tmp"), "archive": "The volume's storage path cannot be used (OSError)"}),
+                             {"default": "healthy", "archive": "unavailable"})
+        with connect() as db:
+            self.assertFalse(smart.due(db, volume_ids=["default", "archive"]))
+            self.assertTrue(smart.due(db, volume_ids=["default", "archive", "offsite"]))  # A volume added since has no reading yet.
+
     def test_a_pre_failure_sign_raises_an_incident_too(self):
         self.refresh(ata([attribute(5, "Reallocated_Sector_Ct", raw=12)]))
         (incident,) = self.incidents("disk_health")
@@ -252,6 +277,14 @@ class DiskHealthTests(DiskCase):
         self.refresh(ata())
         with connect() as db:
             self.assertEqual([row[0] for row in db.execute("SELECT event_type FROM webhook_deliveries ORDER BY created_at,id")], ["storage.failure", "storage.recovered"])
+
+    def test_a_forecast_that_cannot_be_made_does_not_take_the_metrics_down(self):
+        from app import prometheus
+        self.refresh(ata(passed=False))
+        with mock.patch("app.forecast.forecast", side_effect=ValueError("bad timestamp")):
+            text = prometheus.render(False)
+        self.assertIn('nvr_disk_health_state{volume="default",state="failing"} 1', text)
+        self.assertIn("nvr_build_info", text)
 
     def test_the_disk_state_is_a_metric(self):
         self.refresh(ata(passed=False))
@@ -326,7 +359,7 @@ class ForecastTests(ForecastCase):
         first, second = self.camera(result, self.d1), self.camera(result, self.d2)
         self.assertAlmostEqual(first["write_bytes_per_day"] / GB, 10, delta=0.5)
         self.assertAlmostEqual(first["forecast_days"], 23, delta=23 * 0.05)
-        self.assertEqual((first["state"], first["below_policy"], first["message"]), ("below_policy", True, "Dock 1 keeps about 23 days, below its 30-day policy"))
+        self.assertEqual((first["state"], first["below_policy"], first["message"]), ("below_policy", True, "Dock 1's disk can hold about 23 days at the current write rate, below its 30-day policy"))
         self.assertEqual((second["forecast_days"], second["state"], second["below_policy"]), (14.0, "ok", False))
         self.assertEqual(second["message"], "Dock 2 keeps its 14-day policy")
         (disk,) = result["disks"]
@@ -397,6 +430,23 @@ class ForecastTests(ForecastCase):
         self.assertEqual(self.camera(result, self.d1)["state"], "not_forecast")
         self.assertAlmostEqual(result["disks"][0]["budget_bytes"], 130 * GB, delta=10_000)
 
+    def test_a_camera_that_is_not_writing_is_not_below_policy(self):
+        self.write(self.d1, 10)
+        self.write(self.d2, 5, ends=NOW - timedelta(days=5))  # Recording was switched off five days ago: it writes nothing now.
+        self.policy(self.d1, 30)
+        self.policy(self.d2, 14)
+        camera = self.camera(self.run_forecast(100), self.d2)
+        self.assertEqual((camera["state"], camera["below_policy"], camera["forecast_days"]), ("not_forecast", False, None))
+        self.assertIn("Not writing", camera["message"])
+
+    def test_footage_under_a_hold_is_not_room_the_disk_gets_back(self):
+        self.two_cameras()
+        before = self.run_forecast(270)["disks"][0]["budget_bytes"]
+        with connect() as db:
+            segment = db.execute("SELECT id,size_bytes FROM recording_segments WHERE camera_id=? LIMIT 1", (self.d1,)).fetchone()
+            db.execute("INSERT INTO recording_holds(id,segment_id,camera_id) VALUES(?,?,?)", (str(uuid.uuid4()), segment["id"], self.d1))
+        self.assertEqual(before - self.run_forecast(270)["disks"][0]["budget_bytes"], segment["size_bytes"])
+
     def test_motion_cameras_are_forecast_from_what_they_write_not_from_time_recording(self):
         self.write(self.d1, 2, hours=12)  # Twelve segments in two days' window of history: quiet most of the time.
         with connect() as db:
@@ -443,7 +493,7 @@ class ForecastIncidentTests(ForecastCase):
         self.sync(90)  # Shortfall in 6 days.
         incident = self.incident(self.d1)
         self.assertTrue(incident["fault_active"])
-        self.assertEqual(incident["summary"], "Dock 1 keeps about 8 days, below its 30-day policy")
+        self.assertEqual(incident["summary"], "Dock 1's disk can hold about 8 days at the current write rate, below its 30-day policy")
         self.assertIn("Lower Dock 1's bitrate", json.loads(incident["details_json"])["suggestions"][0])
         self.assertTrue(self.incident(self.d2)["fault_active"])  # The shorter-policy camera is held to the same level (8 of its 14 days).
         self.sync(1000)  # Fixed: more room.
@@ -499,13 +549,22 @@ class ForecastIncidentTests(ForecastCase):
 
 class CameraApiTests(ForecastCase):
     def test_a_camera_reads_its_own_forecast_and_disk(self):
-        self.two_cameras()
+        now = datetime.now(timezone.utc)  # The route forecasts from the real clock.
+        self.write(self.d1, 10, ends=now)
+        self.write(self.d2, 5, ends=now)
+        self.policy(self.d1, 30)
+        self.policy(self.d2, 14)
         with mock.patch("app.forecast.shutil.disk_usage", return_value=mock.Mock(free=270 * GB)):
-            response = self.limited.get(f"/api/cameras/{self.d1}/retention-forecast")
+            response = self.admin.get(f"/api/cameras/{self.d1}/retention-forecast")
+            restricted = self.limited.get(f"/api/cameras/{self.d1}/retention-forecast")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
+        # Someone who may see this camera but not all of them learns nothing of the others: no disk totals, no suggestions that name them.
+        self.assertEqual(restricted.status_code, 200, restricted.text)
+        self.assertEqual((restricted.json()["camera"]["id"], restricted.json()["camera"]["suggestions"], restricted.json()["disk"]), (self.d1, [], None))
+        self.assertTrue(body["camera"]["suggestions"], body["camera"])
         self.assertEqual(body["camera"]["id"], self.d1)
-        self.assertIn("keeps", body["camera"]["message"])
+        self.assertIn("can hold", body["camera"]["message"])
         self.assertEqual(body["disk"]["volume_ids"], ["default"])
         self.assertEqual(body["warn_days"], 7)
 

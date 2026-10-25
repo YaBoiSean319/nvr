@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,9 +75,11 @@ def device_for(volume_id: str, path: Path, sysfs: Path = Path("/sys"), dev: Path
             configured = json.loads(raw)
         except ValueError:
             raise Unavailable("NVR_SMART_DEVICES is not valid JSON") from None
+        if not isinstance(configured, dict):
+            raise Unavailable('NVR_SMART_DEVICES must be a JSON object such as {"default": "/dev/sda"}')
     if volume_id in configured:
         device = str(configured[volume_id])
-        if not device.startswith("/dev/") or ".." in device:
+        if not device.startswith("/dev/") or ".." in Path(device).parts:
             raise Unavailable("NVR_SMART_DEVICES must name a device under /dev")
         return device
     try:
@@ -111,9 +114,12 @@ def run_smartctl(device: str) -> dict[str, Any]:
         report = json.loads(result.stdout or b"{}")
     except ValueError:
         raise Unavailable("smartctl gave no readable report") from None
+    if not isinstance(report, dict):
+        raise Unavailable("smartctl gave no readable report")
     messages = " ".join(str(item.get("string", "")) for item in report.get("smartctl", {}).get("messages", []))
     if "ermission denied" in messages or "Operation not permitted" in messages:
-        raise Unavailable("The container may not read this disk's SMART data (it needs the SYS_RAWIO capability; see the disk health documentation)")
+        raise Unavailable("The NVR may not read this disk's SMART data: it needs the SYS_RAWIO capability and a group that can open the device "
+                          "(group_add with the host's disk group, since the NVR does not run as root); see the disk health documentation")
     if not any(key in report for key in ("smart_status", "ata_smart_attributes", "nvme_smart_health_information_log")):
         raise Unavailable(messages or "The disk does not report SMART data (virtual disks and some USB bridges do not)")
     return report
@@ -170,7 +176,15 @@ def _now() -> str:
 
 
 def record(db: sqlite3.Connection, volume_id: str, device: str | None, assessment: Assessment | None, reason: str | None) -> None:
-    """Store a reading and raise or recover the volume's incident."""
+    """Store a reading and raise or recover the volume's incident.
+
+    A disk that cannot be read this time is not a disk that has recovered: when the last reading was a warning or a failure it stands (with the
+    reason the new reading failed), and its incident stays open.
+    """
+    previous = db.execute("SELECT state FROM disk_health WHERE volume_id=?", (volume_id,)).fetchone()
+    if assessment is None and previous is not None and previous["state"] in ("warning", "failing"):
+        db.execute("UPDATE disk_health SET reason=?,checked_at=? WHERE volume_id=?", (f"The latest reading could not be taken: {reason}", _now(), volume_id))
+        return
     available = assessment is not None
     state = assessment.state if assessment else "unavailable"
     db.execute(
@@ -185,15 +199,22 @@ def record(db: sqlite3.Connection, volume_id: str, device: str | None, assessmen
                   active=state in ("warning", "failing"), details={"volume_id": volume_id, "disk_state": state, "findings": findings, "model": assessment.model if assessment else None})
 
 
-def refresh(volumes: dict[str, Path], runner: Callable[[str], dict[str, Any]] = run_smartctl, **discovery: Any) -> dict[str, str]:
-    """Read every volume's disk now; returns each volume's resulting state. A volume that was removed from the configuration is forgotten."""
+def refresh(volumes: dict[str, Path | str], runner: Callable[[str], dict[str, Any]] = run_smartctl, **discovery: Any) -> dict[str, str]:
+    """Read every volume's disk now; returns each volume's resulting state.
+
+    ``volumes`` maps each configured volume to its path, or to the reason its path could not be resolved (it is then reported as not available).
+    The disks are read side by side, so one that does not answer does not hold up the others. A volume no longer configured is forgotten.
+    """
     from .store import connect
     states: dict[str, str] = {}
-    readings = {volume_id: read_volume(volume_id, path, runner, **discovery) for volume_id, path in volumes.items()}
+    paths = {volume_id: path for volume_id, path in volumes.items() if isinstance(path, Path)}
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(paths)))) as pool:
+        futures = {volume_id: pool.submit(read_volume, volume_id, path, runner, **discovery) for volume_id, path in paths.items()}
+        readings = {volume_id: (futures[volume_id].result() if volume_id in futures else (None, None, str(path))) for volume_id, path in volumes.items()}
     with connect() as db:
         for volume_id, (device, assessment, reason) in readings.items():
             record(db, volume_id, device, assessment, reason)
-            states[volume_id] = assessment.state if assessment else "unavailable"
+            states[volume_id] = assessment.state if assessment else db.execute("SELECT state FROM disk_health WHERE volume_id=?", (volume_id,)).fetchone()["state"]
         for row in db.execute("SELECT volume_id FROM disk_health").fetchall():
             if row["volume_id"] not in volumes:
                 sync_incident(db, incident_key=f"disk:{row['volume_id']}", camera_id=None, fault_type="disk_health", summary="Recording storage is no longer configured", active=False)
@@ -201,12 +222,25 @@ def refresh(volumes: dict[str, Path], runner: Callable[[str], dict[str, Any]] = 
     return states
 
 
-def due(db: sqlite3.Connection, now: datetime | None = None) -> bool:
-    """Whether the readings are older than the refresh interval (or there are none)."""
-    row = db.execute("SELECT MIN(checked_at) AS oldest FROM disk_health").fetchone()
-    if row["oldest"] is None:
+def volumes_to_read() -> dict[str, Path | str]:
+    """Every configured volume's path, or why it has none; a volume whose path cannot be resolved is still configured and still reported."""
+    from .storage import configured_volumes, volume_path
+    volumes: dict[str, Path | str] = {}
+    for volume_id in configured_volumes():
+        try:
+            volumes[volume_id] = volume_path(volume_id)
+        except (OSError, ValueError) as exc:
+            volumes[volume_id] = f"The volume's storage path cannot be used ({type(exc).__name__})"
+    return volumes
+
+
+def due(db: sqlite3.Connection, now: datetime | None = None, volume_ids: Any = ()) -> bool:
+    """Whether the readings are older than the refresh interval, or there are none, or a configured volume has none."""
+    rows = db.execute("SELECT volume_id,checked_at FROM disk_health").fetchall()
+    if not rows or any(volume_id not in {row["volume_id"] for row in rows} for volume_id in volume_ids):
         return True
-    return ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(row["oldest"])).total_seconds() >= REFRESH_SECONDS
+    oldest = min(row["checked_at"] for row in rows)
+    return ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(oldest)).total_seconds() >= REFRESH_SECONDS
 
 
 def view(db: sqlite3.Connection) -> list[dict[str, Any]]:

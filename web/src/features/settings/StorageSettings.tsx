@@ -152,7 +152,7 @@ export function StorageSettings() {
                     <td>{camera.policy_days} days</td>
                     <td>{camera.forecast_days === null ? "—" : `about ${Math.round(camera.forecast_days)} days`}</td>
                     <td>{camera.write_bytes_per_day ? `${size(camera.write_bytes_per_day)} a day` : "—"}</td>
-                    <td>{camera.message}{camera.below_policy && camera.days_until_shortfall !== null ? ` · ${camera.days_until_shortfall <= 0 ? "now" : `from about ${Math.round(camera.days_until_shortfall)} days away`}` : ""}</td>
+                    <td>{camera.message}{camera.below_policy && camera.days_until_shortfall !== null ? ` · ${camera.days_until_shortfall < 1 ? "the disk is already full or will be within a day" : `the disk fills in about ${Math.round(camera.days_until_shortfall)} days`}` : ""}</td>
                   </tr>
                 ))}
               </tbody>
