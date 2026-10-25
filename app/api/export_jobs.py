@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
-from app import footage_chain
+from app import footage_chain, viewing_audit
 from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 
 router = APIRouter()
@@ -175,6 +175,8 @@ def download_export(job_id: str, user: CurrentUser) -> FileResponse:
             masks = db.execute("SELECT zones_json,updated_at FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
             if masks and json.loads(masks["zones_json"]) and masks["updated_at"] > row["created_at"]:
                 raise HTTPException(status_code=409, detail="This export was made before the camera's current privacy masks; export again to download it masked")
+    with connect() as db:
+        viewing_audit.record_events(db, int(user["id"]), json.loads(row["camera_ids_json"]), "download", job_id)
     acquire_playback(path)
     return FileResponse(path, media_type="application/zip", filename=f"nvr-export-{job_id}.zip", background=BackgroundTask(release_playback, path))
 

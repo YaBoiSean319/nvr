@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
-from app import privacy
+from app import privacy, viewing_audit
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -114,6 +114,7 @@ async def play_segment(
     if not path.is_file():
         release_playback(path)
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+    viewing_audit.safely(viewing_audit.touch_playback, user.id, camera_id)
     if zones:
         # Recordings on disk are not masked: deliver a masked rendering, never the file itself.
         try:
@@ -177,6 +178,7 @@ async def snapshot_segment(
                  json.dumps({"camera_id": camera_id, "source_time": source_time})),
             )
             audit_reference = f"audit-{cursor.lastrowid}"
+            viewing_audit.record_events(db, int(user["id"]), [camera_id], "snapshot", audit_reference)
         return Response(image, media_type="image/jpeg", headers={
             "Cache-Control": "no-store", "X-Source-Time": source_time, "X-Audit-Reference": audit_reference,
         })

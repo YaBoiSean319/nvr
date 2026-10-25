@@ -1,21 +1,10 @@
 // Real-browser journeys for camera access grants (#119).
-const { test, expect, FIXTURE_PASSWORD, seedFixtures, signInNext } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInAs, signInNext } = require("./helpers.cjs");
 
 async function openCameraAccess(page) {
   await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
   await page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Users & access" }).click();
   return page.getByRole("region", { name: "Camera access" });
-}
-
-async function signInAs(browser, baseURL, username) {
-  const context = await browser.newContext({ baseURL });
-  const page = await context.newPage();
-  await page.goto("/");
-  await page.getByLabel("Username").fill(username);
-  await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
-  return { context, page };
 }
 
 test("narrowing an operator to a camera group hides every other camera from them, and an expiry ends access", async ({ page, browser, baseURL }) => {

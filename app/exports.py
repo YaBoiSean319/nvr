@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import footage_chain, privacy
+from . import footage_chain, privacy, viewing_audit
 from .display_settings import format_display_datetime
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
@@ -1087,6 +1087,7 @@ def create_export_record(
         db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,output_modes_json,display_settings_json,tile_camera_ids_json,grid_resolution,requested_start,requested_end,status,include_audio,audio_camera_id,created_at,updated_at,retry_of) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                    (job_id, requested_by, json.dumps(camera_ids), json.dumps(output_modes), json.dumps(display_settings), json.dumps(tile_camera_ids), grid_resolution, start.isoformat(), end.isoformat(), int(include_audio), audio_camera_id, now, now, retry_of))
         db.executemany("INSERT INTO export_sources(export_id,segment_id) VALUES(?,?)", ((job_id, segment["id"]) for segment in segments))
+        viewing_audit.record_events(db, requested_by, camera_ids, "export", job_id)
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (requested_by, "export_retried" if retry_of else "export_requested", "export", job_id, json.dumps({
                        "cameras": len(camera_ids), "start": start.isoformat(), "end": end.isoformat(), "output_modes": output_modes,

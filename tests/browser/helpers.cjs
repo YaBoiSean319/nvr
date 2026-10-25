@@ -82,4 +82,15 @@ function trackLiveSockets(page) {
   };
 }
 
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, signInNext, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+async function signInAs(browser, baseURL, username) {
+  const context = await browser.newContext({ baseURL });
+  const page = await context.newPage();
+  await page.goto("/");
+  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
+  return { context, page };
+}
+module.exports = {
+  signInAs, test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, signInNext, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

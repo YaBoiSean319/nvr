@@ -195,6 +195,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         # Every operator sees every camera until a journey narrows them.
         db.execute("DELETE FROM access_grants")
         db.execute("INSERT INTO access_grants(subject_type,subject,scope_type) SELECT 'user', CAST(id AS TEXT), 'all' FROM users WHERE role='operator'")
+        db.execute("DELETE FROM viewing_audit")
+        db.execute("UPDATE security_settings SET audit_retention_days=365")
         db.execute("UPDATE security_settings SET mfa_policy='off' WHERE singleton_id=1")
         db.execute("UPDATE ai_runtime_settings SET max_active_cameras=4 WHERE singleton_id=1")
         db.execute("DELETE FROM export_sources")
