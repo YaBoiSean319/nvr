@@ -80,10 +80,10 @@ class WebInterfaceTests(unittest.TestCase):
     def test_theme_preference_is_personal(self):
         self.assertEqual(self.client.get("/api/me/preferences").status_code, 401)
         self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
-        self.assertEqual(self.client.get("/api/me/preferences").json(), {"theme": "system"})
-        self.assertEqual(self.client.put("/api/me/preferences", json={"theme": "dark"}).json(), {"theme": "dark"})
+        self.assertEqual(self.client.get("/api/me/preferences").json()["theme"], "system")
+        self.assertEqual(self.client.put("/api/me/preferences", json={"theme": "dark"}).json()["theme"], "dark")
         self.assertEqual(self.client.put("/api/me/preferences", json={"theme": "neon"}).status_code, 422)
-        self.assertEqual(self.client.get("/api/me/preferences").json(), {"theme": "dark"})
+        self.assertEqual(self.client.get("/api/me/preferences").json()["theme"], "dark")
 
 
 if __name__ == "__main__":

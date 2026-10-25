@@ -473,13 +473,14 @@ class DetectionManager:
             self.task_configs[camera_id] = signature
 
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
-        from .tracks import Tracker, record_detections
+        from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
 
         while not self.stopping:
             try:
                 source = _camera_source(camera_id, bool(config["use_substream"]))
                 zones = json.loads(config["zones_json"])
                 tracker = Tracker()
+                keyframed: set[str] = set()
                 seen_frame = False
                 async for frame in _raw_frames(source, float(config["analysis_fps"])):
                     if self.stopping:
@@ -500,11 +501,20 @@ class DetectionManager:
                     with connect() as db:
                         db.execute("BEGIN IMMEDIATE")
                         try:
-                            record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
+                            track_ids = record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
                         except BaseException:
                             db.execute("ROLLBACK")
                             raise
                         db.execute("COMMIT")
+                    # Each object's first analysed frame, kept as its keyframe.
+                    for track_id in dict.fromkeys(track_ids):
+                        if track_id in keyframed:
+                            continue
+                        keyframed.add(track_id)
+                        jpeg = await asyncio.to_thread(encode_jpeg, frame)
+                        if jpeg:
+                            with connect() as db:
+                                store_keyframe(db, track_id, at, jpeg)
                 if not self.stopping:
                     raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
             except asyncio.CancelledError:

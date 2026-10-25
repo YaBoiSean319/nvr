@@ -142,13 +142,15 @@ class MigrationTests(unittest.TestCase):
             db.execute("INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version) "
                        "VALUES('o1','c1','person',0.8,'{}','2026-10-01T00:00:10+00:00','2026-10-01T00:00:20+00:00',448,256,'m','v')")
             tables = ("users", "cameras", "recording_segments", "ai_observations")
-            before = {table: self._rows(db, table) for table in tables}
+            # Later migrations may add columns; the data in the existing ones must be untouched.
+            columns = {table: self._columns(db, table) for table in tables}
+            before = {table: self._rows(db, table, columns[table]) for table in tables}
 
         initialize()
 
         self.assertEqual(self._versions(), ALL_VERSIONS)
         with connect() as db:
-            self.assertEqual({table: self._rows(db, table) for table in tables}, before)
+            self.assertEqual({table: self._rows(db, table, columns[table]) for table in tables}, before)
             self.assertEqual(db.execute("SELECT count(*) FROM ai_detections").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT count(*) FROM ai_tracks").fetchone()[0], 0)
         self.assertEqual(len(self._copies()), 1)

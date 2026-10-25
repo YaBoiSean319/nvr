@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import os
-import shutil
 import unittest
 from datetime import timedelta
-from pathlib import Path
 
 from app.rules import RulesManager
 from app.store import connect
@@ -12,7 +9,6 @@ from tests.fixtures import detection_scene as scene
 from tests.scene_case import SceneTestCase, parse
 
 BOTTOM_LEFT = {"x": 0.0, "y": 0.6, "width": 0.3, "height": 0.4}
-SCENE_LENGTH = scene.FRAME_INTERVAL * scene.FRAME_COUNT
 
 
 class AlarmTests(SceneTestCase):
@@ -24,17 +20,6 @@ class AlarmTests(SceneTestCase):
         })
         self.assertEqual(rule.status_code, 201, rule.text)
         self.rule_id = rule.json()["id"]
-
-    def record_scene_footage(self) -> int:
-        """Index the fixture footage as the camera's recording of the scene."""
-        relative = f"{self.camera_id}/scene.mp4"
-        target = Path(os.environ["NVR_RECORDINGS_PATH"]) / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(self.footage, target)
-        with connect() as db:
-            return db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
-                              (self.camera_id, relative, self.scene_start.isoformat(), (self.scene_start + SCENE_LENGTH).isoformat(),
-                               target.stat().st_size)).lastrowid
 
     def alarms(self, **params) -> list[dict]:
         response = self.client.get("/api/alarms", params=params)

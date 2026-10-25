@@ -6,6 +6,7 @@ import { failureText } from "@/features/admin/tabDraft";
 import { usePlaybackStore } from "@/features/playback/store";
 import { useStatusPanel } from "@/features/status/StatusArea";
 import { formatSiteDateTime } from "@/lib/zonedTime";
+import { NotificationSettings } from "./NotificationSettings";
 import {
   ACTION_LABEL, FILTER_LABEL, STATE_LABEL, useAlarm, useAlarmAction, useAlarms, useAssignees,
   type Alarm, type AlarmFilter, type AlarmQuery,
@@ -19,9 +20,9 @@ function useWhen() {
 }
 
 /** The alarm inbox: filters, a list newest first, and one alarm's handling. */
-export function AlarmsInbox({ onNavigate }: { onNavigate: () => void }) {
+export function AlarmsInbox({ onNavigate, initialAlarmId = null }: { onNavigate: () => void; initialAlarmId?: string | null }) {
   const [query, setQuery] = useState<AlarmQuery>({ state: "open", camera_id: "", rule_id: "" });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialAlarmId);
   const alarms = useAlarms(query);
   const cameras = useCameras();
   const when = useWhen();
@@ -50,6 +51,7 @@ export function AlarmsInbox({ onNavigate }: { onNavigate: () => void }) {
         </label>
       </form>
       {counts ? <p className="muted">{counts.new} new · {counts.acknowledged} acknowledged · {counts.assigned} assigned</p> : null}
+      <NotificationSettings />
       {alarms.error ? <p className="notice" data-tone="bad" role="alert">{failureText(alarms.error, "Alarms could not be loaded.")}</p> : null}
       {alarms.isPending ? <p className="muted">Loading alarms…</p> : null}
       {alarms.data && !alarms.data.alarms.length ? <p className="muted">No alarms match these filters.</p> : null}

@@ -12,7 +12,8 @@ const SAVE_DELAY_MS = 600;
  */
 export function useLiveWorkspacePersistence(cameras: Camera[] | undefined) {
   const restored = useLiveStore(store => store.restored);
-  const arrangement = useLiveStore(store => store.arrangement);
+  // While an alarm layout is shown, the person's own arrangement is the one it will return to.
+  const arrangement = useLiveStore(store => store.alarmLayout?.saved.arrangement ?? store.arrangement);
   const sidebarOpen = useLiveStore(store => store.sidebarOpen);
 
   useEffect(() => {
