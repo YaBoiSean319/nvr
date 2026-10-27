@@ -64,6 +64,10 @@ class HanwhaTests(InspectCase):
         self.assertEqual(self.verified.await_count, 2)
         self.assertIs(result["selection"]["live_verified"], True)
 
+    async def test_a_camera_that_checks_the_events_action_is_inspected_with_motion_working(self):
+        result = await self.inspect(self.camera(strict_actions=True))
+        self.assertEqual(result["capabilities"]["motion"]["state"], "ok", result["capabilities"]["motion"])
+
     async def test_a_live_substream_that_cannot_be_decoded_is_a_warning_and_video_stays_ok(self):
         results = [DECODED, {"decoded": False, "opened": True, "reason": "RTSP stream connected but video decoding failed"}]
         with mock.patch("app.camera_inspect.verify_video", new=mock.AsyncMock(side_effect=results)):

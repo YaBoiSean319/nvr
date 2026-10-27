@@ -78,6 +78,7 @@ class SubscriptionCase(unittest.IsolatedAsyncioTestCase):
             seen.append(item)
 
         task = asyncio.create_task(subscribe_and_pull(camera.url, user, password, on_event, statuses.append))
+        self._task = task
         self.addAsyncCleanup(self.stop, task)
         return task, seen, statuses
 
@@ -118,6 +119,16 @@ class SubscriptionTests(SubscriptionCase):
         await self.until(lambda: len(seen) >= 2)
         await asyncio.sleep(0.3)
         self.assertEqual([item.active for item in seen], [True, False])
+
+    async def test_a_camera_that_checks_the_ws_addressing_action_is_subscribed_to_and_ends_cleanly(self):
+        camera = self.camera(strict_actions=True)
+        _, seen, statuses = await self.start(camera)
+        await self.until(lambda: "healthy" in statuses)
+        camera.motion(CELL, True)
+        await self.until(lambda: seen)
+        self.assertNotIn("unavailable", statuses)
+        await self.stop(self._task)
+        self.assertEqual(camera.unsubscribed, 1)
 
     async def test_a_hanwha_style_camera_reports_one_movement_on_two_topics_with_different_item_names(self):
         # Modelled on Hanwha Wisenet: VideoSource/MotionAlarm carries "State", VideoAnalytics/MotionDetection carries "IsMotion", both for one movement.
@@ -284,6 +295,11 @@ class ProbeTests(SubscriptionCase):
     async def test_a_camera_that_does_not_list_its_topics_still_passes_when_it_subscribes(self):
         result = await self.probe(self.camera(behaviours={"GetEventProperties": "fault"}))
         self.assertTrue(result["ok"])
+
+    async def test_a_probe_works_on_a_camera_that_checks_the_ws_addressing_action(self):
+        result = await self.probe(self.camera(strict_actions=True))
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["topics"])
 
     async def test_a_probe_says_why_a_camera_would_not_subscribe(self):
         camera = self.camera(behaviours={"CreatePullPointSubscription": "fault"})

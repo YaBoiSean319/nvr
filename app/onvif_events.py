@@ -14,6 +14,7 @@ import httpx
 from .onvif_client import EVENTS, OnvifClient, OnvifError
 
 WSNT = "http://docs.oasis-open.org/wsn/b-2"
+EVENT_PORT = "http://www.onvif.org/ver10/events/wsdl/EventPortType/"  # The Events service's own operations are addressed through its port type, unlike the device and media services
 MAX_XML_BYTES = 1024 * 1024
 SUBSCRIPTION_SECONDS = 60
 PULL_TIMEOUT_SECONDS = 20
@@ -191,7 +192,7 @@ class PullPoint:
         root = await self.client.call(
             self.events_url, "CreatePullPointSubscription", EVENTS,
             f"<tev:CreatePullPointSubscription><tev:InitialTerminationTime>{_termination(SUBSCRIPTION_SECONDS)}</tev:InitialTerminationTime></tev:CreatePullPointSubscription>",
-            service="events")
+            service="events", action=EVENT_PORT + "CreatePullPointSubscriptionRequest")
         address = _address(root, "SubscriptionReference")
         if address is None:
             raise OnvifError("malformed", "The camera did not say where to pull events from")
@@ -230,7 +231,7 @@ async def probe_motion(client: OnvifClient, events_url: str) -> dict[str, object
     """Try motion events the way recording will: subscribe, pull once, and end. ``{"ok": True, "topics": [...]}`` or ``{"ok": False, "reason": ...}``."""
     topics: list[str] = []
     try:
-        root = await client.call(events_url, "GetEventProperties", EVENTS, "<tev:GetEventProperties/>", service="events")
+        root = await client.call(events_url, "GetEventProperties", EVENTS, "<tev:GetEventProperties/>", service="events", action=EVENT_PORT + "GetEventPropertiesRequest")
         topics = sorted(_topic_paths(root))[:50]
     except OnvifError:
         pass  # Optional: some cameras do not list their topics.
