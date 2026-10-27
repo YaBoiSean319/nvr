@@ -46,9 +46,19 @@ Video and motion events are separate: if events fail, recording and live view ca
 - The source is `healthy` only after events have been pulled successfully, and the reason it is not is shown in the camera's last error (prefixed "Motion events:"). A motion fault never changes the video's recording status.
 - After a fault the NVR waits 1 second, doubling to at most 30 seconds, with jitter, and reports the source as `unavailable`. A refused login is reported as `authentication_error` and retried only every five minutes, to avoid locking the account. A camera with no Events service is `unsupported`.
 
+## Capability health and saving a camera that is not fully working
+
+Each saved camera has a state and a message for discovery, authentication, video, audio, motion events and PTZ (`GET /api/cameras/{id}/capabilities`). States are `ok`, `available`, `unsupported`, `failed` and `unknown`. Messages are the NVR's own plain sentences and never hold a login or a credentialed address.
+
+- `POST /api/cameras` accepts `save_anyway: true`. If the camera's video will not open, or ONVIF will not give a stream address at all (a media service error, say), the camera is still saved, with recording off, the video marked `failed` with the reason, and no live sub-stream, instead of the request being refused. When no address could be had, a stand-in address with no login is stored and the real one is asked for again in the background. Without `save_anyway`, a stream that will not open is refused as before.
+- A camera added over ONVIF starts with discovery, login, audio, PTZ and motion events taken from a real inspection, not assumed. Cameras saved before this existed are checked once, then kept up to date. A source change refreshes video and audio health.
+- A failed video or motion check, or one not yet made, is tested again in the background (in the background worker): after 30 seconds, then doubling to at most 30 minutes, with jitter, and at most four rechecks per 15-second poll, so a site with many unwell cameras is not hit at once. A success stops the rechecks. Recording is never switched on by a recheck: an administrator decides.
+- `POST /api/cameras/{id}/capabilities/recheck` (administrators) tests video and motion events now.
+- Inspection also decodes a frame from the lower-resolution live stream. If it cannot, that is a warning in the report (`selection.live_verified` is false) and live view can use the main stream.
+
 ## Not in this slice
 
-Verifying the live sub-stream, the Add Camera screen, saving a camera with partial capabilities, camera-level retries and bulk onboarding follow in later slices of #173.
+The Add Camera screen with progress and diagnostics, and bulk onboarding, follow in the next slice of #173.
 
 ## Limits
 

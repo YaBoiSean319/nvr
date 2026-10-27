@@ -27,8 +27,22 @@ export function applyTheme(theme: ThemePreference): void {
   }
 }
 
+// The workspace the shell last put in the title. Branding can arrive after the shell has mounted; applying it again without this would drop the workspace.
+let shownWorkspace: string | undefined;
+
+/** Apply site branding again (it was fetched or changed) keeping the workspace the shell is showing in the title. */
+export function reapplyBranding(branding: Branding): void {
+  applyBranding(branding, shownWorkspace);
+}
+
+/** The shell is gone (signed out): the title is the plain name again. */
+export function forgetWorkspace(): void {
+  shownWorkspace = undefined;
+}
+
 /** Apply site branding: name in the title, a legible accent in both themes, and the icon. */
 export function applyBranding(branding: Branding, workspace?: string): void {
+  shownWorkspace = workspace;
   const root = document.documentElement.style;
   const lightAccent = legibleOn(branding.accent_color, LIGHT_PANEL, 4.5);
   const darkAccent = legibleOn(branding.accent_color, DARK_PANEL, 4.5);

@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react";
 import { usePreferences, usePublicBranding } from "@/api/queries";
 import type { Me } from "@/api/types";
 import { BrandMark } from "@/components/BrandMark";
-import { applyBranding, applyTheme, storedTheme } from "@/lib/appearance";
+import { applyBranding, applyTheme, forgetWorkspace, storedTheme } from "@/lib/appearance";
 import { StatusArea } from "@/features/status/StatusArea";
 import { UserMenu } from "./UserMenu";
 
@@ -37,6 +37,7 @@ export function Shell({ me }: { me: Me }) {
   useEffect(() => {
     if (branding.data) applyBranding(branding.data, workspace);
   }, [branding.data, workspace]);
+  useEffect(() => forgetWorkspace, []);
 
   const destinations = DESTINATIONS.filter(destination => !destination.admin || me.role === "administrator");
   return (

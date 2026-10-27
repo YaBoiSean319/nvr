@@ -89,6 +89,23 @@ def _failure(error: OnvifError) -> str:
     return error.message
 
 
+async def _check_live(client: OnvifClient, services: Services, live: MediaProfile, selection: dict[str, Any], verify: bool, protocols: str | None) -> None:
+    """Resolve the lower-resolution live stream and, when video is being verified, decode a frame from it. A problem is a warning: live view can use the main stream."""
+    try:
+        source = client.stream_url_with_login(await client.stream_uri(services, live))
+    except (OnvifError, ValueError) as exc:
+        selection["live_verified"] = False
+        selection["warnings"] = [*selection["warnings"], f"The live sub-stream could not be resolved: {exc.message if isinstance(exc, OnvifError) else 'invalid address'}"]
+        return
+    if not verify:
+        selection["live_verified"] = None
+        return
+    result = await verify_video(source, protocols)
+    selection["live_verified"] = bool(result.get("decoded"))
+    if not result.get("decoded"):
+        selection["warnings"] = [*selection["warnings"], f"The live sub-stream could not be verified: {result.get('reason', 'no video')}"]
+
+
 async def inspect_camera(host: str, username: str = "", password: str = "", *, device_service_url: str | None = None, brand: str = "auto",
                          transport: httpx.AsyncBaseTransport | None = None, verify: bool = True, protocols: str | None = None) -> dict[str, Any]:
     """The report on one camera. It does not raise for camera faults: each failure is the step's outcome and the capability's state."""
@@ -232,6 +249,9 @@ async def _inspect(host: str, username: str, password: str, device_service_url: 
             done("video", "skipped", "Not checked: no video profile was chosen")
 
         skipped = steps["video"]["state"] == "skipped" and not verify and selection is not None and selection.record is not None
+        if selection is not None and selection.live is not None and services is not None and report["selection"] is not None:
+            await _check_live(client, services, selection.live, report["selection"], verify, protocols)
+
         report["ok"] = capabilities["video"]["state"] == "ok" or skipped
         done("ready", "ok" if report["ok"] else "failed", "" if report["ok"] else "Video could not be verified; the camera can still be saved and fixed later")
         return finish(client)

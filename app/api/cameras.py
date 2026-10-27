@@ -1,6 +1,8 @@
 """Camera inventory, stream sources, credentials, audio probing and motion sources."""
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import sqlite3
 import uuid
 import json
@@ -18,7 +20,7 @@ from app.credentials import encrypt, decrypt
 from app.recording import masked_stream_url, probe_stream, safe_stream_url
 from app.health import recording_health
 from app.onvif_stream import list_camera_stream_profiles, resolve_camera_stream
-from app import diagnostics
+from app import capabilities as camera_capabilities, diagnostics
 from app.retention import coverage_summary, effective_retention
 from app.api.policies import effective_schedule_view
 
@@ -127,6 +129,7 @@ class CameraCreateRequest(CameraProbeRequest):
     motion_zones: list[MotionZoneRequest] = Field(default_factory=list, max_length=16)
     motion_sensitivity: int = Field(default=50, ge=1, le=100)
     onvif_uuid: str | None = Field(default=None, min_length=36, max_length=36)
+    save_anyway: bool = False  # Save the camera although its video could not be opened; recording stays off and the video is rechecked in the background
 
     @field_validator("onvif_uuid")
     @classmethod
@@ -400,6 +403,48 @@ def list_cameras(user: CurrentUser) -> dict[str, object]:
     return {"cameras": cameras}
 
 
+def _unresolved_stream_url(camera_ip: str | None) -> str | None:
+    """The stand-in address stored for a camera whose stream ONVIF would not give: it identifies the camera and opens nothing."""
+    try:
+        address = ipaddress.ip_address((camera_ip or "").strip())
+    except ValueError:
+        return None
+    return f"rtsp://{address}/" if address.version == 4 and not address.is_unspecified and not address.is_multicast else None
+
+
+async def _initial_health(payload: "CameraCreateRequest", service_url: str | None) -> dict[str, dict[str, str]] | None:
+    """What an inspection says about the camera's discovery, login, audio, PTZ and motion events, for the health a new camera starts with. Best effort."""
+    from app.camera_inspect import inspect_camera
+    try:
+        report = await asyncio.wait_for(inspect_camera(
+            payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
+            device_service_url=service_url or payload.device_service_url, brand=payload.camera_brand, verify=False), timeout=30)
+    except Exception:  # noqa: BLE001 - health is recorded as unknown and rechecked rather than failing the add
+        return None
+    return report["capabilities"]
+
+
+def _record_new_camera_capabilities(db: sqlite3.Connection, camera_id: str, payload: "CameraCreateRequest", capability: dict[str, object],
+                                    video_problem: str | None, has_events: bool, health: dict[str, dict[str, str]] | None) -> None:
+    """The capability health a camera starts with, from what adding it learned (an inspection where ONVIF was used). Video and motion are rechecked in the background when not ok."""
+    record = camera_capabilities.record
+    record(db, camera_id, "video", "failed" if video_problem else "ok", video_problem or "Video is flowing")
+    if health is not None:
+        for name in ("discovery", "authentication", "audio", "ptz"):
+            record(db, camera_id, name, health[name]["state"], health[name]["message"])
+        motion = health["motion"]
+        record(db, camera_id, "motion", motion["state"] if has_events or motion["state"] != "ok" else "unknown", motion["message"])
+        return
+    if video_problem:
+        record(db, camera_id, "audio", "unknown", "Not checked: the video could not be opened")
+    else:
+        record(db, camera_id, "audio", "available" if capability.get("audio") else "unsupported", "The camera carries audio" if capability.get("audio") else "No audio on the stream")
+    record(db, camera_id, "discovery", "unsupported", "Added from a direct stream address")
+    record(db, camera_id, "authentication", "unknown", "Not checked")
+    record(db, camera_id, "ptz", "unknown", "Not checked")
+    record(db, camera_id, "motion", "unknown" if has_events else "unsupported", "Motion events have not been checked yet" if has_events else "No ONVIF event service is set")
+
+
 @router.post("/api/cameras", status_code=status.HTTP_201_CREATED)
 async def create_camera(
     payload: CameraCreateRequest,
@@ -409,38 +454,60 @@ async def create_camera(
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Camera name is required")
+    onvif_resolved = not payload.stream_url and bool(payload.camera_ip)
+    unresolved: str | None = None
     try:
         stream_url, resolved_service_url = await _resolve_camera_source(payload, payload.motion_service_url)
         safe_stream_url(stream_url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HTTPException as exc:
+        placeholder = _unresolved_stream_url(payload.camera_ip) if payload.save_anyway and onvif_resolved and exc.status_code == 422 else None
+        if placeholder is None:
+            raise
+        # ONVIF would not give a stream address. The camera is saved anyway (recording off) and the address is looked for again in the background.
+        unresolved, stream_url, resolved_service_url = str(exc.detail)[:300], placeholder, payload.motion_service_url
     motion_username = payload.motion_username if payload.motion_username is not None else payload.camera_username
     motion_password = payload.motion_password if payload.motion_password is not None else payload.camera_password
     if bool(motion_username) != bool(motion_password):
         raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
-    capability = await probe_stream(stream_url)
-    if not capability.get("reachable"):
-        raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
+    video_problem: str | None = unresolved
+    if unresolved is not None:
+        capability = {"reachable": False, "video": {}}
+    else:
+        capability = await probe_stream(stream_url)
+    if unresolved is None and not capability.get("reachable"):
+        reason = str(capability.get("reason", "Camera stream could not be opened"))
+        if not payload.save_anyway:
+            raise HTTPException(status_code=422, detail=reason)
+        video_problem = reason[:300]
+        capability = {"reachable": False, "video": {}}
     live_substream_url = None
-    if payload.live_substream_profile_token:
-        try:
-            substream = await resolve_camera_stream(
-                payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
-                resolved_service_url or payload.device_service_url, payload.live_substream_profile_token, payload.camera_brand,
-            )
-            safe_stream_url(substream.stream_url)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="The selected live substream could not be resolved") from exc
-        substream_capability = await probe_stream(substream.stream_url)
-        if not substream_capability.get("reachable"):
-            raise HTTPException(status_code=422, detail="The selected live substream failed its video test")
-        main_video = capability.get("video") or {}
-        sub_video = substream_capability.get("video") or {}
-        main_pixels = int(main_video.get("width") or 0) * int(main_video.get("height") or 0)
-        sub_pixels = int(sub_video.get("width") or 0) * int(sub_video.get("height") or 0)
-        if not main_pixels or not sub_pixels or sub_pixels >= main_pixels:
-            raise HTTPException(status_code=422, detail="Choose an ONVIF profile with a lower video resolution for grid viewing")
-        live_substream_url = substream.stream_url
+    try:
+        if payload.live_substream_profile_token and video_problem is None:
+            try:
+                substream = await resolve_camera_stream(
+                    payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
+                    resolved_service_url or payload.device_service_url, payload.live_substream_profile_token, payload.camera_brand,
+                )
+                safe_stream_url(substream.stream_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="The selected live substream could not be resolved") from exc
+            substream_capability = await probe_stream(substream.stream_url)
+            if not substream_capability.get("reachable"):
+                raise HTTPException(status_code=422, detail="The selected live substream failed its video test")
+            main_video = capability.get("video") or {}
+            sub_video = substream_capability.get("video") or {}
+            main_pixels = int(main_video.get("width") or 0) * int(main_video.get("height") or 0)
+            sub_pixels = int(sub_video.get("width") or 0) * int(sub_video.get("height") or 0)
+            if not main_pixels or not sub_pixels or sub_pixels >= main_pixels:
+                raise HTTPException(status_code=422, detail="Choose an ONVIF profile with a lower video resolution for grid viewing")
+            live_substream_url = substream.stream_url
+    except HTTPException:
+        if not payload.save_anyway:
+            raise
+        live_substream_url = None  # Live view uses the main stream
+    health = await _initial_health(payload, resolved_service_url) if onvif_resolved else None
     with connect() as db:
         try:
             discovery_claim = getattr(request.state, "discovery_add_claim", None)
@@ -452,8 +519,8 @@ async def create_camera(
                 camera_ip=payload.camera_ip, camera_brand=payload.camera_brand,
                 device_service_url=resolved_service_url or payload.device_service_url,
                 onvif_profile_token=payload.onvif_profile_token,
-                live_substream_profile_token=payload.live_substream_profile_token,
-                recording_enabled=payload.recording_enabled,
+                live_substream_profile_token=payload.live_substream_profile_token if live_substream_url else None,
+                recording_enabled=payload.recording_enabled and video_problem is None,
                 motion_service_url=payload.motion_service_url or resolved_service_url,
                 motion_username=motion_username,
                 motion_password=motion_password,
@@ -464,11 +531,13 @@ async def create_camera(
                 motion_sensitivity=payload.motion_sensitivity,
                 live_substream_url=live_substream_url,
             )
-            record_discovery_probe(
-                db,
-                discovery_claim["device_uuid"] if discovery_claim else payload.onvif_uuid,
-                capability,
-            )
+            if video_problem is None:
+                record_discovery_probe(
+                    db,
+                    discovery_claim["device_uuid"] if discovery_claim else payload.onvif_uuid,
+                    capability,
+                )
+            _record_new_camera_capabilities(db, camera_id, payload, capability, video_problem, bool(payload.motion_service_url or resolved_service_url), health)
             if discovery_claim:
                 claimed = db.execute(
                     "UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=?,add_claim_token=NULL,add_claimed_until=NULL "
@@ -625,6 +694,8 @@ async def update_camera_source(
              (capability.get("video") or {}).get("codec"), (capability.get("video") or {}).get("width"),
              (capability.get("video") or {}).get("height"), camera_id),
         )
+        camera_capabilities.record(db, camera_id, "video", "ok", "Video is flowing")
+        camera_capabilities.record(db, camera_id, "audio", "available" if capability.get("audio") else "unsupported", "The camera carries audio" if capability.get("audio") else "No audio on the stream")
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()

@@ -20,7 +20,7 @@ import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
 import { useUnmaskedStore } from "@/features/privacy/store";
 import { Shell } from "@/features/shell/Shell";
-import { applyBranding, applyTheme, storedTheme } from "@/lib/appearance";
+import { applyTheme, reapplyBranding, storedTheme } from "@/lib/appearance";
 
 function AdminRoute({ me, children }: { me: Me; children: ReactNode }) {
   return me.role === "administrator" ? <>{children}</> : <AdministratorOnly />;
@@ -81,7 +81,7 @@ export function App() {
 
   useEffect(() => applyTheme(storedTheme()), []);
   useEffect(() => {
-    if (branding.data) applyBranding(branding.data);
+    if (branding.data) reapplyBranding(branding.data);
   }, [branding.data]);
   useEffect(() => onSessionExpired(() => client.setQueryData(keys.me, null)), [client]);
 
