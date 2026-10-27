@@ -37,7 +37,10 @@ def preserve_segment(camera_id: str, segment_id: int, actor_id: int, expires_in_
 def release_segment_hold(camera_id: str, segment_id: int, actor_id: int) -> None:
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        hold=active_hold(db,segment_id)
+        now=datetime.now(timezone.utc).isoformat()
+        # Only a hold someone placed by hand: footage an open case holds stays held until the case lets it go.
+        hold=db.execute("SELECT * FROM recording_holds WHERE segment_id=? AND case_id IS NULL AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) ORDER BY created_at DESC LIMIT 1",(segment_id,now)).fetchone()
+        if hold is None and active_hold(db,segment_id) is not None: raise PermissionError("This footage is held for a case; remove the clip or close the case to release it")
         if hold is None or hold["camera_id"]!=camera_id: raise LookupError("No active preservation hold found")
         db.execute("UPDATE recording_holds SET released_by=?,released_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",(actor_id,hold["id"]))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",

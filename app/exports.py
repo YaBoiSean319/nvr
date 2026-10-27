@@ -603,6 +603,11 @@ class ExportManager:
                 continue
             for job_id in queued:
                 self.enqueue(job_id)
+            try:
+                from . import cases
+                await asyncio.to_thread(cases.advance_packages)  # Case packages: start each clip's export, assemble when they are done
+            except sqlite3.Error:
+                pass
             if self._running in cancelling and self._running not in self._cancelled:
                 await self.cancel(self._running)
 

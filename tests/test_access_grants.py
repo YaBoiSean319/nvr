@@ -295,7 +295,12 @@ class RouteTests(GrantCase):
         ("GET", "/api/incidents"), ("POST", "/api/incidents/{incident_id}/acknowledge"),
         ("GET", "/api/live/layouts"), ("DELETE", "/api/live/layouts/{name}"), ("PUT", "/api/live/layouts/{name}"), ("GET", "/api/live/views"),
         ("GET", "/api/live/workspace"), ("PUT", "/api/live/workspace"), ("GET", "/api/live/alarm-pop-ins"), ("POST", "/api/playback/timeline"),
-        ("GET", "/api/ai/search"), ("GET", "/api/ai/search/options"), ("GET", "/api/ai/tracks/{track_id}/thumbnail"), ("GET", "/api/ai/tracks/{track_id}/similar"), ("GET", "/api/ai/search/ask"), ("GET", "/api/playback/overlay"), ("GET", "/api/playback/overlay/tracks/{track_id}"),
+        ("GET", "/api/ai/search"), ("GET", "/api/ai/search/options"), ("GET", "/api/ai/tracks/{track_id}/thumbnail"), ("GET", "/api/ai/tracks/{track_id}/similar"), ("GET", "/api/ai/search/ask"),
+        ("GET", "/api/cases"), ("POST", "/api/cases"), ("GET", "/api/cases/{case_id}"), ("PATCH", "/api/cases/{case_id}"), ("POST", "/api/cases/{case_id}/members"),
+        ("DELETE", "/api/cases/{case_id}/members/{user_id}"), ("POST", "/api/cases/{case_id}/items"), ("DELETE", "/api/cases/{case_id}/items/{item_id}"),
+        ("POST", "/api/cases/{case_id}/close"), ("GET", "/api/cases/{case_id}/audit"), ("POST", "/api/cases/{case_id}/packages"),
+        ("GET", "/api/cases/{case_id}/packages/{package_id}"), ("GET", "/api/cases/{case_id}/packages/{package_id}/download"),
+        ("POST", "/api/cases/{case_id}/packages/{package_id}/verify"), ("GET", "/api/playback/overlay"), ("GET", "/api/playback/overlay/tracks/{track_id}"),
     }
     # Routes that name no camera and return none: the person's own settings, sign-in and public information.
     NO_CAMERA_DATA = {

@@ -313,6 +313,8 @@ def release_camera_segment(camera_id: str, segment_id: int, user: Administrator)
         release_segment_hold(camera_id,segment_id,int(user["id"]))
     except LookupError as exc:
         raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
     return Response(status_code=204)
 
 

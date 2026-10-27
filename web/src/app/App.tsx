@@ -16,6 +16,7 @@ import { AddCameras } from "@/features/admin/cameras/add/AddCameras";
 import { GroupsWorkspace } from "@/features/admin/groups/GroupsWorkspace";
 import { RulesWorkspace } from "@/features/admin/rules/RulesWorkspace";
 import { SettingsWorkspace } from "@/features/settings/SettingsWorkspace";
+import { CasesList, CaseView } from "@/features/cases/CasesWorkspace";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
 import { useUnmaskedStore } from "@/features/privacy/store";
@@ -36,6 +37,8 @@ function router(me: Me) {
           { index: true, element: <Navigate to="/live" replace /> },
           { path: "live/*", element: <LiveWorkspace /> },
           { path: "playback/*", element: <PlaybackWorkspace /> },
+          { path: "cases", element: <CasesList /> },
+          { path: "cases/:caseId", element: <CaseView /> },
           {
             path: "cameras",
             element: <CamerasShell admin={me.role === "administrator"}><Outlet /></CamerasShell>,
