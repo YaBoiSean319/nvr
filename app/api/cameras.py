@@ -18,6 +18,7 @@ from app.store import connect
 from app.credentials import encrypt, decrypt
 from app.recording import masked_stream_url, probe_stream, safe_stream_url
 from app.health import recording_health
+from app.onvif_client import normalise_host
 from app.onvif_stream import list_camera_stream_profiles, placeholder_stream_url, resolve_camera_stream
 from app import capabilities as camera_capabilities, diagnostics
 from app.retention import coverage_summary, effective_retention
@@ -54,6 +55,12 @@ class CameraSourceRequest(BaseModel):
     def validate_device_service_url(cls, value: str | None) -> str | None:
         return _validate_onvif_service_url(value)
 
+    @field_validator("camera_ip")
+    @classmethod
+    def normalise_camera_ip(cls, value: str | None) -> str | None:
+        """Stored and compared as one spelling: an IP address or host name in lower case, without brackets or spaces."""
+        return None if value is None else normalise_host(value)
+
 
 class CameraProbeRequest(CameraSourceRequest):
     @model_validator(mode="after")
@@ -79,6 +86,12 @@ class CameraSourceUpdateRequest(CameraSourceRequest):
 
 class CameraProfileRequest(BaseModel):
     camera_ip: str = Field(min_length=1, max_length=253)
+
+    @field_validator("camera_ip")
+    @classmethod
+    def normalise_camera_ip(cls, value: str) -> str:
+        return normalise_host(value)
+
     camera_username: str | None = Field(default=None, max_length=256)
     camera_password: str | None = Field(default=None, max_length=1024)
     camera_brand: CameraBrand = "auto"

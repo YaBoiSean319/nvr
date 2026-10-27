@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { keys } from "@/api/queries";
 import { attentionText, BULK_LABEL, BULK_LIMIT, EMPTY_QUICK, failureText, inspectCamera, parseBulk, runLimited, saveChecked, suggestedName, type BulkRow, type BulkStatus } from "./inspect";
 
@@ -17,7 +17,10 @@ export function BulkAdd() {
   const [outcomes, setOutcomes] = useState<Record<number, Outcome>>({});
   const [running, setRunning] = useState(false);
   const [addAnyway, setAddAnyway] = useState(true);
+  const [recording, setRecording] = useState(false);
   const stop = useRef(false);
+  // Leaving the tab ends the run: nothing keeps adding cameras (or holding their passwords) out of sight.
+  useEffect(() => () => { stop.current = true; }, []);
   const parsed = parseBulk(text);
   const valid = parsed.filter(row => !row.problem);
   const shown = rows.length ? rows : parsed;
@@ -40,7 +43,7 @@ export function BulkAdd() {
         return;
       }
       note(row, "adding");
-      const camera = await saveChecked(connection, report, row.name || suggestedName(report, row.host));
+      const camera = await saveChecked(connection, report, row.name || suggestedName(report, row.host), recording);
       note(row, report.ok ? "added" : "attention", report.ok ? camera.name : `${camera.name}: ${attentionText(report)}`);
     } catch (error) {
       note(row, "failed", failureText(error, "The NVR could not be reached"));
@@ -74,6 +77,7 @@ export function BulkAdd() {
             <textarea className="mono csv-input" rows={6} value={text} spellCheck={false} disabled={running} onChange={event => { setText(event.target.value); setRows([]); setOutcomes({}); }} />
           </label>
           <label className="inline-field"><input type="checkbox" checked={addAnyway} disabled={running} onChange={event => setAddAnyway(event.target.checked)} /> Also add cameras that need attention (recording stays off)</label>
+          <label className="inline-field"><input type="checkbox" checked={recording} disabled={running} onChange={event => setRecording(event.target.checked)} /> Turn on motion recording for cameras that check out completely</label>
           <div className="field-actions">
             <button type="button" className="button" data-variant="primary" disabled={running || !valid.length || tooMany} onClick={() => void run()}>
               {running ? "Adding…" : `Check and add ${valid.length} camera${valid.length === 1 ? "" : "s"}`}
@@ -81,10 +85,10 @@ export function BulkAdd() {
             {running ? <button type="button" className="button" onClick={() => { stop.current = true; }}>Stop</button> : null}
             {!running && failed.length ? <button type="button" className="button" onClick={() => void run(failed)}>Retry {failed.length} not added</button> : null}
           </div>
-          <p className="muted field-hint">Passwords stay in this page only while it is open. {CONCURRENCY} cameras are checked at a time. New cameras start with recording turned off.</p>
+          <p className="muted field-hint">Passwords are in the box above in plain text and stay in this page only while it is open. {CONCURRENCY} cameras are checked at a time. New cameras start with recording turned off.</p>
           {tooMany ? <p className="field-error" role="alert">Lists are limited to {BULK_LIMIT} cameras. Split the list and add it in parts.</p> : null}
           {shown.length ? (
-            <p className="notice" data-tone={counts.failed || counts.invalid ? "warn" : "good"} role="status" aria-live="polite">
+            <p className="notice" data-tone={counts.failed || counts.invalid ? "warn" : "good"} role="status" aria-live={running ? "off" : "polite"}>
               {added} added of {shown.length}
               {counts.attention ? ` (${counts.attention} need attention)` : ""}
               {counts.failed ? `, ${counts.failed} not added` : ""}
@@ -113,10 +117,10 @@ export function BulkAdd() {
           </div>
         ) : null}
       </section>
-      <section className="add-detail" aria-label="About bulk add">
+      <section className="add-detail" aria-label="How bulk adding works">
         <div className="tab-form">
           <h2 className="setup-title">How it works</h2>
-          <p className="muted">Each camera is identified, signed in to, and its video checked, then added. A camera whose video could not be verified is added with recording off (when the box is ticked) and the NVR keeps checking it. Nothing is added twice: a name already in use is reported for that row.</p>
+          <p className="muted">Each camera is identified, signed in to, and its video checked, then added. A camera whose video could not be verified is added with recording off (when the box is ticked) and the NVR keeps checking it. A name already in use is reported for that row, so running the same list again does not add the cameras twice.</p>
         </div>
       </section>
     </div>

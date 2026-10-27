@@ -325,7 +325,7 @@ class SaveAnywayTests(GrantCase):
         url = self.camera.url.replace("127.0.0.1", "localhost")
         with mock.patch("app.api.cameras.probe_stream", new=AsyncMock(return_value={"reachable": True, "video": {"codec": "h264", "width": 1920, "height": 1080}})):
             profiles = self.admin.post("/api/cameras/onvif-profiles", json={"camera_ip": "Localhost", "camera_username": USER, "camera_password": PASSWORD, "device_service_url": url})
-            saved = self.admin.post("/api/cameras", json=self.body(camera_ip="localhost", device_service_url=url))
+            saved = self.admin.post("/api/cameras", json=self.body(camera_ip=" LocalHost ", device_service_url=url))
             wrong_host = self.admin.post("/api/cameras", json=self.body(name="Elsewhere", camera_ip="other.example.test", device_service_url=url))
         self.assertEqual(profiles.status_code, 200, profiles.text)
         self.assertEqual(saved.status_code, 201, saved.text)

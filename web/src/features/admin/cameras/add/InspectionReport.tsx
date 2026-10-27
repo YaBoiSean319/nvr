@@ -14,8 +14,10 @@ export function InspectionReport({ report }: { report: InspectReport }) {
     const link = document.createElement("a");
     link.href = url;
     link.download = "camera-diagnostics.json";
+    document.body.append(link);
     link.click();
-    URL.revokeObjectURL(url);
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   return (
     <section className="inspection" aria-label="Camera check">
