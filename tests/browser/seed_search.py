@@ -43,10 +43,13 @@ def seed() -> dict[str, object]:
             db.execute("INSERT INTO track_keyframes(track_id,captured_at,jpeg) VALUES(?,?,?)", (track, at.isoformat(), jpeg))
             made[name] = {"track_id": track, "camera_id": camera_id, "first_seen_at": at.isoformat()}
         week = (now - timedelta(days=7)).isoformat()
+        # Coverage that has an end, far ahead: the AI supervisor closes any open-ended row for a camera whose AI is off (every few seconds), which would
+        # leave the end of the searched range "not running" and make the journey depend on how fast it runs.
+        later = (now + timedelta(days=365)).isoformat()
         db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at) VALUES(?,'analyzed',?,?)", (_camera_id(1), week, (now - timedelta(hours=9)).isoformat()))
         db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,'failed',?,?,?)", (_camera_id(1), (now - timedelta(hours=9)).isoformat(), (now - timedelta(hours=8)).isoformat(), "Camera stream ended"))
-        db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at) VALUES(?,'analyzed',?,NULL)", (_camera_id(1), (now - timedelta(hours=8)).isoformat()))
-        db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at) VALUES(?,'analyzed',?,NULL)", (_camera_id(2), week))
+        db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at) VALUES(?,'analyzed',?,?)", (_camera_id(1), (now - timedelta(hours=8)).isoformat(), later))
+        db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at) VALUES(?,'analyzed',?,?)", (_camera_id(2), week, later))
     return made
 
 
