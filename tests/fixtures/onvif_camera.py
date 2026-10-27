@@ -39,6 +39,18 @@ def hanwha_profiles() -> list[dict]:
             profile("profile3", "h264-sub", "H264", 640, 360, 15, 1024), profile("profile4", "h265-main", "H265", 1920, 1080)]
 
 
+_EVENTS = "http://www.onvif.org/ver10/events/wsdl/"
+_WSN = "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/"
+EVENT_ACTIONS = {
+    "CreatePullPointSubscription": _EVENTS + "EventPortType/CreatePullPointSubscriptionRequest",
+    "GetEventProperties": _EVENTS + "EventPortType/GetEventPropertiesRequest",
+    "GetServiceCapabilities": _EVENTS + "EventPortType/GetServiceCapabilitiesRequest",
+    "PullMessages": _EVENTS + "PullPointSubscription/PullMessagesRequest",
+    "Renew": _WSN + "RenewRequest",
+    "Unsubscribe": _WSN + "UnsubscribeRequest",
+}
+
+
 def fault(code: str, subcode: str, reason: str) -> str:
     return (f'<s:Fault><s:Code><s:Value>{code}</s:Value><s:Subcode><s:Value>{subcode}</s:Value></s:Subcode></s:Code>'
             f'<s:Reason><s:Text xml:lang="en">{reason}</s:Text></s:Reason></s:Fault>')
@@ -48,7 +60,7 @@ class OnvifCamera:
     def __init__(self, *, username: str = "operator", password: str = "S3cret!pass", auth: dict[str, str] | None = None, skew: timedelta = timedelta(),
                  profiles: list[dict] | None = None, media2_profiles: list[dict] | None = None, manufacturer: str = "Hanwha Techwin", model: str = "XNV-6120R",
                  firmware: str = "2.00.00", get_services: bool = True, pull_point: bool = True, services: tuple[str, ...] = ("media", "events", "ptz"),
-                 behaviours: dict[str, str] | None = None, subscription_style: str = "path",
+                 behaviours: dict[str, str] | None = None, subscription_style: str = "path", strict_actions: bool = False,
                  event_topics: tuple[str, ...] = ("RuleEngine/CellMotionDetector/Motion", "VideoSource/MotionAlarm", "VideoAnalytics/MotionDetection", "Device/Temperature")) -> None:
         self.username, self.password = username, password
         self.auth = {"device": "digest", "media": "digest", "media2": "digest", "events": "digest", **(auth or {})}
@@ -63,6 +75,7 @@ class OnvifCamera:
         self.nonces: set[str] = set()
         self.pending: list[str] = []  # Notifications for the next PullMessages
         self.pending_lock = threading.Lock()
+        self.strict_actions = strict_actions  # Refuse Events requests whose WS-Addressing action is not the one the ONVIF specification gives, as some real cameras do
         self.subscription_style, self.event_topics = subscription_style, event_topics  # style: "path", "query" (id in the address's query) or "reference" (id in reference parameters)
         self.subscription_alive, self.subscriptions, self.unsubscribed = False, 0, 0
         camera = self
@@ -145,6 +158,10 @@ class OnvifCamera:
                 return self.send(handler, 401, "", {"WWW-Authenticate": f'Digest realm="{REALM}", qop="auth", nonce="{nonce}", algorithm=MD5'})
             if "wsse" in mode and not self._wsse_ok(body):
                 return self.send(handler, 400, self.envelope(fault("s:Sender", "ter:NotAuthorized", "Sender not authorized")))
+        if self.strict_actions and service == "events":
+            given = re.search(r"<(?:\w+:)?Action[^>]*>([^<]*)</", body)
+            if (given.group(1) if given else "") != EVENT_ACTIONS.get(operation, given.group(1) if given else ""):
+                return self.send(handler, 500, self.envelope(fault("s:Sender", "ter:ActionNotSupported", "The action is not supported")))
         behaviour = self.behaviours.get(f"{service}:{operation}") or self.behaviours.get(operation)
         if behaviour == "hang":
             time.sleep(3)

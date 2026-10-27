@@ -444,7 +444,9 @@ class OnvifClient:
             return {}
         namespace, prefix = namespaces[name]
         try:
-            root = await self.call(services.urls[name], "GetServiceCapabilities", namespace, f"<{prefix}:GetServiceCapabilities/>", service=name)
+            # The Events service is addressed through its port type; a camera that checks the action refuses the plain form.
+            action = f"{EVENTS}/EventPortType/GetServiceCapabilitiesRequest" if name == "events" else None
+            root = await self.call(services.urls[name], "GetServiceCapabilities", namespace, f"<{prefix}:GetServiceCapabilities/>", service=name, action=action)
         except OnvifError as exc:
             if exc.code in {"auth_rejected", "unreachable", "timeout"}:
                 raise
