@@ -1,7 +1,8 @@
-"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the external heartbeat and configuration backups."""
+"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat and configuration backups."""
 from __future__ import annotations
 
 from app.backup import BackupManager
+from app.capabilities import CapabilityManager
 from app.hardening import HardeningManager
 from app.heartbeat import HeartbeatManager
 from app.push import PushManager
@@ -22,6 +23,7 @@ class BackgroundService:
         self.footage_chain = FootageChainManager()
         self.self_test = SelfTestManager()
         self.hardening = HardeningManager()
+        self.capabilities = CapabilityManager()
         self.heartbeat = HeartbeatManager()
         self.backups = BackupManager()
 
@@ -33,12 +35,14 @@ class BackgroundService:
         await self.footage_chain.start()
         await self.self_test.start()
         await self.hardening.start()
+        await self.capabilities.start()
         await self.heartbeat.start()
         await self.backups.start()
 
     async def stop(self) -> None:
         await self.backups.stop()
         await self.heartbeat.stop()
+        await self.capabilities.stop()
         await self.hardening.stop()
         await self.self_test.stop()
         await self.footage_chain.stop()

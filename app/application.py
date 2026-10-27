@@ -24,6 +24,7 @@ from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
 from .push import PushManager
 from .footage_chain import FootageChainManager
+from .capabilities import CapabilityManager
 from .hardening import HardeningManager
 from .self_test import SelfTestManager
 from .ptz import PtzTourManager
@@ -46,6 +47,7 @@ STARTUP_ORDER = (
     ("footage_chain", FootageChainManager),
     ("self_test", SelfTestManager),
     ("hardening", HardeningManager),
+    ("capabilities", CapabilityManager),
     ("heartbeat", HeartbeatManager),
     ("recorders", RecordingManager),
     ("detectors", DetectionManager),
@@ -53,7 +55,7 @@ STARTUP_ORDER = (
     ("backups", BackupManager),
 )
 # Detection reads recorder state, and recording should outlive everything else.
-SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "hardening", "self_test", "footage_chain", "ptz_tours", "rule_actions", "push", "webhooks", "heartbeat", "recorders")
+SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "capabilities", "hardening", "self_test", "footage_chain", "ptz_tours", "rule_actions", "push", "webhooks", "heartbeat", "recorders")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:

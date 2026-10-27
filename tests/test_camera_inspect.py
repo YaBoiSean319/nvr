@@ -60,7 +60,16 @@ class HanwhaTests(InspectCase):
         self.assertEqual([item["token"] for item in result["profiles"]], ["profile1", "profile2", "profile3", "profile4"])
         capabilities = {name: item["state"] for name, item in result["capabilities"].items()}
         self.assertEqual(capabilities, {"discovery": "ok", "authentication": "ok", "video": "ok", "audio": "available", "motion": "ok", "ptz": "available"})
-        self.assertEqual(self.verified.await_count, 1)
+        # The main stream and the live sub-stream are both decoded.
+        self.assertEqual(self.verified.await_count, 2)
+        self.assertIs(result["selection"]["live_verified"], True)
+
+    async def test_a_live_substream_that_cannot_be_decoded_is_a_warning_and_video_stays_ok(self):
+        results = [DECODED, {"decoded": False, "opened": True, "reason": "RTSP stream connected but video decoding failed"}]
+        with mock.patch("app.camera_inspect.verify_video", new=mock.AsyncMock(side_effect=results)):
+            result = await camera_inspect.inspect_camera("127.0.0.1", USER, PASSWORD, device_service_url=self.camera().url)
+        self.assertEqual((result["ok"], result["selection"]["live_verified"]), (True, False))
+        self.assertTrue(any("live sub-stream could not be verified" in item for item in result["selection"]["warnings"]))
 
     async def test_the_report_holds_no_credential_and_no_credentialed_address(self):
         result = await self.inspect(self.camera())
@@ -68,8 +77,8 @@ class HanwhaTests(InspectCase):
         for secret in (USER, PASSWORD, "S3cret", "rtsp://", "Nonce", "PasswordDigest"):
             self.assertNotIn(secret, text)
         # The verified stream carries the login, in memory only, and the camera's own host is replaced by the one entered.
-        source = self.verified.await_args.args[0]
-        self.assertEqual(source, "rtsp://operator:S3cret%21pass@127.0.0.1:554/profile2/media.smp")
+        sources = [call.args[0] for call in self.verified.await_args_list]
+        self.assertEqual(sources, ["rtsp://operator:S3cret%21pass@127.0.0.1:554/profile2/media.smp", "rtsp://operator:S3cret%21pass@127.0.0.1:554/profile3/media.smp"])
 
     async def test_video_that_does_not_decode_fails_the_video_step_but_not_the_other_capabilities(self):
         result = await self.inspect(self.camera(), verify={"decoded": False, "opened": True, "reason": "RTSP stream connected but video decoding failed"})
