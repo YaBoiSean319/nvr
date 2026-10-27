@@ -10,6 +10,7 @@ import { AttributeSearch } from "./AttributeSearch";
 import { ExportDrawer } from "./ExportDrawer";
 import { FullChooser } from "./FullChooser";
 import { MarkControls } from "./MarkControls";
+import { OverlayControls } from "./OverlayControls";
 import { Investigation } from "./Investigation";
 import { PlaybackGrid } from "./PlaybackGrid";
 import { SearchBar } from "./SearchBar";
@@ -156,6 +157,7 @@ export function PlaybackWorkspace() {
           <Transport settings={display.data} ready={ready && Boolean(applied)}>
             <Investigation settings={display.data} range={range} names={names}
                            rows={shownIds.map(id => timeline.get(id)).filter((row): row is TimelineCamera => row !== undefined)} />
+            <OverlayControls ready={ready && Boolean(applied)} />
             <MarkControls ready={ready && Boolean(applied)} />
           </Transport>
         ) : null}
