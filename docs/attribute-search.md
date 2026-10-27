@@ -11,7 +11,7 @@ Playback > **Find by attributes…** finds people and vehicles across cameras by
 - **Passed through**: anywhere, or the left, right, top or bottom half or the centre of the picture.
 - **Cameras**: every camera you can see, or the cameras in the current Playback view. **When**: the last hour, day, week or 30 days, or the current Playback search range.
 
-Results are the tracks that matched, with the picture the object was first seen in (the box drawn on it), the camera, the time (site time) and what was found, in time order. Choosing one opens Playback at that moment with the camera selected. A search shows up to 60 results and says when more matched.
+Results are the tracks that matched, with the picture the object was first seen in (the box drawn on it), the camera, the time (site time) and what was found, newest first. Choosing one opens Playback at that moment with the camera selected. A search shows up to 60 results and says when more matched.
 
 ## What was not analysed
 
@@ -38,7 +38,7 @@ Tracks recorded before this feature have no attributes and are never matched by 
 
 ```http
 GET /api/ai/search?start=<iso>&end=<iso>[&camera_ids=<id>&camera_ids=<id>][&label=person|vehicle][&upper_colour=red][&lower_colour=blue]
-    [&vehicle_colour=white][&vehicle_type=car][&direction=left][&zone=left|right|top|bottom|centre|x,y,width,height][&order=asc|desc][&limit=60]
+    [&vehicle_colour=white][&vehicle_type=car][&direction=left][&zone=left|right|top|bottom|centre|x,y,width,height][&order=desc|asc][&limit=60]
 GET /api/ai/search/options
 GET /api/ai/tracks/<track-id>/thumbnail
 ```

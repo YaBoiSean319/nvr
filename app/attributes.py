@@ -70,17 +70,22 @@ def classify_pixels(pixels: np.ndarray) -> str | None:
     return counts.most_common(1)[0][0]
 
 
-def _crop(frame: bytes | None, box: dict[str, float], region: tuple[float, float, float, float]) -> np.ndarray:
-    """The pixels (N x 3, BGR) of a region, given as fractions of the box, inside a detector-sized frame."""
+def _crop_image(frame: bytes | None, box: dict[str, float], region: tuple[float, float, float, float]) -> np.ndarray:
+    """A region, given as fractions of the box, cut from a detector-sized frame: rows x columns x 3 (BGR), possibly empty."""
     if frame is None or len(frame) != MODEL_WIDTH * MODEL_HEIGHT * 3:
-        return np.empty((0, 3), dtype=np.uint8)
+        return np.empty((0, 0, 3), dtype=np.uint8)
     image = np.frombuffer(frame, dtype=np.uint8).reshape(MODEL_HEIGHT, MODEL_WIDTH, 3)
     x0, x1, y0, y1 = region
     left, top = box["x"] + box["width"] * x0, box["y"] + box["height"] * y0
     right, bottom = box["x"] + box["width"] * x1, box["y"] + box["height"] * y1
     columns = (max(0, int(left * MODEL_WIDTH)), min(MODEL_WIDTH, max(int(left * MODEL_WIDTH) + 1, int(round(right * MODEL_WIDTH)))))
     rows = (max(0, int(top * MODEL_HEIGHT)), min(MODEL_HEIGHT, max(int(top * MODEL_HEIGHT) + 1, int(round(bottom * MODEL_HEIGHT)))))
-    return image[rows[0]:rows[1], columns[0]:columns[1]].reshape(-1, 3)
+    return image[rows[0]:rows[1], columns[0]:columns[1]]
+
+
+def _crop(frame: bytes | None, box: dict[str, float], region: tuple[float, float, float, float]) -> np.ndarray:
+    """The pixels (N x 3, BGR) of a region, given as fractions of the box, inside a detector-sized frame."""
+    return _crop_image(frame, box, region).reshape(-1, 3)
 
 
 def describe_colours(frame: bytes | None, label: str, box: dict[str, float]) -> dict[str, str]:
@@ -111,11 +116,9 @@ class VehicleAttributeModel:
         self.compiled = core.compile_model(core.read_model(str(path)), provider)
 
     def classify(self, frame: bytes | None, box: dict[str, float]) -> dict[str, str]:
-        crop = _crop(frame, box, (0.0, 1.0, 0.0, 1.0))
-        width = max(1, int(round(box["width"] * MODEL_WIDTH)))
-        if frame is None or crop.shape[0] < MIN_REGION_PIXELS or crop.shape[0] % width:
+        image = _crop_image(frame, box, (0.0, 1.0, 0.0, 1.0))
+        if image.shape[0] * image.shape[1] < MIN_REGION_PIXELS:
             return {}
-        image = crop.reshape(-1, width, 3)
         rows = np.minimum((np.arange(self.SIZE) * image.shape[0] / self.SIZE).astype(int), image.shape[0] - 1)
         columns = np.minimum((np.arange(self.SIZE) * image.shape[1] / self.SIZE).astype(int), image.shape[1] - 1)
         tensor = image[rows][:, columns].transpose(2, 0, 1)[None].astype(np.float32)
@@ -146,7 +149,10 @@ def attribute_model_available(path: Path = ATTRIBUTE_MODEL_PATH) -> bool:
 def describe(frame: bytes | None, detections: list[dict[str, Any]], model: Any = None) -> None:
     """Attach each detection's attributes (``item["attributes"]``) from the frame it was found in."""
     for item in detections:
-        attributes = describe_colours(frame, str(item["label"]), item["box"])
+        try:
+            attributes = describe_colours(frame, str(item["label"]), item["box"])
+        except Exception:  # noqa: BLE001 - a detection whose pixels cannot be read is still tracked, just without colours
+            attributes = {}
         if model is not None and item["label"] == "vehicle":
             try:
                 attributes.update(model.classify(frame, item["box"]))
@@ -194,6 +200,7 @@ class TrackProfile:
         self.first: tuple[float, float] | None = None
         self.last: tuple[float, float] | None = None
         self.mask = 0
+        self.seen = 0
         self.stored: dict[str, Any] | None = None
 
     def add(self, attributes: dict[str, str], box: dict[str, float]) -> None:
@@ -203,6 +210,7 @@ class TrackProfile:
         centre = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         self.first = self.first or centre
         self.last = centre
+        self.seen += 1
         self.mask |= cell_mask(box)
 
     def summary(self) -> dict[str, Any]:
@@ -211,6 +219,6 @@ class TrackProfile:
         for name, counts in self.votes.items():
             best = max(counts.values())
             found[name] = next(value for value in counts if counts[value] == best)  # Counter keeps first-seen order, so a tie goes to the earlier.
-        found["direction"] = direction_of(self.first, self.last) if self.first and self.last else None
+        found["direction"] = direction_of(self.first, self.last) if self.first and self.last and self.seen >= 2 else None  # One sighting says nothing about movement
         found["zone_mask"] = self.mask
         return found

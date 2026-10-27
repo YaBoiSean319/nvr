@@ -160,7 +160,10 @@ def _store_attributes(db: sqlite3.Connection, track_id: str, profile: TrackProfi
     summary = profile.summary()
     if summary == profile.stored:
         return
-    db.execute("UPDATE ai_tracks SET upper_colour=?,lower_colour=?,vehicle_colour=?,vehicle_type=?,direction=?,zone_mask=? WHERE id=?",
+    # A value this profile has not seen never replaces one already stored (the profile starts empty when the worker restarts and picks up a track again),
+    # and the cells passed through only ever accumulate.
+    db.execute("UPDATE ai_tracks SET upper_colour=COALESCE(?,upper_colour),lower_colour=COALESCE(?,lower_colour),vehicle_colour=COALESCE(?,vehicle_colour),"
+               "vehicle_type=COALESCE(?,vehicle_type),direction=COALESCE(?,direction),zone_mask=zone_mask|? WHERE id=?",
                (summary["upper_colour"], summary["lower_colour"], summary["vehicle_colour"], summary["vehicle_type"], summary["direction"], summary["zone_mask"], track_id))
     profile.stored = summary
 

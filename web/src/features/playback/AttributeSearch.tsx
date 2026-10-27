@@ -67,7 +67,7 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
   const change = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
 
   const found = useQuery({
-    queryKey: ["ai-search", submitted, shownIds, range],
+    queryKey: ["ai-search", submitted, submitted?.cameras === "view" ? shownIds : null, submitted?.when === "range" ? range : null],
     enabled: submitted !== null,
     queryFn: ({ signal }) => {
       const query = submitted!;
@@ -173,7 +173,7 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
                 </details>
               ) : null}
             </section>
-            <p className="muted" role="status">{data.results.length ? `${data.results.length}${data.truncated ? "+" : ""} match${data.results.length === 1 ? "" : "es"}, in time order.${data.truncated ? " More matched than are shown: narrow the filters or the time." : ""}` : "No matches in the time that was analysed."}</p>
+            <p className="muted" role="status">{data.results.length ? `${data.results.length}${data.truncated ? "+" : ""} match${data.results.length === 1 ? "" : "es"}, newest first.${data.truncated ? " More matched than are shown: narrow the filters or the time." : ""}` : "No matches in the time that was analysed."}</p>
             <ul className="attr-grid" aria-label="Search results">
               {data.results.map(result => (
                 <li key={result.track_id}>

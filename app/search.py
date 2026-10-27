@@ -53,8 +53,8 @@ def _parse(value: str) -> datetime:
 
 def find_tracks(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: datetime, *, label: str | None = None, upper_colour: str | None = None,
                 lower_colour: str | None = None, vehicle_colour: str | None = None, vehicle_type: str | None = None, direction: str | None = None,
-                zone: dict[str, float] | None = None, order: str = "asc", limit: int = 60) -> tuple[list[dict[str, Any]], bool]:
-    """The tracks in range matching every filter given, in time order, and whether more matched than ``limit``."""
+                zone: dict[str, float] | None = None, order: str = "desc", limit: int = 60) -> tuple[list[dict[str, Any]], bool]:
+    """The tracks in range matching every filter given, newest first unless ``order`` is ``asc``, and whether more matched than ``limit``."""
     if not camera_ids:
         return [], False
     clauses = [f"t.camera_id IN ({','.join('?' * len(camera_ids))})", "t.last_seen_at>=?", "t.first_seen_at<?"]

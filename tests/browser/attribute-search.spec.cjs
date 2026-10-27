@@ -16,14 +16,14 @@ test("attribute search finds tracks by what they looked like, lists what was not
   await signInNext(page);
   await openSearch(page);
 
-  // Red tops, anywhere, in the last day: two people on two cameras, in time order.
+  // Red tops, anywhere, in the last day: two people on two cameras, newest first.
   await panel(page).getByLabel("Kind").selectOption("person");
   await panel(page).getByLabel("Top colour").selectOption("red");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
   await expect(results(page).getByRole("button")).toHaveCount(2);
-  await expect(results(page).getByRole("button").nth(0)).toContainText("Camera 001");
-  await expect(results(page).getByRole("button").nth(1)).toContainText("Camera 003");
-  await expect(results(page).getByRole("button").nth(0)).toContainText("red top, blue lower, moving right");
+  await expect(results(page).getByRole("button").nth(0)).toContainText("Camera 003");
+  await expect(results(page).getByRole("button").nth(1)).toContainText("Camera 001");
+  await expect(results(page).getByRole("button").nth(1)).toContainText("red top, blue lower, moving right");
   await expect(results(page).getByRole("img")).toHaveCount(0); // The pictures are decorative: the card's name says what it is.
   await expect(results(page).locator("img").first()).toHaveJSProperty("complete", true);
 

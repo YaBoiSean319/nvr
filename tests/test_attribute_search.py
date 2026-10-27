@@ -105,6 +105,11 @@ class ProfileTests(unittest.TestCase):
             tied.add({"vehicle_colour": colour}, box)
         self.assertEqual(tied.summary()["vehicle_colour"], "green")
 
+    def test_a_single_sighting_has_no_direction(self):
+        profile = attributes.TrackProfile()
+        profile.add({}, {"x": 0.4, "y": 0.4, "width": 0.1, "height": 0.2})
+        self.assertIsNone(profile.summary()["direction"])
+
     def test_direction_and_grid_follow_the_path(self):
         profile = attributes.TrackProfile()
         for x in (0.05, 0.3, 0.6, 0.85):
@@ -112,6 +117,16 @@ class ProfileTests(unittest.TestCase):
         summary = profile.summary()
         self.assertEqual(summary["direction"], "right")
         self.assertGreater(bin(summary["zone_mask"]).count("1"), 2)
+
+
+class ModelSharingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_attribute_model_is_loaded_once_for_all_cameras_using_a_provider(self):
+        from unittest import mock
+        from app.detection import DetectionManager
+        manager = DetectionManager()
+        with mock.patch.object(attributes, "load_attribute_model", return_value="loaded") as loader:
+            first, second, other = await manager._attribute_model("CPU"), await manager._attribute_model("CPU"), await manager._attribute_model("GPU")
+        self.assertEqual((first, second, other, loader.call_count), ("loaded", "loaded", "loaded", 2))
 
 
 class FakeCore:
@@ -166,6 +181,21 @@ class AttributeModelTests(unittest.TestCase):
         again = [{"label": "vehicle", "box": box_of(200, 150, 290, 190)}]
         attributes.describe(frame, again, Broken())
         self.assertEqual(again[0]["attributes"], {"vehicle_colour": "green"})
+
+    def test_a_box_whose_width_does_not_round_to_whole_pixels_still_gets_the_models_answer(self):
+        core = FakeCore(colour=0, kind=0)
+        model = attributes.VehicleAttributeModel(Path("/models/vehicle.xml"), core=core)
+        frame = frame_with([((201, 150, 290, 190), (200, 200, 200))])
+        for left, right in ((0.6278, 0.9039), (0.63, 0.9), (0.6251, 0.9049)):
+            box = {"x": left, "y": 0.4, "width": right - left, "height": 0.2}
+            self.assertEqual(model.classify(frame, box), {"vehicle_colour": "white", "vehicle_type": "car"}, box)
+
+    def test_a_detection_whose_pixels_cannot_be_read_is_kept_without_colours(self):
+        detections = [{"label": "person", "box": {"x": "not a number", "y": 0, "width": 0.1, "height": 0.2}}, {"label": "person", "box": box_of(100, 40, 124, 104)}]
+        frame = frame_with([((100, 40, 124, 104), (30, 30, 220))])
+        attributes.describe(frame, detections)
+        self.assertEqual(detections[0]["attributes"], {})
+        self.assertIn("upper_colour", detections[1]["attributes"])
 
     def test_without_the_model_files_there_is_no_model_and_no_error(self):
         self.assertIsNone(attributes.load_attribute_model(Path("/nowhere/vehicle.xml")))
@@ -267,11 +297,25 @@ class FilterTests(SearchCase):
         self.untagged = self.add_track(self.d2, "person", at + timedelta(minutes=5))  # Recorded before attributes existed.
         self.everything = {self.red_walker, self.red_standing, self.blue_walker, self.white_car, self.red_truck, self.untagged}
 
-    def test_with_no_filter_every_track_in_range_is_found_in_time_order(self):
+    def test_with_no_filter_every_track_in_range_is_found_newest_first_by_default(self):
         body = self.run_search()
         self.assertEqual([item["track_id"] for item in body["results"]],
-                         [self.red_walker, self.red_standing, self.blue_walker, self.white_car, self.red_truck, self.untagged])
-        self.assertEqual([item["track_id"] for item in self.run_search(order="desc")["results"]][0], self.untagged)
+                         [self.untagged, self.red_truck, self.white_car, self.blue_walker, self.red_standing, self.red_walker])
+        oldest = self.run_search(order="asc")
+        self.assertEqual([item["track_id"] for item in oldest["results"]][0], self.red_walker)
+
+    def test_a_track_picked_up_again_after_a_restart_keeps_what_was_stored(self):
+        from app import tracks
+        read = lambda db: dict(db.execute("SELECT upper_colour,lower_colour,direction,zone_mask FROM ai_tracks WHERE id=?", (self.red_walker,)).fetchone())  # noqa: E731
+        with connect() as db:
+            before = read(db)
+            fresh = attributes.TrackProfile()  # The worker restarted: this profile has seen one frame of a track the database already knows
+            fresh.add({}, {"x": 0.9, "y": 0.9, "width": 0.05, "height": 0.05})
+            tracks._store_attributes(db, self.red_walker, fresh)
+            after = read(db)
+        self.assertEqual((after["upper_colour"], after["lower_colour"], after["direction"]), (before["upper_colour"], before["lower_colour"], before["direction"]))
+        self.assertEqual(after["zone_mask"] & before["zone_mask"], before["zone_mask"])
+        self.assertNotEqual(after["zone_mask"], before["zone_mask"])
 
     def test_each_filter_returns_the_matching_tracks_and_not_the_others(self):
         cases = [
@@ -323,7 +367,7 @@ class FilterTests(SearchCase):
     def test_a_search_is_limited_and_says_when_there_are_more(self):
         body = self.run_search(limit=2)
         self.assertEqual((len(body["results"]), body["truncated"]), (2, True))
-        self.assertEqual([item["track_id"] for item in body["results"]], [self.red_walker, self.red_standing])
+        self.assertEqual([item["track_id"] for item in body["results"]], [self.untagged, self.red_truck])  # The newest are the ones kept
         self.assertFalse(self.run_search(limit=6)["truncated"])
 
     def test_bad_filters_and_ranges_are_refused(self):
@@ -466,11 +510,12 @@ class ThumbnailTests(SearchCase):
             db.execute("INSERT INTO track_keyframes(track_id,captured_at,jpeg) VALUES(?,?,?)", (track, (NOW - timedelta(hours=1)).isoformat(), jpeg))
         return track
 
-    def test_the_thumbnail_is_the_stored_frame_and_is_cached_privately(self):
+    def test_the_thumbnail_is_the_stored_frame_and_is_never_kept_by_the_browser(self):
         track = self.keyframe_track()
         response = self.admin.get(f"/api/ai/tracks/{track}/thumbnail")
         self.assertEqual((response.status_code, response.headers["content-type"]), (200, "image/jpeg"))
-        self.assertIn("private", response.headers["cache-control"])
+        # A privacy mask added after the picture was fetched must apply on the next view, so nothing is reused.
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
         self.assertGreater(float(self.decode(response.content).mean()), 60)
 
     def test_a_privacy_mask_is_drawn_over_the_thumbnail(self):

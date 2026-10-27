@@ -39,7 +39,7 @@ def search_tracks(
     vehicle_type: str | None = Query(default=None, max_length=16),
     direction: str | None = Query(default=None, max_length=16),
     zone: str | None = Query(default=None, max_length=64),
-    order: str = Query(default="asc", pattern="^(asc|desc)$"),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=60, ge=1, le=search.MAX_LIMIT),
 ) -> dict[str, object]:
     try:
@@ -83,4 +83,4 @@ async def track_thumbnail(track_id: str, user: CurrentUser) -> Response:
         picture = await privacy.mask_jpeg(bytes(row["jpeg"]), zones)
     except Exception:  # noqa: BLE001 - never the unmasked picture
         raise HTTPException(status_code=503, detail="The privacy mask could not be applied to this picture") from None
-    return Response(picture, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+    return Response(picture, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
