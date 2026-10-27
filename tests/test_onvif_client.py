@@ -268,7 +268,7 @@ class FailureTests(CameraCase):
         client = self.client()
         with self.assertRaises(OnvifError) as caught:
             await client.device_information(await client.locate_device(f"{camera.origin}/onvif/nothing-here"))
-        self.assertEqual(caught.exception.code, "unreachable")  # Nothing there answers like an ONVIF device.
+        self.assertEqual(caught.exception.code, "service_unavailable")
 
     async def test_a_camera_that_answers_with_a_web_page_or_unsafe_xml_is_malformed(self):
         for behaviour in ("html", "doctype"):

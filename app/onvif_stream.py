@@ -143,7 +143,8 @@ async def resolve_camera_stream(
                 if profile is None:
                     raise ValueError("The selected ONVIF profile is not on the camera any more; choose a profile again")
             else:
-                profile = choose_profiles(profiles).record
+                profile = choose_profiles(profiles).record or next((item for item in profiles if item.encoding == "other" and not item.width and not item.height), None)
+                # A profile with no encoder details at all is tried anyway; the video check decides.
                 if profile is None:
                     raise ValueError("No compatible video profile found on the camera")
             uri = await client.stream_uri(services, profile)

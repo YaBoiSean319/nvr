@@ -329,8 +329,9 @@ class OnvifClient:
                 refused += exc.code == "unreachable"
                 self._note(operation="Locate", service="device", auth="none", outcome=exc.code, status=None, ms=int((time.monotonic() - started) * 1000), port=urlsplit(url).port)
                 continue
-            # Any SOAP answer, even a fault that wants credentials, shows an ONVIF device is here.
-            if root is not None and any(_local(node.tag) in {"Envelope", "Fault"} for node in root.iter()):
+            # Any SOAP answer, even a fault that wants credentials, shows an ONVIF device is here. At an address the administrator gave, any HTTP answer will do:
+            # a wrong path is reported by the first real request.
+            if device_service_url or root is not None and any(_local(node.tag) in {"Envelope", "Fault"} for node in root.iter()):
                 self._note(operation="Locate", service="device", auth="none", outcome="ok", status=response.status_code, ms=int((time.monotonic() - started) * 1000), port=urlsplit(url).port)
                 self._device_url = url
                 return url
