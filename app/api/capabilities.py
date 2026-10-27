@@ -30,7 +30,9 @@ def get_capabilities(camera_id: str, _: CurrentUser) -> dict[str, object]:
 async def recheck_capabilities(camera_id: str, admin: Administrator) -> dict[str, object]:
     """Test video and motion events again now, instead of waiting for the scheduled recheck."""
     _camera_exists(camera_id)
-    await asyncio.gather(*(capabilities.recheck(camera_id, name) for name in capabilities.RECHECKED))
+    results = await asyncio.gather(*(capabilities.recheck(camera_id, name) for name in capabilities.RECHECKED))
+    if all(item is None for item in results):
+        raise HTTPException(status_code=404, detail="Camera not found")  # It was deleted while being checked
     with connect() as db:
         record(db, admin.id, "camera_capabilities_rechecked", "camera", camera_id)
         return {"capabilities": capabilities.view(db, camera_id)}

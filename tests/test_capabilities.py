@@ -179,6 +179,75 @@ class RecheckTests(StoreCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(capabilities.view(db, self.camera_id)["video"]["state"], "ok")
 
 
+class HealthRobustnessTests(StoreCase, unittest.IsolatedAsyncioTestCase):
+    async def test_cameras_saved_before_health_existed_are_checked_once_and_then_kept_up_to_date(self):
+        with connect() as db:
+            self.assertEqual(capabilities.seed(db), 1)
+            self.assertEqual(capabilities.seed(db), 0)
+            shown = capabilities.view(db, self.camera_id)
+        self.assertEqual((shown["video"]["state"], shown["motion"]["state"]), ("unknown", "unsupported"))
+        await asyncio.sleep(capabilities.UNKNOWN_RETRY_SECONDS + 0.2)
+        with mock.patch("app.recording.probe_stream", new=AsyncMock(return_value={"reachable": True, "video": {"codec": "h264", "width": 1280, "height": 720}, "audio": True})):
+            self.assertEqual(await capabilities.CapabilityManager().process_once(), 1)
+        with connect() as db:
+            shown = capabilities.view(db, self.camera_id)
+            row = db.execute("SELECT video_codec,video_width,audio_supported FROM cameras WHERE id=?", (self.camera_id,)).fetchone()
+        self.assertEqual((shown["video"]["state"], shown["audio"]["state"], tuple(row)), ("ok", "available", ("h264", 1280, 1)))
+        self.assertIn("recording is off", shown["video"]["message"])  # The camera was added with recording off: say so
+
+    async def test_one_check_that_raises_does_not_stop_the_others(self):
+        other = self.add_camera("Dock")
+        for camera_id in (self.camera_id, other):
+            with connect() as db:
+                capabilities.record(db, camera_id, "video", "failed", "x")
+                db.execute("UPDATE camera_capabilities SET next_retry_at=? WHERE camera_id=?", ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), camera_id))
+        real = capabilities.recheck
+
+        async def flaky(camera_id, capability):
+            if camera_id == self.camera_id:
+                raise RuntimeError("boom")
+            return await real(camera_id, capability)
+
+        with mock.patch("app.capabilities.recheck", new=flaky), mock.patch("app.recording.probe_stream", new=AsyncMock(return_value={"reachable": True})):
+            self.assertEqual(await capabilities.CapabilityManager().process_once(), 2)
+        with connect() as db:
+            self.assertEqual(capabilities.view(db, other)["video"]["state"], "ok")
+
+    async def test_a_camera_deleted_while_it_is_checked_is_not_a_crash(self):
+        async def deleted_meanwhile(_stream):
+            with connect() as db:
+                db.execute("DELETE FROM cameras WHERE id=?", (self.camera_id,))
+            return {"reachable": True}
+        with mock.patch("app.recording.probe_stream", new=deleted_meanwhile):
+            self.assertIsNone(await capabilities.recheck(self.camera_id, "video"))
+
+    async def test_a_check_that_hangs_is_cut_off(self):
+        async def hangs(_stream):
+            await asyncio.sleep(30)
+        with mock.patch.object(capabilities, "CHECK_SECONDS", 0.2), mock.patch("app.recording.probe_stream", new=hangs):
+            result = await capabilities.recheck(self.camera_id, "video")
+        self.assertEqual((result["state"], result["message"]), ("failed", "The check could not be completed"))
+
+    async def test_an_event_address_with_a_login_in_it_is_refused_without_contacting_anything(self):
+        with connect() as db:
+            db.execute("UPDATE cameras SET motion_service_url='http://user:pw@127.0.0.1/onvif/device_service' WHERE id=?", (self.camera_id,))
+        result = await capabilities.recheck(self.camera_id, "motion")
+        self.assertEqual((result["state"], result["message"]), ("failed", "The ONVIF event address is not valid"))
+        self.assertNotIn("pw", str(result))
+
+    def test_the_failure_count_is_kept_by_the_database(self):
+        with connect() as db:
+            for _ in range(3):
+                capabilities.record(db, self.camera_id, "motion", "failed", "x")
+            self.assertEqual(capabilities.view(db, self.camera_id)["motion"]["failures"], 3)
+
+    def test_capabilities_that_cannot_be_tested_alone_are_ignored_by_due_even_if_marked(self):
+        with connect() as db:
+            capabilities.record(db, self.camera_id, "ptz", "failed", "x")
+            db.execute("UPDATE camera_capabilities SET next_retry_at=? WHERE capability='ptz'", ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),))
+            self.assertEqual(capabilities.due(db), [])
+
+
 class SaveAnywayTests(GrantCase):
     def setUp(self):
         super().setUp()
@@ -201,7 +270,7 @@ class SaveAnywayTests(GrantCase):
         shown = self.admin.get(f"/api/cameras/{camera['id']}/capabilities").json()["capabilities"]
         self.assertEqual((shown["video"]["state"], shown["video"]["message"]), ("failed", "Camera stream could not be opened"))
         self.assertIsNotNone(shown["video"]["next_retry_at"])
-        self.assertEqual((shown["discovery"]["state"], shown["authentication"]["state"], shown["motion"]["state"]), ("ok", "ok", "unknown"))
+        self.assertEqual((shown["discovery"]["state"], shown["authentication"]["state"], shown["motion"]["state"]), ("ok", "ok", "ok"))  # From a real inspection: the mock camera accepts a motion subscription
         for secret in (PASSWORD, "rtsp://"):
             self.assertNotIn(secret, self.admin.get(f"/api/cameras/{camera['id']}/capabilities").text)
 
@@ -223,6 +292,47 @@ class SaveAnywayTests(GrantCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["capabilities"]["video"]["state"], "ok")
         self.assertEqual(len(self.audit("camera_capabilities_rechecked")), 1)
+
+    def stored_stream(self, camera_id: str) -> str:
+        from app.credentials import decrypt
+        with connect() as db:
+            return decrypt(db.execute("SELECT stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()[0])
+
+    def test_a_camera_whose_stream_address_onvif_will_not_give_is_saved_and_the_address_is_found_later(self):
+        broken = OnvifCamera(username=USER, password=PASSWORD, behaviours={"GetProfiles": "fault"})
+        self.addCleanup(broken.close)
+        body = self.body(device_service_url=broken.url, save_anyway=True)
+        refused = self.admin.post("/api/cameras", json={**body, "save_anyway": False})
+        self.assertEqual(refused.status_code, 422)
+        saved = self.admin.post("/api/cameras", json=body)
+        self.assertEqual(saved.status_code, 201, saved.text)
+        camera_id = saved.json()["id"]
+        self.assertFalse(saved.json()["recording_enabled"])
+        self.assertEqual(self.stored_stream(camera_id), "rtsp://127.0.0.1/")  # A stand-in with no login
+        shown = self.admin.get(f"/api/cameras/{camera_id}/capabilities").json()["capabilities"]
+        self.assertEqual((shown["video"]["state"], shown["discovery"]["state"], shown["authentication"]["state"]), ("failed", "ok", "ok"))
+        self.assertTrue(shown["video"]["message"] and PASSWORD not in shown["video"]["message"])  # The reason ONVIF gave, never the login
+        # The camera is fixed; the recheck asks ONVIF again and stores the real address.
+        broken.behaviours.clear()
+        with mock.patch("app.recording.probe_stream", new=AsyncMock(return_value={"reachable": True, "video": {"codec": "h264", "width": 1920, "height": 1080}})):
+            after = self.admin.post(f"/api/cameras/{camera_id}/capabilities/recheck").json()["capabilities"]
+        self.assertEqual(after["video"]["state"], "ok")
+        self.assertTrue(self.stored_stream(camera_id).startswith("rtsp://"))
+        self.assertIn("/profile2/", self.stored_stream(camera_id))
+        self.assertNotIn(PASSWORD, self.admin.get(f"/api/cameras/{camera_id}/capabilities").text)
+
+    def test_an_unreachable_stream_with_a_live_substream_asked_for_saves_without_the_substream_or_its_token(self):
+        with mock.patch("app.api.cameras.probe_stream", new=AsyncMock(return_value={"reachable": False, "reason": "No answer"})):
+            saved = self.admin.post("/api/cameras", json=self.body(save_anyway=True, onvif_profile_token="profile2", live_substream_profile_token="profile3"))
+        self.assertEqual(saved.status_code, 201, saved.text)
+        self.assertIsNone(saved.json()["live_substream_profile_token"])
+
+    def test_audio_is_not_called_unsupported_when_the_video_never_opened(self):
+        with mock.patch("app.api.cameras.probe_stream", new=AsyncMock(return_value={"reachable": False, "reason": "No answer"})):
+            saved = self.admin.post("/api/cameras", json={"name": "Direct", "stream_url": "rtsp://192.0.2.50/stream", "save_anyway": True})
+        self.assertEqual(saved.status_code, 201, saved.text)
+        shown = self.admin.get(f"/api/cameras/{saved.json()['id']}/capabilities").json()["capabilities"]
+        self.assertEqual((shown["audio"]["state"], shown["discovery"]["state"], shown["authentication"]["state"]), ("unknown", "unsupported", "unknown"))
 
     def test_an_unknown_camera_is_not_found(self):
         missing = str(uuid.uuid4())

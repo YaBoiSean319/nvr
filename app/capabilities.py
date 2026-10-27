@@ -27,6 +27,7 @@ FIRST_RETRY_SECONDS = 30
 MAX_RETRY_SECONDS = 1800
 UNKNOWN_RETRY_SECONDS = 5
 POLL_SECONDS = 15
+CHECK_SECONDS = 45  # No single check holds up the others for longer than this
 BATCH = 4  # Rechecks started in one poll
 RECHECKED = ("video", "motion")  # What the background recheck can test on its own
 
@@ -45,21 +46,22 @@ def record(db: sqlite3.Connection, camera_id: str, capability: str, state: str, 
     """Store a capability's state. A failure schedules the next check later each time; a success or an unsupported capability stops the checks."""
     if capability not in CAPABILITIES or state not in STATES:
         raise ValueError("Unknown camera capability or state")
-    current = db.execute("SELECT failures FROM camera_capabilities WHERE camera_id=? AND capability=?", (camera_id, capability)).fetchone()
-    failures = ((current["failures"] if current else 0) + 1) if state == "failed" else 0
     when = now()
+    # The count is kept by the database, so two checks of the same capability at once cannot lose an update.
+    db.execute(
+        "INSERT INTO camera_capabilities(camera_id,capability,state,message,checked_at,failures,next_retry_at) VALUES(?,?,?,?,?,?,NULL) "
+        "ON CONFLICT(camera_id,capability) DO UPDATE SET state=excluded.state,message=excluded.message,checked_at=excluded.checked_at,"
+        "failures=CASE WHEN excluded.state='failed' THEN camera_capabilities.failures+1 ELSE 0 END",
+        (camera_id, capability, state, message[:300], when.isoformat(), 1 if state == "failed" else 0),
+    )
     if state == "failed":
+        failures = db.execute("SELECT failures FROM camera_capabilities WHERE camera_id=? AND capability=?", (camera_id, capability)).fetchone()["failures"]
         retry: str | None = (when + timedelta(seconds=retry_delay(failures))).isoformat()
     elif state == "unknown" and capability in RECHECKED:
         retry = (when + timedelta(seconds=UNKNOWN_RETRY_SECONDS)).isoformat()
     else:
         retry = None
-    db.execute(
-        "INSERT INTO camera_capabilities(camera_id,capability,state,message,checked_at,failures,next_retry_at) VALUES(?,?,?,?,?,?,?) "
-        "ON CONFLICT(camera_id,capability) DO UPDATE SET state=excluded.state,message=excluded.message,checked_at=excluded.checked_at,"
-        "failures=excluded.failures,next_retry_at=excluded.next_retry_at",
-        (camera_id, capability, state, message[:300], when.isoformat(), failures, retry),
-    )
+    db.execute("UPDATE camera_capabilities SET next_retry_at=? WHERE camera_id=? AND capability=?", (retry, camera_id, capability))
 
 
 def record_report(db: sqlite3.Connection, camera_id: str, capabilities: dict[str, dict[str, str]]) -> None:
@@ -80,6 +82,15 @@ def view(db: sqlite3.Connection, camera_id: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+def seed(db: sqlite3.Connection, limit: int = 50) -> int:
+    """Give cameras saved before capability health existed a video and a motion row, due now, so they are checked once and then kept up to date."""
+    rows = db.execute("SELECT id,motion_service_url FROM cameras WHERE enabled=1 AND id NOT IN (SELECT camera_id FROM camera_capabilities WHERE capability='video') LIMIT ?", (limit,)).fetchall()
+    for row in rows:
+        record(db, row["id"], "video", "unknown", "Not checked yet")
+        record(db, row["id"], "motion", "unknown" if row["motion_service_url"] else "unsupported", "Not checked yet" if row["motion_service_url"] else "No ONVIF event service is set")
+    return len(rows)
+
+
 def due(db: sqlite3.Connection, limit: int = BATCH) -> list[tuple[str, str]]:
     """The (camera, capability) pairs whose recheck time has come, oldest first, for cameras that are enabled."""
     marks = ",".join("?" for _ in RECHECKED)
@@ -88,12 +99,32 @@ def due(db: sqlite3.Connection, limit: int = BATCH) -> list[tuple[str, str]]:
         f"AND k.next_retry_at<=? AND k.capability IN ({marks}) ORDER BY k.next_retry_at LIMIT ?", (now().isoformat(), *RECHECKED, limit))]
 
 
-async def check_video(stream_url: str) -> tuple[str, str]:
+async def check_video(row: sqlite3.Row) -> tuple[str, str]:
+    from .onvif_stream import resolve_camera_stream
     from .recording import probe_stream
+    stream_url = decrypt(row["stream_url_ciphertext"])
+    camera_ip = row["camera_ip"]
+    if camera_ip and stream_url == f"rtsp://{camera_ip}/":
+        # The camera was saved before ONVIF would give its stream address (a stand-in is stored): ask again.
+        credentials = json.loads(decrypt(row["motion_credentials_ciphertext"])) if row["motion_credentials_ciphertext"] else {"username": "", "password": ""}
+        try:
+            source = await resolve_camera_stream(camera_ip, credentials.get("username", ""), credentials.get("password", ""), row["device_service_url"],
+                                                 row["onvif_profile_token"], row["camera_brand"] or "auto")
+        except ValueError as error:
+            return "failed", str(error)[:300]
+        stream_url = source.stream_url
+        from .credentials import encrypt
+        with connect() as db:
+            db.execute("UPDATE cameras SET stream_url_ciphertext=? WHERE id=?", (encrypt(stream_url), row["id"]))
     result = await probe_stream(stream_url)
-    if result.get("reachable"):
-        return "ok", "Video is flowing"
-    return "failed", str(result.get("reason") or "The camera's video stream could not be opened")[:300]
+    if not result.get("reachable"):
+        return "failed", str(result.get("reason") or "The camera's video stream could not be opened")[:300]
+    video = result.get("video") or {}
+    with connect() as db:
+        db.execute("UPDATE cameras SET video_codec=?,video_width=?,video_height=?,audio_supported=?,last_probe_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+                   (video.get("codec"), video.get("width"), video.get("height"), int(bool(result.get("audio"))), row["id"]))
+        record(db, row["id"], "audio", "available" if result.get("audio") else "unsupported", "The camera carries audio" if result.get("audio") else "No audio on the stream")
+    return "ok", "Video is flowing" + ("" if row["recording_enabled"] else "; recording is off until you turn it on")
 
 
 async def check_motion(row: sqlite3.Row) -> tuple[str, str]:
@@ -103,6 +134,8 @@ async def check_motion(row: sqlite3.Row) -> tuple[str, str]:
     if not url:
         return "unsupported", "No ONVIF event service is set: the NVR's own motion detection can be used"
     parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return "failed", "The ONVIF event address is not valid"
     credentials = json.loads(decrypt(row["motion_credentials_ciphertext"])) if row["motion_credentials_ciphertext"] else {"username": "", "password": ""}
     try:
         async with OnvifClient(parsed.hostname or "", credentials.get("username", ""), credentials.get("password", "")) as client:
@@ -129,17 +162,18 @@ async def recheck(camera_id: str, capability: str) -> dict[str, Any] | None:
         return None
     try:
         if capability == "video":
-            state, message = await check_video(decrypt(row["stream_url_ciphertext"]))
+            state, message = await asyncio.wait_for(check_video(row), CHECK_SECONDS)
         else:
-            state, message = await check_motion(row)
+            state, message = await asyncio.wait_for(check_motion(row), CHECK_SECONDS)
     except Exception:  # noqa: BLE001 - a test that could not run is a failed check, not a crash
         logger.warning("A camera capability could not be checked")
         state, message = "failed", "The check could not be completed"
-    with connect() as db:
-        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
-            return None
-        record(db, camera_id, capability, state, message)
-        return view(db, camera_id)[capability]
+    try:
+        with connect() as db:
+            record(db, camera_id, capability, state, message)
+            return view(db, camera_id)[capability]
+    except sqlite3.IntegrityError:
+        return None  # The camera was deleted while it was being checked
 
 
 class CapabilityManager:
@@ -160,8 +194,11 @@ class CapabilityManager:
 
     async def process_once(self) -> int:
         with connect() as db:
+            seed(db)
             ready = due(db)
-        await asyncio.gather(*(recheck(camera_id, capability) for camera_id, capability in ready))
+        results = await asyncio.gather(*(recheck(camera_id, capability) for camera_id, capability in ready), return_exceptions=True)
+        for failed in (item for item in results if isinstance(item, BaseException)):
+            logger.warning("A camera capability recheck failed: %s", type(failed).__name__)
         return len(ready)
 
     async def _run(self) -> None:

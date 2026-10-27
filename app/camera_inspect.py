@@ -93,9 +93,9 @@ async def _check_live(client: OnvifClient, services: Services, live: MediaProfil
     """Resolve the lower-resolution live stream and, when video is being verified, decode a frame from it. A problem is a warning: live view can use the main stream."""
     try:
         source = client.stream_url_with_login(await client.stream_uri(services, live))
-    except OnvifError as exc:
+    except (OnvifError, ValueError) as exc:
         selection["live_verified"] = False
-        selection["warnings"] = [*selection["warnings"], f"The live sub-stream could not be resolved: {_failure(exc)}"]
+        selection["warnings"] = [*selection["warnings"], f"The live sub-stream could not be resolved: {exc.message if isinstance(exc, OnvifError) else 'invalid address'}"]
         return
     if not verify:
         selection["live_verified"] = None
