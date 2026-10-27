@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,7 +50,7 @@ class HanwhaTests(InspectCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["device"], {"manufacturer": "Hanwha Techwin", "model": "XNV-6120R", "firmware": "2.00.00"})
         self.assertEqual(result["brand"], "hanwha")
-        self.assertEqual([step["label"] for step in result["steps"]], ["Connecting to camera", "Authenticating", "Identifying device", "Discovering streams", "Checking motion events", "Verifying video", "Camera ready"])
+        self.assertEqual([step["label"] for step in result["steps"]], ["Connecting to camera", "Authenticating", "Identifying device", "Discovering streams", "Configuring motion events", "Verifying video", "Camera ready"])
         self.assertEqual(set(self.states(result).values()), {"ok"})
         self.assertEqual(result["auth"], {"device": "digest", "media": "digest", "events": "wsse"})
         # The H.264 main stream is chosen to record, not the MJPEG profile the camera lists first and not the H.265 one; the H.264 sub-stream is for the grid.
@@ -90,7 +91,7 @@ class HanwhaTests(InspectCase):
         with mock.patch("app.camera_inspect.verify_video", new=mock.AsyncMock()) as checked:
             result = await camera_inspect.inspect_camera("127.0.0.1", USER, PASSWORD, device_service_url=camera.url, verify=False)
         checked.assert_not_awaited()
-        self.assertEqual((result["ok"], result["capabilities"]["video"]["state"]), (False, "unknown"))
+        self.assertEqual((result["ok"], result["capabilities"]["video"]["state"]), (True, "unknown"))
 
 
 class FailureTests(InspectCase):
@@ -182,6 +183,13 @@ class DecodeTests(unittest.IsolatedAsyncioTestCase):
             broken.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"not video" * 100)
             result = await camera_inspect.verify_video(f"file:{broken}", self.FILES)
         self.assertEqual((result["decoded"], result["reason"]), (False, "RTSP stream connected but video decoding failed"))
+
+    async def test_a_stream_with_no_video_frames_is_not_called_decoded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=1", str(audio)], check=True)
+            result = await camera_inspect.verify_video(f"file:{audio}", self.FILES)
+        self.assertFalse(result["decoded"])
 
     async def test_a_stream_that_never_answers_times_out_with_a_reason(self):
         with mock.patch.object(camera_inspect, "DECODE_TIMEOUT_SECONDS", 0.3), mock.patch("app.recording._manifest_bytes", return_value=b"ffconcat version 1.0\nfile /dev/zero\n"):

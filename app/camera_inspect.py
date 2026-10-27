@@ -20,7 +20,7 @@ from .onvif_profiles import MediaProfile, Selection, choose_profiles
 
 STEPS = (
     ("connect", "Connecting to camera"), ("authenticate", "Authenticating"), ("identify", "Identifying device"),
-    ("streams", "Discovering streams"), ("motion", "Checking motion events"), ("video", "Verifying video"), ("ready", "Camera ready"),
+    ("streams", "Discovering streams"), ("motion", "Configuring motion events"), ("video", "Verifying video"), ("ready", "Camera ready"),
 )
 DECODE_TIMEOUT_SECONDS = 25
 STREAM_PROTOCOLS: str | None = None  # Camera protocols only; the tests widen it to read generated files.
@@ -63,10 +63,10 @@ async def verify_video(source: str, protocols: str | None = None) -> dict[str, A
     if not opened.get("reachable"):
         return {"decoded": False, "opened": False, "reason": f"The camera's video stream could not be opened: {opened.get('reason', 'no answer')}"}
     args = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-protocol_whitelist", protocols or STREAM_PROTOCOLS or _PROTOCOLS,
-            "-i", "pipe:0", "-an", "-frames:v", "1", "-f", "null", "-"]
-    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            "-i", "pipe:0", "-an", "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
+    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
-        await asyncio.wait_for(process.communicate(_manifest_bytes(source)), timeout=DECODE_TIMEOUT_SECONDS)
+        frame, _ = await asyncio.wait_for(process.communicate(_manifest_bytes(source)), timeout=DECODE_TIMEOUT_SECONDS)
     except (asyncio.TimeoutError, OSError):
         return {"decoded": False, "opened": True, "reason": "RTSP stream connected but no video frame arrived in time"}
     finally:
@@ -75,6 +75,8 @@ async def verify_video(source: str, protocols: str | None = None) -> dict[str, A
             await process.wait()
     if process.returncode != 0:
         return {"decoded": False, "opened": True, "reason": "RTSP stream connected but video decoding failed"}
+    if not frame:
+        return {"decoded": False, "opened": True, "reason": "RTSP stream connected but it carried no video frames"}
     return {"decoded": True, "opened": True, "video": opened.get("video")}
 
 
@@ -132,16 +134,21 @@ async def _inspect(host: str, username: str, password: str, device_service_url: 
         info = None
         try:
             info = await client.device_information(url)
-            done("authenticate", "ok", f"Signed in with {client.auth_by_service.get('device', 'none').replace('+', ' and ')}")
-            capabilities["authentication"] = _state("ok", steps["authenticate"]["detail"])
+            method = client.auth_by_service.get("device", "none")
+            if method == "none" and username:
+                done("authenticate", "ok", "The camera's device service does not ask for a login; the credentials are checked on its other services")
+                capabilities["authentication"] = _state("unknown", steps["authenticate"]["detail"])
+            else:
+                done("authenticate", "ok", "No login is needed" if method == "none" else f"Signed in with {method.replace('+', ' and ')}")
+                capabilities["authentication"] = _state("ok", steps["authenticate"]["detail"])
         except OnvifError as exc:
             if exc.code == "auth_rejected":
                 done("authenticate", "failed", _failure(exc))
                 capabilities["authentication"] = _state("failed", _failure(exc))
                 return finish(client)
-            # The camera would not describe itself, but accepted the login (or needs none): go on to its streams.
+            # The camera would not describe itself, but did not reject the login: go on to its streams.
             done("authenticate", "ok", "Credentials were not rejected")
-            capabilities["authentication"] = _state("ok", "Credentials were not rejected")
+            capabilities["authentication"] = _state("unknown", "Credentials were not rejected, but sign-in could not be confirmed")
             done("identify", "failed", _failure(exc))
         if info is not None:
             report["device"] = {"manufacturer": info.manufacturer, "model": info.model, "firmware": info.firmware}
@@ -169,6 +176,7 @@ async def _inspect(host: str, username: str, password: str, device_service_url: 
             capabilities["video"] = _state("failed", _failure(exc))
             if exc.code == "auth_rejected":
                 capabilities["authentication"] = _state("failed", _failure(exc))
+                done("authenticate", "failed", _failure(exc))
         if services is not None:
             names = set(services.urls)
             capabilities["ptz"] = _state("available", "The camera has a PTZ service") if "ptz" in names or any(item.has_ptz for item in profiles) else _state("unsupported", "No PTZ service")
@@ -206,6 +214,7 @@ async def _inspect(host: str, username: str, password: str, device_service_url: 
                 else:
                     result = await verify_video(source, protocols)
                     if result.get("decoded"):
+                        report["video"] = result.get("video")
                         done("video", "ok", f"Decoded video from {selection.record.name}")
                         capabilities["video"] = _state("ok", f"Decoded video from {selection.record.name}")
                     else:
@@ -214,6 +223,7 @@ async def _inspect(host: str, username: str, password: str, device_service_url: 
         elif steps["video"]["state"] == "pending":
             done("video", "skipped", "Not checked: no video profile was chosen")
 
-        report["ok"] = capabilities["video"]["state"] == "ok"
+        skipped = steps["video"]["state"] == "skipped" and not verify and selection is not None and selection.record is not None
+        report["ok"] = capabilities["video"]["state"] == "ok" or skipped
         done("ready", "ok" if report["ok"] else "failed", "" if report["ok"] else "Video could not be verified; the camera can still be saved and fixed later")
         return finish(client)

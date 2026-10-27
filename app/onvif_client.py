@@ -114,7 +114,7 @@ def normalise_host(value: str) -> str:
         if not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*", text):
             raise ValueError("Enter the camera's IP address or host name") from None
         return text.lower()
-    if address.is_unspecified or address.is_multicast:
+    if address.is_unspecified or address.is_multicast or address.is_link_local:
         raise ValueError("Enter a unicast camera address")
     return str(address)
 
@@ -142,6 +142,8 @@ class OnvifClient:
         self.auth_by_service: dict[str, str] = {}
         self._digests: dict[str, httpx.DigestAuth] = {}  # One for each service address: after its first challenge it answers the next requests without another round trip.
         self.trace: list[dict[str, Any]] = []
+        self._refused = False
+        self._device_url: str | None = None
 
     async def __aenter__(self) -> "OnvifClient":
         return self
@@ -182,8 +184,7 @@ class OnvifClient:
         self.trace.append(entry)
         del self.trace[:-200]
 
-    @staticmethod
-    def _fault(root: ET.Element | None) -> tuple[str, str] | None:
+    def _fault(self, root: ET.Element | None) -> tuple[str, str] | None:
         """The (code, reason) of a SOAP fault, or None when the document is not one."""
         if root is None:
             return None
@@ -192,7 +193,14 @@ class OnvifClient:
             return None
         values = [node.text.strip() for node in fault.iter() if _local(node.tag) in {"Value", "faultcode"} and node.text]
         reasons = [node.text.strip() for node in fault.iter() if _local(node.tag) in {"Text", "faultstring"} and node.text]
-        return " ".join(values)[:200], (reasons[0] if reasons else "")[:200]
+        return self._scrub(" ".join(values))[:200], self._scrub(reasons[0] if reasons else "")[:200]
+
+    def _scrub(self, text: str) -> str:
+        """Camera-supplied text with the login removed, since some firmware repeats the submitted user or password in a fault."""
+        for secret in (self._password, self._username):
+            if secret:
+                text = text.replace(secret, "***")
+        return text
 
     @staticmethod
     def _is_auth_fault(code: str, reason: str) -> bool:
@@ -229,10 +237,13 @@ class OnvifClient:
         """Send one SOAP operation, negotiating authentication, and return the response document. ``OnvifError`` says why it failed."""
         action = f"{namespace}/{operation}"
         rejected = False
+        if self._refused and service not in self.auth_by_service:
+            # Every login method was already refused: asking again only counts towards a camera's account lock-out.
+            raise OnvifError("auth_rejected", step=operation)
         queue = self._methods(service)
         while queue:
             method = queue.pop(0)
-            if "wsse" in method and self.clock_offset is None and service != "device-time":
+            if "wsse" in method and self.clock_offset is None:
                 await self._sync_clock()
             started = time.monotonic()
             try:
@@ -246,8 +257,9 @@ class OnvifClient:
             if status in {401, 403} or (fault and self._is_auth_fault(*fault)):
                 rejected = True
                 self._note(operation=operation, service=service, auth=method, outcome="auth_failed", status=status, ms=elapsed)
-                if "digest" not in method and "digest" not in response.headers.get("www-authenticate", "").casefold():
-                    # Nothing asked for HTTP Digest, so trying it would send exactly what was just refused: go on to WS-Security.
+                challenge = response.headers.get("www-authenticate", "").casefold()
+                if "digest" not in method and challenge and "digest" not in challenge:
+                    # The camera named another scheme and not Digest, so Digest would send what was just refused: go on to WS-Security.
                     queue = [item for item in queue if "digest" not in item]
                 continue
             if status == 404:
@@ -270,12 +282,13 @@ class OnvifClient:
             return root
         if rejected and not self._username:
             raise OnvifError("auth_rejected", "The camera requires a username and password", step=operation)
+        self._refused = self._refused or (rejected and bool(self._username))
         raise OnvifError("auth_rejected" if rejected else "unreachable", step=operation)
 
     async def _sync_clock(self) -> None:
         """Read the camera's clock so a WS-Security token is stamped with the camera's time; a camera that will not say is taken to agree."""
         self.clock_offset = timedelta()
-        url = getattr(self, "_device_url", None)
+        url = self._device_url
         if not url:
             return
         try:

@@ -118,6 +118,8 @@ def choose_profiles(profiles: list[MediaProfile]) -> Selection:
     if skipped:
         reason += f"; {' and '.join(skipped)} profiles were not chosen because {others[record.encoding]} is available"
     problems = ("Only MJPEG is available: recordings will be much larger and playback may be limited",) if record.encoding == "mjpeg" else ()
+    if record.encoding == "h265":
+        problems += ("Only H.265 is available: recording and browser playback of H.265 may be limited",)
     smaller = [item for item in usable if item.encoding == "h264" and item.token != record.token and 0 < item.pixels < record.pixels]
     live = None
     if smaller:

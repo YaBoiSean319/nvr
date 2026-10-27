@@ -60,11 +60,11 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(choose_profiles([make("a", "mjpeg", 1920, 1080), make("b", "h265", 1280, 720)]).record.token, "b")
         self.assertEqual(choose_profiles([make("a", "h265", 3840, 2160), make("b", "h264", 640, 360)]).record.token, "b")
 
-    def test_mjpeg_alone_is_used_with_a_warning_and_h265_alone_without_one(self):
+    def test_mjpeg_alone_is_used_with_a_warning_and_h265_alone_with_one(self):
         only_mjpeg = choose_profiles([make("a", "mjpeg", 1280, 720)])
         self.assertEqual(only_mjpeg.record.token, "a")
         self.assertTrue(only_mjpeg.problems and "MJPEG" in only_mjpeg.problems[0])
-        self.assertEqual(choose_profiles([make("a", "h265", 1280, 720)]).problems, ())
+        self.assertIn("H.265", choose_profiles([make("a", "h265", 1280, 720)]).problems[0])
 
     def test_within_a_codec_the_most_pixels_then_frame_rate_then_bit_rate_win(self):
         self.assertEqual(choose_profiles([make("small", "h264", 1280, 720), make("big", "h264", 1920, 1080)]).record.token, "big")

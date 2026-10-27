@@ -24,6 +24,20 @@ Recording uses the best H.264 profile (then H.265, then MJPEG). MJPEG is chosen 
 
 Discovery, authentication, video, audio, motion and PTZ are reported separately, each as ok, available, unsupported, failed or unknown. Unavailable motion events do not make working video unhealthy.
 
+## Sign-in attempts and secrets
+
+Some cameras lock an account after a few failed logins. Once every sign-in method has been refused, the NVR stops asking that camera, and the report says the login was rejected. Text a camera puts in a SOAP fault has the username and password removed before it is shown. Diagnostics list each request (operation, service, method tried, outcome, status, time) and never a header, body, credential or credentialed address. Link-local addresses are refused as camera addresses.
+
+`NVR_ONVIF_TIMEOUT_SECONDS` sets how long the NVR waits for each ONVIF request.
+
+## Profile lists
+
+`/api/cameras/onvif-profiles` now also returns each profile's codec, resolution, frame rate, whether it has audio, which Media service listed it, and `suggested` (`record` or `live`) for the ones the NVR would choose. The report's `video` field gives the decoded stream's codec and size once verified. H.265 is chosen only when no H.264 is offered, with a warning that playback may be limited.
+
+## Not in this slice
+
+Verifying the live sub-stream, ONVIF motion subscriptions, retries with backoff, the Add Camera screen and bulk onboarding follow in later slices of #173.
+
 ## Limits
 
 Inspections run at most four at a time, so adding many cameras does not connect to all of them at once.

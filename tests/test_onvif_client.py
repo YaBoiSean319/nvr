@@ -45,13 +45,13 @@ class AuthenticationTests(CameraCase):
         await client.profiles(services)
         await client.service_capabilities(services, "events")
         self.assertEqual(client.auth_by_service, {"device": "digest", "media": "digest", "events": "wsse"})
-        # Nothing assumed: the plain request first, then WS-Security (Digest is skipped, as nothing asked for it). Then it is remembered.
-        self.assertEqual(self.carried(camera, "events", "GetServiceCapabilities"), ["none", "wsse"])
+        # Nothing assumed: the plain request first, then Digest once (a bare 401 does not rule it out), then WS-Security. Then it is remembered.
+        self.assertEqual(self.carried(camera, "events", "GetServiceCapabilities"), ["none", "none", "wsse"])
         # A Digest challenge was issued, so Digest is tried: the plain request, then the challenge round trip, then the answer.
         self.assertEqual(self.carried(camera, "media", "GetProfiles"), ["none", "none", "digest"])
         await client.service_capabilities(services, "events")
         await client.profiles(services)
-        self.assertEqual(self.carried(camera, "events", "GetServiceCapabilities")[2:], ["wsse"])
+        self.assertEqual(self.carried(camera, "events", "GetServiceCapabilities")[3:], ["wsse"])
         self.assertEqual(self.carried(camera, "media", "GetProfiles")[3:], ["digest"])  # Answered at once from the earlier challenge.
 
     async def test_a_camera_that_asks_for_nothing_gets_no_credentials(self):
@@ -78,6 +78,22 @@ class AuthenticationTests(CameraCase):
             everything = f"{caught.exception.message} {json.dumps(client.diagnostics())}"
             for secret in (USER, PASSWORD, "not-the-password"):
                 self.assertNotIn(secret, everything)
+
+    async def test_once_every_login_is_refused_the_camera_is_not_asked_again(self):
+        camera = self.camera(auth={"device": "digest+wsse"})
+        client = self.client(password="not-the-password")
+        url = await client.locate_device(camera.url)
+        for _ in range(2):
+            with self.assertRaises(OnvifError):
+                await client.device_information(url)
+            counted = len(camera.requests)
+            if _ == 0:
+                first = counted
+        self.assertEqual(counted, first)  # The second try sent nothing: repeated failures can lock a camera account.
+
+    def test_camera_text_never_carries_the_login_into_a_report(self):
+        client = self.client()
+        self.assertEqual(client._scrub(f"User {USER} not found, bad {PASSWORD}"), "User *** not found, bad ***")
 
     async def test_a_camera_that_needs_a_login_says_so_when_none_was_given(self):
         camera = self.camera()
@@ -252,7 +268,7 @@ class FailureTests(CameraCase):
         client = self.client()
         with self.assertRaises(OnvifError) as caught:
             await client.device_information(await client.locate_device(f"{camera.origin}/onvif/nothing-here"))
-        self.assertEqual(caught.exception.code, "service_unavailable")
+        self.assertEqual(caught.exception.code, "unreachable")  # Nothing there answers like an ONVIF device.
 
     async def test_a_camera_that_answers_with_a_web_page_or_unsafe_xml_is_malformed(self):
         for behaviour in ("html", "doctype"):
@@ -292,7 +308,7 @@ class DiagnosticsTests(CameraCase):
         await client.service_capabilities(services, "events")
         trace = client.diagnostics()
         self.assertTrue({"operation", "service", "auth", "outcome", "status", "ms"} <= set(trace[0]))
-        self.assertEqual([item["outcome"] for item in trace if item["operation"] == "GetServiceCapabilities"], ["auth_failed", "ok"])
+        self.assertEqual([item["outcome"] for item in trace if item["operation"] == "GetServiceCapabilities"], ["auth_failed", "auth_failed", "ok"])
         text = json.dumps(trace)
         for secret in (USER, PASSWORD, "Nonce", "Authorization", "PasswordDigest", "UsernameToken", "rtsp://", "S3cret"):
             self.assertNotIn(secret, text)
