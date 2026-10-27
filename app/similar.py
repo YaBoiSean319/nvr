@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,7 @@ class ReidModel:
             import openvino as ov
             core = ov.Core()
         self.compiled = core.compile_model(core.read_model(str(path)), provider)
+        self._lock = threading.Lock()  # one inference request at a time: cameras share this model from different threads
 
     def embed(self, frame: bytes | None, box: dict[str, float]) -> np.ndarray | None:
         image = _crop_image(frame, box, (0.0, 1.0, 0.0, 1.0))
@@ -80,7 +82,8 @@ class ReidModel:
         rows = np.minimum((np.arange(self.HEIGHT) * image.shape[0] / self.HEIGHT).astype(int), image.shape[0] - 1)
         columns = np.minimum((np.arange(self.WIDTH) * image.shape[1] / self.WIDTH).astype(int), image.shape[1] - 1)
         tensor = image[rows][:, columns].transpose(2, 0, 1)[None].astype(np.float32)
-        result = self.compiled(tensor)
+        with self._lock:
+            result = self.compiled(tensor)
         values = [np.asarray(value).reshape(-1) for value in result.values()]
         vector = values[0].astype(np.float32) if values else np.empty(0, dtype=np.float32)
         norm = float(np.linalg.norm(vector))
@@ -161,24 +164,24 @@ def find_similar(db: sqlite3.Connection, track_id: str, camera_ids: list[str], s
 
     Raises ``LookupError`` when the track has no embedding. ``use_extension`` forces the extension (True) or the scan (False); left alone, the
     extension is used when it loads."""
-    source = db.execute("SELECT e.model_id,e.vector,t.label FROM track_embeddings e JOIN ai_tracks t ON t.id=e.track_id WHERE e.track_id=?", (track_id,)).fetchone()
+    source = db.execute("SELECT e.model_id,e.dim,e.vector,t.label FROM track_embeddings e JOIN ai_tracks t ON t.id=e.track_id WHERE e.track_id=?", (track_id,)).fetchone()
     if source is None:
         raise LookupError("This object has no appearance to compare")
     if not camera_ids:
         return []
     limit = max(1, min(limit, MAX_RESULTS))
-    where = (f"e.model_id=? AND t.label=? AND t.id!=? AND t.camera_id IN ({','.join('?' * len(camera_ids))}) AND t.last_seen_at>=? AND t.first_seen_at<?")
-    values: list[Any] = [source["model_id"], source["label"], track_id, *camera_ids, _iso(start), _iso(end)]
+    where = (f"e.model_id=? AND e.dim=? AND t.label=? AND t.id!=? AND t.camera_id IN ({','.join('?' * len(camera_ids))}) AND t.last_seen_at>=? AND t.first_seen_at<?")
+    values: list[Any] = [source["model_id"], source["dim"], source["label"], track_id, *camera_ids, _iso(start), _iso(end)]
     vector = bytes(source["vector"])
     if use_extension is not False and load_extension(db):
         rows = db.execute(
-            f"SELECT id,similarity FROM (SELECT t.id AS id,t.first_seen_at AS first_seen,1.0-vec_distance_cosine(vec_int8(e.vector),vec_int8(?)) AS similarity "
+            f"SELECT id,similarity FROM (SELECT t.id AS id,t.first_seen_at AS first_seen,ROUND(1.0-vec_distance_cosine(vec_int8(e.vector),vec_int8(?)),5) AS similarity "
             f"FROM track_embeddings e JOIN ai_tracks t ON t.id=e.track_id WHERE {where}) WHERE similarity>=? ORDER BY similarity DESC,first_seen,id LIMIT ?",
             (vector, *values, min_similarity, limit)).fetchall()
         return [(row["id"], float(row["similarity"])) for row in rows]
     if use_extension is True:
         raise RuntimeError("The sqlite-vec extension is not available")
-    scored = [(row["id"], cosine(vector, bytes(row["vector"])), row["first_seen_at"]) for row in db.execute(
+    scored = [(row["id"], round(cosine(vector, bytes(row["vector"])), 5), row["first_seen_at"]) for row in db.execute(
         f"SELECT t.id,t.first_seen_at,e.vector FROM track_embeddings e JOIN ai_tracks t ON t.id=e.track_id WHERE {where}", values)]
     kept = sorted((item for item in scored if item[1] >= min_similarity), key=lambda item: (-item[1], item[2], item[0]))[:limit]
     return [(track, similarity) for track, similarity, _ in kept]

@@ -253,6 +253,13 @@ class RetentionTests(SimilarCase):
         self.assertIn(self.same_dock2, remaining)
         self.assertTrue(count_after > 0)
 
+    def test_deleting_a_cameras_footage_removes_its_embeddings(self):
+        with connect() as db:
+            db.execute("DELETE FROM ai_tracks WHERE camera_id=?", (self.d1,))  # What DELETE /api/cameras/{id}/footage does
+            remaining = {row[0] for row in db.execute("SELECT track_id FROM track_embeddings")}
+        self.assertFalse(remaining & {self.source, self.green, self.vehicle})
+        self.assertIn(self.same_dock2, remaining)
+
 
 class WorkerStoresEmbeddingsTests(SceneTestCase):
     def test_the_worker_stores_an_embedding_for_each_track_and_search_finds_by_it(self):
