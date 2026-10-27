@@ -124,7 +124,7 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
          data-segment-start={segmentStart ?? undefined} data-camera-id={id} hidden={hidden}
          onClick={() => setActive(id)} onDoubleClick={() => (enlarged ? unenlarge() : enlarge(id))}>
       <video ref={video} className="tile-video" muted playsInline preload="auto" />
-      {overlayOn && phase === "ready" ? <TrackOverlay cameraId={id} video={video} path={path} /> : null}
+      {overlayOn ? <TrackOverlay cameraId={id} video={video} path={path} visible={phase === "ready"} /> : null}
       <div className="tile-top">
         <span className="tile-name" title={name}>{name}</span>
       </div>

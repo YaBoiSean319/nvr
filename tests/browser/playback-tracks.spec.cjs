@@ -106,7 +106,7 @@ test("boxes follow the stored detections of the shared clock at 1x and while fra
 });
 
 test("following an object draws its stored path as a fading trail, across a pause", async ({ page }) => {
-  const { anchor, seeded } = await open(page);
+  const { seeded } = await open(page);
   await page.keyboard.press("b");
   await seekBy(page, 10); // 10 s: the person is hidden, the 10 s frame holds the vehicle
   await expect(boxes(page)).toHaveCount(1);
@@ -138,7 +138,6 @@ test("following an object draws its stored path as a fading trail, across a paus
   await expect(segments).toHaveCount(3);
   const later = await segments.evaluateAll(lines => lines.map(line => Number(line.dataset.x)));
   expect(later[2]).toBeCloseTo(centre(14), 3);
-  expect(anchor).toBeGreaterThan(0);
 
   // Choosing it again stops following it.
   await seekBy(page, -10); // 5 s again, where the person is drawn

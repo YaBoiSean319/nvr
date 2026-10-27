@@ -10,18 +10,18 @@ Playback can draw the objects the AI worker found over the video, and follow one
 
 ## What is drawn, and from what
 
-Only detections the AI worker stored: nothing is inferred live, and nothing is drawn where no frame was analysed. The boxes shown at a moment are those of the latest analysed frame at or before the clock, kept on screen for a little over two analysis intervals (worked out from the frames, between 1 and 10 seconds) and then removed, so a box never lingers after its frame is stale. A box is exact at the instant its frame was analysed and then stays where it was until the next analysed frame, so it is behind a moving object by up to one analysis interval (half a second to two seconds at the usual 0.5 to 2 analysed frames a second, which is many video frames) plus the analysis delay. It never moves between analysed frames.
+Only detections the AI worker stored: nothing is inferred live, and nothing is drawn where no frame was analysed. The boxes shown at a moment are those of the latest analysed frame at or before the clock, kept on screen for a little over two analysis intervals (worked out from the gaps between stored frames, between 1 and 6 seconds; frames exist only where something was detected, so a sparse stretch holds a box for the longest) and then removed, so a box never lingers after its frame is stale. A box is exact at the instant its frame was analysed and then stays where it was until the next analysed frame, so it is behind a moving object by up to one analysis interval (half a second to two seconds at the usual 0.5 to 2 analysed frames a second, which is many video frames) plus the analysis delay. It never moves between analysed frames.
 
 Boxes are placed on the picture, so they stay on their objects when a tile is letterboxed or resized.
 
 ## Privacy masks and access
 
-A box that touches a privacy-masked area is never sent to the browser, so the overlay cannot show that something is behind a mask. The same holds for the points of a followed object's path. An administrator holding an unmasked grant for the camera sees the boxes too. Cameras a person may not see are not found, exactly as for missing ones.
+A box that touches a privacy-masked area is never sent to the browser, and neither is a count of them, so the overlay does not report that something is behind a mask. The same holds for the points of a followed object's path; the trail is broken where the object was in a masked area (nothing is drawn across it, and the path's points carry no times from inside the mask), which does show that the object continued behind the mask. Mask areas are those in force at the start of the minute (for boxes) or of the object's first sighting (for its path), so around a change of masks the overlay can hide more than the video does, never less. An administrator holding an unmasked grant for the camera sees the boxes too. Cameras a person may not see are not found, exactly as for missing ones.
 
 ## API
 
-- `GET /api/playback/overlay?camera_id=&start=&end=` (at most 10 minutes): the stored detections of one camera, one entry for each analysed frame (`frames[].at` and `frames[].boxes[]` with `track_id`, `label`, `confidence`, `box`), with `withheld` (boxes left out because of masks), `unanalyzed` (intervals not analysed, with why) and `truncated`.
-- `GET /api/playback/overlay/tracks/{track_id}`: the whole stored path of one object, `points[]` (`at`, `box`).
+- `GET /api/playback/overlay?camera_id=&start=&end=` (at most 10 minutes): the stored detections of one camera, one entry for each analysed frame (`frames[].at` and `frames[].boxes[]` with `track_id`, `label`, `confidence`, `box`), with `unanalyzed` (intervals not analysed, with why) and `truncated`.
+- `GET /api/playback/overlay/tracks/{track_id}`: the whole stored path of one object, `points[]` (`at`, `box`, and `run`: a trail is not drawn between points of different runs).
 
 Both accept `unmasked=true` with an administrator's grant, as video does.
 

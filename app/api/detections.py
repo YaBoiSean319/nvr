@@ -128,8 +128,8 @@ def playback_overlay(
 ) -> dict[str, object]:
     """The stored detections of one camera for a stretch of playback, one entry for each analysed frame, for drawing boxes over video.
 
-    Only what the AI worker stored is returned, never a live inference. Boxes that touch a privacy-masked area are left out (counted in
-    ``withheld``), as they would show what the mask hides."""
+    Only what the AI worker stored is returned, never a live inference. Boxes that touch a privacy-masked area are left out, and what a mask
+    hides is never reported, not even as a count."""
     start_text, end_text = _range(start, end)
     start_time, end_time = datetime.fromisoformat(start_text), datetime.fromisoformat(end_text)
     with connect() as db:
@@ -142,15 +142,13 @@ def playback_overlay(
                           (camera_id, start_text, end_text, OVERLAY_LIMIT)).fetchall()
         unanalyzed = list(iter_unanalyzed(db, camera_id, start_text, end_text))
     frames: list[dict[str, Any]] = []
-    withheld = 0
     for row in rows:
         if zones and _hidden_by_mask(row, zones):
-            withheld += 1
             continue
         if not frames or frames[-1]["at"] != row["detected_at"]:
             frames.append({"at": row["detected_at"], "boxes": []})
         frames[-1]["boxes"].append(_point(row))
-    return {"camera_id": camera_id, "start": start_text, "end": end_text, "frames": frames, "withheld": withheld, "truncated": len(rows) == OVERLAY_LIMIT,
+    return {"camera_id": camera_id, "start": start_text, "end": end_text, "frames": frames, "truncated": len(rows) == OVERLAY_LIMIT,
             "unanalyzed": unanalyzed, "coverage_note": COVERAGE_NOTE}
 
 
@@ -164,6 +162,14 @@ def playback_overlay_track(track_id: str, user: CurrentUser, unmasked: Annotated
             raise HTTPException(status_code=404, detail="Track not found")
         zones = _overlay_zones(user, track["camera_id"], datetime.fromisoformat(track["first_seen_at"]), unmasked)
         rows = db.execute("SELECT * FROM ai_detections WHERE track_id=? ORDER BY detected_at,id LIMIT ?", (track_id, OVERLAY_LIMIT)).fetchall()
-    points = [{"at": row["detected_at"], "box": _point(row)["box"]} for row in rows if not (zones and _hidden_by_mask(row, zones))]
-    return {"track_id": track_id, "camera_id": track["camera_id"], "label": track["label"], "first_seen_at": track["first_seen_at"],
-            "last_seen_at": track["last_seen_at"], "points": points, "withheld": len(rows) - len(points), "truncated": len(rows) == OVERLAY_LIMIT}
+    # Points are in runs: a run ends where the object was in a masked area, so a trail is never drawn across the mask. The mask itself is not
+    # reported, nor how many points it hid.
+    points: list[dict[str, Any]] = []
+    run = 0
+    for row in rows:
+        if zones and _hidden_by_mask(row, zones):
+            if points and points[-1]["run"] == run:
+                run += 1
+            continue
+        points.append({"at": row["detected_at"], "box": _point(row)["box"], "run": run})
+    return {"track_id": track_id, "camera_id": track["camera_id"], "label": track["label"], "points": points, "truncated": len(rows) == OVERLAY_LIMIT}

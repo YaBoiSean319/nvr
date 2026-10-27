@@ -4,10 +4,10 @@
  */
 export interface OverlayBox { track_id: string | null; label: string; confidence: number; box: { x: number; y: number; width: number; height: number } }
 export interface OverlayFrame { at: number; boxes: OverlayBox[] }
-export interface TrackPoint { at: number; box: { x: number; y: number; width: number; height: number } }
+export interface TrackPoint { at: number; run?: number; box: { x: number; y: number; width: number; height: number } }
 
 const MIN_HOLD_MS = 1000;
-const MAX_HOLD_MS = 10_000;
+const MAX_HOLD_MS = 6000;
 const DEFAULT_HOLD_MS = 3000;
 
 /**
@@ -45,11 +45,11 @@ export function lastAtOrBefore(times: number[], time: number): number {
 }
 
 /** The analysed frame that is on screen at ``time``: the latest one at or before it, if it is recent enough (``hold``) and not an earlier gap. */
-export function frameAt(frames: OverlayFrame[], time: number, hold = holdFor(frames.map(frame => frame.at))): OverlayFrame | null {
-  const index = lastAtOrBefore(frames.map(frame => frame.at), time);
+export function frameAt(frames: OverlayFrame[], time: number, hold?: number, times = frames.map(frame => frame.at)): OverlayFrame | null {
+  const index = lastAtOrBefore(times, time);
   if (index < 0) return null;
   const frame = frames[index]!;
-  return time - frame.at <= hold ? frame : null;
+  return time - frame.at <= (hold ?? holdFor(times)) ? frame : null;
 }
 
 export interface TrailSegment { from: { x: number; y: number }; to: { x: number; y: number }; opacity: number; at: number }
@@ -63,16 +63,16 @@ export function centre(box: TrackPoint["box"]): { x: number; y: number } {
 
 /**
  * A fading trail of where an object has been: segments between its stored centres up to ``time`` over the last ``span``, each as faint
- * as it is old. A pause in the points (an occlusion) is bridged, since the path is the same object's.
+ * as it is old. A pause in the points (an occlusion) is bridged, since the path is the same object's, but never across a privacy-masked area.
  */
 export function trail(points: TrackPoint[], time: number, span = TRAIL_MS): TrailSegment[] {
-  const times = points.map(point => point.at);
-  const last = lastAtOrBefore(times, time);
+  const last = lastAtOrBefore(points.map(point => point.at), time);
   const segments: TrailSegment[] = [];
   for (let index = last; index > 0; index -= 1) {
     const to = points[index]!;
     if (time - to.at > span) break;
     const from = points[index - 1]!;
+    if ((from.run ?? 0) !== (to.run ?? 0)) break; // The path went through a privacy-masked area here: nothing is drawn across it
     segments.push({ from: centre(from.box), to: centre(to.box), at: to.at, opacity: Math.max(0.1, 1 - (time - to.at) / span) });
   }
   return segments.reverse();

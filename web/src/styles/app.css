@@ -655,7 +655,7 @@
   color: #fff; font: inherit; pointer-events: auto; cursor: pointer; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.6);
 }
 .track-box[data-label="vehicle"] { border-color: #ffd166; }
-.track-box[disabled] { cursor: default; border-style: dashed; }
+.track-box[data-followable="false"] { cursor: default; border-style: dashed; pointer-events: none; }
 .track-box[data-chosen] { border-color: var(--n-accent); border-width: 3px; }
 .track-box:focus-visible { outline: 2px solid var(--n-focus); outline-offset: 2px; }
 .track-box-label {

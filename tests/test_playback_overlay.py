@@ -49,7 +49,7 @@ class OverlayFrameTests(OverlayCase):
         self.assertEqual([box["track_id"] for box in by_second[10]["boxes"]], [self.vehicle])  # The person is hidden for this frame
         person = next(box for box in by_second[6]["boxes"] if box["track_id"] == self.person)
         self.assertEqual((person["label"], person["box"]["x"], person["box"]["width"]), ("person", 0.22, 0.1))
-        self.assertEqual((body["withheld"], body["truncated"]), (0, False))
+        self.assertEqual(body["truncated"], False)
         self.assertIn("unknown, not empty", body["coverage_note"])
 
     def test_only_the_asked_stretch_and_camera_are_returned(self):
@@ -84,7 +84,8 @@ class OverlayTrackTests(OverlayCase):
         seconds = [round((datetime.fromisoformat(point["at"]) - self.at).total_seconds()) for point in body["points"]]
         self.assertEqual(seconds, [4, 6, 8, 14])
         self.assertEqual([point["box"]["x"] for point in body["points"]], [0.10, 0.22, 0.34, 0.70])
-        self.assertEqual((body["track_id"], body["camera_id"], body["label"], body["withheld"]), (self.person, self.d1, "person", 0))
+        self.assertEqual((body["track_id"], body["camera_id"], body["label"]), (self.person, self.d1, "person"))
+        self.assertEqual({point["run"] for point in body["points"]}, {0})  # One run: nothing was masked
 
     def test_no_answer_carries_an_embedding_or_the_model(self):
         text = self.overlay().text + self.admin.get(f"/api/playback/overlay/tracks/{self.person}").text
@@ -117,10 +118,8 @@ class OverlayMaskTests(OverlayCase):
         body = self.overlay().json()
         people = [box for frame in body["frames"] for box in frame["boxes"] if box["track_id"] == self.person]
         self.assertEqual([box["box"]["x"] for box in people], [0.34, 0.70])  # 0.10 and 0.22 (to 0.32) touch the mask
-        self.assertEqual(body["withheld"], 2)
         points = self.admin.get(f"/api/playback/overlay/tracks/{self.person}").json()
         self.assertEqual([point["box"]["x"] for point in points["points"]], [0.34, 0.70])
-        self.assertEqual(points["withheld"], 2)
 
     def test_the_vehicle_away_from_the_mask_is_unaffected_and_a_frame_with_only_masked_boxes_is_left_out(self):
         self.mask(self.d1, [{"x": 0.0, "y": 0.0, "width": 0.3, "height": 1.0}])
@@ -129,13 +128,28 @@ class OverlayMaskTests(OverlayCase):
         self.track(self.d1, "person", [(30, 0.05)])
         again = self.overlay().json()
         self.assertNotIn((self.at + timedelta(seconds=30)).isoformat(), [frame["at"] for frame in again["frames"]])
-        self.assertEqual(again["withheld"], 3)
+
+    def test_nothing_says_that_a_mask_hid_anything(self):
+        self.mask(self.d1, [{"x": 0.0, "y": 0.0, "width": 0.3, "height": 1.0}])
+        masked = self.overlay().text + self.admin.get(f"/api/playback/overlay/tracks/{self.person}").text
+        for word in ("withheld", "hidden", "masked", "first_seen_at", "last_seen_at"):
+            self.assertNotIn(word, masked)
+
+    def test_a_followed_path_breaks_where_the_object_was_in_the_masked_area(self):
+        track = self.track(self.d1, "person", [(40, 0.5), (42, 0.1), (44, 0.12), (46, 0.6), (48, 0.7)])  # Across the left mask and back out
+        self.mask(self.d1, [{"x": 0.0, "y": 0.0, "width": 0.3, "height": 1.0}])
+        points = self.admin.get(f"/api/playback/overlay/tracks/{track}").json()["points"]
+        self.assertEqual([point["box"]["x"] for point in points], [0.5, 0.6, 0.7])
+        self.assertEqual([point["run"] for point in points], [0, 1, 1])
+        leading = self.track(self.d1, "person", [(50, 0.1), (52, 0.5), (54, 0.6)])  # Starts inside the mask: no break before the first visible point
+        self.assertEqual([point["run"] for point in self.admin.get(f"/api/playback/overlay/tracks/{leading}").json()["points"]], [0, 0])
 
     def test_unmasked_boxes_need_an_administrators_grant(self):
         self.mask(self.d1, [{"x": 0.0, "y": 0.0, "width": 0.3, "height": 1.0}])
         self.assertEqual(self.overlay(unmasked="true").status_code, 403)  # An administrator without a grant
         self.assertEqual(self.overlay(client=self.full, unmasked="true").status_code, 403)  # An operator
-        self.assertEqual(self.overlay(unmasked="false").json()["withheld"], 2)
+        self.assertEqual(self.admin.get(f"/api/playback/overlay/tracks/{self.person}", params={"unmasked": "true"}).status_code, 403)
+        self.assertEqual(self.limited.get(f"/api/playback/overlay/tracks/{self.person}", params={"unmasked": "true"}).status_code, 403)
 
 
 if __name__ == "__main__":

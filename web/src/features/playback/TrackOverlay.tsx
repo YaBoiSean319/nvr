@@ -9,12 +9,13 @@ const LABEL: Record<string, string> = { person: "Person", vehicle: "Vehicle" };
  * Detection boxes over one tile's video, drawn from the stored detections for the shared playback clock, and the fading trail of the
  * chosen object. Boxes are placed on the picture itself, not the tile, so they stay on their objects when the video is letterboxed.
  */
-export function TrackOverlay({ cameraId, video, path }: { cameraId: string; video: RefObject<HTMLVideoElement | null>; path: TrackPoint[] }) {
+export function TrackOverlay({ cameraId, video, path, visible }: { cameraId: string; video: RefObject<HTMLVideoElement | null>; path: TrackPoint[]; visible: boolean }) {
   const time = useClockTime();
   const tracked = usePlaybackStore(store => store.tracked);
-  const { frames, withheld } = useOverlayFrames(cameraId, true);
-  const hold = useMemo(() => holdFor(frames.map(frame => frame.at)), [frames]);
-  const frame = frameAt(frames, time, hold);
+  const frames = useOverlayFrames(cameraId, true);
+  const times = useMemo(() => frames.map(frame => frame.at), [frames]);
+  const hold = useMemo(() => holdFor(times), [times]);
+  const frame = visible ? frameAt(frames, time, hold, times) : null;
   const wrapper = useRef<HTMLDivElement>(null);
   const [rect, setRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
 
@@ -36,11 +37,11 @@ export function TrackOverlay({ cameraId, video, path }: { cameraId: string; vide
   }, [video]);
 
   const onThisCamera = tracked?.cameraId === cameraId;
-  const segments = useMemo(() => (onThisCamera ? trail(path, time) : []), [onThisCamera, path, time]);
-  const { trackObject } = usePlaybackStore.getState();
+  const segments = useMemo(() => (visible && onThisCamera ? trail(path, time) : []), [visible, onThisCamera, path, time]);
+  const { trackObject, setActive } = usePlaybackStore.getState();
 
   return (
-    <div ref={wrapper} className="track-overlay" data-withheld={withheld || undefined} aria-label="Detections" role="group"
+    <div ref={wrapper} className="track-overlay" aria-label="Detections" role="group"
          style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}>
       {segments.length ? (
         <svg className="track-trail" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true" data-track-id={tracked?.id} data-points={segments.length + 1}>
@@ -54,16 +55,17 @@ export function TrackOverlay({ cameraId, video, path }: { cameraId: string; vide
         const chosen = Boolean(item.track_id) && item.track_id === tracked?.id;
         const name = `${LABEL[item.label] ?? item.label}${item.track_id ? "" : " (not followed)"}`;
         return (
-          <button key={`${item.track_id ?? "none"}-${index}`} type="button" className="track-box" data-chosen={chosen || undefined} data-label={item.label}
+          <button key={item.track_id ?? `none-${index}`} type="button" className="track-box" data-chosen={chosen || undefined} data-label={item.label}
                   data-track-id={item.track_id ?? undefined} data-at={frame.at}
                   style={{ left: `${item.box.x * 100}%`, top: `${item.box.y * 100}%`, width: `${item.box.width * 100}%`, height: `${item.box.height * 100}%` }}
                   aria-label={`${name}, ${Math.round(item.confidence * 100)}% sure${chosen ? ", followed" : ""}`} aria-pressed={item.track_id ? chosen : undefined}
-                  disabled={!item.track_id}
+                  data-followable={item.track_id ? "true" : "false"} tabIndex={item.track_id ? 0 : -1}
                   onClick={event => {
+                    if (!item.track_id) return;
                     event.stopPropagation();
-                    if (item.track_id) trackObject(chosen ? null : { id: item.track_id, cameraId });
-                  }}
-                  onDoubleClick={event => event.stopPropagation()}>
+                    setActive(cameraId);
+                    trackObject(chosen ? null : { id: item.track_id, cameraId });
+                  }}>
             <span className="track-box-label">{name}</span>
           </button>
         );

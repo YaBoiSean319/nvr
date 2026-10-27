@@ -38,6 +38,7 @@ export function OverlayControls({ ready }: { ready: boolean }) {
       if (key.defaultPrevented || key.altKey || key.ctrlKey || key.metaKey || isEditable(key.target) || document.querySelector("[role=dialog]")) return;
       if (key.key.toLowerCase() === "b") {
         key.preventDefault();
+        if (key.repeat) return;
         setOverlayOn(!usePlaybackStore.getState().overlayOn);
       } else if ((key.key === "[" || key.key === "]") && usePlaybackStore.getState().tracked) {
         key.preventDefault();
