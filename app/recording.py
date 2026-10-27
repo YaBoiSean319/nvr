@@ -133,6 +133,22 @@ async def probe_stream(raw: str, timeout_seconds: float = 8.0) -> dict[str, obje
     }
 
 
+def _record_motion_source(camera_id: str, value: str, reason: str, fallback_enabled: bool) -> None:
+    """Store the state of a camera's ONVIF motion events.
+
+    Motion events are one capability and video another: a fault here must not change the video's state (``recording_status``), which follows
+    the stream itself. ``last_error`` is set while events are unwell and cleared again only when it is the events' own message."""
+    healthy = value == "healthy"
+    reason = reason or ("The ONVIF event subscription is unavailable" if value == "unavailable" else "The ONVIF event service is not usable")
+    error = None if healthy else f"Motion events: {reason}"
+    if error and fallback_enabled:
+        error += "; server motion fallback is starting"
+    with connect() as db:
+        db.execute("UPDATE cameras SET motion_source_status=?,server_motion_status=?,"
+                   "last_error=CASE WHEN ? IS NOT NULL THEN ? WHEN last_error LIKE 'Motion events:%' THEN NULL ELSE last_error END WHERE id=?",
+                   (value, "waiting" if healthy and fallback_enabled else ("disabled" if not fallback_enabled else "detecting"), error, error, camera_id))
+
+
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -493,24 +509,22 @@ class RecordingManager:
             await proc.stdin.drain()
             proc.stdin.close()
 
+            problem = {"text": ""}
+
             def source_status(value: str) -> None:
                 source_state["value"] = value
                 source_changed.set()
-                healthy = value == "healthy"
-                status = "buffering" if healthy else ("reconnecting" if value == "unavailable" else "degraded")
-                error = None if healthy else ("ONVIF event subscription is unavailable" if value == "unavailable" else "ONVIF event service is not usable")
-                if not healthy and fallback_enabled:
-                    error = "ONVIF events are degraded; server motion fallback is starting"
-                with connect() as db:
-                    db.execute("UPDATE cameras SET recording_status=?,motion_source_status=?,server_motion_status=?,last_error=? WHERE id=?",
-                               (status, value, "waiting" if healthy and fallback_enabled else ("disabled" if not fallback_enabled else "detecting"), error, camera_id))
+                _record_motion_source(camera_id, value, problem["text"], fallback_enabled)
+
+            def source_detail(text: str) -> None:
+                problem["text"] = text
 
             async def on_event(event) -> None:
                 await assembler.ingest(event)
 
             if row["motion_service_url"]:
                 event_task = asyncio.create_task(
-                    subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status),
+                    subscribe_and_pull(row["motion_service_url"], credentials.get("username", ""), credentials.get("password", ""), on_event, source_status, on_detail=source_detail),
                     name=f"onvif-events-{camera_id}",
                 )
             else:
