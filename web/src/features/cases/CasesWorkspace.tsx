@@ -118,6 +118,7 @@ function OpenCase({ value }: { value: CaseDetail }) {
 
   function openClip(item: CaseItem) {
     if (!item.camera_id || !item.starts_at) return;
+    void api(`${base}/items/${item.id}/viewed`, { method: "POST" }).catch(() => undefined); // Recorded for the case; opening is never held up by it
     usePlaybackStore.getState().openInPlayback(item.camera_id, Date.parse(item.starts_at));
     navigate("/playback");
   }

@@ -25,7 +25,7 @@ def preserve_segment(camera_id: str, segment_id: int, actor_id: int, expires_in_
         segment=db.execute("SELECT id,relative_path FROM recording_segments WHERE id=? AND camera_id=?",(segment_id,camera_id)).fetchone()
         if segment is None: raise LookupError("Recorded interval not found")
         existing=active_hold(db,segment_id)
-        if existing: raise FileExistsError("Recorded interval is already preserved")
+        if existing: raise FileExistsError("Recorded interval is already preserved (by a hold or a case)")
         path=recording_file_path(segment["relative_path"])
         if not path.is_file(): raise FileNotFoundError("Recorded interval is unavailable")
         db.execute("INSERT INTO recording_holds(id,segment_id,camera_id,created_by,expires_at) VALUES(?,?,?,?,?)",(hold_id,segment_id,camera_id,actor_id,expires))

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import access as access_rules, viewing_audit
+from .storage import recording_file_path
 from .store import connect
 
 MAX_TITLE = 200
@@ -207,8 +208,17 @@ def remove_member(db: sqlite3.Connection, row: sqlite3.Row, actor_id: int, user_
 # --- holds -------------------------------------------------------------------------------------------------------------------------
 
 def _available_segments(db: sqlite3.Connection, camera_id: str, start: datetime, end: datetime) -> list[sqlite3.Row]:
-    return db.execute("SELECT id,starts_at,ends_at FROM recording_segments WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
+    """The recorded intervals of the camera in range whose file is on disk: a segment that has gone cannot be held."""
+    rows = db.execute("SELECT id,starts_at,ends_at,relative_path FROM recording_segments WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
                       (camera_id, _iso(end), _iso(start))).fetchall()
+    found = []
+    for row in rows:
+        try:
+            if recording_file_path(row["relative_path"]).is_file():
+                found.append(row)
+        except OSError:
+            continue
+    return found
 
 
 def hold_segments(db: sqlite3.Connection, case_id: str, camera_id: str, segments: list[sqlite3.Row], actor_id: int) -> int:
@@ -398,6 +408,20 @@ def close_case(db: sqlite3.Connection, row: sqlite3.Row, actor_id: int, confirme
     return released
 
 
+def record_item_viewed(db: sqlite3.Connection, row: sqlite3.Row, user: Any, item_id: str) -> None:
+    """Someone opened an item of the case (a clip in Playback, say): recorded for the case, once for each stretch of use of that item."""
+    item = db.execute("SELECT * FROM case_items WHERE id=? AND case_id=? AND removed_at IS NULL", (item_id, row["id"])).fetchone()
+    if item is None or not all(user.access.can_see(camera_id) for camera_id in _item_cameras(item)):
+        raise CaseError("Item not found", 404)
+    recent = db.execute("SELECT created_at,detail_json FROM case_audit WHERE case_id=? AND actor_id=? AND action='item_viewed' ORDER BY id DESC LIMIT 50",
+                        (row["id"], int(user["id"]))).fetchall()
+    for event in recent:
+        if json.loads(event["detail_json"]).get("item") == item_id and _now() - _parse(event["created_at"]) < OPENED_AGAIN_AFTER:
+            return
+    camera = db.execute("SELECT name FROM cameras WHERE id=?", (item["camera_id"],)).fetchone() if item["camera_id"] else None
+    audit(db, row["id"], int(user["id"]), "item_viewed", item=item_id, kind=item["kind"], camera=camera["name"] if camera else None, at=item["starts_at"])
+
+
 # --- audit ---------------------------------------------------------------------------------------------------------------------------
 
 def audit_extract(db: sqlite3.Connection, case_id: str) -> list[dict[str, Any]]:
@@ -486,6 +510,10 @@ def _case_json(db: sqlite3.Connection, case: sqlite3.Row, package: sqlite3.Row, 
         if item["kind"] == "clip":
             entry["package_file"] = None  # Filled in as the files are written
             entry["export_id"] = exports_by_item.get(item["id"])
+            # What is recorded now, not when the clip was added: footage can have been lost since.
+            start, end = _parse(item["starts_at"]), _parse(item["ends_at"])
+            covered = _covered_seconds(_available_segments(db, item["camera_id"], start, end), start, end)
+            entry["coverage"] = {"covered_seconds": round(covered, 1), "uncovered_seconds": round((end - start).total_seconds() - covered, 1)}
         items.append(entry)
     members = [row["username"] for row in db.execute("SELECT u.username FROM case_members m JOIN users u ON u.id=m.user_id WHERE m.case_id=? ORDER BY m.added_at", (case["id"],))]
     return {"case_id": case["id"], "title": case["title"], "description": case["description"], "status": case["status"], "owner": _username(db, case["owner_id"]),
@@ -615,9 +643,11 @@ def verify_package_bytes(content: bytes, case_id: str, package_id: str, installa
                 inner_valid = bool(inner["checksums_valid"]) and (inner.get("chain") is None or bool(inner["chain"]["valid"]))
                 every_clip = every_clip and inner_valid
                 clips.append({"item_id": entry.get("id"), "export_id": entry.get("export_id"), "present": True, "valid": inner_valid, "error": inner.get("error"),
+                              "uncovered_seconds": (entry.get("coverage") or {}).get("uncovered_seconds"),
                               "chain": None if inner.get("chain") is None else ("valid" if inner["chain"]["valid"] else "invalid")})
             notes_present = {"notes.json", "notes.md", "audit.json"} <= delivered
-            return {"checksums_valid": valid, "files": files, "clips": clips, "clips_valid": every_clip, "notes_and_audit_present": notes_present,
+            partial = [clip["item_id"] for clip in clips if (clip.get("uncovered_seconds") or 0) > 0]
+            return {"checksums_valid": valid, "files": files, "clips": clips, "clips_valid": every_clip, "notes_and_audit_present": notes_present, "partial_clips": partial,
                     "omitted_items": metadata.get("omitted_items", 0), "complete": valid and every_clip and notes_present and metadata.get("omitted_items", 0) == 0,
                     "error": None if valid else "one or more file checksums do not match"}
     except (zipfile.BadZipFile, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

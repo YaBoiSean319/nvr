@@ -12,6 +12,7 @@ from unittest import mock
 
 from app import cases
 from app.recording import recordings_path
+from app.storage import recording_file_path
 from app.store import connect
 from tests.test_access_grants import START, GrantCase
 
@@ -42,6 +43,15 @@ class CaseCase(GrantCase):
         super().setUp()
         self.d1_first, self.d1_second = self.add_segment(self.d1, 0), self.add_segment(self.d1, 1)
         self.y1_segment = self.add_segment(self.y1, 0)
+
+    def add_segment(self, camera_id: str, minutes: int = 0) -> int:
+        """A recorded interval with its file on disk (a segment whose file has gone cannot be held)."""
+        segment = super().add_segment(camera_id, minutes)
+        with connect() as db:
+            path = recording_file_path(db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (segment,)).fetchone()[0])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"footage")
+        return segment
 
     def create(self, client=None, title: str = "Break-in") -> dict:
         response = (client or self.full).post("/api/cases", json={"title": title, "description": "Back door"})
@@ -78,6 +88,18 @@ class HoldTests(CaseCase):
         clip = next(item for item in response.json()["case"]["items"] if item["kind"] == "clip")
         self.assertEqual((clip["camera_name"], clip["text"], clip["data"]["segments"]), ("Dock 1", "Door opens", 2))
         self.assertEqual(clip["data"]["uncovered_seconds"], 0)
+
+    def test_footage_whose_file_has_gone_is_not_held_and_cannot_make_a_clip(self):
+        with connect() as db:
+            path = recording_file_path(db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (self.d1_second,)).fetchone()[0])
+        path.unlink()
+        case = self.create()["id"]
+        added = self.clip(case, self.d1, 0, 2)
+        self.assertEqual(added.status_code, 201, added.text)
+        self.assertEqual({hold["segment_id"] for hold in self.holds(case)}, {self.d1_first})
+        clip = next(item for item in added.json()["case"]["items"] if item["kind"] == "clip")
+        self.assertEqual((clip["data"]["segments"], clip["data"]["uncovered_seconds"]), (1, 60.0))  # Half the two minutes is not there
+        self.assertEqual(self.clip(case, self.d1, 1, 1).status_code, 422)
 
     def test_a_clip_with_no_recording_in_range_the_future_or_too_long_is_refused(self):
         case = self.create()["id"]
@@ -235,6 +257,22 @@ class ItemTests(CaseCase):
         if yard_export.status_code == 202:
             self.assertEqual(self.add(case, client=self.limited, kind="export", export_id=yard_export.json()["id"]).status_code, 404)
 
+    def test_opening_a_clip_from_the_case_is_recorded_for_the_case_once_for_each_stretch_of_use(self):
+        case = self.create()["id"]
+        self.full.post(f"/api/cases/{case}/members", json={"username": "limited"})
+        clip = self.clip(case, self.d1, 0, 1).json()["item_id"]
+        yard = self.clip(case, self.y1, 0, 1).json()["item_id"]
+        for _ in range(3):
+            self.assertEqual(self.limited.post(f"/api/cases/{case}/items/{clip}/viewed").status_code, 204)
+        self.assertEqual(self.full.post(f"/api/cases/{case}/items/{clip}/viewed").status_code, 204)
+        viewed = self.case_audit(case, "item_viewed")
+        self.assertEqual([(event["actor"], event["detail"]["camera"], event["detail"]["kind"]) for event in viewed], [("limited", "Dock 1", "clip"), ("full", "Dock 1", "clip")])
+        self.assertEqual(self.limited.post(f"/api/cases/{case}/items/{yard}/viewed").status_code, 404)  # A camera they may not see
+        self.assertEqual(self.limited.post(f"/api/cases/{case}/items/{uuid.uuid4()}/viewed").status_code, 404)
+        outsider = self.add_operator("outsider")
+        self.assertEqual(self.sign_in("outsider").post(f"/api/cases/{case}/items/{clip}/viewed").status_code, 404)
+        self.assertTrue(outsider)
+
     def test_a_case_audit_names_who_did_what(self):
         case = self.create()["id"]
         self.clip(case, self.d1, 0, 1)
@@ -337,6 +375,20 @@ class PackageTests(CaseCase):
         self.assertEqual((resealed["checksums_valid"], resealed["clips_valid"], resealed["complete"]), (True, False, False))
         self.assertEqual([clip["present"] for clip in resealed["clips"]], [True, False])
         self.assertFalse(self.verify(self.case, package, b"not a zip")["checksums_valid"])
+
+    def test_a_package_says_which_clips_lost_footage_since_they_were_added(self):
+        with connect() as db:
+            path = recording_file_path(db.execute("SELECT relative_path FROM recording_segments WHERE id=?", (self.d1_second,)).fetchone()[0])
+        # The second clip's footage is held, so it cannot be deleted by any rule; a disk fault can still lose the file
+        path.unlink()
+        package, content = self.build(self.case)
+        result = self.verify(self.case, package, content)
+        self.assertEqual((result["checksums_valid"], result["clips_valid"]), (True, True))
+        document = json.loads(zipfile.ZipFile(io.BytesIO(content)).read("case.json"))
+        coverage = {entry["text"]: entry["coverage"] for entry in document["items"] if entry["kind"] == "clip"}
+        self.assertEqual(coverage["Door"]["uncovered_seconds"], 0)
+        self.assertEqual(coverage["Corridor"]["uncovered_seconds"], 60.0)
+        self.assertEqual(len(result["partial_clips"]), 1)
 
     def test_a_package_that_is_not_for_this_case_fails_verification(self):
         package, content = self.build(self.case)

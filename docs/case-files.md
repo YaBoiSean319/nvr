@@ -23,17 +23,17 @@ Notes are only added. What was written, by whom and when stays as it was; to cor
 
 ## Audit
 
-`case_audit` records, for the case: created, updated, opened (once for each stretch of use, not for every refresh), clips, marks, notes, alarms, searches and exports added, items removed (with the holds released), members added and removed, packages requested, ready, downloaded and verified, and closing. Exports of a clip are also in the viewing audit and audit log as for any export; a package download is a `download` in the viewing audit for each of its cameras.
+`case_audit` records, for the case: created, updated, opened (once for each stretch of use, not for every refresh), a clip opened in Playback from the case (`item_viewed`, once for each stretch of use of that clip, with the camera and time),  clips, marks, notes, alarms, searches and exports added, items removed (with the holds released), members added and removed, packages requested, ready, downloaded and verified, and closing. Exports of a clip are also in the viewing audit and audit log as for any export; a package download is a `download` in the viewing audit for each of its cameras.
 
 ## The evidence package
 
 **Build evidence package** makes one ZIP of the clips the person may see. It is built in the background by the exporter: one export is made for each clip (as the export queue has room), and when all are done the case's file is written. It contains:
 
 - `clips/NN-<export id>.zip`: the export's own evidence package, with its manifest and signed chain extract;
-- `case.json` (the case, its members and items, and which file holds each clip), `notes.json`, `notes.md`, `audit.json` (the audit up to that moment), `metadata.json`;
+- `case.json` (the case, its members and items, which file holds each clip, and how much of each clip's range is recorded now), `notes.json`, `notes.md`, `audit.json` (the audit up to that moment), `metadata.json`;
 - `integrity.json`: the SHA-256 and size of every other file.
 
-**Verify a file…** (or `POST /api/cases/{id}/packages/{package}/verify` with the file as the body) checks every file against the manifest and each clip's own package, including its signed chain. It reports whether every clip named in `case.json` is present and valid (`complete`). A package built by someone with less access is valid but not complete: it says how many items were left out (`omitted_items`), and does not name them. The checksums are unsigned: they detect changes to the files, not who made the package.
+**Verify a file…** (or `POST /api/cases/{id}/packages/{package}/verify` with the file as the body) checks every file against the manifest and each clip's own package, including its signed chain. It reports whether every clip named in `case.json` is present and valid (`complete`) and which clips have footage missing from their range (`partial_clips`: a clip over a gap in the recording, or whose file was lost since, still verifies, and says how many seconds are missing). A package built by someone with less access is valid but not complete: it says how many items were left out (`omitted_items`), and does not name them. The checksums are unsigned: they detect changes to the files, not who made the package.
 
 A package is the access of the person who asked for it, so only they and administrators can download it. Only one package for a case is built at a time.
 
@@ -45,5 +45,8 @@ A package is the access of the person who asked for it, so only they and adminis
 
 - A case holds up to 500 items. Items of a camera that is later deleted stay in the case but their footage goes with the camera.
 - The exports a package is built from expire after seven days as usual; the assembled case package does not.
+- Only clips are put in a package as footage. Alarms, saved searches and exports appear in `case.json` as records; an export added to a case is not bundled (build the package for the clips). A package is all or nothing: if one clip cannot be exported the package fails, with the reason.
+- Viewing a clip is recorded when it is opened from the case; watching the same footage in Playback directly is in the viewing audit as ever, with no case attached.
+- Footage whose file is already gone cannot be held and is not counted as held; a segment still being recorded when a clip is added is not held, and footage recorded later in the clip's range is not added to the hold.
 - A clip's export is limited as any export is (a size and a segment count); a clip too large to export makes the package fail, with the reason.
 - Notes and items are visible to every member who may see their cameras. There are no per-item permissions.

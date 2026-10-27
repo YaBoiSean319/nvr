@@ -175,6 +175,17 @@ def remove_item(case_id: str, item_id: str, user: CurrentUser) -> dict[str, obje
         return cases.detail(db, row, user)
 
 
+@router.post("/api/cases/{case_id}/items/{item_id}/viewed", status_code=status.HTTP_204_NO_CONTENT)
+@requires_scope("export")
+def item_viewed(case_id: str, item_id: str, user: CurrentUser) -> Response:
+    """Record that this person opened an item of the case (the interface calls this when a clip is opened in Playback from the case)."""
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = _open(db, case_id, user)
+        _guard(lambda: cases.record_item_viewed(db, row, user, item_id))
+    return Response(status_code=204)
+
+
 @router.post("/api/cases/{case_id}/close")
 @requires_scope("export")
 def close_case(case_id: str, payload: CloseRequest, user: CurrentUser) -> dict[str, object]:
