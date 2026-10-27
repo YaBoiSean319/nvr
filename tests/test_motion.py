@@ -359,6 +359,37 @@ class MotionTests(unittest.TestCase):
                 for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH"):
                     os.environ.pop(key, None)
 
+    def test_a_motion_event_fault_changes_the_motion_source_but_never_the_video_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            os.environ["NVR_DB_PATH"] = str(root / "state.sqlite3")
+            os.environ["NVR_RECORDINGS_PATH"] = str(root / "recordings")
+            os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(root / "credentials.key")
+            try:
+                from app.store import connect, initialize
+                from app.recording import _record_motion_source
+                initialize()
+                camera_id = str(uuid.uuid4())
+                with connect() as db:
+                    db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_enabled,recording_mode,recording_status) VALUES(?,?,?,1,'motion','buffering')", (camera_id, "Events fault", b"encrypted"))
+
+                def row():
+                    with connect() as db:
+                        return db.execute("SELECT recording_status,motion_source_status,last_error FROM cameras WHERE id=?", (camera_id,)).fetchone()
+
+                _record_motion_source(camera_id, "authentication_error", "Camera authentication rejected", False)
+                self.assertEqual((row()["recording_status"], row()["motion_source_status"]), ("buffering", "authentication_error"))
+                self.assertEqual(row()["last_error"], "Motion events: Camera authentication rejected")
+                _record_motion_source(camera_id, "healthy", "", False)
+                self.assertEqual((row()["recording_status"], row()["last_error"]), ("buffering", None))
+                with connect() as db:
+                    db.execute("UPDATE cameras SET last_error='Camera stream interrupted' WHERE id=?", (camera_id,))
+                _record_motion_source(camera_id, "healthy", "", False)
+                self.assertEqual(row()["last_error"], "Camera stream interrupted")  # A video fault is not the events' to clear
+            finally:
+                for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH"):
+                    os.environ.pop(key, None)
+
     def test_live_playlist_rejects_non_local_segment_references(self):
         now = datetime.now(timezone.utc).isoformat()
         playlist = f"#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:{now}\n#EXTINF:2.0,\n../outside.ts\n#EXTINF:2.0,\nsegment-000001.ts\n"

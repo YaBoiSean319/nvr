@@ -48,7 +48,8 @@ class OnvifCamera:
     def __init__(self, *, username: str = "operator", password: str = "S3cret!pass", auth: dict[str, str] | None = None, skew: timedelta = timedelta(),
                  profiles: list[dict] | None = None, media2_profiles: list[dict] | None = None, manufacturer: str = "Hanwha Techwin", model: str = "XNV-6120R",
                  firmware: str = "2.00.00", get_services: bool = True, pull_point: bool = True, services: tuple[str, ...] = ("media", "events", "ptz"),
-                 behaviours: dict[str, str] | None = None) -> None:
+                 behaviours: dict[str, str] | None = None, subscription_style: str = "path",
+                 event_topics: tuple[str, ...] = ("RuleEngine/CellMotionDetector/Motion", "VideoSource/MotionAlarm", "VideoAnalytics/MotionDetection", "Device/Temperature")) -> None:
         self.username, self.password = username, password
         self.auth = {"device": "digest", "media": "digest", "media2": "digest", "events": "digest", **(auth or {})}
         self.skew = skew
@@ -61,6 +62,8 @@ class OnvifCamera:
         self.requests: list[dict] = []
         self.nonces: set[str] = set()
         self.pending: list[str] = []  # Notifications for the next PullMessages
+        self.pending_lock = threading.Lock()
+        self.subscription_style, self.event_topics = subscription_style, event_topics  # style: "path", "query" (id in the address's query) or "reference" (id in reference parameters)
         self.subscription_alive, self.subscriptions, self.unsubscribed = False, 0, 0
         camera = self
 
@@ -124,7 +127,7 @@ class OnvifCamera:
     def handle(self, handler: BaseHTTPRequestHandler, body: str) -> None:
         path = handler.path
         service = {"/onvif/device_service": "device", "/onvif/media": "media", "/onvif/media2": "media2", "/onvif/events": "events", "/onvif/events/subscription": "events",
-                   "/onvif/ptz": "ptz"}.get(path)
+                   "/onvif/ptz": "ptz"}.get(path.split("?")[0])
         match = re.search(r"<s:Body>\s*<(?:\w+:)?(\w+)", body)
         operation = match.group(1) if match else ""
         has_digest = handler.headers.get("Authorization", "").startswith("Digest ")
@@ -153,6 +156,7 @@ class OnvifCamera:
             return self.send(handler, 200, "<html><body>camera web page</body></html>", {"Content-Type": "text/html"})
         if behaviour == "doctype":
             return self.send(handler, 200, '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "b">]><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body/></s:Envelope>')
+        self.current = (path, body)
         reply = self.answer(service, operation, body)
         if reply is None:
             return self.send(handler, 500, self.envelope(fault("s:Sender", "ter:ActionNotSupported", "Optional action not implemented")))
@@ -223,13 +227,14 @@ class OnvifCamera:
             return f"<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>{uri}</tt:Uri><tt:InvalidAfterConnect>false</tt:InvalidAfterConnect></trt:MediaUri></trt:GetStreamUriResponse>"
         return None
 
-    def motion(self, topic: str, active: bool, source: str | None = None, at: datetime | None = None) -> None:
+    def motion(self, topic: str, active: bool, source: str | None = None, at: datetime | None = None, item: str = "IsMotion") -> None:
         """Queue a motion notification for the next PullMessages."""
         stamp = (at or self.now()).strftime("%Y-%m-%dT%H:%M:%SZ")
         named = f'<tt:Source><tt:SimpleItem Name="Rule" Value="{source}"/></tt:Source>' if source else ""
-        self.pending.append(
+        with self.pending_lock:
+            self.pending.append(
             f'<wsnt:NotificationMessage><wsnt:Topic>{topic}</wsnt:Topic><wsnt:Message><tt:Message UtcTime="{stamp}">{named}'
-            f'<tt:Data><tt:SimpleItem Name="IsMotion" Value="{str(active).lower()}"/></tt:Data></tt:Message></wsnt:Message></wsnt:NotificationMessage>')
+            f'<tt:Data><tt:SimpleItem Name="{item}" Value="{str(active).lower()}"/></tt:Data></tt:Message></wsnt:Message></wsnt:NotificationMessage>')
 
     def drop_subscription(self) -> None:
         """The camera forgets the subscription, as it does when it restarts."""
@@ -237,17 +242,24 @@ class OnvifCamera:
 
     def _events(self, operation: str) -> str | None:
         wsnt = 'xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"'
+        path, body = self.current
         if operation == "CreatePullPointSubscription":
             self.subscription_alive = True
             self.subscriptions += 1
-            return (f'<tev:CreatePullPointSubscriptionResponse><tev:SubscriptionReference><wsa:Address xmlns:wsa="http://www.w3.org/2005/08/addressing">'
-                    f'http://{PLACEHOLDER_HOST}:{self.port}/onvif/events/subscription</wsa:Address></tev:SubscriptionReference></tev:CreatePullPointSubscriptionResponse>')
+            address = f"http://{PLACEHOLDER_HOST}:{self.port}/onvif/events/subscription" + ("?Idx=7" if self.subscription_style == "query" else "")
+            refs = ('<wsa:ReferenceParameters><dom:Id xmlns:dom="urn:fixture">sub-7</dom:Id></wsa:ReferenceParameters>' if self.subscription_style == "reference" else "")
+            return (f'<tev:CreatePullPointSubscriptionResponse><tev:SubscriptionReference xmlns:wsa="http://www.w3.org/2005/08/addressing"><wsa:Address>{address}</wsa:Address>{refs}'
+                    f'</tev:SubscriptionReference></tev:CreatePullPointSubscriptionResponse>')
+        named = {"query": "Idx=7" in path, "reference": "sub-7" in body}.get(self.subscription_style, True)
+        if operation in {"PullMessages", "Renew", "Unsubscribe"} and not named:
+            return None  # The camera cannot tell which subscription is meant
         if operation in {"PullMessages", "Renew"} and not self.subscription_alive:
             return None
         if operation == "PullMessages":
             if not self.pending:
                 time.sleep(0.05)
-            batch, self.pending = self.pending, []
+            with self.pending_lock:
+                batch, self.pending = self.pending, []
             return f"<tev:PullMessagesResponse {wsnt}>{''.join(batch)}</tev:PullMessagesResponse>"
         if operation == "Renew":
             return f"<wsnt:RenewResponse {wsnt}/>"
@@ -256,9 +268,14 @@ class OnvifCamera:
             self.unsubscribed += 1
             return f"<wsnt:UnsubscribeResponse {wsnt}/>"
         if operation == "GetEventProperties":
-            return ('<tev:GetEventPropertiesResponse xmlns:wstop="http://docs.oasis-open.org/wsn/t-1"><wstop:TopicSet><tns1:RuleEngine xmlns:tns1="http://www.onvif.org/ver10/topics">'
-                    '<CellMotionDetector><Motion wstop:topic="true"/></CellMotionDetector></tns1:RuleEngine><tns1:Device xmlns:tns1="http://www.onvif.org/ver10/topics">'
-                    '<Temperature wstop:topic="true"/></tns1:Device></wstop:TopicSet></tev:GetEventPropertiesResponse>')
+            topics = ""
+            for topic in self.event_topics:
+                first, *rest = topic.split("/")
+                inner = f'<{rest[-1]} wstop:topic="true"/>' if rest else ""
+                for part in reversed(rest[:-1]):
+                    inner = f"<{part}>{inner}</{part}>"
+                topics += f'<tns1:{first} xmlns:tns1="http://www.onvif.org/ver10/topics">{inner}</tns1:{first}>'
+            return f'<tev:GetEventPropertiesResponse xmlns:wstop="http://docs.oasis-open.org/wsn/t-1"><wstop:TopicSet>{topics}</wstop:TopicSet></tev:GetEventPropertiesResponse>'
         return None
 
     @staticmethod

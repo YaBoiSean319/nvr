@@ -154,10 +154,10 @@ class OnvifClient:
     # ----------------------------------------------------------------------------------------------------------------- transport
 
     def same_host(self, url: str) -> str:
-        """An address a camera returned (a subscription, say), moved onto the host the administrator entered."""
-        return self._kept(url)
+        """An address a camera returned (a subscription, say), moved onto the host the administrator entered. The query is kept: some cameras name the subscription in it."""
+        return self._kept(url, query=True)
 
-    def _kept(self, url: str) -> str:
+    def _kept(self, url: str, query: bool = False) -> str:
         """An address a camera returned, moved onto the host the administrator entered."""
         parts = urlsplit(url.strip())
         if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
@@ -166,7 +166,7 @@ class OnvifClient:
             port = parts.port
         except ValueError:
             raise OnvifError("unsupported", "The camera reported an invalid service port") from None
-        return urlunsplit((parts.scheme, _netloc(self.host, port), parts.path, "", ""))
+        return urlunsplit((parts.scheme, _netloc(self.host, port), parts.path, parts.query[:256] if query else "", ""))
 
     def _security_header(self) -> str:
         nonce = os.urandom(16)
@@ -179,8 +179,8 @@ class OnvifClient:
                 f'<wsse:Nonce EncodingType="{BASE64_BINARY}">{base64.b64encode(nonce).decode()}</wsse:Nonce>'
                 f"<wsu:Created>{created}</wsu:Created></wsse:UsernameToken></wsse:Security>")
 
-    def _envelope(self, action: str, body: str, *, wsse: bool) -> bytes:
-        header = f'<a:Action s:mustUnderstand="1">{action}</a:Action>' + (self._security_header() if wsse else "")
+    def _envelope(self, action: str, body: str, *, wsse: bool, extra: str = "") -> bytes:
+        header = f'<a:Action s:mustUnderstand="1">{action}</a:Action>' + extra + (self._security_header() if wsse else "")
         return (f'<?xml version="1.0" encoding="UTF-8"?><s:Envelope xmlns:s="{SOAP}" xmlns:a="{ADDRESSING}" xmlns:tds="{DEVICE}" xmlns:trt="{MEDIA}" '
                 f'xmlns:tr2="{MEDIA2}" xmlns:tev="{EVENTS}" xmlns:tt="{SCHEMA}"><s:Header>{header}</s:Header><s:Body>{body}</s:Body></s:Envelope>').encode()
 
@@ -211,9 +211,9 @@ class OnvifClient:
         text = f"{code} {reason}".casefold()
         return any(token in text for token in ("notauthorized", "not authorized", "authorization", "authentication", "unauthorized", "sender not authorized", "failedauthentication"))
 
-    async def _once(self, url: str, action: str, body: str, method: str) -> tuple[httpx.Response, ET.Element | None]:
+    async def _once(self, url: str, action: str, body: str, method: str, extra: str = "") -> tuple[httpx.Response, ET.Element | None]:
         auth = self._digests.setdefault(url, httpx.DigestAuth(self._username, self._password)) if "digest" in method else None
-        envelope = self._envelope(action, body, wsse="wsse" in method)
+        envelope = self._envelope(action, body, wsse="wsse" in method, extra=extra)
         try:
             response = await self._http.post(url, content=envelope, auth=auth, headers={"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"'})
         except httpx.TimeoutException:
@@ -237,10 +237,11 @@ class OnvifClient:
         known = self.auth_by_service.get(service)
         return [known, *[item for item in AUTH_ORDER if item != known]] if known else list(AUTH_ORDER)
 
-    async def call(self, url: str, operation: str, namespace: str, body: str, *, service: str, action: str | None = None) -> ET.Element:
+    async def call(self, url: str, operation: str, namespace: str, body: str, *, service: str, action: str | None = None, headers: str = "") -> ET.Element:
         """Send one SOAP operation, negotiating authentication, and return the response document. ``OnvifError`` says why it failed.
 
-        ``action`` is the WS-Addressing action where it is not ``namespace/operation`` (subscription management uses another namespace)."""
+        ``action`` is the WS-Addressing action where it is not ``namespace/operation`` (subscription management uses another namespace).
+        ``headers`` is extra SOAP header XML, such as the reference parameters a camera gave with a subscription address."""
         action = action or f"{namespace}/{operation}"
         rejected = False
         if self._refused and service not in self.auth_by_service:
@@ -253,7 +254,7 @@ class OnvifClient:
                 await self._sync_clock()
             started = time.monotonic()
             try:
-                response, root = await self._once(url, action, body, method)
+                response, root = await self._once(url, action, body, method, headers)
             except OnvifError as exc:
                 self._note(operation=operation, service=service, auth=method, outcome=exc.code, status=None, ms=int((time.monotonic() - started) * 1000))
                 raise

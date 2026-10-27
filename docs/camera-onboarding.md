@@ -41,7 +41,9 @@ Video and motion events are separate: if events fail, recording and live view ca
 - Inspection tries a real subscription (subscribe, pull once, end), so "Configuring motion events" says whether the camera will deliver motion, and lists its motion topics where it names them.
 - While recording, the NVR keeps a PullPoint subscription, renews it halfway through its lifetime, and subscribes again if the camera forgets it (a restart). It ends the subscription when recording stops.
 - Cameras often report one movement on several topics (a cell detector and a video-source alarm) or from several rules. These are merged: motion starts when the first detector goes active and ends when the last goes inactive. Topic prefixes and case are ignored.
-- When a subscription is made again, motion that was open is ended, since its end may have been missed. Clips use the existing pre-roll and post-roll settings.
+- When a subscription is made again, or the camera goes out of reach, motion that was open is ended, since its end may have been missed. Motion that a detector reports for ten minutes without an end is ended too. Clips use the existing pre-roll and post-roll settings.
+- The camera's subscription address is used as given (including a query and WS-Addressing reference parameters), on the host that was entered. The camera's granted lifetime sets the renewal time. A camera that answers pulls at once is asked at most once a second.
+- The source is `healthy` only after events have been pulled successfully, and the reason it is not is shown in the camera's last error (prefixed "Motion events:"). A motion fault never changes the video's recording status.
 - After a fault the NVR waits 1 second, doubling to at most 30 seconds, with jitter, and reports the source as `unavailable`. A refused login is reported as `authentication_error` and retried only every five minutes, to avoid locking the account. A camera with no Events service is `unsupported`.
 
 ## Not in this slice

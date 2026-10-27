@@ -18,6 +18,8 @@ MAX_XML_BYTES = 1024 * 1024
 SUBSCRIPTION_SECONDS = 60
 PULL_TIMEOUT_SECONDS = 20
 MAX_BACKOFF_SECONDS = 30
+MIN_PULL_SECONDS = 1.0  # A camera that ignores the pull timeout and answers at once is asked at most this often.
+MAX_ACTIVE_SECONDS = 600  # A detector that never reports the end of motion does not hold a clip open for ever.
 AUTH_RETRY_SECONDS = 300  # A refused login is retried rarely: repeated failures can lock a camera's account.
 EVENTS_HTTP_TIMEOUT = httpx.Timeout(PULL_TIMEOUT_SECONDS + 10, connect=5.0)
 
@@ -118,6 +120,7 @@ class MotionAggregator:
     def __init__(self) -> None:
         self.states: dict[tuple[str, str], bool] = {}
         self.active = False
+        self.active_since = 0.0
 
     def reset(self) -> None:
         """Forget what was known (after a reconnect, when the camera restates its detectors)."""
@@ -127,12 +130,16 @@ class MotionAggregator:
     def feed(self, event: CameraMotionEvent) -> CameraMotionEvent | None:
         key = (normalise_topic(event.topic), event.source_key)
         if key not in self.states and len(self.states) >= self.MAX_DETECTORS:
-            return None
+            idle = next((known for known, state in self.states.items() if not state), None)
+            if idle is None:
+                return None
+            del self.states[idle]  # Make room: a detector that is quiet is the cheapest to forget.
         self.states[key] = event.active
         now_active = any(self.states.values())
         if now_active == self.active:
             return None
         self.active = now_active
+        self.active_since = time.monotonic()
         return CameraMotionEvent(now_active, event.event_time, event.topic, event.source, event.source_key)
 
 
@@ -143,6 +150,24 @@ def _address(root: ET.Element, parent: str) -> str | None:
             if address:
                 return address
     return None
+
+
+def _reference_headers(root: ET.Element) -> str:
+    """The WS-Addressing reference parameters a camera gave with its subscription address; it expects them back as SOAP headers."""
+    for node in root.iter():
+        if _local(node.tag) == "ReferenceParameters":
+            return "".join(ET.tostring(child, encoding="unicode") for child in node)[:2048]
+    return ""
+
+
+def _granted_seconds(root: ET.Element) -> float:
+    """How long the camera made the subscription last, from its answer; the time asked for if it does not say."""
+    times = {_local(node.tag): _parse_datetime(node.text) for node in root.iter() if _local(node.tag) in {"CurrentTime", "TerminationTime"} and node.text}
+    if len(times) == 2:
+        granted = (times["TerminationTime"] - times["CurrentTime"]).total_seconds()
+        if 2 <= granted <= 3600:
+            return granted
+    return float(SUBSCRIPTION_SECONDS)
 
 
 def _status_for(error: OnvifError) -> str:
@@ -159,6 +184,7 @@ class PullPoint:
     def __init__(self, client: OnvifClient, events_url: str) -> None:
         self.client, self.events_url = client, events_url
         self.address: str | None = None
+        self.headers = ""
         self.renew_at = 0.0
 
     async def create(self) -> None:
@@ -170,21 +196,22 @@ class PullPoint:
         if address is None:
             raise OnvifError("malformed", "The camera did not say where to pull events from")
         self.address = self.client.same_host(address)
-        self.renew_at = time.monotonic() + SUBSCRIPTION_SECONDS / 2
+        self.headers = _reference_headers(root)
+        self.renew_at = time.monotonic() + _granted_seconds(root) / 2
 
     async def renew(self) -> None:
         await self.client.call(
             self.address, "Renew", WSNT,
             f"<wsnt:Renew xmlns:wsnt=\"{WSNT}\"><wsnt:TerminationTime>{_termination(SUBSCRIPTION_SECONDS)}</wsnt:TerminationTime></wsnt:Renew>",
-            service="events", action="http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest")
+            service="events", action="http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest", headers=self.headers)
         self.renew_at = time.monotonic() + SUBSCRIPTION_SECONDS / 2
 
     async def pull(self, seconds: int = PULL_TIMEOUT_SECONDS) -> list[CameraMotionEvent]:
         root = await self.client.call(
             self.address, "PullMessages", EVENTS,
             f"<tev:PullMessages><tev:Timeout>PT{seconds}S</tev:Timeout><tev:MessageLimit>100</tev:MessageLimit></tev:PullMessages>",
-            service="events", action="http://www.onvif.org/ver10/events/wsdl/PullPointSubscription/PullMessagesRequest")
-        return sorted(parse_motion_notifications(ET.tostring(root, encoding="utf-8")), key=lambda item: item.event_time)
+            service="events", action="http://www.onvif.org/ver10/events/wsdl/PullPointSubscription/PullMessagesRequest", headers=self.headers)
+        return parse_motion_notifications(ET.tostring(root, encoding="utf-8"))
 
     async def end(self) -> None:
         """Tell the camera the subscription is finished, so it does not hold it until it lapses. Best effort."""
@@ -193,7 +220,7 @@ class PullPoint:
         try:
             await asyncio.wait_for(self.client.call(
                 self.address, "Unsubscribe", WSNT, f"<wsnt:Unsubscribe xmlns:wsnt=\"{WSNT}\"/>", service="events",
-                action="http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest"), timeout=3)
+                action="http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest", headers=self.headers), timeout=3)
         except Exception:  # noqa: BLE001 - the subscription lapses by itself if this fails
             pass
         self.address = None
@@ -216,7 +243,9 @@ async def probe_motion(client: OnvifClient, events_url: str) -> dict[str, object
     finally:
         await point.end()
     motion = [topic for topic in topics if "motion" in topic]
-    return {"ok": True, "topics": motion or topics}
+    if topics and not motion:
+        return {"ok": False, "reason": "The camera offers events but none about motion", "code": "no_motion_topic"}
+    return {"ok": True, "topics": motion}
 
 
 def _topic_paths(root: ET.Element) -> set[str]:
@@ -249,15 +278,25 @@ async def subscribe_and_pull(
     on_event: Callable[[CameraMotionEvent], Awaitable[None]],
     on_status: Callable[[str], None],
     *,
+    on_detail: Callable[[str], None] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     """Keep an ONVIF PullPoint subscription alive for as long as the task runs.
 
     The subscription is renewed before it lapses and made again if the camera drops it. After a fault the NVR reconnects with a growing, bounded,
     jittered wait, and reports ``healthy``, ``unavailable``, ``authentication_error`` or ``unsupported`` for the camera's motion source. Detectors that
-    report the same movement are merged into one motion state."""
+    report the same movement are merged into one motion state. ``on_detail`` receives a short, credential-free sentence saying what is wrong
+    (or an empty string when all is well), so a person can act on it. A source is ``healthy`` only once events have actually been pulled."""
+    detail = on_detail or (lambda _text: None)
     parsed = urlsplit(device_service_url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        detail("The ONVIF event address is not valid")
+        on_status("configuration_error")
+        return
+    try:
+        OnvifClient(parsed.hostname, username, password)
+    except ValueError as exc:
+        detail(str(exc))
         on_status("configuration_error")
         return
     backoff = 1.0
@@ -270,34 +309,55 @@ async def subscribe_and_pull(
                 services = await client.services(url)
                 events_url = services.urls.get("events")
                 if events_url is None:
+                    detail("The camera has no ONVIF Events service")
                     on_status("unsupported")
                     return
                 point = PullPoint(client, events_url)
                 try:
                     await point.create()
                     await _restart(aggregator, on_event)
-                    on_status("healthy")
-                    backoff = 1.0
+                    first = True
                     while True:
                         if time.monotonic() >= point.renew_at:
                             try:
                                 await point.renew()
                             except OnvifError:
-                                # The camera forgot the subscription (a restart, a lapse): make a new one rather than back off.
+                                # The camera forgot the subscription (a restart, a lapse): end the old one if it can be, and make a new one rather than back off.
+                                await point.end()
                                 await point.create()
                                 await _restart(aggregator, on_event)
-                        for event in await point.pull():
+                        started = time.monotonic()
+                        pulled = await point.pull(1 if first else PULL_TIMEOUT_SECONDS)
+                        if first:
+                            first = False
+                            detail("")
+                            on_status("healthy")
+                            backoff = 1.0
+                        for event in pulled:
                             merged = aggregator.feed(event)
                             if merged is not None:
                                 await on_event(merged)
+                        if aggregator.active and time.monotonic() - aggregator.active_since > MAX_ACTIVE_SECONDS:
+                            await _restart(aggregator, on_event)  # Motion that has lasted this long is a detector that lost its end.
+                        if not pulled and time.monotonic() - started < MIN_PULL_SECONDS:
+                            await asyncio.sleep(MIN_PULL_SECONDS - (time.monotonic() - started))
                 finally:
                     await point.end()
         except asyncio.CancelledError:
             raise
         except OnvifError as error:
+            detail(error.message)
             on_status(_status_for(error))
             delay = AUTH_RETRY_SECONDS if error.code == "auth_rejected" else None
         except (httpx.HTTPError, OSError, ValueError, ET.ParseError):
+            detail("The camera's event service could not be reached")
             on_status("unavailable")
+        except Exception:  # noqa: BLE001 - one camera's fault, such as a failure to store an event, must not end its motion source
+            detail("Motion events could not be handled")
+            on_status("unavailable")
+        if aggregator.active:
+            # The camera is out of reach, so the end of any motion is unknown: end it rather than leave a clip open until the camera is back.
+            await on_event(CameraMotionEvent(False, datetime.now(timezone.utc), "onvif/subscription-lost"))
+            aggregator.reset()
         await asyncio.sleep(delay or backoff * random.uniform(0.8, 1.2))
         backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)

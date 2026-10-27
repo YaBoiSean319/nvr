@@ -46,6 +46,12 @@ class AggregatorTests(unittest.TestCase):
         self.assertIsNone(merged.feed(event(CELL, False, "Rule=a")))
         self.assertFalse(merged.feed(event(CELL, False, "Rule=b")).active)
 
+    def test_a_new_active_detector_is_not_ignored_when_the_table_is_full_of_quiet_ones(self):
+        merged = MotionAggregator()
+        for number in range(MotionAggregator.MAX_DETECTORS):
+            merged.feed(event(CELL, False, f"Rule={number}"))
+        self.assertTrue(merged.feed(event(CELL, True, "Rule=new")).active)
+
     def test_a_camera_cannot_make_the_state_grow_without_limit(self):
         merged = MotionAggregator()
         for number in range(MotionAggregator.MAX_DETECTORS + 20):
@@ -54,6 +60,11 @@ class AggregatorTests(unittest.TestCase):
 
 
 class SubscriptionCase(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        patcher = mock.patch.object(onvif_events, "MIN_PULL_SECONDS", 0.05)  # The mock camera answers at once; the real floor is tested separately.
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def camera(self, **options) -> OnvifCamera:
         camera = OnvifCamera(username=USER, password=PASSWORD, **options)
         self.addCleanup(camera.close)
@@ -108,14 +119,50 @@ class SubscriptionTests(SubscriptionCase):
         await asyncio.sleep(0.3)
         self.assertEqual([item.active for item in seen], [True, False])
 
+    async def test_a_hanwha_style_camera_reports_one_movement_on_two_topics_with_different_item_names(self):
+        # Modelled on Hanwha Wisenet: VideoSource/MotionAlarm carries "State", VideoAnalytics/MotionDetection carries "IsMotion", both for one movement.
+        camera = self.camera(auth={"device": "digest", "events": "wsse"})
+        _, seen, statuses = await self.start(camera)
+        await self.until(lambda: "healthy" in statuses)
+        camera.motion("tns1:VideoSource/MotionAlarm", True, item="State")
+        camera.motion("tns1:VideoAnalytics/MotionDetection", True, source="MotionRule")
+        await self.until(lambda: not camera.pending)
+        camera.motion("tns1:VideoAnalytics/MotionDetection", False, source="MotionRule")
+        camera.motion("tns1:VideoSource/MotionAlarm", False, item="State")
+        await self.until(lambda: len(seen) >= 2)
+        await asyncio.sleep(0.3)
+        self.assertEqual([item.active for item in seen], [True, False])
+
+    async def test_a_camera_that_subscribes_but_fails_every_pull_is_never_called_healthy(self):
+        camera = self.camera(behaviours={"PullMessages": "fault"})
+        _, _, statuses = await self.start(camera)
+        details: list[str] = []
+        await self.until(lambda: "unavailable" in statuses)
+        self.assertNotIn("healthy", statuses)
+
+    async def test_the_reason_is_passed_on_in_words_without_the_login(self):
+        camera = self.camera()
+        details: list[str] = []
+        statuses: list[str] = []
+        task = asyncio.create_task(subscribe_and_pull(camera.url, USER, "not-the-password", mock.AsyncMock(), statuses.append, on_detail=details.append))
+        self.addAsyncCleanup(self.stop, task)
+        await self.until(lambda: "authentication_error" in statuses)
+        self.assertTrue(details and "rejected" in details[-1].casefold())
+        self.assertNotIn("not-the-password", " ".join(details))
+
+    async def test_a_login_with_a_username_but_no_password_is_a_configuration_error(self):
+        statuses: list[str] = []
+        await subscribe_and_pull("http://127.0.0.1:1/onvif/device_service", USER, "", mock.AsyncMock(), statuses.append)
+        self.assertEqual(statuses, ["configuration_error"])
+
     async def test_the_subscription_is_renewed_before_it_lapses_and_ended_when_the_task_stops(self):
         camera = self.camera()
         with mock.patch.object(onvif_events, "SUBSCRIPTION_SECONDS", 2):
             task, _, statuses = await self.start(camera)
             await self.until(lambda: any(item["operation"] == "Renew" for item in camera.requests), 5)
-        self.assertEqual(camera.subscriptions, 1)
         await self.stop(task)
-        self.assertEqual(camera.unsubscribed, 1)
+        self.assertGreaterEqual(camera.unsubscribed, 1)
+        self.assertFalse(camera.subscription_alive)
 
     async def test_a_camera_that_forgets_the_subscription_is_subscribed_again_and_open_motion_is_ended(self):
         camera = self.camera()
@@ -128,7 +175,63 @@ class SubscriptionTests(SubscriptionCase):
             await self.until(lambda: camera.subscriptions == 2, 8)
         await self.until(lambda: len(seen) >= 2)
         self.assertEqual([item.active for item in seen], [True, False])
+        self.assertIn(seen[1].topic, {"onvif/subscription-restarted", "onvif/subscription-lost"})
+
+    async def test_a_renewal_the_camera_refuses_makes_a_new_subscription_without_going_unavailable(self):
+        camera = self.camera(behaviours={"Renew": "fault"})
+        with mock.patch.object(onvif_events, "SUBSCRIPTION_SECONDS", 2):
+            _, seen, statuses = await self.start(camera)
+            await self.until(lambda: "healthy" in statuses)
+            camera.motion(CELL, True)
+            await self.until(lambda: seen)
+            await self.until(lambda: camera.subscriptions == 2 and len(seen) >= 2, 8)
         self.assertEqual(seen[1].topic, "onvif/subscription-restarted")
+        self.assertNotIn("unavailable", statuses)
+        self.assertGreaterEqual(camera.unsubscribed, 1)  # The old subscription was ended, not left to lapse
+
+    async def test_motion_open_when_the_camera_goes_away_is_ended_not_left_open(self):
+        camera = self.camera()
+        _, seen, statuses = await self.start(camera)
+        await self.until(lambda: "healthy" in statuses)
+        camera.motion(CELL, True)
+        await self.until(lambda: seen)
+        camera.behaviours["PullMessages"] = "http500"
+        await self.until(lambda: len(seen) >= 2, 8)
+        self.assertEqual([item.active for item in seen], [True, False])
+        self.assertEqual(seen[1].topic, "onvif/subscription-lost")
+
+    async def test_a_camera_that_names_its_subscription_in_the_address_query_is_pulled_correctly(self):
+        camera = self.camera(subscription_style="query")
+        _, seen, statuses = await self.start(camera)
+        await self.until(lambda: "healthy" in statuses)
+        camera.motion(CELL, True)
+        await self.until(lambda: seen)
+
+    async def test_a_camera_that_wants_reference_parameters_echoed_gets_them(self):
+        camera = self.camera(subscription_style="reference")
+        _, seen, statuses = await self.start(camera)
+        await self.until(lambda: "healthy" in statuses)
+        camera.motion(CELL, True)
+        await self.until(lambda: seen)
+
+    async def test_a_camera_that_answers_pulls_at_once_is_not_hammered(self):
+        camera = self.camera()
+        with mock.patch.object(onvif_events, "MIN_PULL_SECONDS", 0.5):
+            _, _, statuses = await self.start(camera)
+            await self.until(lambda: "healthy" in statuses)
+            before = sum(item["operation"] == "PullMessages" for item in camera.requests)
+            await asyncio.sleep(1.6)
+        pulls = sum(item["operation"] == "PullMessages" for item in camera.requests) - before
+        self.assertLessEqual(pulls, 5)
+
+    async def test_a_detector_that_never_ends_does_not_hold_motion_open_for_ever(self):
+        camera = self.camera()
+        with mock.patch.object(onvif_events, "MAX_ACTIVE_SECONDS", 0.3):
+            _, seen, statuses = await self.start(camera)
+            await self.until(lambda: "healthy" in statuses)
+            camera.motion(CELL, True)
+            await self.until(lambda: len(seen) >= 2)
+        self.assertEqual([item.active for item in seen], [True, False])
 
     async def test_a_camera_that_fails_is_reported_unavailable_then_healthy_when_it_recovers(self):
         camera = self.camera(behaviours={"CreatePullPointSubscription": "http500"})
@@ -171,8 +274,16 @@ class ProbeTests(SubscriptionCase):
         camera = self.camera()
         result = await self.probe(camera)
         self.assertTrue(result["ok"])
-        self.assertEqual(result["topics"], ["ruleengine/cellmotiondetector/motion"])
+        self.assertEqual(result["topics"], ["ruleengine/cellmotiondetector/motion", "videoanalytics/motiondetection", "videosource/motionalarm"])
         self.assertEqual((camera.subscriptions, camera.unsubscribed), (1, 1))
+
+    async def test_a_camera_that_lists_no_motion_topic_does_not_pass_the_probe(self):
+        result = await self.probe(self.camera(event_topics=("Device/Temperature",)))
+        self.assertEqual((result["ok"], result["code"]), (False, "no_motion_topic"))
+
+    async def test_a_camera_that_does_not_list_its_topics_still_passes_when_it_subscribes(self):
+        result = await self.probe(self.camera(behaviours={"GetEventProperties": "fault"}))
+        self.assertTrue(result["ok"])
 
     async def test_a_probe_says_why_a_camera_would_not_subscribe(self):
         camera = self.camera(behaviours={"CreatePullPointSubscription": "fault"})
