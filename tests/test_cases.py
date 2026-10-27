@@ -212,6 +212,60 @@ class AccessTests(CaseCase):
         full = self.full.get(f"/api/cases/{case}").json()
         self.assertEqual({item["camera_name"] for item in full["items"] if item["kind"] == "clip"}, {"Dock 1", "Yard 1"})
 
+    def test_what_the_audit_and_the_counts_say_about_a_hidden_camera_is_left_out(self):
+        case = self.create()["id"]
+        self.full.post(f"/api/cases/{case}/members", json={"username": "limited"})
+        self.clip(case, self.y1, 0, 1, label="Yard gate")
+        self.clip(case, self.d1, 0, 1)
+        seen = self.limited.get(f"/api/cases/{case}/audit").json()["events"]
+        self.assertNotIn("Yard", json.dumps(seen))
+        self.assertNotIn(self.y1, json.dumps(seen))
+        restricted = [event for event in seen if event["detail"] == {"restricted": True}]
+        self.assertEqual([event["action"] for event in restricted], ["clip_added"])
+        self.assertEqual(next(event for event in seen if event["action"] == "clip_added" and event["detail"].get("camera") == "Dock 1")["detail"]["camera"], "Dock 1")
+        everything = self.full.get(f"/api/cases/{case}/audit").json()["events"]
+        self.assertIn("Yard 1", json.dumps(everything))
+        self.assertEqual(self.limited.get(f"/api/cases/{case}").json()["counts"]["clip"], 1)
+        self.assertEqual(self.limited.get("/api/cases").json()["cases"][0]["counts"]["clip"], 1)
+        self.assertEqual(self.full.get("/api/cases").json()["cases"][0]["counts"]["clip"], 2)
+
+    def test_a_saved_search_shows_each_member_only_the_results_on_their_cameras(self):
+        case = self.create()["id"]
+        self.full.post(f"/api/cases/{case}/members", json={"username": "limited"})
+        dock, yard = self.add_track(self.d1), self.add_track(self.y1)
+        self.add(case, kind="search", text="People", params={}, track_ids=[dock, yard])
+        shown = next(item for item in self.limited.get(f"/api/cases/{case}").json()["items"] if item["kind"] == "search")
+        self.assertEqual(shown["data"]["track_ids"], [dock])
+        full = next(item for item in self.full.get(f"/api/cases/{case}").json()["items"] if item["kind"] == "search")
+        self.assertEqual(full["data"]["track_ids"], [dock, yard])
+
+    def test_a_refused_try_is_audited_on_the_routes_that_change_a_case_too(self):
+        case = self.create()["id"]
+        self.limited.post(f"/api/cases/{case}/items", json={"kind": "note", "text": "x"})
+        self.limited.post(f"/api/cases/{case}/packages")
+        self.limited.post(f"/api/cases/{case}/close", json={"confirm": True})
+        self.assertEqual(len(self.audit("case_access_denied")), 3)
+        self.assertEqual(self.full.get(f"/api/cases/{case}").json()["status"], "open")
+
+    def test_only_the_person_who_added_an_item_the_owner_or_an_administrator_removes_it(self):
+        case = self.create()["id"]
+        self.full.post(f"/api/cases/{case}/members", json={"username": "limited"})
+        theirs = self.clip(case, self.d1, 0, 1, client=self.limited).json()["item_id"]
+        owners = self.clip(case, self.d1, 1, 1).json()["item_id"]
+        self.assertEqual(self.limited.delete(f"/api/cases/{case}/items/{owners}").status_code, 403)
+        self.assertEqual(self.limited.delete(f"/api/cases/{case}/items/{theirs}").status_code, 200)
+        again = self.clip(case, self.d1, 0, 1, client=self.limited).json()["item_id"]
+        self.assertEqual(self.full.delete(f"/api/cases/{case}/items/{again}").status_code, 200)  # The owner may remove anyone's
+
+    def test_a_person_owns_a_limited_number_of_open_cases(self):
+        for index in range(cases.MAX_OPEN_CASES):
+            self.create(title=f"Case {index}")
+        refused = self.full.post("/api/cases", json={"title": "One too many"})
+        self.assertEqual(refused.status_code, 409)
+        first = self.full.get("/api/cases").json()["cases"][0]["id"]
+        self.full.post(f"/api/cases/{first}/close", json={"confirm": True})
+        self.assertEqual(self.full.post("/api/cases", json={"title": "Room again"}).status_code, 201)
+
     def test_grants_that_end_hide_the_clips_again(self):
         case = self.create()["id"]
         self.full.post(f"/api/cases/{case}/members", json={"username": "limited"})
@@ -389,6 +443,69 @@ class PackageTests(CaseCase):
         self.assertEqual(coverage["Door"]["uncovered_seconds"], 0)
         self.assertEqual(coverage["Corridor"]["uncovered_seconds"], 60.0)
         self.assertEqual(len(result["partial_clips"]), 1)
+
+    def test_a_package_rewritten_to_match_itself_is_not_the_package_the_nvr_built(self):
+        package, content = self.build(self.case)
+        untouched = self.verify(self.case, package, content)
+        self.assertEqual((untouched["matches_issued_package"], untouched["clips_match_request"], untouched["verified"]), (True, True, True))
+        source = zipfile.ZipFile(io.BytesIO(content))
+        clips = [name for name in source.namelist() if name.startswith("clips/")]
+        # A clip dropped, with case.json and the manifest rewritten to agree: the package is consistent, and is not what was built
+        document = json.loads(source.read("case.json"))
+        document["items"] = [entry for entry in document["items"] if entry.get("package_file") != clips[1]]
+        output = io.BytesIO()
+        files = {name: source.read(name) for name in source.namelist() if name not in (clips[1], "integrity.json")}
+        files["case.json"] = json.dumps(document).encode()
+        manifest = {"algorithm": "sha256", "files": [{"path": name, "size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()} for name, body in files.items()]}
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, body in files.items():
+                archive.writestr(name, body)
+            archive.writestr("integrity.json", json.dumps(manifest))
+        forged = self.verify(self.case, package, output.getvalue())
+        self.assertEqual((forged["checksums_valid"], forged["clips_valid"]), (True, True))  # Consistent with itself ...
+        self.assertEqual((forged["matches_issued_package"], forged["clips_match_request"], forged["verified"], forged["complete"]), (False, False, False, False))  # ... and caught
+        self.assertEqual(self.case_audit(self.case, "package_verification_failed")[0]["detail"]["matches_issued_package"], False)
+
+    def test_a_clip_package_that_lost_the_signed_chain_it_was_exported_with_fails(self):
+        package = self.package(self.case)
+        cases.advance_packages()
+        with connect() as db:
+            for row in db.execute("SELECT export_id FROM case_package_clips WHERE package_id=?", (package,)).fetchall():
+                db.execute("UPDATE exports SET metadata_json=? WHERE id=?", (json.dumps({"signed_footage": {self.d1: "signed"}}), row[0]))
+        self.finish_exports()
+        cases.advance_packages()
+        download = self.full.get(f"/api/cases/{self.case}/packages/{package}/download").content
+        result = self.verify(self.case, package, download)
+        self.assertEqual((result["checksums_valid"], result["clips_valid"], result["verified"]), (True, False, False))  # The stand-in packages carry no chain
+        self.assertIn("signed", result["clips"][0]["error"])
+
+    def test_the_package_is_of_the_clips_it_was_requested_for_whatever_changes_after(self):
+        package = self.package(self.case)
+        self.clip(self.case, self.d1, 0, 1, label="Added after")  # After the request
+        cases.advance_packages()
+        self.finish_exports()
+        cases.advance_packages()
+        self.assertEqual(self.full.get(f"/api/cases/{self.case}/packages/{package}").json()["status"], "ready")
+        content = self.full.get(f"/api/cases/{self.case}/packages/{package}/download").content
+        document = json.loads(zipfile.ZipFile(io.BytesIO(content)).read("case.json"))
+        self.assertEqual(sorted(entry["text"] for entry in document["items"] if entry["kind"] == "clip"), ["Corridor", "Door"])
+        self.assertTrue(self.verify(self.case, package, content)["verified"])
+
+    def test_a_package_that_never_finishes_is_failed_and_the_number_kept_is_limited_and_a_package_can_be_deleted(self):
+        package = self.package(self.case)
+        with connect() as db:
+            db.execute("UPDATE case_packages SET created_at=? WHERE id=?", (iso(START - timedelta(days=1)), package))
+        cases.advance_packages()
+        failed = self.full.get(f"/api/cases/{self.case}/packages/{package}").json()
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("six hours", failed["error"])
+        for _ in range(cases.MAX_PACKAGES - 1):
+            with connect() as db:
+                db.execute("INSERT INTO case_packages(id,case_id,requested_by,status,created_at) VALUES(?,?,?, 'failed', ?)", (str(uuid.uuid4()), self.case, self.full_id, iso(START)))
+        self.assertEqual(self.full.post(f"/api/cases/{self.case}/packages").status_code, 409)
+        self.assertEqual(self.full.delete(f"/api/cases/{self.case}/packages/{package}").status_code, 200)
+        self.assertEqual(self.full.post(f"/api/cases/{self.case}/packages").status_code, 202)
+        self.assertEqual(self.limited.delete(f"/api/cases/{self.case}/packages/{package}").status_code, 404)
 
     def test_a_package_that_is_not_for_this_case_fails_verification(self):
         package, content = self.build(self.case)

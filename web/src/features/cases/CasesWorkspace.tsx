@@ -84,7 +84,7 @@ function itemSummary(item: CaseItem, when: (iso: string | null | undefined) => s
 export function CaseView() {
   const { caseId = "" } = useParams();
   const detail = useCase(caseId);
-  if (detail.error) {
+  if (detail.error && !detail.data) {
     return (
       <section className="cases"><p className="notice" data-tone="bad" role="alert">{failureText(detail.error, "This case could not be opened.")}</p><Link className="button" to="/cases">All cases</Link></section>
     );
@@ -252,9 +252,13 @@ function PackageRow({ caseId, item, when }: { caseId: string; item: CasePackage;
       ) : null}
       {problem ? <p className="notice" data-tone="bad" role="alert">{problem}</p> : null}
       {result ? (
-        <p className="notice" role="status" data-tone={result.checksums_valid && result.clips_valid && result.complete ? "good" : "bad"}>
-          {result.checksums_valid && result.clips_valid ? `The files match their manifest and ${result.clips.length === 1 ? "its clip package verifies" : `all ${result.clips.length} clip packages verify`}.` : (result.error ?? "This package does not verify.")}
-          {result.checksums_valid && result.clips_valid && !result.complete ? ` Not every clip of the case is in it${result.omitted_items ? ` (${result.omitted_items} left out)` : ""}.` : ""}
+        <p className="notice" role="status" data-tone={result.verified && result.complete ? "good" : "bad"}>
+          {result.verified
+            ? `This is the package this NVR built, and ${result.clips.length === 1 ? "its clip package verifies" : `all ${result.clips.length} clip packages verify`}.`
+            : result.checksums_valid && result.clips_valid && !result.matches_issued_package
+              ? "The files match their own manifest, but this is not the package this NVR built: it has been changed or is not this one."
+              : (result.error ?? "This package does not verify.")}
+          {result.verified && !result.complete ? ` Not every clip of the case is in it${result.omitted_items ? ` (${result.omitted_items} left out)` : ""}.` : ""}
         </p>
       ) : null}
     </li>

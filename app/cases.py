@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sqlite3
 import uuid
 import zipfile
@@ -32,6 +33,10 @@ MAX_TEXT = 5000
 MAX_CLIP = timedelta(hours=24)
 MAX_ITEMS = 500
 MAX_SEARCH_TRACKS = 200
+MAX_OPEN_CASES = 25  # For each person: holding footage is not free
+MAX_PACKAGES = 5  # For each case
+PACKAGE_TIMEOUT = timedelta(hours=6)
+MIN_PACKAGE_FREE_BYTES = 256 * 1024**2
 OPEN, CLOSED = "open", "closed"
 OPENED_AGAIN_AFTER = timedelta(minutes=10)
 PACKAGE_DIRECTORY = "cases"
@@ -111,6 +116,8 @@ def create_case(db: sqlite3.Connection, owner_id: int, title: str, description: 
         raise CaseError(f"Give the case a title of up to {MAX_TITLE} characters")
     if len(description) > MAX_TEXT:
         raise CaseError(f"The description is limited to {MAX_TEXT} characters")
+    if db.execute("SELECT COUNT(*) FROM cases WHERE owner_id=? AND status='open'", (owner_id,)).fetchone()[0] >= MAX_OPEN_CASES:
+        raise CaseError(f"You own {MAX_OPEN_CASES} open cases: close one before starting another", 409)
     case_id = str(uuid.uuid4())
     now = _iso(_now())
     db.execute("INSERT INTO cases(id,title,description,owner_id,created_at) VALUES(?,?,?,?,?)", (case_id, title, description, owner_id, now))
@@ -119,14 +126,18 @@ def create_case(db: sqlite3.Connection, owner_id: int, title: str, description: 
     return case_id
 
 
-def _counts(db: sqlite3.Connection, case_id: str) -> dict[str, int]:
-    counts = {row["kind"]: row["n"] for row in db.execute("SELECT kind,COUNT(*) AS n FROM case_items WHERE case_id=? AND removed_at IS NULL GROUP BY kind", (case_id,))}
-    return {kind: counts.get(kind, 0) for kind in ("clip", "mark", "note", "alarm", "search", "export")}
+def _counts(db: sqlite3.Connection, case_id: str, access: access_rules.Access) -> dict[str, int]:
+    """Items of each kind that this person may see (an item on a camera they may not see is not even counted)."""
+    counts = {kind: 0 for kind in ("clip", "mark", "note", "alarm", "search", "export")}
+    for item in db.execute("SELECT * FROM case_items WHERE case_id=? AND removed_at IS NULL", (case_id,)):
+        if all(access.can_see(camera_id) for camera_id in _item_cameras(item)):
+            counts[item["kind"]] += 1
+    return counts
 
 
-def summary(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def summary(db: sqlite3.Connection, row: sqlite3.Row, user: Any) -> dict[str, Any]:
     return {"id": row["id"], "title": row["title"], "status": row["status"], "owner": _username(db, row["owner_id"]), "owner_id": row["owner_id"],
-            "created_at": row["created_at"], "closed_at": row["closed_at"], "counts": _counts(db, row["id"])}
+            "created_at": row["created_at"], "closed_at": row["closed_at"], "counts": _counts(db, row["id"], user.access)}
 
 
 def list_cases(db: sqlite3.Connection, user: Any, status: str | None = None) -> list[dict[str, Any]]:
@@ -138,7 +149,7 @@ def list_cases(db: sqlite3.Connection, user: Any, status: str | None = None) -> 
         clauses.append("status=?")
         values.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    return [summary(db, row) for row in db.execute(f"SELECT * FROM cases {where} ORDER BY created_at DESC LIMIT 200", values)]
+    return [summary(db, row, user) for row in db.execute(f"SELECT * FROM cases {where} ORDER BY created_at DESC LIMIT 200", values)]
 
 
 def _item_cameras(row: sqlite3.Row) -> list[str]:
@@ -147,12 +158,24 @@ def _item_cameras(row: sqlite3.Row) -> list[str]:
     return [row["camera_id"]] if row["camera_id"] else []
 
 
+def _visible_tracks(db: sqlite3.Connection, track_ids: list[str], access: access_rules.Access) -> list[str]:
+    seen: set[str] = set()
+    for start in range(0, len(track_ids), 500):
+        part = track_ids[start:start + 500]
+        for found in db.execute(f"SELECT id,camera_id FROM ai_tracks WHERE id IN ({','.join('?' * len(part))})", part):
+            if access.can_see(found["camera_id"]):
+                seen.add(found["id"])
+    return [track for track in track_ids if track in seen]
+
+
 def item_view(db: sqlite3.Connection, row: sqlite3.Row, user: Any) -> dict[str, Any]:
     """An item, or just that it exists when it concerns a camera this person may not see."""
     if not all(user.access.can_see(camera_id) for camera_id in _item_cameras(row)):
         return {"id": row["id"], "kind": row["kind"], "restricted": True, "added_at": row["added_at"]}
     view = {"id": row["id"], "kind": row["kind"], "restricted": False, "camera_id": row["camera_id"], "starts_at": row["starts_at"], "ends_at": row["ends_at"],
             "ref": row["ref"], "text": row["text"], "data": json.loads(row["data_json"]), "added_by": _username(db, row["added_by"]), "added_at": row["added_at"]}
+    if row["kind"] == "search":  # Found by the person who saved it, with their access: others see the results of theirs
+        view["data"]["track_ids"] = _visible_tracks(db, view["data"].get("track_ids", []), user.access)
     if row["camera_id"]:
         camera = db.execute("SELECT name FROM cameras WHERE id=?", (row["camera_id"],)).fetchone()
         view["camera_name"] = camera["name"] if camera else None
@@ -168,7 +191,7 @@ def detail(db: sqlite3.Connection, row: sqlite3.Row, user: Any) -> dict[str, Any
     members = [{"user_id": member["user_id"], "username": member["username"], "added_at": member["added_at"], "owner": member["user_id"] == row["owner_id"]}
                for member in db.execute("SELECT m.user_id,u.username,m.added_at FROM case_members m JOIN users u ON u.id=m.user_id WHERE m.case_id=? ORDER BY m.added_at", (row["id"],))]
     packages = [package_view(package) for package in db.execute("SELECT * FROM case_packages WHERE case_id=? ORDER BY created_at DESC LIMIT 20", (row["id"],))]
-    return {**summary(db, row), "description": row["description"], "items": items, "restricted_items": sum(1 for item in items if item["restricted"]),
+    return {**summary(db, row, user), "description": row["description"], "items": items, "restricted_items": sum(1 for item in items if item["restricted"]),
             "members": members, "held_segments": len(held_segment_ids(db, row["id"])), "packages": packages,
             "can_manage": is_manager(db, row, user)}
 
@@ -302,7 +325,7 @@ def add_clip(db: sqlite3.Connection, row: sqlite3.Row, user: Any, camera_id: str
     held = hold_segments(db, row["id"], camera_id, segments, int(user["id"]))
     item = _insert(db, row["id"], int(user["id"]), "clip", camera_id=camera_id, starts_at=_iso(start), ends_at=_iso(end), text=label.strip()[:200],
                    data={"segments": len(segments), "covered_seconds": round(covered, 1), "uncovered_seconds": round((end - start).total_seconds() - covered, 1)})
-    audit(db, row["id"], int(user["id"]), "clip_added", item=item, camera=camera["name"], start=_iso(start), end=_iso(end), segments_held=held)
+    audit(db, row["id"], int(user["id"]), "clip_added", item=item, camera_id=camera_id, camera=camera["name"], start=_iso(start), end=_iso(end), segments_held=held)
     return item
 
 
@@ -316,7 +339,7 @@ def add_mark(db: sqlite3.Connection, row: sqlite3.Row, user: Any, camera_id: str
     if not text or len(text) > 500:
         raise CaseError("Say what the mark is, in up to 500 characters")
     item = _insert(db, row["id"], int(user["id"]), "mark", camera_id=camera_id, starts_at=_iso(at), text=text)
-    audit(db, row["id"], int(user["id"]), "mark_added", item=item, camera=camera["name"], at=_iso(at))
+    audit(db, row["id"], int(user["id"]), "mark_added", item=item, camera_id=camera_id, camera=camera["name"], at=_iso(at))
     return item
 
 
@@ -340,7 +363,7 @@ def add_alarm(db: sqlite3.Connection, row: sqlite3.Row, user: Any, alarm_id: str
         raise CaseError("Alarm not found", 404)
     item = _insert(db, row["id"], int(user["id"]), "alarm", camera_id=alarm["camera_id"], starts_at=alarm["occurred_at"], ref=alarm_id, text=alarm["rule_name"],
                    data={"label": alarm["label"]})
-    audit(db, row["id"], int(user["id"]), "alarm_added", item=item, alarm=alarm_id)
+    audit(db, row["id"], int(user["id"]), "alarm_added", item=item, camera_id=alarm["camera_id"], alarm=alarm_id)
     return item
 
 
@@ -386,6 +409,8 @@ def remove_item(db: sqlite3.Connection, row: sqlite3.Row, user: Any, item_id: st
         raise CaseError("Item not found", 404)
     if item["kind"] == "note":
         raise CaseError("A note stays in the case: add another to correct it", 409)
+    if item["added_by"] != int(user["id"]) and not is_manager(db, row, user):
+        raise CaseError("Only the person who added this, the case's owner or an administrator can remove it", 403)
     db.execute("UPDATE case_items SET removed_at=?,removed_by=? WHERE id=?", (_iso(_now()), int(user["id"]), item_id))
     released = 0
     if item["kind"] == "clip":
@@ -419,14 +444,22 @@ def record_item_viewed(db: sqlite3.Connection, row: sqlite3.Row, user: Any, item
         if json.loads(event["detail_json"]).get("item") == item_id and _now() - _parse(event["created_at"]) < OPENED_AGAIN_AFTER:
             return
     camera = db.execute("SELECT name FROM cameras WHERE id=?", (item["camera_id"],)).fetchone() if item["camera_id"] else None
-    audit(db, row["id"], int(user["id"]), "item_viewed", item=item_id, kind=item["kind"], camera=camera["name"] if camera else None, at=item["starts_at"])
+    audit(db, row["id"], int(user["id"]), "item_viewed", item=item_id, kind=item["kind"], camera_id=item["camera_id"], camera=camera["name"] if camera else None, at=item["starts_at"])
 
 
 # --- audit ---------------------------------------------------------------------------------------------------------------------------
 
-def audit_extract(db: sqlite3.Connection, case_id: str) -> list[dict[str, Any]]:
-    return [{"at": row["created_at"], "actor": _username(db, row["actor_id"]), "action": row["action"], "detail": json.loads(row["detail_json"])}
-            for row in db.execute("SELECT * FROM case_audit WHERE case_id=? ORDER BY id", (case_id,))]
+def audit_extract(db: sqlite3.Connection, case_id: str, access: access_rules.Access = access_rules.EVERYTHING) -> list[dict[str, Any]]:
+    """The case's audit. What an event says about a camera this person may not see (its name, the time range) is left out of it."""
+    events = []
+    for row in db.execute("SELECT * FROM case_audit WHERE case_id=? ORDER BY id", (case_id,)):
+        detail = json.loads(row["detail_json"])
+        if detail.get("camera_id") and not access.can_see(detail["camera_id"]):
+            detail = {"restricted": True}
+        elif "camera_id" in detail and not access.unrestricted:
+            detail = {key: value for key, value in detail.items() if key != "camera_id"}
+        events.append({"at": row["created_at"], "actor": _username(db, row["actor_id"]), "action": row["action"], "detail": detail})
+    return events
 
 
 # --- packages ------------------------------------------------------------------------------------------------------------------------
@@ -450,6 +483,8 @@ def request_package(db: sqlite3.Connection, row: sqlite3.Row, user: Any) -> str:
         raise CaseError("This case has no clips you may export", 422)
     if db.execute("SELECT 1 FROM case_packages WHERE case_id=? AND status='building'", (row["id"],)).fetchone():
         raise CaseError("A package for this case is already being built", 409)
+    if db.execute("SELECT COUNT(*) FROM case_packages WHERE case_id=?", (row["id"],)).fetchone()[0] >= MAX_PACKAGES:
+        raise CaseError(f"A case keeps up to {MAX_PACKAGES} packages: delete an old one first", 409)
     package_id = str(uuid.uuid4())
     db.execute("INSERT INTO case_packages(id,case_id,requested_by,omitted,created_at) VALUES(?,?,?,?,?)", (package_id, row["id"], int(user["id"]), omitted, _iso(_now())))
     db.executemany("INSERT INTO case_package_clips(package_id,item_id) VALUES(?,?)", ((package_id, clip["id"]) for clip in clips))
@@ -470,6 +505,9 @@ def advance_packages() -> None:
     for package in packages:
         try:
             with connect() as db:
+                if _now() - _parse(package["created_at"]) > PACKAGE_TIMEOUT:
+                    _fail(db, package, "The package was not finished in six hours: its exports did not complete")
+                    continue
                 _advance(db, package, create_export_record)
         except Exception as exc:  # noqa: BLE001 - a package that cannot be built is failed, not retried for ever
             with connect() as db:
@@ -500,13 +538,21 @@ def _advance(db: sqlite3.Connection, package: sqlite3.Row, create_export_record:
 
 
 def _case_json(db: sqlite3.Connection, case: sqlite3.Row, package: sqlite3.Row, access: access_rules.Access, exports_by_item: dict[str, str]) -> tuple[dict[str, Any], int]:
+    """The case as the package records it. The clips are those the package was requested for (a clip added or removed since is not in it)."""
     items, omitted = [], 0
-    for item in db.execute("SELECT * FROM case_items WHERE case_id=? AND removed_at IS NULL ORDER BY added_at,rowid", (case["id"],)):
+    for item in db.execute("SELECT * FROM case_items WHERE case_id=? ORDER BY added_at,rowid", (case["id"],)):
+        if item["kind"] == "clip":
+            if item["id"] not in exports_by_item:
+                continue
+        elif item["removed_at"] is not None:
+            continue
         if not all(access.can_see(camera_id) for camera_id in _item_cameras(item)):
             omitted += 1
             continue
         entry = {"id": item["id"], "kind": item["kind"], "camera_id": item["camera_id"], "starts_at": item["starts_at"], "ends_at": item["ends_at"], "ref": item["ref"],
                  "text": item["text"], "data": json.loads(item["data_json"]), "added_by": _username(db, item["added_by"]), "added_at": item["added_at"]}
+        if item["kind"] == "search":
+            entry["data"]["track_ids"] = _visible_tracks(db, entry["data"].get("track_ids", []), access)
         if item["kind"] == "clip":
             entry["package_file"] = None  # Filled in as the files are written
             entry["export_id"] = exports_by_item.get(item["id"])
@@ -516,6 +562,7 @@ def _case_json(db: sqlite3.Connection, case: sqlite3.Row, package: sqlite3.Row, 
             entry["coverage"] = {"covered_seconds": round(covered, 1), "uncovered_seconds": round((end - start).total_seconds() - covered, 1)}
         items.append(entry)
     members = [row["username"] for row in db.execute("SELECT u.username FROM case_members m JOIN users u ON u.id=m.user_id WHERE m.case_id=? ORDER BY m.added_at", (case["id"],))]
+    omitted += int(package["omitted"])  # The clips on cameras the requester may not see, counted when they asked
     return {"case_id": case["id"], "title": case["title"], "description": case["description"], "status": case["status"], "owner": _username(db, case["owner_id"]),
             "created_at": case["created_at"], "closed_at": case["closed_at"], "members": members, "items": items}, omitted
 
@@ -561,12 +608,16 @@ def assemble(db: sqlite3.Connection, package: sqlite3.Row) -> None:
         "case.json": json.dumps(document, indent=2, sort_keys=True).encode(),
         "notes.json": json.dumps(notes, indent=2, sort_keys=True).encode(),
         "notes.md": notes_markdown.encode(),
-        "audit.json": json.dumps(audit_extract(db, case["id"]), indent=2, sort_keys=True).encode(),
+        "audit.json": json.dumps(audit_extract(db, case["id"], access), indent=2, sort_keys=True).encode(),
         "metadata.json": json.dumps(metadata, indent=2, sort_keys=True).encode(),
     }
     # The case document names each clip's file, so it is written last of the documents that name files (above) and hashed as written.
     directory = root / PACKAGE_DIRECTORY / case["id"]
     directory.mkdir(parents=True, exist_ok=True)
+    needed = sum(source.stat().st_size for source in sources.values()) + MIN_PACKAGE_FREE_BYTES
+    if shutil.disk_usage(directory).free < needed:
+        _fail(db, package, "There is not enough free space to write the package")
+        return
     target = directory / f"{package['id']}.zip"
     temporary = target.with_suffix(".partial")
     files = []

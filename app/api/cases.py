@@ -1,10 +1,13 @@
 """Case files: a case's items, members and holds, and its evidence packages."""
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -23,6 +26,8 @@ def _open(db, case_id: str, user) -> Any:
     row = cases.find(db, case_id, user)
     if row is None:
         if db.execute("SELECT 1 FROM cases WHERE id=?", (case_id,)).fetchone() is not None:
+            if db.in_transaction:
+                db.execute("COMMIT")  # Nothing has been changed yet: keep the record of the attempt when the request ends in a 404
             cases.record_denied(db, case_id, user)
         raise HTTPException(status_code=404, detail="Case not found")
     return row
@@ -202,7 +207,7 @@ def close_case(case_id: str, payload: CloseRequest, user: CurrentUser) -> dict[s
 def get_audit(case_id: str, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         _open(db, case_id, user)
-        return {"case_id": case_id, "events": cases.audit_extract(db, case_id)}
+        return {"case_id": case_id, "events": cases.audit_extract(db, case_id, user.access)}
 
 
 @router.post("/api/cases/{case_id}/packages", status_code=status.HTTP_202_ACCEPTED)
@@ -228,6 +233,28 @@ def _package(db, case_id: str, package_id: str, user):
 def get_package(case_id: str, package_id: str, user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         return cases.package_view(_package(db, case_id, package_id, user))
+
+
+@router.delete("/api/cases/{case_id}/packages/{package_id}")
+@requires_scope("export")
+def delete_package(case_id: str, package_id: str, user: CurrentUser) -> dict[str, object]:
+    """Remove a package's file and record (to make room for another); the person who asked for it, the owner and administrators may."""
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = _open(db, case_id, user)
+        package = _package(db, case_id, package_id, user)
+        if package["requested_by"] != int(user["id"]) and not cases.is_manager(db, row, user):
+            raise HTTPException(status_code=403, detail="Only the person who asked for the package, the case's owner or an administrator can delete it")
+        if package["status"] == "building":
+            raise HTTPException(status_code=409, detail="The package is still being built")
+        if package["relative_path"]:
+            try:
+                cases.package_path(package).unlink(missing_ok=True)
+            except (FileNotFoundError, ValueError, OSError):
+                pass
+        db.execute("DELETE FROM case_packages WHERE id=?", (package_id,))
+        cases.audit(db, case_id, int(user["id"]), "package_deleted", package=package_id)
+        return cases.detail(db, row, user)
 
 
 @router.get("/api/cases/{case_id}/packages/{package_id}/download")
@@ -264,10 +291,28 @@ async def verify_package(case_id: str, package_id: str, request: Request, user: 
         body.extend(chunk)
         if len(body) > MAX_VERIFY_PACKAGE_BYTES:
             raise HTTPException(status_code=413, detail="The package exceeds the verification size limit")
-    result = cases.verify_package_bytes(bytes(body), case_id, package_id, footage_chain.public_key())
-    valid = result["checksums_valid"] and bool(result.get("clips_valid", False))
+    data = bytes(body)
+    del body
+    result = await run_in_threadpool(cases.verify_package_bytes, data, case_id, package_id, footage_chain.public_key())
+    with connect() as db:
+        package = db.execute("SELECT * FROM case_packages WHERE id=? AND case_id=?", (package_id, case_id)).fetchone()
+        recorded = {row["export_id"]: row for row in db.execute(
+            "SELECT p.export_id,e.metadata_json FROM case_package_clips p LEFT JOIN exports e ON e.id=p.export_id WHERE p.package_id=?", (package_id,))}
+    # What the package's own manifest says is only as good as the package: it is checked against what this NVR built.
+    result["matches_issued_package"] = bool(package and package["sha256"] and hashlib.sha256(data).hexdigest() == package["sha256"])
+    result["clips_match_request"] = {clip["export_id"] for clip in result["clips"]} == set(recorded)
+    for clip in result["clips"]:
+        row = recorded.get(clip["export_id"])
+        expected = (json.loads(row["metadata_json"]) if row and row["metadata_json"] else {}).get("signed_footage", {})
+        wanted = sorted(camera for camera, state in expected.items() if state == "signed")
+        if clip["valid"] and wanted and clip.get("chain") != "valid":
+            clip.update(valid=False, error=f"cameras {wanted} were signed when exported, but the clip's signed chain is missing or not valid")
+    result["clips_valid"] = bool(result.get("clips_valid", False)) and all(clip["valid"] for clip in result["clips"])
+    result["complete"] = bool(result["complete"]) and result["clips_valid"] and result["clips_match_request"]
+    valid = bool(result["checksums_valid"] and result["clips_valid"] and result["clips_match_request"] and result["matches_issued_package"])
+    result["verified"] = valid
     with connect() as db:
         cases.audit(db, case_id, int(user["id"]), "package_verified" if valid else "package_verification_failed", package=package_id,
-                    clips=len(result["clips"]), complete=bool(result["complete"]))
-    return {**result, "authenticity": "Checksums are unsigned: a matching manifest detects changes to the files but not who made the package. "
-                                      "Each clip's signed chain shows its source recordings match what this NVR hashed when they were written."}
+                    clips=len(result["clips"]), complete=bool(result["complete"]), matches_issued_package=result["matches_issued_package"])
+    return {**result, "authenticity": "A package verifies when it is byte-for-byte the one this NVR built for this request, and every clip's own package and signed chain verify. "
+                                      "Checksums inside a file are unsigned: on their own they detect changes only if the manifest is untouched."}

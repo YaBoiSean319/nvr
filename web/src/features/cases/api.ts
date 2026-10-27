@@ -15,7 +15,7 @@ export interface CaseDetail extends CaseSummary {
 }
 export interface CaseEvent { at: string; actor: string | null; action: string; detail: Record<string, unknown> }
 export interface PackageCheck {
-  checksums_valid: boolean; clips_valid?: boolean; complete: boolean; omitted_items?: number; notes_and_audit_present?: boolean; error: string | null;
+  checksums_valid: boolean; clips_valid?: boolean; verified: boolean; matches_issued_package: boolean; clips_match_request: boolean; complete: boolean; omitted_items?: number; notes_and_audit_present?: boolean; error: string | null;
   clips: { item_id: string | null; export_id: string | null; present: boolean; valid: boolean; error?: string | null }[];
 }
 

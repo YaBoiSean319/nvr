@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCameras, useDisplaySettings } from "@/api/queries";
 import { Modal } from "@/components/Modal";
 import { failureText } from "@/features/admin/tabDraft";
 import { playbackClock } from "@/features/playback/clock";
 import { usePlaybackStore } from "@/features/playback/store";
 import { formatSiteDateTime } from "@/lib/zonedTime";
-import { addItem, createCase, useCases } from "./api";
+import { addItem, caseKeys, createCase, useCases } from "./api";
 
 const CLIP_HALF_MS = 30_000;
 
@@ -19,6 +20,7 @@ export function AddToCase({ ready }: { ready: boolean }) {
   const [result, setResult] = useState<{ tone: "good" | "bad"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const cases = useCases();
+  const client = useQueryClient();
   const cameras = useCameras();
   const display = useDisplaySettings();
   const activeId = usePlaybackStore(store => store.activeId);
@@ -29,8 +31,9 @@ export function AddToCase({ ready }: { ready: boolean }) {
 
   function range() {
     const now = playbackClock.time();
-    const start = marks.in ?? now - CLIP_HALF_MS;
-    const end = marks.out ?? Math.max(start + 1000, now + CLIP_HALF_MS);
+    // Footage already recorded: a minute around a playhead near the live edge stops at the present.
+    const end = Math.min(marks.out ?? now + CLIP_HALF_MS, Date.now());
+    const start = Math.min(marks.in ?? now - CLIP_HALF_MS, end - 1000);
     return { start, end };
   }
   const when = (moment: number) => (display.data ? formatSiteDateTime(moment, display.data) : new Date(moment).toISOString());
@@ -44,6 +47,7 @@ export function AddToCase({ ready }: { ready: boolean }) {
       if (!caseId || caseId === "new") {
         const created = await createCase(title.trim() || `${camera.name} ${when(Date.now())}`, "");
         caseId = created.id;
+        await client.invalidateQueries({ queryKey: caseKeys.all });
         setTarget(caseId);
       }
       if (kind === "clip") {
@@ -54,7 +58,7 @@ export function AddToCase({ ready }: { ready: boolean }) {
         await addItem(caseId, { kind: "mark", camera_id: camera.id, at: new Date(playbackClock.time()).toISOString(), text: label || "Marked in Playback" });
         setResult({ tone: "good", text: "Mark added." });
       }
-      void cases.refetch();
+      await client.invalidateQueries({ queryKey: caseKeys.all });
     } catch (problem) {
       setResult({ tone: "bad", text: failureText(problem, "That could not be added to the case.") });
     } finally {

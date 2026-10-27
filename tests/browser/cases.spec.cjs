@@ -79,7 +79,7 @@ test("a clip added from Playback is held, the case builds an evidence package th
   expect(names).toEqual(expect.arrayContaining(["case.json", "notes.md", "notes.json", "audit.json", "metadata.json", "integrity.json"]));
   expect(names.filter(name => name.startsWith("clips/"))).toHaveLength(1);
   await packages.locator("input[type=file]").setInputFiles(target);
-  await expect(packages.getByRole("status")).toContainText("The files match their manifest and its clip package verifies.");
+  await expect(packages.getByRole("status")).toContainText("This is the package this NVR built, and its clip package verifies.");
   fs.rmSync(directory, { recursive: true, force: true });
 
   // Closing needs a confirmation that says what is released.

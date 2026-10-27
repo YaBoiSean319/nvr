@@ -13,9 +13,9 @@ A case groups everything about one incident: clips (a camera and a time range), 
 
 ## Who can open a case
 
-Only the case's members and administrators. Anyone else gets exactly the answer for a case that does not exist, and the attempt is recorded in the administrators' audit log (`case_access_denied`). The owner and administrators add and remove members, rename the case and close it.
+Only the case's members and administrators. Anyone else gets exactly the answer for a case that does not exist, and the attempt is recorded in the administrators' audit log (`case_access_denied`). The owner and administrators add and remove members, rename the case and close it. Anyone in a case adds items and removes their own; the owner and administrators remove anyone's. A person owns at most 25 open cases (holding footage is not free).
 
-**Access grants apply to each clip's camera.** A person cannot add a clip, mark or alarm on a camera they may not see (the answer is that the camera is not found). A case shows them only the items on cameras they may see, plus how many they cannot; they cannot remove those items. Saved searches keep only the results on cameras the person may see.
+**Access grants apply to each clip's camera.** A person cannot add a clip, mark or alarm on a camera they may not see (the answer is that the camera is not found). A case shows them only the items on cameras they may see (the counts leave the others out too), plus how many items they cannot see; they cannot remove those. The audit, and `audit.json` in a package, leave out what an event says about a camera they may not see. Saved searches show each member only the results on cameras that member may see.
 
 ## Notes
 
@@ -33,9 +33,9 @@ Notes are only added. What was written, by whom and when stays as it was; to cor
 - `case.json` (the case, its members and items, which file holds each clip, and how much of each clip's range is recorded now), `notes.json`, `notes.md`, `audit.json` (the audit up to that moment), `metadata.json`;
 - `integrity.json`: the SHA-256 and size of every other file.
 
-**Verify a file…** (or `POST /api/cases/{id}/packages/{package}/verify` with the file as the body) checks every file against the manifest and each clip's own package, including its signed chain. It reports whether every clip named in `case.json` is present and valid (`complete`) and which clips have footage missing from their range (`partial_clips`: a clip over a gap in the recording, or whose file was lost since, still verifies, and says how many seconds are missing). A package built by someone with less access is valid but not complete: it says how many items were left out (`omitted_items`), and does not name them. The checksums are unsigned: they detect changes to the files, not who made the package.
+**Verify a file…** (or `POST /api/cases/{id}/packages/{package}/verify` with the file as the body) checks every file against the manifest and each clip's own package, including its signed chain, and then checks the file against what this NVR built: `matches_issued_package` (the file is byte-for-byte the one it wrote, by its SHA-256), `clips_match_request` (the clips are those the package was requested for) and, for a clip exported from signed footage, that its signed chain is still there. `verified` needs all of them. A manifest inside a file proves nothing alone, since whoever changes a file can rewrite it; the check against the NVR's own record is what catches that. A copy of a package made on another installation cannot verify here. It reports whether every clip named in `case.json` is present and valid (`complete`) and which clips have footage missing from their range (`partial_clips`: a clip over a gap in the recording, or whose file was lost since, still verifies, and says how many seconds are missing). A package built by someone with less access verifies but is not complete: it says how many items were left out (`omitted_items`), and does not name them. The checksums are unsigned: they detect changes to the files, not who made the package.
 
-A package is the access of the person who asked for it, so only they and administrators can download it. Only one package for a case is built at a time.
+A package is the access of the person who asked for it, so only they and administrators can download it. The clips in it are those the package was requested for. Only one package for a case is built at a time, a case keeps up to five (the person who asked for one, the owner and administrators can delete it), a package not finished in six hours fails, and one is not written when the disk has too little room.
 
 ## API
 
