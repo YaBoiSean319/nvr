@@ -56,9 +56,18 @@ Each saved camera has a state and a message for discovery, authentication, video
 - `POST /api/cameras/{id}/capabilities/recheck` (administrators) tests video and motion events now.
 - Inspection also decodes a frame from the lower-resolution live stream. If it cannot, that is a warning in the report (`selection.live_verified` is false) and live view can use the main stream.
 
+## Adding cameras in the web interface
+
+Cameras > Add Cameras has two ways that need only an address and a login:
+
+- **Quick Add**: enter the camera's address (an IP address or host name; add `:port` if its ONVIF service is not on a usual port) and its username and password, then **Check camera**. The result lists the steps (Connecting to camera, Authenticating, Identifying device, Discovering streams, Configuring motion events, Verifying video, Camera ready), each with its outcome and, where it did not work, why; the camera's make and model; the recording and live streams the NVR chose; and the six capabilities separately. **Diagnostics** lists each request made (no passwords, no addresses with a login) and downloads as a file. The name is filled in from the camera's make and model. A camera that checks out is added with **Add camera**; one that needs attention can still be added with **Add camera anyway** (recording off, rechecked in the background). Changing the address or login after a check requires checking again. **Advanced** holds the ONVIF device service address and the brand, for the rare camera that needs them. The steps are shown when the check finishes, not live: a check can take up to a minute.
+- **Bulk Add**: one camera per line, `address,username,password` and an optional name (a password with a comma goes in double quotes; lines starting with `#` and a header line are ignored). Each camera is checked and added, three at a time, however long the list (up to 500), and each line shows its own result: added, added but needs attention, not added with the reason, invalid, or not run. Cameras that need attention are added with recording off unless the box is unticked. **Stop** leaves the rest not run, and **Retry** runs only the ones not added. Passwords stay in the page only while it is open.
+
+Discover, Manual Add and CSV Import are unchanged. Saving by host name (not only IPv4) is supported everywhere a camera address is entered.
+
 ## Not in this slice
 
-The Add Camera screen with progress and diagnostics, and bulk onboarding, follow in the next slice of #173.
+Live progress while a check runs (steps appear when it finishes), and a stored history of diagnostics, are not built; the report from a check is the diagnostics.
 
 ## Limits
 

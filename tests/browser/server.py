@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
@@ -17,7 +18,20 @@ class FixtureOnvifHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         size = int(self.headers.get("Content-Length", "0"))
         request = self.rfile.read(size).decode("utf-8", errors="replace")
-        if "GetCapabilities" in request and self.path == "/onvif/device_service":
+        if "GetSystemDateAndTime" in request and self.path == "/onvif/device_service":
+            now = datetime.now(timezone.utc)
+            body = (
+                '<tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:UTCDateTime>'
+                f'<tt:Time><tt:Hour>{now.hour}</tt:Hour><tt:Minute>{now.minute}</tt:Minute><tt:Second>{now.second}</tt:Second></tt:Time>'
+                f'<tt:Date><tt:Year>{now.year}</tt:Year><tt:Month>{now.month}</tt:Month><tt:Day>{now.day}</tt:Day></tt:Date>'
+                '</tt:UTCDateTime></tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse>'
+            )
+        elif "GetDeviceInformation" in request and self.path == "/onvif/device_service":
+            body = (
+                '<tds:GetDeviceInformationResponse><tds:Manufacturer>Fixture</tds:Manufacturer><tds:Model>Browser Camera</tds:Model>'
+                '<tds:FirmwareVersion>1.0</tds:FirmwareVersion><tds:SerialNumber>FIXTURE</tds:SerialNumber><tds:HardwareId>fixture</tds:HardwareId></tds:GetDeviceInformationResponse>'
+            )
+        elif "GetCapabilities" in request and self.path == "/onvif/device_service":
             body = (
                 '<tds:GetCapabilitiesResponse><tds:Capabilities>'
                 f'<tt:Media><tt:XAddr>http://127.0.0.1:{self.server.server_port}/onvif/media_service</tt:XAddr></tt:Media>'
@@ -26,7 +40,9 @@ class FixtureOnvifHandler(BaseHTTPRequestHandler):
         elif "GetProfiles" in request and self.path == "/onvif/media_service":
             body = (
                 '<trt:GetProfilesResponse>'
-                '<trt:Profiles token="main"><tt:Name>Main stream</tt:Name></trt:Profiles>'
+                '<trt:Profiles token="main"><tt:Name>Main stream</tt:Name>'
+                '<tt:VideoEncoderConfiguration token="main-encoder"><tt:Name>encoder</tt:Name><tt:Encoding>H264</tt:Encoding>'
+                '<tt:Resolution><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles>'
                 '</trt:GetProfilesResponse>'
             )
         elif "GetStreamUri" in request and self.path == "/onvif/media_service":

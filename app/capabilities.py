@@ -100,11 +100,11 @@ def due(db: sqlite3.Connection, limit: int = BATCH) -> list[tuple[str, str]]:
 
 
 async def check_video(row: sqlite3.Row) -> tuple[str, str]:
-    from .onvif_stream import resolve_camera_stream
+    from .onvif_stream import placeholder_stream_url, resolve_camera_stream
     from .recording import probe_stream
     stream_url = decrypt(row["stream_url_ciphertext"])
     camera_ip = row["camera_ip"]
-    if camera_ip and stream_url == f"rtsp://{camera_ip}/":
+    if camera_ip and stream_url == placeholder_stream_url(camera_ip):
         # The camera was saved before ONVIF would give its stream address (a stand-in is stored): ask again.
         credentials = json.loads(decrypt(row["motion_credentials_ciphertext"])) if row["motion_credentials_ciphertext"] else {"username": "", "password": ""}
         try:

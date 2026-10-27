@@ -4,13 +4,12 @@ The SOAP work is done by ``onvif_client`` (negotiated authentication, discovered
 entry points the camera APIs call, and the lookups that keep every request on the camera address the administrator entered."""
 from __future__ import annotations
 
-import ipaddress
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .discovery import IP_RANGE_PORTS
-from .onvif_client import OnvifClient, OnvifError
+from .onvif_client import OnvifClient, OnvifError, normalise_host
 from .onvif_profiles import MediaProfile, choose_profiles
 
 SOAP = "http://www.w3.org/2003/05/soap-envelope"
@@ -60,14 +59,18 @@ def _parse_response(data: bytes) -> ET.Element:
     return ET.fromstring(data)
 
 
-def _camera_ip(value: str) -> ipaddress.IPv4Address:
+def _camera_ip(value: str) -> str:
+    """The camera address as entered: an IPv4 or IPv6 address or a host name (the same rule as camera inspection)."""
+    return normalise_host(value)
+
+
+def placeholder_stream_url(host: str | None) -> str | None:
+    """The stand-in address stored for a camera whose stream ONVIF would not give: it names the camera and opens nothing. ``None`` for an unusable host."""
     try:
-        address = ipaddress.ip_address(value.strip())
-    except ValueError as exc:
-        raise ValueError("Enter a valid camera IPv4 address") from exc
-    if address.version != 4 or address.is_unspecified or address.is_multicast:
-        raise ValueError("Enter a unicast camera IPv4 address")
-    return address
+        text = normalise_host(host or "")
+    except ValueError:
+        return None
+    return f"rtsp://[{text}]/" if ":" in text else f"rtsp://{text}/"
 
 
 def _stream_lookup_inputs(
@@ -76,7 +79,7 @@ def _stream_lookup_inputs(
     password: str,
     device_service_url: str | None,
     brand: str,
-) -> tuple[ipaddress.IPv4Address, str, tuple[str, ...]]:
+) -> tuple[str, str, tuple[str, ...]]:
     address = _camera_ip(camera_ip_value)
     username = username.strip()
     if bool(username) != bool(password):
@@ -89,8 +92,8 @@ def _stream_lookup_inputs(
             raise ValueError("Invalid ONVIF device service port") from exc
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("Invalid ONVIF device service URL")
-        if parsed.hostname != str(address):
-            raise ValueError("ONVIF device service URL host must match the camera IP address")
+        if parsed.hostname != address:
+            raise ValueError("ONVIF device service URL host must match the camera address")
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("Invalid ONVIF device service port")
         service_urls = (device_service_url,)
