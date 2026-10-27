@@ -92,6 +92,21 @@ test("operators never see administrator destinations and the server refuses them
   expect(sessions.status()).toBe(403);
 });
 
+test("the title keeps its workspace when branding arrives after the shell is showing", async ({ page }) => {
+  seedFixtures(0);
+  await signInNext(page, ADMIN);
+  const saved = await page.request.put("/api/settings/branding", { data: { app_name: "Late Branding Hall", primary_color: "#0f3d2e", accent_color: "#2a6f4e" } });
+  expect(saved.ok()).toBeTruthy();
+  // Answer the branding request only after the signed-in shell has been drawn, the order that used to drop the workspace from the title.
+  await page.route("**/api/public/branding", async route => {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await route.continue();
+  });
+  await page.reload();
+  await expect(page.locator(".shell-app-name")).toHaveText("Late Branding Hall", { timeout: 10_000 });
+  await expect(page).toHaveTitle("Live · Late Branding Hall");
+});
+
 test("site branding reaches sign-in, the shell and the title, with a legible accent", async ({ page }) => {
   seedFixtures(0);
   await signInNext(page, ADMIN);
