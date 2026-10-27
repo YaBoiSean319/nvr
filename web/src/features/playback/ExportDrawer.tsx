@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { ApiError } from "@/api/client";
-import { useCreateExport } from "@/api/queries";
+import { useCreateExport, useRedactionKinds, useRedactionReview, useStartRedactionReview } from "@/api/queries";
 import type { Camera, DisplaySettings, TimelineCamera } from "@/api/types";
 import { useStatusPanel } from "@/features/status/StatusArea";
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
@@ -8,6 +8,7 @@ import { formatSiteDateTime, localTimeCandidates, toLocalInput } from "@/lib/zon
 import { playbackClock } from "./clock";
 import { intervalsOf } from "./investigationRules";
 import { MAX_SEARCH_MS } from "./SearchBar";
+import { RedactionPanel } from "./RedactionPanel";
 import { usePlaybackStore, type Marks } from "./store";
 
 interface Props {
@@ -87,6 +88,11 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
   const [audio, setAudio] = useState(false);
   const [audioSource, setAudioSource] = useState<string>("");
   const [submitted, setSubmitted] = useState(false);
+  const kinds = useRedactionKinds();
+  const startReview = useStartRedactionReview();
+  const [blur, setBlur] = useState<("faces" | "plates")[]>([]);
+  // A review belongs to the exact cameras, range and kinds it was made for; changing any of them makes it stale.
+  const [review, setReview] = useState<{ id: string; key: string } | null>(null);
 
   const start = marks.in ?? range.start;
   const end = marks.out ?? range.end;
@@ -94,6 +100,10 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
   const audioCameras = selected.filter(id => cameras.get(id)?.audio_enabled);
   const coverage = selected.map(id => ({ id, name: cameras.get(id)?.name ?? "Camera", covered: covered(timeline.get(id), start, end) }));
   const span = end - start;
+  const blurring = blur.length > 0;
+  const reviewKey = JSON.stringify([selected, start, end, blur]);
+  const currentReview = review && review.key === reviewKey ? review.id : null;
+  const reviewState = useRedactionReview(currentReview).data?.state;
 
   const problem = (() => {
     if (end <= start) return "The export end must be after its start.";
@@ -101,6 +111,7 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
     if (span > MAX_SEARCH_MS) return "Exports are limited to 24 hours.";
     if (!selected.length) return "Choose at least one camera.";
     if (!individual && !grid) return "Choose at least one output.";
+    if (blurring && !individual) return "Blurred exports are individual camera files.";
     if (coverage.every(item => item.covered <= 0)) return "There is no footage in this range for the selected cameras, so there is nothing to export.";
     if (audio && grid && !audioSource) return "Choose which camera's audio the grid uses.";
     return null;
@@ -111,9 +122,20 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
     setExportCameraIds(next.length === shownIds.length ? null : next);
   }
 
+  function toggleBlur(kind: "faces" | "plates", on: boolean) {
+    const next = on ? [...blur, kind] : blur.filter(item => item !== kind);
+    setBlur(next);
+    if (next.length) setGrid(false);
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
     if (problem) return;
+    if (blurring && reviewState !== "confirmed") {
+      // The first press looks for faces and plates; the export itself waits for the confirmed review.
+      if (!currentReview) startReview.mutate({ camera_ids: selected, start: new Date(start).toISOString(), end: new Date(end).toISOString(), kinds: blur }, { onSuccess: made => setReview({ id: made.id, key: reviewKey }) });
+      return;
+    }
     // The grid follows the arrangement at the moment of submission.
     const size = [1, 4, 9, 16].find(value => value >= selected.length) ?? MAX_DISPLAYED_CAMERAS;
     const tiles = [...selected, ...Array<null>(size - selected.length).fill(null)];
@@ -127,6 +149,7 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
       grid_resolution: resolution,
       include_audio: audio && (grid ? Boolean(audioSource) : audioCameras.length > 0),
       audio_camera_id: audio && grid ? audioSource || null : null,
+      redaction_review_id: blurring ? currentReview : null,
     });
   }
 
@@ -162,7 +185,7 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
         <fieldset>
           <legend>Outputs</legend>
           <label><input type="checkbox" checked={individual} onChange={event => setIndividual(event.target.checked)} /> Individual camera files</label>
-          <label><input type="checkbox" checked={grid} onChange={event => setGrid(event.target.checked)} /> Synchronized grid</label>
+          <label><input type="checkbox" checked={grid} disabled={blurring} onChange={event => setGrid(event.target.checked)} /> Synchronized grid</label>
           {grid ? (
             <div className="export-resolution" role="radiogroup" aria-label="Grid resolution">
               <label><input type="radio" name="resolution" checked={resolution === "1080p"} onChange={() => setResolution("1080p")} /> 1080p</label>
@@ -185,6 +208,21 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
           ) : <p className="muted">None of the selected cameras has audio enabled.</p>}
         </fieldset>
 
+        {kinds.data?.length ? (
+          <fieldset>
+            <legend>Blur</legend>
+            {kinds.data.map(kind => (
+              <label key={kind}>
+                <input type="checkbox" checked={blur.includes(kind)} onChange={event => toggleBlur(kind, event.target.checked)} />
+                {kind === "faces" ? "Faces" : "Licence plates"}
+              </label>
+            ))}
+            {blurring ? <p className="muted">Blurred exports hold individual camera files only, and you review what is blurred before they are made.</p> : null}
+            {blurring && currentReview ? <RedactionPanel reviewId={currentReview} cameras={cameras} /> : null}
+            {startReview.error ? <p className="notice" data-tone="bad" role="alert">{startReview.error instanceof ApiError ? startReview.error.detail : "The review could not be started."}</p> : null}
+          </fieldset>
+        ) : null}
+
         {missing.length && span > 0 ? (
           <div className="notice export-missing" data-tone="warn" role="status">
             <strong>Known missing footage</strong>
@@ -204,8 +242,8 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
           </p>
         ) : null}
         <footer className="export-foot">
-          <button type="submit" className="button" data-variant="primary" disabled={Boolean(problem) || create.isPending}>
-            {create.isPending ? "Starting…" : "Export"}
+          <button type="submit" className="button" data-variant="primary" disabled={Boolean(problem) || create.isPending || startReview.isPending || (blurring && Boolean(currentReview) && reviewState !== "confirmed")}>
+            {create.isPending ? "Starting…" : blurring && reviewState !== "confirmed" ? (currentReview ? "Confirm the review first" : startReview.isPending ? "Starting…" : "Review blurs") : "Export"}
           </button>
         </footer>
       </form>

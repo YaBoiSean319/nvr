@@ -150,6 +150,51 @@ export interface ExportJob {
   download_url: string | null;
   cancel_requested: boolean;
   retry_of: string | null;
+  redaction_review_id: string | null;
+}
+
+export interface RedactionTrack {
+  id: string;
+  camera_id: string;
+  kind: "face" | "plate";
+  start: number;
+  end: number;
+  confidence: number;
+  blur: boolean;
+  box: { x: number; y: number; width: number; height: number };
+}
+
+export interface RedactionKeyframe { t: number; x: number; y: number; width: number; height: number }
+
+export interface RedactionRegion {
+  id: string;
+  camera_id: string;
+  start: number;
+  end: number;
+  follow_track_id: string | null;
+  scale: number;
+  keyframes: RedactionKeyframe[];
+}
+
+export interface RedactionReview {
+  id: string;
+  state: "queued" | "analysing" | "ready" | "confirmed" | "used" | "failed";
+  progress: number;
+  error: string | null;
+  camera_ids: string[];
+  start: string;
+  end: string;
+  kinds: ("faces" | "plates")[];
+  durations: Record<string, number>;
+  tracks: RedactionTrack[];
+  manual: RedactionRegion[];
+  confirmed_at: string | null;
+  edited_at: string | null;
+}
+
+export interface RedactionEdit {
+  keep?: string[];
+  manual?: Omit<RedactionRegion, "id">[];
 }
 
 export interface ExportRequest {
@@ -161,6 +206,7 @@ export interface ExportRequest {
   grid_resolution: "1080p" | "4k";
   include_audio: boolean;
   audio_camera_id: string | null;
+  redaction_review_id?: string | null;
 }
 
 export interface SavedView {

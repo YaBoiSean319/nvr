@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import footage_chain, privacy, viewing_audit
+from . import footage_chain, privacy, redaction, viewing_audit
 from .display_settings import format_display_datetime
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
@@ -554,6 +554,7 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
         "download_url": f"/api/exports/{row['id']}/download" if row["status"] == "completed" and row["output_relative_path"] and (not row["expires_at"] or _parse_time(row["expires_at"]) > datetime.now(timezone.utc)) else None,
         "cancel_requested": bool(row["cancel_requested"]),
         "retry_of": row["retry_of"],
+        "redaction_review_id": row["redaction_review_id"],
     }
 
 
@@ -569,11 +570,13 @@ class ExportManager:
         self._expiry_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._case_task: asyncio.Task[None] | None = None
+        self._review_task: asyncio.Task[None] | None = None
         self._pending: set[str] = set()
         self._running: str | None = None
 
     async def start(self) -> None:
         recover_interrupted_exports()
+        redaction.recover()
         expire_exports()
         with connect() as db:
             pending = [row[0] for row in db.execute("SELECT id FROM exports WHERE status='queued' ORDER BY created_at")]
@@ -592,6 +595,10 @@ class ExportManager:
         while True:
             await asyncio.sleep(60)
             expire_exports()
+            try:
+                redaction.expire_reviews()
+            except sqlite3.Error:
+                pass
 
     async def _poll_loop(self) -> None:
         """Pick up queued jobs and cancel requests even when a nudge was lost."""
@@ -608,6 +615,9 @@ class ExportManager:
             if self._case_task is None or self._case_task.done():
                 # Case packages: start each clip's export, assemble when they are done. Off the loop, so a long assembly does not hold up the queue or cancels.
                 self._case_task = asyncio.create_task(self._advance_cases(), name="nvr-case-packages")
+            if self._review_task is None or self._review_task.done():
+                # Redaction reviews analyse in their own task, one at a time, so a long analysis never holds up an export.
+                self._review_task = asyncio.create_task(redaction.advance_reviews(), name="nvr-redaction-reviews")
             if self._running in cancelling and self._running not in self._cancelled:
                 await self.cancel(self._running)
 
@@ -622,9 +632,10 @@ class ExportManager:
 
     async def stop(self) -> None:
         self._stopping = True
-        if self._case_task:
-            self._case_task.cancel()
-            self._case_task = None
+        for task in (self._case_task, self._review_task):
+            if task:
+                task.cancel()
+        self._case_task = self._review_task = None
         for task in (self._expiry_task, self._poll_task):
             if task:
                 task.cancel()
@@ -697,6 +708,7 @@ class ExportManager:
             grid_resolution = row["grid_resolution"]
             include_audio = bool(row["include_audio"])
             audio_camera_id = row["audio_camera_id"]
+            redaction_review_id = row["redaction_review_id"]
             requester = row["requested_by"]
             start, end = _parse_time(row["requested_start"]), _parse_time(row["requested_end"])
 
@@ -775,6 +787,10 @@ class ExportManager:
                 "omitted_cameras": [],
                 "notes": ["Audio is omitted unless requested; individual outputs use the camera's own recorded audio, while grid output uses the selected camera source and silence for missing spans.", "Individual camera videos omit each camera's missing intervals. The synchronized grid follows the union of selected camera recordings and compresses only intervals where every selected camera is missing footage.", "Burned camera and time labels use the site display settings captured when this export was requested; labels show source time before gap compression.", "SHA-256 detects changes relative to this manifest but is not a digital signature and does not establish who created the package or when."],
             }
+            redaction_regions: dict[str, Any] = {}
+            if redaction_review_id:
+                with connect() as db:
+                    redaction_regions, metadata["redaction"] = redaction.manifest_entry(db, redaction_review_id)
             self._progress(job_id, 10)
             union = _union_intervals(per_camera, start, end) if "grid" in output_modes else []
             if union:
@@ -826,6 +842,8 @@ class ExportManager:
                     manifest = work_dir / f"camera-{camera['index']}.ffconcat"
                     video_file = _camera_video_filename(camera["name"], camera["camera_id"], camera["index"])
                     clip_path = work_dir / video_file
+                    # A redacted clip is first rendered under another name and then re-encoded blurred; only the blurred one is ever packaged.
+                    render_path = work_dir / f"unredacted-{video_file}" if redaction_review_id else clip_path
                     subtitle_path = work_dir / f"camera-{camera['index']}.srt"
                     lines = ["ffconcat version 1.0\n"]
                     for span in spans:
@@ -839,12 +857,23 @@ class ExportManager:
                     await self._run_ffmpeg(job_id, [
                         "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
                         "-map", "0:v:0", "-an", "-vf", privacy.with_mask(f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}", camera["privacy_zones"]),
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-y", str(clip_path),
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-y", str(render_path),
                     ])
                     if job_id in self._cancelled:
                         raise ExportCancelled()
-                    if not clip_path.is_file() or clip_path.stat().st_size == 0:
+                    if not render_path.is_file() or render_path.stat().st_size == 0:
                         raise RuntimeError(f"No playable video was produced for camera {camera['name']}")
+                    if redaction_review_id:
+                        try:
+                            counts = await asyncio.to_thread(redaction.redact_clip, render_path, clip_path, redaction_regions, camera["camera_id"], lambda: job_id in self._cancelled)
+                        except redaction.Cancelled as exc:
+                            raise ExportCancelled() from exc
+                        finally:
+                            render_path.unlink(missing_ok=True)
+                        camera_tracks = [track for track in redaction_regions["tracks"] if track["camera_id"] == camera["camera_id"]]
+                        entry["redaction"] = {"frames": counts["frames"], "blurred_boxes": counts["boxes"],
+                                              "tracks_blurred": sum(1 for track in camera_tracks if track["blur"]), "tracks_kept": sum(1 for track in camera_tracks if not track["blur"]),
+                                              "manual_regions": sum(1 for region in redaction_regions["manual"] if region["camera_id"] == camera["camera_id"])}
                     if camera_audio_enabled:
                         audio_path = work_dir / f"camera-{camera['index']}.m4a"
                         duration = sum((span["source_end"] - span["source_start"]).total_seconds() for span in spans)
@@ -1052,6 +1081,7 @@ def create_export_record(
     output_modes: list[str] | None = None,
     tile_camera_ids: list[str | None] | None = None, grid_resolution: str = "1080p",
     include_audio: bool = False, audio_camera_id: str | None = None, retry_of: str | None = None,
+    redaction_review_id: str | None = None,
 ) -> str:
     output_modes = output_modes or ["individual", "grid"]
     if not output_modes or len(set(output_modes)) != len(output_modes) or any(mode not in {"individual", "grid"} for mode in output_modes):
@@ -1104,6 +1134,9 @@ def create_export_record(
         db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,output_modes_json,display_settings_json,tile_camera_ids_json,grid_resolution,requested_start,requested_end,status,include_audio,audio_camera_id,created_at,updated_at,retry_of) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                    (job_id, requested_by, json.dumps(camera_ids), json.dumps(output_modes), json.dumps(display_settings), json.dumps(tile_camera_ids), grid_resolution, start.isoformat(), end.isoformat(), int(include_audio), audio_camera_id, now, now, retry_of))
         db.executemany("INSERT INTO export_sources(export_id,segment_id) VALUES(?,?)", ((job_id, segment["id"]) for segment in segments))
+        if redaction_review_id:
+            redaction.claim_for_export(db, redaction_review_id, requested_by, job_id, camera_ids, start, end, output_modes, retry_of)
+            db.execute("UPDATE exports SET redaction_review_id=? WHERE id=?", (redaction_review_id, job_id))
         viewing_audit.record_events(db, requested_by, camera_ids, "export", job_id)
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (requested_by, "export_retried" if retry_of else "export_requested", "export", job_id, json.dumps({

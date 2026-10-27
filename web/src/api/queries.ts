@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
 import { forgetThisDevice } from "@/features/alarms/pushDevice";
-import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, SavedView, ThemePreference } from "./types";
+import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, RedactionEdit, RedactionReview, SavedView, ThemePreference } from "./types";
 
 export const keys = {
   setup: ["setup"] as const,
@@ -161,6 +161,44 @@ function useExportAction<T>(run: (value: T) => Promise<ExportJob>) {
 export const useCreateExport = () => useExportAction((request: ExportRequest) => api<ExportJob>("/api/exports", { method: "POST", body: request }));
 export const useCancelExport = () => useExportAction((id: string) => api<ExportJob>(`/api/exports/${encodeURIComponent(id)}/cancel`, { method: "POST" }));
 export const useRetryExport = () => useExportAction((id: string) => api<ExportJob>(`/api/exports/${encodeURIComponent(id)}/retry`, { method: "POST" }));
+
+/** Which kinds of blur the installed detection models can find (none when no model is installed). */
+export function useRedactionKinds(enabled = true) {
+  return useQuery({
+    queryKey: ["redaction", "models"] as const,
+    enabled,
+    queryFn: ({ signal }) => api<{ kinds: ("faces" | "plates")[] }>("/api/redaction/models", { signal }).then(result => result.kinds),
+    staleTime: 60_000,
+  });
+}
+
+export function useRedactionReview(id: string | null) {
+  return useQuery({
+    queryKey: ["redaction", "review", id] as const,
+    enabled: id !== null,
+    queryFn: ({ signal }) => api<RedactionReview>(`/api/redaction/reviews/${encodeURIComponent(id ?? "")}`, { signal }),
+    refetchInterval: query => (query.state.data && (query.state.data.state === "queued" || query.state.data.state === "analysing") ? 1_500 : false),
+  });
+}
+
+export function useStartRedactionReview() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (request: { camera_ids: string[]; start: string; end: string; kinds: ("faces" | "plates")[] }) =>
+      api<RedactionReview>("/api/redaction/reviews", { method: "POST", body: request }),
+    onSuccess: review => client.setQueryData(["redaction", "review", review.id], review),
+  });
+}
+
+export function useChangeRedactionReview(id: string) {
+  const client = useQueryClient();
+  const store = (review: RedactionReview) => client.setQueryData(["redaction", "review", id], review);
+  const path = `/api/redaction/reviews/${encodeURIComponent(id)}`;
+  return {
+    edit: useMutation({ mutationFn: (edit: RedactionEdit) => api<RedactionReview>(path, { method: "PATCH", body: edit }), onSuccess: store }),
+    confirm: useMutation({ mutationFn: () => api<RedactionReview>(`${path}/confirm`, { method: "POST" }), onSuccess: store }),
+  };
+}
 
 export const viewKeys = {
   views: ["live", "views"] as const,

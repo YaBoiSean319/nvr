@@ -679,3 +679,13 @@
 .case-status[data-state="open"] { border-color: var(--n-accent); }
 .case-description { white-space: pre-wrap; margin: 0; }
 .case-controls { display: inline-flex; gap: var(--n-space-1); align-items: center; }
+.redaction-panel { display: grid; gap: var(--n-space-2); }
+.redaction-panel progress { width: 100%; }
+.redaction-tracks { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.redaction-tracks li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--n-space-1); }
+.redaction-preview { display: grid; gap: var(--n-space-1); margin: 0; }
+.redaction-preview img { width: 100%; height: auto; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); }
+.redaction-draft { padding: var(--n-space-2) !important; border: 1px solid var(--n-line) !important; border-radius: var(--n-radius-small); }
+.redaction-field { display: grid !important; grid-template-columns: minmax(0, 1fr) 84px; }
+.redaction-field select { grid-column: 2; min-width: 0; }
+.redaction-field input, .redaction-field select { height: 28px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); }
