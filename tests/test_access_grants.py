@@ -295,7 +295,7 @@ class RouteTests(GrantCase):
         ("GET", "/api/incidents"), ("POST", "/api/incidents/{incident_id}/acknowledge"),
         ("GET", "/api/live/layouts"), ("DELETE", "/api/live/layouts/{name}"), ("PUT", "/api/live/layouts/{name}"), ("GET", "/api/live/views"),
         ("GET", "/api/live/workspace"), ("PUT", "/api/live/workspace"), ("GET", "/api/live/alarm-pop-ins"), ("POST", "/api/playback/timeline"),
-        ("GET", "/api/ai/search"), ("GET", "/api/ai/search/options"), ("GET", "/api/ai/tracks/{track_id}/thumbnail"),
+        ("GET", "/api/ai/search"), ("GET", "/api/ai/search/options"), ("GET", "/api/ai/tracks/{track_id}/thumbnail"), ("GET", "/api/ai/tracks/{track_id}/similar"),
     }
     # Routes that name no camera and return none: the person's own settings, sign-in and public information.
     NO_CAMERA_DATA = {

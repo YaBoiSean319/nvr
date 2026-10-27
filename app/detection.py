@@ -481,11 +481,22 @@ class DetectionManager:
             self._attribute_models[provider] = await asyncio.to_thread(attributes.load_attribute_model, attributes.ATTRIBUTE_MODEL_PATH, provider)
         return self._attribute_models[provider]
 
+    async def _reid_model(self, provider: str) -> Any:
+        """The person re-identification model, loaded once for every camera that uses this provider (None when it is not installed)."""
+        from . import similar
+        if not hasattr(self, "_reid_models"):
+            self._reid_models: dict[str, Any] = {}
+        if provider not in self._reid_models:
+            self._reid_models[provider] = await asyncio.to_thread(similar.load_reid_model, similar.REID_MODEL_PATH, provider)
+        return self._reid_models[provider]
+
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         from . import attributes
+        from . import similar
         from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
 
         attribute_model = await self._attribute_model(str(config["provider"]))
+        reid_model = await self._reid_model(str(config["provider"]))
         while not self.stopping:
             try:
                 source = _camera_source(camera_id, bool(config["use_substream"]))
@@ -519,6 +530,7 @@ class DetectionManager:
                             raise
                         db.execute("COMMIT")
                     # Each object's first analysed frame, kept as its keyframe.
+                    first_seen = {track_id: item for track_id, item in reversed(list(zip(track_ids, observations)))}
                     for track_id in dict.fromkeys(track_ids):
                         if track_id in keyframed:
                             continue
@@ -527,6 +539,15 @@ class DetectionManager:
                         if jpeg:
                             with connect() as db:
                                 store_keyframe(db, track_id, at, jpeg)
+                        item = first_seen.get(track_id)
+                        # What the object looks like, for finding it again on other cameras. A failure here never stops detection.
+                        try:
+                            described = await asyncio.to_thread(similar.embed, frame, str(item["label"]), item["box"], reid_model) if item else None
+                            if described:
+                                with connect() as db:
+                                    similar.store_embedding(db, track_id, described[0], described[1])
+                        except Exception:  # noqa: BLE001
+                            pass
                 if not self.stopping:
                     raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
             except asyncio.CancelledError:

@@ -26,7 +26,7 @@ ZONE_PRESETS = {
 
 def options() -> dict[str, Any]:
     return {"labels": list(LABELS), "colours": list(PALETTE), "vehicle_types": list(VEHICLE_TYPES), "directions": list(DIRECTIONS),
-            "vehicle_type_available": attribute_model_available(), "zones": ZONE_PRESETS, "max_range_days": MAX_RANGE.days, "max_limit": MAX_LIMIT}
+            "vehicle_type_available": attribute_model_available(), "similar_available": True, "zones": ZONE_PRESETS, "max_range_days": MAX_RANGE.days, "max_limit": MAX_LIMIT}
 
 
 def parse_zone(value: str) -> dict[str, float]:
@@ -71,24 +71,34 @@ def find_tracks(db: sqlite3.Connection, camera_ids: list[str], start: datetime, 
         clauses.append("EXISTS (SELECT 1 FROM ai_detections d WHERE d.track_id=t.id AND d.box_x+d.box_width/2 BETWEEN ? AND ? AND d.box_y+d.box_height/2 BETWEEN ? AND ?)")
         values.extend([zone["x"], zone["x"] + zone["width"], zone["y"], zone["y"] + zone["height"]])
     direction_sql = "DESC" if order == "desc" else "ASC"
-    rows = db.execute(
-        "SELECT t.*,c.name AS camera_name,EXISTS(SELECT 1 FROM track_keyframes k WHERE k.track_id=t.id) AS has_thumbnail,"
-        "(SELECT box_x||','||box_y||','||box_width||','||box_height FROM ai_detections d WHERE d.track_id=t.id ORDER BY d.detected_at,d.id LIMIT 1) AS first_box "
-        f"FROM ai_tracks t JOIN cameras c ON c.id=t.camera_id WHERE {' AND '.join(clauses)} ORDER BY t.first_seen_at {direction_sql},t.id {direction_sql} LIMIT ?",
-        (*values, limit + 1)).fetchall()
-    results = []
-    for row in rows[:limit]:
-        box = None
-        if row["first_box"]:
-            x, y, width, height = (float(part) for part in row["first_box"].split(","))
-            box = {"x": x, "y": y, "width": width, "height": height}
-        results.append({
-            "track_id": row["id"], "camera_id": row["camera_id"], "camera_name": row["camera_name"], "label": row["label"],
-            "first_seen_at": row["first_seen_at"], "last_seen_at": row["last_seen_at"], "detection_count": row["detection_count"], "confidence": row["max_confidence"],
-            "attributes": {key: row[key] for key in ("upper_colour", "lower_colour", "vehicle_colour", "vehicle_type", "direction") if row[key]},
-            "thumbnail_url": f"/api/ai/tracks/{row['id']}/thumbnail" if row["has_thumbnail"] else None, "box": box,
-        })
-    return results, len(rows) > limit
+    rows = db.execute(f"{_TRACK_COLUMNS} WHERE {' AND '.join(clauses)} ORDER BY t.first_seen_at {direction_sql},t.id {direction_sql} LIMIT ?", (*values, limit + 1)).fetchall()
+    return [_result(row) for row in rows[:limit]], len(rows) > limit
+
+
+def _result(row: sqlite3.Row) -> dict[str, Any]:
+    box = None
+    if row["first_box"]:
+        x, y, width, height = (float(part) for part in row["first_box"].split(","))
+        box = {"x": x, "y": y, "width": width, "height": height}
+    return {
+        "track_id": row["id"], "camera_id": row["camera_id"], "camera_name": row["camera_name"], "label": row["label"],
+        "first_seen_at": row["first_seen_at"], "last_seen_at": row["last_seen_at"], "detection_count": row["detection_count"], "confidence": row["max_confidence"],
+        "attributes": {key: row[key] for key in ("upper_colour", "lower_colour", "vehicle_colour", "vehicle_type", "direction") if row[key]},
+        "thumbnail_url": f"/api/ai/tracks/{row['id']}/thumbnail" if row["has_thumbnail"] else None, "box": box,
+    }
+
+
+_TRACK_COLUMNS = ("SELECT t.*,c.name AS camera_name,EXISTS(SELECT 1 FROM track_keyframes k WHERE k.track_id=t.id) AS has_thumbnail,"
+                  "(SELECT box_x||','||box_y||','||box_width||','||box_height FROM ai_detections d WHERE d.track_id=t.id ORDER BY d.detected_at,d.id LIMIT 1) AS first_box "
+                  "FROM ai_tracks t JOIN cameras c ON c.id=t.camera_id")
+
+
+def tracks_by_ids(db: sqlite3.Connection, track_ids: list[str]) -> list[dict[str, Any]]:
+    """The search-result view of these tracks, in the order given (a track that no longer exists is left out)."""
+    if not track_ids:
+        return []
+    found = {row["id"]: _result(row) for row in db.execute(f"{_TRACK_COLUMNS} WHERE t.id IN ({','.join('?' * len(track_ids))})", track_ids)}
+    return [found[track_id] for track_id in track_ids if track_id in found]
 
 
 def _merge(intervals: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:

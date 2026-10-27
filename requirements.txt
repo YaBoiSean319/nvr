@@ -5,3 +5,4 @@ Authlib==1.6.11
 httpx==0.28.1
 itsdangerous==2.2.0
 openvino==2026.2.1
+sqlite-vec==0.1.6
