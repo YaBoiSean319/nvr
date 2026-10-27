@@ -27,16 +27,23 @@ jobs:
         with:
           node-version: '22'
       - name: Install FFmpeg
+        timeout-minutes: 6
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
-            if ! timeout 90s sudo apt-get \
-              -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-              install --no-install-recommends -y ffmpeg; then
-              timeout 180s sudo apt-get \
-                -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-              sudo apt-get \
-                -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-                install --no-install-recommends -y ffmpeg
+            apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60"
+            installed=0
+            for attempt in 1 2 3; do
+              if sudo timeout -k 10s 100s apt-get $apt_opts update \
+                && sudo timeout -k 10s 120s apt-get $apt_opts install --no-install-recommends -y ffmpeg; then
+                installed=1
+                break
+              fi
+              echo "ffmpeg install attempt ${attempt} failed or timed out" >&2
+              sleep 5
+            done
+            if [ "$installed" != 1 ]; then
+              echo "ffmpeg could not be installed after 3 attempts" >&2
+              exit 1
             fi
           fi
           ffmpeg -version >/dev/null
@@ -104,16 +111,23 @@ jobs:
         with:
           node-version: '22'
       - name: Install FFmpeg
+        timeout-minutes: 6
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
-            if ! timeout 90s sudo apt-get \
-              -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-              install --no-install-recommends -y ffmpeg; then
-              timeout 180s sudo apt-get \
-                -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-              sudo apt-get \
-                -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-                install --no-install-recommends -y ffmpeg
+            apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60"
+            installed=0
+            for attempt in 1 2 3; do
+              if sudo timeout -k 10s 100s apt-get $apt_opts update \
+                && sudo timeout -k 10s 120s apt-get $apt_opts install --no-install-recommends -y ffmpeg; then
+                installed=1
+                break
+              fi
+              echo "ffmpeg install attempt ${attempt} failed or timed out" >&2
+              sleep 5
+            done
+            if [ "$installed" != 1 ]; then
+              echo "ffmpeg could not be installed after 3 attempts" >&2
+              exit 1
             fi
           fi
           ffmpeg -version >/dev/null
