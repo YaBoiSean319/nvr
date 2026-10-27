@@ -321,6 +321,18 @@ class SaveAnywayTests(GrantCase):
         self.assertIn("/profile2/", self.stored_stream(camera_id))
         self.assertNotIn(PASSWORD, self.admin.get(f"/api/cameras/{camera_id}/capabilities").text)
 
+    def test_a_camera_can_be_added_by_host_name(self):
+        url = self.camera.url.replace("127.0.0.1", "localhost")
+        with mock.patch("app.api.cameras.probe_stream", new=AsyncMock(return_value={"reachable": True, "video": {"codec": "h264", "width": 1920, "height": 1080}})):
+            profiles = self.admin.post("/api/cameras/onvif-profiles", json={"camera_ip": "Localhost", "camera_username": USER, "camera_password": PASSWORD, "device_service_url": url})
+            saved = self.admin.post("/api/cameras", json=self.body(camera_ip=" LocalHost ", device_service_url=url))
+            wrong_host = self.admin.post("/api/cameras", json=self.body(name="Elsewhere", camera_ip="other.example.test", device_service_url=url))
+        self.assertEqual(profiles.status_code, 200, profiles.text)
+        self.assertEqual(saved.status_code, 201, saved.text)
+        self.assertEqual(saved.json()["camera_ip"], "localhost")
+        self.assertEqual(wrong_host.status_code, 422)  # The device address must be on the camera's own host
+        self.assertIn("must match the camera address", wrong_host.json()["detail"])
+
     def test_an_unreachable_stream_with_a_live_substream_asked_for_saves_without_the_substream_or_its_token(self):
         with mock.patch("app.api.cameras.probe_stream", new=AsyncMock(return_value={"reachable": False, "reason": "No answer"})):
             saved = self.admin.post("/api/cameras", json=self.body(save_anyway=True, onvif_profile_token="profile2", live_substream_profile_token="profile3"))

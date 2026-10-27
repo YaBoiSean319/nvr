@@ -599,3 +599,19 @@
 .recovery-codes { columns: 2; column-gap: var(--n-space-4); list-style: none; margin: 0 0 var(--n-space-3); padding: 0; font-size: 15px; line-height: 1.8; }
 .secret-key { margin: 0; padding: var(--n-space-2) var(--n-space-3); border: 1px solid var(--n-line); border-radius: 6px; overflow-wrap: anywhere; user-select: all; }
 .security-panel .field-actions { align-items: end; flex-wrap: wrap; }
+
+/* --- quick add and bulk add ------------------------------------------------------------ */
+.add-quick { max-width: 760px; }
+.quick-advanced { border: 1px solid var(--n-line); border-radius: var(--n-radius-small); padding: var(--n-space-2); }
+.quick-advanced summary { cursor: pointer; font-weight: 600; }
+.inspection { display: grid; gap: var(--n-space-2); }
+.inspection-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.inspection-steps li { display: grid; grid-template-columns: 20px minmax(150px, auto) 110px minmax(0, 1fr); gap: var(--n-space-2); align-items: baseline; font-size: 14px; }
+.inspection-steps li[data-state="failed"] .step-state, .inspection-steps li[data-state="failed"] .step-mark { color: var(--n-bad); font-weight: 600; }
+.inspection-steps li[data-state="ok"] .step-mark { color: var(--n-good); font-weight: 600; }
+.inspection-capabilities tr[data-state="failed"] td, .inspection-capabilities tr[data-state="failed"] th { color: var(--n-bad); }
+.inspection-diagnostics { border-top: 1px solid var(--n-line); padding-top: var(--n-space-2); }
+.inspection-diagnostics summary { cursor: pointer; font-weight: 600; }
+.bulk-add tr[data-status="failed"] td, .bulk-add tr[data-status="invalid"] td { color: var(--n-bad); }
+.bulk-add tr[data-status="attention"] td, .bulk-add tr[data-status="skipped"] td { color: var(--n-warn); }
+@media (max-width: 760px) { .inspection-steps li { grid-template-columns: 20px minmax(0, 1fr); } .inspection-steps .step-state, .inspection-steps .step-detail { grid-column: 2; } }

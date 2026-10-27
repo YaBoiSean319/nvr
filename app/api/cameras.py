@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import sqlite3
 import uuid
 import json
@@ -19,7 +18,8 @@ from app.store import connect
 from app.credentials import encrypt, decrypt
 from app.recording import masked_stream_url, probe_stream, safe_stream_url
 from app.health import recording_health
-from app.onvif_stream import list_camera_stream_profiles, resolve_camera_stream
+from app.onvif_client import normalise_host
+from app.onvif_stream import list_camera_stream_profiles, placeholder_stream_url, resolve_camera_stream
 from app import capabilities as camera_capabilities, diagnostics
 from app.retention import coverage_summary, effective_retention
 from app.api.policies import effective_schedule_view
@@ -32,7 +32,7 @@ CameraBrand = Literal["auto", "acti", "axis", "bosch", "dahua", "hanwha", "hikvi
 
 class CameraSourceRequest(BaseModel):
     stream_url: str | None = Field(default=None, min_length=8, max_length=2048)
-    camera_ip: str | None = Field(default=None, min_length=7, max_length=45)
+    camera_ip: str | None = Field(default=None, min_length=1, max_length=253)
     camera_username: str | None = Field(default=None, max_length=256)
     camera_password: str | None = Field(default=None, max_length=1024)
     camera_brand: CameraBrand = "auto"
@@ -54,6 +54,12 @@ class CameraSourceRequest(BaseModel):
     @classmethod
     def validate_device_service_url(cls, value: str | None) -> str | None:
         return _validate_onvif_service_url(value)
+
+    @field_validator("camera_ip")
+    @classmethod
+    def normalise_camera_ip(cls, value: str | None) -> str | None:
+        """Stored and compared as one spelling: an IP address or host name in lower case, without brackets or spaces."""
+        return None if value is None else normalise_host(value)
 
 
 class CameraProbeRequest(CameraSourceRequest):
@@ -79,7 +85,13 @@ class CameraSourceUpdateRequest(CameraSourceRequest):
 
 
 class CameraProfileRequest(BaseModel):
-    camera_ip: str = Field(min_length=7, max_length=45)
+    camera_ip: str = Field(min_length=1, max_length=253)
+
+    @field_validator("camera_ip")
+    @classmethod
+    def normalise_camera_ip(cls, value: str) -> str:
+        return normalise_host(value)
+
     camera_username: str | None = Field(default=None, max_length=256)
     camera_password: str | None = Field(default=None, max_length=1024)
     camera_brand: CameraBrand = "auto"
@@ -403,15 +415,6 @@ def list_cameras(user: CurrentUser) -> dict[str, object]:
     return {"cameras": cameras}
 
 
-def _unresolved_stream_url(camera_ip: str | None) -> str | None:
-    """The stand-in address stored for a camera whose stream ONVIF would not give: it identifies the camera and opens nothing."""
-    try:
-        address = ipaddress.ip_address((camera_ip or "").strip())
-    except ValueError:
-        return None
-    return f"rtsp://{address}/" if address.version == 4 and not address.is_unspecified and not address.is_multicast else None
-
-
 async def _initial_health(payload: "CameraCreateRequest", service_url: str | None) -> dict[str, dict[str, str]] | None:
     """What an inspection says about the camera's discovery, login, audio, PTZ and motion events, for the health a new camera starts with. Best effort."""
     from app.camera_inspect import inspect_camera
@@ -462,7 +465,7 @@ async def create_camera(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except HTTPException as exc:
-        placeholder = _unresolved_stream_url(payload.camera_ip) if payload.save_anyway and onvif_resolved and exc.status_code == 422 else None
+        placeholder = placeholder_stream_url(payload.camera_ip) if payload.save_anyway and onvif_resolved and exc.status_code == 422 else None
         if placeholder is None:
             raise
         # ONVIF would not give a stream address. The camera is saved anyway (recording off) and the address is looked for again in the background.

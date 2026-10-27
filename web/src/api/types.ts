@@ -94,6 +94,24 @@ export interface OnvifProfile {
   height?: number | null;
 }
 
+/** One step of a camera inspection, as the NVR reports it. */
+export interface InspectStep { id: string; label: string; state: "pending" | "ok" | "failed" | "skipped"; detail: string }
+export interface InspectCapability { state: "ok" | "available" | "unsupported" | "failed" | "unknown"; message: string }
+export interface InspectProfile { token: string; name: string; encoding: string; width: number; height: number; fps: number; has_audio: boolean }
+
+/** What `POST /api/cameras/inspect` says about a camera. It never holds a login or an address with one. */
+export interface InspectReport {
+  ok: boolean;
+  device: { manufacturer?: string; model?: string; firmware?: string };
+  brand: CameraBrand;
+  device_service_url: string | null;
+  profiles: InspectProfile[];
+  selection: { record_token: string; live_token: string | null; reason: string; warnings: string[]; live_verified?: boolean | null } | null;
+  steps: InspectStep[];
+  capabilities: Record<string, InspectCapability>;
+  diagnostics: Record<string, string | number | null>[];
+}
+
 export interface StreamProbe {
   reachable: boolean;
   reason?: string;
