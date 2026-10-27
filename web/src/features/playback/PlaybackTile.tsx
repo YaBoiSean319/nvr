@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import type { TimelineCamera } from "@/api/types";
 import { playbackClock } from "./clock";
 import { REASON_LABEL } from "./gapReasons";
+import { TrackOverlay } from "./TrackOverlay";
+import { useTrackPath } from "./useOverlayData";
 import { usePlaybackStore } from "./store";
 
 type Phase = "no-footage" | "no-recording" | "loading" | "ready" | "error";
@@ -36,6 +38,9 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
   const [segmentStart, setSegmentStart] = useState<number | null>(null);
   const [gapReason, setGapReason] = useState<string | null>(null);
   const { setActive, enlarge, unenlarge, remove } = usePlaybackStore.getState();
+  const overlayOn = usePlaybackStore(store => store.overlayOn);
+  const tracked = usePlaybackStore(store => store.tracked);
+  const { points: path } = useTrackPath(tracked?.cameraId === id ? tracked.id : null, id);
 
   useEffect(() => {
     const element = video.current;
@@ -119,6 +124,7 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
          data-segment-start={segmentStart ?? undefined} data-camera-id={id} hidden={hidden}
          onClick={() => setActive(id)} onDoubleClick={() => (enlarged ? unenlarge() : enlarge(id))}>
       <video ref={video} className="tile-video" muted playsInline preload="auto" />
+      {overlayOn && phase === "ready" ? <TrackOverlay cameraId={id} video={video} path={path} /> : null}
       <div className="tile-top">
         <span className="tile-name" title={name}>{name}</span>
       </div>

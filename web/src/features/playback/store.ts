@@ -49,6 +49,10 @@ interface PlaybackState {
   /** Export range marks; a missing mark means the matching search boundary. */
   marks: Marks;
   exportOpen: boolean;
+  /** Detection boxes over the video: off until asked for, and never remembered between visits. */
+  overlayOn: boolean;
+  /** The object whose path is drawn as a trail and whose appearances can be stepped through. */
+  tracked: { id: string; cameraId: string } | null;
   /** The attribute search drawer, which shares its place beside Playback with the export drawer. */
   attributeSearchOpen: boolean;
   /** Cameras chosen for export; null means every searched camera. */
@@ -76,6 +80,8 @@ interface PlaybackState {
   setMark: (kind: keyof Marks, time: number | null) => void;
   clearMarks: () => void;
   setExportOpen: (open: boolean) => void;
+  setOverlayOn: (on: boolean) => void;
+  trackObject: (tracked: { id: string; cameraId: string } | null) => void;
   setAttributeSearchOpen: (open: boolean) => void;
   setExportCameraIds: (ids: string[] | null) => void;
   restore: (username: string, available: Set<string>, defaults: SearchDraft) => void;
@@ -99,6 +105,8 @@ const initial = {
   pendingOpen: null,
   marks: { in: null, out: null },
   exportOpen: false,
+  overlayOn: false,
+  tracked: null,
   attributeSearchOpen: false,
   exportCameraIds: null,
   restoredFor: null,
@@ -162,6 +170,8 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       return { marks, exportOpen: state.exportOpen || completed, attributeSearchOpen: state.attributeSearchOpen && !completed };
     }),
   clearMarks: () => set({ marks: { in: null, out: null } }),
+  setOverlayOn: overlayOn => set(state => ({ overlayOn, tracked: overlayOn ? state.tracked : null })),
+  trackObject: tracked => set({ tracked }),
   setExportOpen: exportOpen => set(state => ({ exportOpen, attributeSearchOpen: exportOpen ? false : state.attributeSearchOpen })),
   setAttributeSearchOpen: attributeSearchOpen => set(state => ({ attributeSearchOpen, exportOpen: attributeSearchOpen ? false : state.exportOpen })),
   setExportCameraIds: exportCameraIds => set({ exportCameraIds }),
