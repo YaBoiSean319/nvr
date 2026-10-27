@@ -619,6 +619,9 @@
 .attr-body { align-content: start; }
 .attr-form { display: grid; gap: var(--n-space-2); }
 .attr-field { display: grid; gap: 2px; }
+.attr-field input[type="search"] { height: 30px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); color: inherit; min-width: 0; }
+.attr-ask { padding-bottom: var(--n-space-2); border-bottom: 1px solid var(--n-line); }
+.attr-answer { display: grid; gap: var(--n-space-2); }
 .attr-field select { height: 30px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); color: inherit; }
 .attr-actions { display: flex; gap: var(--n-space-1); }
 .attr-coverage { display: grid; gap: var(--n-space-1); }

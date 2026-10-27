@@ -116,3 +116,31 @@ test("Find similar lists look-alikes on other cameras with how alike they are, a
   await expect(page.getByRole("group", { name: /^Camera 003.*: playback$/ })).toBeVisible();
   expect(tracks["far-walker"].camera_id).toBeTruthy();
 });
+
+test("describing what to look for finds it, says what was understood and which model ranked it, and opens Playback", async ({ page }) => {
+  seedFixtures(3);
+  seedSearchTracks();
+  await signInNext(page);
+  await openSearch(page);
+
+  const box = panel(page).getByRole("searchbox", { name: /Describe what you are looking for/ });
+  await box.fill("person in a red jacket after 12 am at camera 003");
+  await panel(page).getByRole("button", { name: "Ask", exact: true }).click();
+  const answer = panel(page).getByRole("region", { name: "Description results" });
+  await expect(answer).toContainText("Cameras: Camera 003");
+  await expect(answer).toContainText("Time of day: 00:00 to 24:00");
+  await expect(answer).toContainText("No image-text model is installed");
+  const matches = answer.getByRole("list", { name: "Description matches" }).getByRole("button");
+  await expect(matches).toHaveCount(1);
+  await expect(matches.first()).toContainText("Camera 003");
+  await expect(matches.first()).toContainText("score 100");
+  await expect(answer).toContainText("not analysed"); // Camera 003 was never analysed: the answer says so
+
+  // Without a camera phrase the red tops on every camera are found, best first.
+  await box.fill("red jacket");
+  await panel(page).getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(answer.getByRole("list", { name: "Description matches" }).getByRole("button")).toHaveCount(2);
+
+  await answer.getByRole("list", { name: "Description matches" }).getByRole("button").first().click();
+  await expect(page.getByRole("group", { name: /^Camera 003.*: playback$/ })).toBeVisible();
+});

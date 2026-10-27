@@ -78,6 +78,9 @@ for (const size of [{ width: 320, height: 800 }, { width: 768, height: 800 }, { 
     await panel.getByRole("button", { name: "Search", exact: true }).click();
     await expect(panel.getByRole("list", { name: "Search results" }).getByRole("button", { name: /^Open/ })).toHaveCount(4);
     await panel.getByText(/Not analysed: \d+ cameras?/).click();
+    await panel.getByRole("searchbox", { name: /Describe what you are looking for/ }).fill("red jacket");
+    await panel.getByRole("button", { name: "Ask", exact: true }).click();
+    await expect(panel.getByRole("region", { name: "Description results" })).toContainText("No image-text model is installed");
     await expectFits(page, `search panel ${size.width}px`);
     await expectNamedControls(page, `search panel ${size.width}px`);
   });

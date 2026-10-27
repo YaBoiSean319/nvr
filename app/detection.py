@@ -490,13 +490,22 @@ class DetectionManager:
             self._reid_models[provider] = await asyncio.to_thread(similar.load_reid_model, similar.REID_MODEL_PATH, provider)
         return self._reid_models[provider]
 
+    async def _clip_model(self) -> Any:
+        """The administrator's image-text model, loaded once for every camera (None when none is installed)."""
+        from . import clip
+        if not hasattr(self, "_clip_loaded"):
+            self._clip_loaded = await asyncio.to_thread(clip.shared_model)
+        return self._clip_loaded
+
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         from . import attributes
+        from . import clip
         from . import similar
         from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
 
         attribute_model = await self._attribute_model(str(config["provider"]))
         reid_model = await self._reid_model(str(config["provider"]))
+        clip_model = await self._clip_model()
         while not self.stopping:
             try:
                 source = _camera_source(camera_id, bool(config["use_substream"]))
@@ -546,6 +555,14 @@ class DetectionManager:
                             if described:
                                 with connect() as db:
                                     similar.store_embedding(db, track_id, described[0], described[1])
+                        except Exception:  # noqa: BLE001
+                            pass
+                        # What it looks like to the image-text model, for natural-language search. Also never fatal.
+                        try:
+                            vector = await asyncio.to_thread(clip_model.embed_image, frame, item["box"]) if clip_model and item else None
+                            if vector is not None:
+                                with connect() as db:
+                                    clip.store_embedding(db, track_id, clip_model.model_id, vector)
                         except Exception:  # noqa: BLE001
                             pass
                 if not self.stopping:
