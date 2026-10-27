@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from .onvif_client import DEFAULT_PORTS, OnvifClient, OnvifError, Services
+from .onvif_events import probe_motion
 from .onvif_profiles import MediaProfile, Selection, choose_profiles
 
 STEPS = (
@@ -195,8 +196,15 @@ async def _inspect(host: str, username: str, password: str, device_service_url: 
                         done("motion", "skipped", "The camera's Events service does not offer pull-point subscriptions")
                         capabilities["motion"] = _state("unsupported", "No pull-point subscriptions: motion can use the NVR's own detection instead")
                     else:
-                        done("motion", "ok", "The camera offers ONVIF pull-point events")
-                        capabilities["motion"] = _state("available", "The camera offers ONVIF pull-point events")
+                        probe = await probe_motion(client, services.urls["events"])
+                        if probe["ok"]:
+                            topics = ", ".join(probe["topics"][:3])
+                            detail = "The camera accepted a motion event subscription" + (f" ({topics})" if topics else "")
+                            done("motion", "ok", detail)
+                            capabilities["motion"] = _state("ok", detail)
+                        else:
+                            done("motion", "failed", str(probe["reason"]))
+                            capabilities["motion"] = _state("failed", f"{probe['reason']}: video is not affected, and the NVR can use its own motion detection")
         else:
             done("motion", "skipped", "Not checked: the camera's services could not be listed")
 

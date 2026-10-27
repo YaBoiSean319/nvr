@@ -59,7 +59,7 @@ class HanwhaTests(InspectCase):
         self.assertIn("MJPEG", result["selection"]["reason"])
         self.assertEqual([item["token"] for item in result["profiles"]], ["profile1", "profile2", "profile3", "profile4"])
         capabilities = {name: item["state"] for name, item in result["capabilities"].items()}
-        self.assertEqual(capabilities, {"discovery": "ok", "authentication": "ok", "video": "ok", "audio": "available", "motion": "available", "ptz": "available"})
+        self.assertEqual(capabilities, {"discovery": "ok", "authentication": "ok", "video": "ok", "audio": "available", "motion": "ok", "ptz": "available"})
         self.assertEqual(self.verified.await_count, 1)
 
     async def test_the_report_holds_no_credential_and_no_credentialed_address(self):
@@ -76,7 +76,7 @@ class HanwhaTests(InspectCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["capabilities"]["video"], {"state": "failed", "message": "RTSP stream connected but video decoding failed"})
         # Motion, audio and PTZ are judged on their own: a failed picture does not hide them.
-        self.assertEqual({name: result["capabilities"][name]["state"] for name in ("authentication", "motion", "audio", "ptz")}, {"authentication": "ok", "motion": "available", "audio": "available", "ptz": "available"})
+        self.assertEqual({name: result["capabilities"][name]["state"] for name in ("authentication", "motion", "audio", "ptz")}, {"authentication": "ok", "motion": "ok", "audio": "available", "ptz": "available"})
         steps = {step["id"]: step for step in result["steps"]}
         self.assertEqual((steps["video"]["state"], steps["ready"]["state"]), ("failed", "failed"))
         self.assertIn("can still be saved", steps["ready"]["detail"])
@@ -120,7 +120,7 @@ class FailureTests(InspectCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["capabilities"]["video"]["state"], "failed")
         self.assertIn("Media service unavailable", result["capabilities"]["video"]["message"])
-        self.assertEqual(result["capabilities"]["motion"]["state"], "available")
+        self.assertEqual(result["capabilities"]["motion"]["state"], "ok")
         self.assertEqual(self.verified.await_count, 0)
 
     async def test_a_camera_with_only_mjpeg_is_used_with_a_warning(self):

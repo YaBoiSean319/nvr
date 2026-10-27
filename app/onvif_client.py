@@ -153,6 +153,10 @@ class OnvifClient:
 
     # ----------------------------------------------------------------------------------------------------------------- transport
 
+    def same_host(self, url: str) -> str:
+        """An address a camera returned (a subscription, say), moved onto the host the administrator entered."""
+        return self._kept(url)
+
     def _kept(self, url: str) -> str:
         """An address a camera returned, moved onto the host the administrator entered."""
         parts = urlsplit(url.strip())
@@ -233,9 +237,11 @@ class OnvifClient:
         known = self.auth_by_service.get(service)
         return [known, *[item for item in AUTH_ORDER if item != known]] if known else list(AUTH_ORDER)
 
-    async def call(self, url: str, operation: str, namespace: str, body: str, *, service: str) -> ET.Element:
-        """Send one SOAP operation, negotiating authentication, and return the response document. ``OnvifError`` says why it failed."""
-        action = f"{namespace}/{operation}"
+    async def call(self, url: str, operation: str, namespace: str, body: str, *, service: str, action: str | None = None) -> ET.Element:
+        """Send one SOAP operation, negotiating authentication, and return the response document. ``OnvifError`` says why it failed.
+
+        ``action`` is the WS-Addressing action where it is not ``namespace/operation`` (subscription management uses another namespace)."""
+        action = action or f"{namespace}/{operation}"
         rejected = False
         if self._refused and service not in self.auth_by_service:
             # Every login method was already refused: asking again only counts towards a camera's account lock-out.
