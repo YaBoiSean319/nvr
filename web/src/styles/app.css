@@ -635,3 +635,10 @@
 .attr-nopicture { display: grid; place-items: center; height: 100%; font-size: 12px; }
 .attr-meta { display: grid; gap: 1px; font-size: 12px; }
 .attr-meta span { overflow-wrap: anywhere; }
+
+/* --- find similar ---------------------------------------------------------------------- */
+.attr-similar { margin-top: 4px; }
+.attr-similar-results { border-top: 1px solid var(--n-line); padding-top: var(--n-space-3); display: grid; gap: var(--n-space-2); }
+.attr-similar-head { display: flex; align-items: center; justify-content: space-between; gap: var(--n-space-2); }
+.attr-similar-head h3 { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.attr-score { font-weight: 600; color: var(--n-accent-text, inherit); }
