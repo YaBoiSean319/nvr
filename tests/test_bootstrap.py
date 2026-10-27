@@ -85,7 +85,9 @@ class BootstrapTests(unittest.TestCase):
         with patch("app.api.cameras.list_camera_stream_profiles",new=AsyncMock(return_value=("http://198.51.100.25:80/onvif/device_service",(OnvifStreamProfile("profile1","Main stream"),)))):
             response=self.client.post("/api/cameras/onvif-profiles",json={"camera_ip":"198.51.100.25","camera_brand":"hikvision","camera_username":"admin","camera_password":TEST_CAMERA_PASSWORD})
         self.assertEqual(response.status_code,200)
-        self.assertEqual(response.json()["profiles"],[{"token":"profile1","name":"Main stream"}])
+        # Labels and stream facts only (codec, size, frame rate): never an address or a login.
+        self.assertEqual([{key:item[key] for key in ("token","name")} for item in response.json()["profiles"]],[{"token":"profile1","name":"Main stream"}])
+        self.assertFalse([key for item in response.json()["profiles"] for key in item if any(word in key for word in ("uri","url","password","credential"))])
         self.assertNotIn("example",response.text)
 
     def test_admin_can_capture_and_download_bounded_redacted_diagnostics(self):
