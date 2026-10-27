@@ -387,7 +387,15 @@ test("200-camera filtering and selection record browser measurements without row
   await signInNext(page); // the signed-out probe of /api/auth/me is expected to fail
   page.on("pageerror", error => { errors.page += 1; details.push(`page: ${error.message}`); });
   page.on("console", message => { if (message.type() === "error") { errors.console += 1; details.push(`console: ${message.text()}`); } });
-  page.on("requestfailed", request => { errors.failed_requests += 1; details.push(`request failed ${new URL(request.url()).pathname}: ${request.failure()?.errorText || "unknown error"}`); });
+  page.on("requestfailed", request => {
+    const { pathname } = new URL(request.url());
+    const reason = request.failure()?.errorText || "unknown error";
+    // The sign-in page's own sign-in-options probe can still be in flight when signing in replaces the page, and the browser then cancels it. That is
+    // not a failure of the Cameras workspace; any other failed request, and any other error for this one, still counts.
+    if (pathname === "/api/auth/oidc/status" && reason === "net::ERR_ABORTED") return;
+    errors.failed_requests += 1;
+    details.push(`request failed ${pathname}: ${reason}`);
+  });
   page.on("response", response => { if (response.status() >= 400) { errors.http_errors += 1; details.push(`HTTP ${response.status()} ${new URL(response.url()).pathname}`); } });
   await openCameras(page);
   await expect(inventory(page).locator("tbody tr")).toHaveCount(200);
