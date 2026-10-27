@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
-from app import privacy, search, similar
+from app import clip, privacy, search, semantic, similar
 from app.attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES
 from app.principal import CurrentUser
 from app.store import connect
@@ -69,6 +70,74 @@ def search_tracks(
         coverage = search.coverage(db, searched, start_time, searched_until)
     return {"start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(), "results": results, "truncated": truncated,
             "coverage": coverage, "coverage_note": "No match in time that was not analysed means nothing was looked at; unanalysed time is listed with the results."}
+
+
+@router.get("/api/ai/search/ask")
+def ask(
+    user: CurrentUser,
+    q: str = Query(min_length=1, max_length=semantic.MAX_QUERY),
+    start: str | None = Query(default=None, max_length=64),
+    end: str | None = Query(default=None, max_length=64),
+    camera_ids: list[str] | None = Query(default=None, max_length=500),
+    utc_offset_minutes: int | None = Query(default=None, ge=-840, le=840),
+    limit: int = Query(default=30, ge=1, le=100),
+) -> dict[str, object]:
+    """Find tracks from a plain description such as "white van at the gate after 6 pm", ranked best first, with what was understood from it.
+
+    Time and camera phrases narrow the range, the time of day and the cameras (within what the person may see); the rest is matched against each
+    object's picture by the administrator's image-text model, or by the attributes it names when there is none. Embeddings are never returned."""
+    if not q.strip():
+        raise HTTPException(status_code=422, detail="Describe what to look for")
+    now = datetime.now(timezone.utc)
+    try:
+        end_time = datetime.fromisoformat(end.replace("Z", "+00:00")) if end else now
+        start_time = datetime.fromisoformat(start.replace("Z", "+00:00")) if start else end_time - timedelta(days=7)
+        if start_time.tzinfo is None or end_time.tzinfo is None:
+            raise ValueError
+    except ValueError:
+        raise HTTPException(status_code=422, detail="start and end must be timestamps with a time zone") from None
+    if (end_time - start_time).total_seconds() <= 0 or (end_time - start_time) > search.MAX_RANGE:
+        raise HTTPException(status_code=422, detail=f"The range must be positive and at most {search.MAX_RANGE.days} days")
+    with connect() as db:
+        if utc_offset_minutes is None:
+            # "6 pm" and "yesterday" mean the site's clock, the one every time in the application is shown in.
+            row = db.execute("SELECT time_zone FROM site_display_settings WHERE singleton_id=1").fetchone()
+            try:
+                utc_offset_minutes = int((ZoneInfo(row["time_zone"] if row else "UTC").utcoffset(now) or timedelta(0)).total_seconds() // 60)
+            except (ZoneInfoNotFoundError, ValueError):
+                utc_offset_minutes = 0
+        names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras")}
+        visible = {camera_id: names[camera_id] for camera_id in user.access.only(list(names))}  # Cameras that may not be seen are never recognised in a query
+        groups: dict[str, tuple[str, list[str]]] = {}
+        for row in db.execute("SELECT g.id,g.name,m.camera_id FROM camera_groups g JOIN camera_group_memberships m ON m.group_id=g.id"):
+            if row["camera_id"] in visible:
+                groups.setdefault(row["id"], (row["name"], []))[1].append(row["camera_id"])
+        parsed = semantic.parse(q, visible, groups, now=now, utc_offset_minutes=utc_offset_minutes)
+        if parsed.start and parsed.end:
+            if start or end:
+                start_time, end_time = max(start_time, parsed.start), min(end_time, parsed.end)
+            else:
+                start_time, end_time = parsed.start, parsed.end
+            if (end_time - start_time) > search.MAX_RANGE:
+                start_time = end_time - search.MAX_RANGE
+        wanted = [camera_id for camera_id in (camera_ids or list(visible)) if camera_id in visible]
+        if parsed.camera_ids:
+            wanted = [camera_id for camera_id in wanted if camera_id in parsed.camera_ids]
+        searched = {camera_id: visible[camera_id] for camera_id in wanted}
+        end_time = min(end_time, now)  # Nothing has been seen in the future: "this evening" at nine in the morning has nothing to look at yet
+        if end_time > start_time:
+            found = semantic.rank(db, parsed, list(searched), start_time, end_time, utc_offset_minutes, clip.shared_model(), limit)
+            coverage = search.coverage(db, searched, start_time, end_time)
+        else:
+            found = {"mode": "browse", "results": [], "candidates": 0, "unindexed": 0, "candidates_truncated": False}
+            coverage = search.coverage(db, searched, start_time, start_time)
+    notes = {"image-text": "Matched against each object's picture by the image-text model.",
+             "attributes": "No image-text model is installed, so results are ranked by the colours, vehicle type and direction named in the description.",
+             "browse": "Nothing in the description could be matched to an object, so these are the newest in range."}
+    return {"query": q, "interpretation": semantic.interpretation(parsed, visible), "mode": found["mode"], "mode_note": notes[str(found["mode"])],
+            "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(), "results": found["results"],
+            "not_yet": end_time <= start_time, "candidates": found["candidates"], "unindexed": found["unindexed"], "truncated": found["candidates_truncated"], "coverage": coverage,
+            "coverage_note": "No match in time that was not analysed means nothing was looked at; unanalysed time is listed with the results."}
 
 
 @router.get("/api/ai/tracks/{track_id}/similar")

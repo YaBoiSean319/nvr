@@ -19,7 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Callable
 
-from app.migrations import m0001_baseline, m0002_api_tokens, m0003_worker_status, m0004_backups, m0005_user_preferences, m0006_export_retries, m0007_detections, m0008_rules, m0009_alarms, m0010_push, m0011_live_alarms, m0012_rule_actions, m0013_ptz, m0014_privacy_masks, m0015_footage_chain, m0016_coverage_reasons, m0017_second_factors, m0018_access_grants, m0019_viewing_audit, m0020_metrics, m0021_tamper, m0022_disk_health, m0023_hardening, m0024_camera_capabilities, m0025_track_attributes, m0026_track_embeddings
+from app.migrations import m0001_baseline, m0002_api_tokens, m0003_worker_status, m0004_backups, m0005_user_preferences, m0006_export_retries, m0007_detections, m0008_rules, m0009_alarms, m0010_push, m0011_live_alarms, m0012_rule_actions, m0013_ptz, m0014_privacy_masks, m0015_footage_chain, m0016_coverage_reasons, m0017_second_factors, m0018_access_grants, m0019_viewing_audit, m0020_metrics, m0021_tamper, m0022_disk_health, m0023_hardening, m0024_camera_capabilities, m0025_track_attributes, m0026_track_embeddings, m0027_track_image_embeddings
 
 logger = logging.getLogger("nvr.migrations")
 
@@ -50,6 +50,7 @@ MIGRATIONS: list[tuple[int, ModuleType]] = [
     (24, m0024_camera_capabilities),
     (25, m0025_track_attributes),
     (26, m0026_track_embeddings),
+    (27, m0027_track_image_embeddings),
 ]
 
 PRE_MIGRATION_COPIES_KEPT = 3
