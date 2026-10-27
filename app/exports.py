@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -567,6 +568,7 @@ class ExportManager:
         self._stopping = False
         self._expiry_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
+        self._case_task: asyncio.Task[None] | None = None
         self._pending: set[str] = set()
         self._running: str | None = None
 
@@ -603,11 +605,26 @@ class ExportManager:
                 continue
             for job_id in queued:
                 self.enqueue(job_id)
+            if self._case_task is None or self._case_task.done():
+                # Case packages: start each clip's export, assemble when they are done. Off the loop, so a long assembly does not hold up the queue or cancels.
+                self._case_task = asyncio.create_task(self._advance_cases(), name="nvr-case-packages")
             if self._running in cancelling and self._running not in self._cancelled:
                 await self.cancel(self._running)
 
+    async def _advance_cases(self) -> None:
+        try:
+            from . import cases
+            await asyncio.to_thread(cases.advance_packages)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - tried again on the next poll; never ends the poll loop
+            logging.getLogger(__name__).exception("Case packages could not be advanced")
+
     async def stop(self) -> None:
         self._stopping = True
+        if self._case_task:
+            self._case_task.cancel()
+            self._case_task = None
         for task in (self._expiry_task, self._poll_task):
             if task:
                 task.cancel()

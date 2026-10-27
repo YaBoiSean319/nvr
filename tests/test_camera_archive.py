@@ -170,12 +170,17 @@ class CameraArchiveTests(unittest.TestCase):
             m0001_baseline.upgrade(reference)
             baseline = m0001_baseline._shape(reference)
             baseline_triggers = {row[0] for row in reference.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+            baseline_indexes = {row[0] for row in reference.execute("SELECT name FROM sqlite_master WHERE type='index'")}
             reference.close()
             # Strip the newer schema as a whole, without firing its foreign-key actions on the way.
             db.execute("PRAGMA foreign_keys = OFF")
             for (trigger,) in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
                 if trigger not in baseline_triggers:
                     db.execute(f"DROP TRIGGER {trigger}")
+            # An index on a column added later has to go before the column can.
+            for (index,) in db.execute("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").fetchall():
+                if index not in baseline_indexes:
+                    db.execute(f"DROP INDEX {index}")
             for table, columns in m0001_baseline._shape(db).items():
                 if table not in baseline:
                     db.execute(f"DROP TABLE {table}")

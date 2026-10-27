@@ -9,6 +9,7 @@ import { playbackClock } from "./clock";
 import { AttributeSearch } from "./AttributeSearch";
 import { ExportDrawer } from "./ExportDrawer";
 import { FullChooser } from "./FullChooser";
+import { AddToCase } from "@/features/cases/AddToCase";
 import { MarkControls } from "./MarkControls";
 import { OverlayControls } from "./OverlayControls";
 import { Investigation } from "./Investigation";
@@ -159,6 +160,7 @@ export function PlaybackWorkspace() {
                            rows={shownIds.map(id => timeline.get(id)).filter((row): row is TimelineCamera => row !== undefined)} />
             <OverlayControls ready={ready && Boolean(applied)} />
             <MarkControls ready={ready && Boolean(applied)} />
+            <AddToCase ready={ready && Boolean(applied)} />
           </Transport>
         ) : null}
         {timelineOpen && display.data && range ? (
