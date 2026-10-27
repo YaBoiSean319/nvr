@@ -49,6 +49,8 @@ interface PlaybackState {
   /** Export range marks; a missing mark means the matching search boundary. */
   marks: Marks;
   exportOpen: boolean;
+  /** The attribute search drawer, which shares its place beside Playback with the export drawer. */
+  attributeSearchOpen: boolean;
   /** Cameras chosen for export; null means every searched camera. */
   exportCameraIds: string[] | null;
   restoredFor: string | null;
@@ -74,6 +76,7 @@ interface PlaybackState {
   setMark: (kind: keyof Marks, time: number | null) => void;
   clearMarks: () => void;
   setExportOpen: (open: boolean) => void;
+  setAttributeSearchOpen: (open: boolean) => void;
   setExportCameraIds: (ids: string[] | null) => void;
   restore: (username: string, available: Set<string>, defaults: SearchDraft) => void;
   reset: () => void;
@@ -96,6 +99,7 @@ const initial = {
   pendingOpen: null,
   marks: { in: null, out: null },
   exportOpen: false,
+  attributeSearchOpen: false,
   exportCameraIds: null,
   restoredFor: null,
 };
@@ -155,10 +159,11 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       const marks = { ...state.marks, [kind]: time };
       // Completing a range opens the export drawer beside Playback.
       const completed = marks.in !== null && marks.out !== null && (state.marks.in === null || state.marks.out === null);
-      return { marks, exportOpen: state.exportOpen || completed };
+      return { marks, exportOpen: state.exportOpen || completed, attributeSearchOpen: state.attributeSearchOpen && !completed };
     }),
   clearMarks: () => set({ marks: { in: null, out: null } }),
-  setExportOpen: exportOpen => set({ exportOpen }),
+  setExportOpen: exportOpen => set(state => ({ exportOpen, attributeSearchOpen: exportOpen ? false : state.attributeSearchOpen })),
+  setAttributeSearchOpen: attributeSearchOpen => set(state => ({ attributeSearchOpen, exportOpen: attributeSearchOpen ? false : state.exportOpen })),
   setExportCameraIds: exportCameraIds => set({ exportCameraIds }),
   restore: (username, available, defaults) => {
     const saved = readSaved(username);

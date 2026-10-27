@@ -472,9 +472,20 @@ class DetectionManager:
             self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, config, detector), name=f"ai-detection-{camera_id}")
             self.task_configs[camera_id] = signature
 
+    async def _attribute_model(self, provider: str) -> Any:
+        """The vehicle attribute model, loaded once for every camera that uses this provider (None when it is not installed)."""
+        from . import attributes
+        if not hasattr(self, "_attribute_models"):
+            self._attribute_models: dict[str, Any] = {}
+        if provider not in self._attribute_models:
+            self._attribute_models[provider] = await asyncio.to_thread(attributes.load_attribute_model, attributes.ATTRIBUTE_MODEL_PATH, provider)
+        return self._attribute_models[provider]
+
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
+        from . import attributes
         from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
 
+        attribute_model = await self._attribute_model(str(config["provider"]))
         while not self.stopping:
             try:
                 source = _camera_source(camera_id, bool(config["use_substream"]))
@@ -493,6 +504,7 @@ class DetectionManager:
                             set_camera_state(camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
                         observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
+                    await asyncio.to_thread(attributes.describe, frame, observations, attribute_model)
                     at = self.clock()
                     # Analysed coverage starts no later than the detections it contains.
                     set_camera_state(camera_id, "analyzed", at=at)

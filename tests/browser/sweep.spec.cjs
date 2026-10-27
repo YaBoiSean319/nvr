@@ -1,6 +1,6 @@
 // Responsive and accessibility sweep across the whole interface (#104, #77): every workspace
 // at phone, tablet and desktop widths, in each theme, with reduced motion, for both roles.
-const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInNext, seedSearchTracks } = require("./helpers.cjs");
 
 const WIDTHS = [320, 360, 768, 1024, 1440].map(width => ({ width, height: 800 }));
 // The desktop sizes #77 names for operators' monitoring stations.
@@ -58,6 +58,28 @@ for (const size of [...WIDTHS, ...DESKTOPS]) {
     await signInNext(page);
     await setTheme(page, "light");
     await sweep(page, ADMIN_ROUTES, `${size.width}px`);
+  });
+}
+
+// The attribute search panel is closed until asked for, so the routes above never see it: open it, with results and unanalysed time showing.
+for (const size of [{ width: 320, height: 800 }, { width: 768, height: 800 }, { width: 1440, height: 900 }]) {
+  test(`the attribute search panel fits and names its controls at ${size.width}px`, async ({ page }) => {
+    seedFixtures(3, { footage: true });
+    seedSearchTracks();
+    await page.setViewportSize(size);
+    await signInNext(page);
+    await visit(page, "/playback");
+    // On a phone the camera browser opens over the workspace until it is hidden.
+    const hide = page.getByRole("button", { name: "Hide camera browser" });
+    if (await hide.isVisible()) await hide.click();
+    await page.getByRole("button", { name: "Find by attributes…" }).click();
+    const panel = page.getByRole("complementary", { name: "Attribute search" });
+    await expect(panel).toBeVisible();
+    await panel.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(panel.getByRole("list", { name: "Search results" }).getByRole("button")).toHaveCount(4);
+    await panel.getByText(/Not analysed: \d+ cameras?/).click();
+    await expectFits(page, `search panel ${size.width}px`);
+    await expectNamedControls(page, `search panel ${size.width}px`);
   });
 }
 
