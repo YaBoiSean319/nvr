@@ -76,7 +76,7 @@ for (const size of [{ width: 320, height: 800 }, { width: 768, height: 800 }, { 
     const panel = page.getByRole("complementary", { name: "Attribute search" });
     await expect(panel).toBeVisible();
     await panel.getByRole("button", { name: "Search", exact: true }).click();
-    await expect(panel.getByRole("list", { name: "Search results" }).getByRole("button")).toHaveCount(4);
+    await expect(panel.getByRole("list", { name: "Search results" }).getByRole("button", { name: /^Open/ })).toHaveCount(4);
     await panel.getByText(/Not analysed: \d+ cameras?/).click();
     await expectFits(page, `search panel ${size.width}px`);
     await expectNamedControls(page, `search panel ${size.width}px`);
