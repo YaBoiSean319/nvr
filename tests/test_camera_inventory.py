@@ -123,7 +123,8 @@ class CameraInventoryTests(unittest.TestCase):
                 "device_service_url": "http://198.51.100.11:8899/custom/service",
             })
         self.assertEqual(loaded.status_code, 200, loaded.text)
-        self.assertEqual(loaded.json()["profiles"], [{"token": "replacement-main", "name": "Main stream"}])
+        self.assertEqual([{key: item[key] for key in ("token", "name")} for item in loaded.json()["profiles"]], [{"token": "replacement-main", "name": "Main stream"}])
+        self.assertFalse([key for item in loaded.json()["profiles"] for key in item if any(word in key for word in ("uri", "url", "password", "credential"))])
         self.assertEqual(profiles.await_args.args[1:3], ("fixture-new-user", TEST_CAMERA_PASSWORD))
         self.assertNotIn(TEST_CAMERA_PASSWORD, loaded.text)
 
