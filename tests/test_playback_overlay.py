@@ -126,11 +126,10 @@ class OverlayMaskTests(OverlayCase):
         self.mask(self.d1, [{"x": 0.0, "y": 0.0, "width": 0.3, "height": 1.0}])
         body = self.overlay().json()
         self.assertEqual(len([box for frame in body["frames"] for box in frame["boxes"] if box["track_id"] == self.vehicle]), 5)
-        single = self.track(self.d1, "person", [(30, 0.05)])
+        self.track(self.d1, "person", [(30, 0.05)])
         again = self.overlay().json()
         self.assertNotIn((self.at + timedelta(seconds=30)).isoformat(), [frame["at"] for frame in again["frames"]])
         self.assertEqual(again["withheld"], 3)
-        self.assertTrue(single)
 
     def test_unmasked_boxes_need_an_administrators_grant(self):
         self.mask(self.d1, [{"x": 0.0, "y": 0.0, "width": 0.3, "height": 1.0}])

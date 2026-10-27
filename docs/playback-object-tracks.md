@@ -10,7 +10,7 @@ Playback can draw the objects the AI worker found over the video, and follow one
 
 ## What is drawn, and from what
 
-Only detections the AI worker stored: nothing is inferred live, and nothing is drawn where no frame was analysed. The boxes shown at a moment are those of the latest analysed frame at or before the clock, kept on screen for a little over two analysis intervals (worked out from the frames, between 1 and 10 seconds) and then removed, so a box never lingers after its frame is stale. At the usual one or two analysed frames a second the box and the video are within a frame or two; at the default 0.5 frames a second the box holds for the two seconds until the next analysed frame, then jumps. It does not move between analysed frames.
+Only detections the AI worker stored: nothing is inferred live, and nothing is drawn where no frame was analysed. The boxes shown at a moment are those of the latest analysed frame at or before the clock, kept on screen for a little over two analysis intervals (worked out from the frames, between 1 and 10 seconds) and then removed, so a box never lingers after its frame is stale. A box is exact at the instant its frame was analysed and then stays where it was until the next analysed frame, so it is behind a moving object by up to one analysis interval (half a second to two seconds at the usual 0.5 to 2 analysed frames a second, which is many video frames) plus the analysis delay. It never moves between analysed frames.
 
 Boxes are placed on the picture, so they stay on their objects when a tile is letterboxed or resized.
 
@@ -33,4 +33,6 @@ Overlays are drawn in the browser only. Exports are cut from the recordings and 
 
 - The time of a detection is when the worker analysed the frame, which can lag the recorded picture by the analysis delay; boxes can therefore be a little behind fast movement.
 - Only analysed time has boxes: an unanalysed stretch shows none, which does not mean nothing was there (the timeline and the answers say which time was not analysed).
-- A box covers up to 5000 stored detections for each minute of a camera; a busier minute is cut and flagged `truncated`.
+- One request returns up to 5000 stored detections (the browser asks a minute at a time); a busier stretch is cut and flagged `truncated`.
+- A trail bridges any pause in the object's stored points, however long, because it is the same track; the tracker decides how long a track survives being hidden.
+- Burning boxes into an export was not built: exports never contain overlays, and there is no option to include them.

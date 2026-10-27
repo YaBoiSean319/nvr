@@ -125,6 +125,9 @@ test("following an object draws its stored path as a fading trail, across a paus
   await expect(segments).toHaveCount(2);
   const xs = await segments.evaluateAll(lines => lines.map(line => Number(line.dataset.x)));
   const centre = at => seeded.person_x[String(at)] + 0.05;
+  const ys = await segments.evaluateAll(lines => lines.map(line => Number(line.dataset.y)));
+  expect(ys).toEqual([ys[0], ys[0]]);
+  expect(ys[0]).toBeCloseTo(0.5, 3); // The person's box is 0.3 to 0.7 high, so its centre is halfway down the picture
   expect(xs[0]).toBeCloseTo(centre(6), 3);
   expect(xs[1]).toBeCloseTo(centre(8), 3);
   const opacities = await segments.evaluateAll(lines => lines.map(line => Number(line.getAttribute("stroke-opacity"))));
