@@ -3,6 +3,7 @@ const { test, expect, seedFixtures, signInNext, seedSearchTracks } = require("./
 
 const panel = page => page.getByRole("complementary", { name: "Attribute search" });
 const results = page => panel(page).getByRole("list", { name: "Search results" });
+const cards = page => results(page).getByRole("button", { name: /^Open/ });
 
 async function openSearch(page) {
   await page.goto("/playback");
@@ -20,10 +21,10 @@ test("attribute search finds tracks by what they looked like, lists what was not
   await panel(page).getByLabel("Kind").selectOption("person");
   await panel(page).getByLabel("Top colour").selectOption("red");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
-  await expect(results(page).getByRole("button")).toHaveCount(2);
-  await expect(results(page).getByRole("button").nth(0)).toContainText("Camera 003");
-  await expect(results(page).getByRole("button").nth(1)).toContainText("Camera 001");
-  await expect(results(page).getByRole("button").nth(1)).toContainText("red top, blue lower, moving right");
+  await expect(cards(page)).toHaveCount(2);
+  await expect(cards(page).nth(0)).toContainText("Camera 003");
+  await expect(cards(page).nth(1)).toContainText("Camera 001");
+  await expect(cards(page).nth(1)).toContainText("red top, blue lower, moving right");
   await expect(results(page).getByRole("img")).toHaveCount(0); // The pictures are decorative: the card's name says what it is.
   await expect(results(page).locator("img").first()).toHaveJSProperty("complete", true);
 
@@ -44,8 +45,8 @@ test("attribute search finds tracks by what they looked like, lists what was not
   await panel(page).getByLabel("Lower colour").selectOption("blue");
   await panel(page).getByLabel("Direction").selectOption("right");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
-  await expect(results(page).getByRole("button")).toHaveCount(1);
-  await expect(results(page).getByRole("button")).toContainText("Camera 001");
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page)).toContainText("Camera 001");
   await panel(page).getByLabel("Direction").selectOption("away");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
   await expect(panel(page)).toContainText("No matches in the time that was analysed.");
@@ -58,23 +59,23 @@ test("attribute search finds tracks by what they looked like, lists what was not
   await expect(panel(page)).toContainText("Needs the vehicle attribute model, which is not installed.");
   await panel(page).getByLabel("Vehicle colour").selectOption("red");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
-  await expect(results(page).getByRole("button")).toHaveCount(1);
-  await expect(results(page).getByRole("button")).toContainText("Camera 002");
-  await expect(results(page).getByRole("button")).toContainText("red truck, toward the camera");
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page)).toContainText("Camera 002");
+  await expect(cards(page)).toContainText("red truck, toward the camera");
 
   // Where in the picture: only the truck, driving down the frame, passed through its bottom half; the people walked across the upper part.
   await panel(page).getByRole("button", { name: "Clear" }).click();
   await panel(page).getByLabel("Passed through").selectOption("bottom");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
-  await expect(results(page).getByRole("button")).toHaveCount(1);
-  await expect(results(page).getByRole("button")).toContainText("Camera 002");
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page)).toContainText("Camera 002");
 
   // A result opens Playback at its moment with its camera selected, by keyboard too.
   await panel(page).getByRole("button", { name: "Clear" }).click();
   await panel(page).getByLabel("Kind").selectOption("person");
   await panel(page).getByLabel("Top colour").selectOption("green");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
-  await results(page).getByRole("button").first().focus();
+  await cards(page).first().focus();
   await page.keyboard.press("Enter");
   const tile = page.getByRole("group", { name: /^Camera 001.*: playback$/ });
   await expect(tile).toBeVisible();
@@ -88,5 +89,30 @@ test("an operator searches the cameras they may see", async ({ page }) => {
   await signInNext(page, "camera-operator");
   await openSearch(page);
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
-  await expect(results(page).getByRole("button")).toHaveCount(4); // The operator fixture sees every camera, as before grants existed.
+  await expect(cards(page)).toHaveCount(4); // The operator fixture sees every camera, as before grants existed.
+});
+
+test("Find similar lists look-alikes on other cameras with how alike they are, and each opens Playback", async ({ page }) => {
+  seedFixtures(3);
+  const tracks = seedSearchTracks();
+  await signInNext(page);
+  await openSearch(page);
+  await panel(page).getByLabel("Kind").selectOption("person");
+  await panel(page).getByRole("button", { name: "Search", exact: true }).click();
+  await expect(cards(page)).toHaveCount(3);
+
+  // The red-over-blue walker on Camera 001: the same-looking person on Camera 003 is found, and the one in green is not.
+  await results(page).getByRole("button", { name: /^Find similar to Camera 001.*red top, blue lower/ }).click();
+  const alike = panel(page).getByRole("region", { name: "Similar objects" });
+  await expect(alike).toContainText("Similar to Camera 001");
+  const found = alike.getByRole("list", { name: "Similar results" }).getByRole("button");
+  await expect(found).toHaveCount(1);
+  await expect(found.first()).toContainText("Camera 003");
+  await expect(found.first()).toContainText(/\d+% similar/);
+  await expect(alike).toContainText("not proof they are the same");
+
+  // Choosing a result opens Playback on that camera at that moment.
+  await found.first().click();
+  await expect(page.getByRole("group", { name: /^Camera 003.*: playback$/ })).toBeVisible();
+  expect(tracks["far-walker"].camera_id).toBeTruthy();
 });

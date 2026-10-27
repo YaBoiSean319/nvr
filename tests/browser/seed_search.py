@@ -7,9 +7,25 @@ from datetime import datetime, timedelta, timezone
 
 from tests.browser.seed_fixtures import _camera_id, connect  # noqa: F401 - sets up the import path
 
-from app import attributes  # noqa: E402
+import numpy as np  # noqa: E402
+
+from app import attributes, similar  # noqa: E402
 from app.tracks import encode_jpeg  # noqa: E402
 from tests.fixtures import detection_scene as scene  # noqa: E402
+
+
+RED_BLUE = [(140, 160, 205), (30, 30, 220), (220, 60, 30), (25, 25, 25)]  # BGR bands from head to feet
+GREEN_BLACK = [(150, 170, 215), (30, 200, 30), (15, 15, 15), (20, 20, 20)]
+
+
+def look(bands: list[tuple[int, int, int]]) -> np.ndarray:
+    """The appearance embedding of a person dressed in these bands, from a made-up frame."""
+    image = np.empty((scene.HEIGHT, scene.WIDTH, 3), dtype=np.uint8)
+    image[:, :] = scene.BACKGROUND
+    for index, colour in enumerate(bands):
+        image[40 + index * 16:40 + (index + 1) * 16, 100:124] = colour
+    box = {"x": 100 / scene.WIDTH, "y": 40 / scene.HEIGHT, "width": 24 / scene.WIDTH, "height": 64 / scene.HEIGHT}
+    return similar.colour_embedding(image.tobytes(), box)
 
 
 def seed() -> dict[str, object]:
@@ -26,7 +42,7 @@ def seed() -> dict[str, object]:
     ]
     made: dict[str, object] = {}
     with connect() as db:
-        for table in ("track_keyframes", "ai_detections", "ai_tracks", "ai_coverage"):
+        for table in ("track_embeddings", "track_keyframes", "ai_detections", "ai_tracks", "ai_coverage"):
             db.execute(f"DELETE FROM {table}")
         for name, camera, label, at, found, path in specs:
             track = str(uuid.uuid4())
@@ -41,6 +57,8 @@ def seed() -> dict[str, object]:
             db.execute("UPDATE ai_tracks SET upper_colour=?,lower_colour=?,vehicle_colour=?,vehicle_type=?,direction=?,zone_mask=? WHERE id=?",
                        (found.get("upper_colour"), found.get("lower_colour"), found.get("vehicle_colour"), found.get("vehicle_type"), found.get("direction"), mask, track))
             db.execute("INSERT INTO track_keyframes(track_id,captured_at,jpeg) VALUES(?,?,?)", (track, at.isoformat(), jpeg))
+            if label == "person":
+                similar.store_embedding(db, track, similar.COLOUR_MODEL_ID, look(RED_BLUE if found.get("upper_colour") == "red" else GREEN_BLACK))
             made[name] = {"track_id": track, "camera_id": camera_id, "first_seen_at": at.isoformat()}
         week = (now - timedelta(days=7)).isoformat()
         # Coverage that has an end, far ahead: the AI supervisor closes any open-ended row for a camera whose AI is off (every few seconds), which would

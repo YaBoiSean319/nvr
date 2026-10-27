@@ -35,6 +35,8 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_LOG_FORWARD_URL` | unset | Forward logs off-host: `syslog+tcp://host:514`, `syslog+tls://host:6514`, `otlp+http://host:4318` or `otlp+https://…`; see [metrics and log forwarding](docs/metrics-and-log-forwarding.md) |
 | `NVR_HARDENING_PROBE_GAP_SECONDS` | `3600` | The least time between two hardening probes of the same camera (asking whether it offers RTSPS or HTTPS); see [camera hardening](docs/camera-hardening.md) |
 | `NVR_AI_ATTRIBUTE_MODEL_PATH` | `/opt/nvr/models/vehicle-attributes-recognition-barrier-0039.xml` | The optional vehicle attribute model (type and colour); without it Vehicle type search is switched off; see [attribute search](docs/attribute-search.md) |
+| `NVR_AI_REID_MODEL_PATH` | `/opt/nvr/models/person-reidentification-retail-0287.xml` | The optional person re-identification model for **Find similar**; without it a description from the pixels is used; see [find similar](docs/find-similar.md) |
+| `NVR_SIMILAR_EXTENSION` | `on` | `off` makes Find similar compare in memory instead of using the `sqlite-vec` extension (same answers) |
 | `NVR_SMART_DEVICES` | unset | Which disk holds each storage volume, for SMART disk health: JSON from volume name to device, such as `{"default":"/dev/sda"}`; see [disk health](docs/disk-health-and-retention-forecast.md) |
 | `NVR_LOG_FORWARD_CA` / `NVR_LOG_FORWARD_LEVEL` / `NVR_LOG_FORWARD_QUEUE` | system CAs / `INFO` / `2000` | CA bundle for TLS, lowest level forwarded, records allowed to wait |
 | `NVR_OIDC_TENANT_ID` | unset | Microsoft Entra workforce tenant GUID |
@@ -79,7 +81,7 @@ Disk health reads SMART for the disks behind the recording volumes where the con
 
 Settings > Camera hardening reports cameras using well-known default passwords, plain RTSP or ONVIF over HTTP where a secure alternative is offered, and addresses outside the camera network; findings can be acknowledged with a reason and stay hidden until their condition changes. Nothing is tried against a camera, and checks never contact one more than once an hour (see [camera hardening](docs/camera-hardening.md)).
 
-Playback > Find by attributes searches people and vehicles across cameras by colour, vehicle type, direction and where they passed, lists the time that was not analysed above the results so "no match" is never confused with "not looked at", and opens Playback at the moment of any result (see [attribute search](docs/attribute-search.md)).
+Playback > Find by attributes searches people and vehicles across cameras by colour, vehicle type, direction and where they passed, lists the time that was not analysed above the results so "no match" is never confused with "not looked at", and opens Playback at the moment of any result (see [attribute search](docs/attribute-search.md)). **Find similar** on a result lists the closest-looking people or vehicles on every camera you may see (the same camera included), best matches first and then shown in time order, each with a similarity score; it is offered on the cards of the attribute results, and by default compares colour appearance, using an installed re-identification model for people when there is one (see [find similar](docs/find-similar.md)).
 
 Local accounts can add passkeys or an authenticator app with one-time recovery codes; administrators can require them, reset them, and sign-in attempts are rate limited per account and per address (see [passkeys and authenticator apps](docs/second-factors.md)).
 

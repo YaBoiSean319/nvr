@@ -11,6 +11,8 @@ interface Result {
   track_id: string; camera_id: string; camera_name: string; label: string; first_seen_at: string; last_seen_at: string; confidence: number;
   attributes: Record<string, string>; thumbnail_url: string | null; box: { x: number; y: number; width: number; height: number } | null;
 }
+interface SimilarResult extends Result { similarity: number; rank: number }
+interface SimilarResponse { track_id: string; results: SimilarResult[]; coverage: Coverage }
 interface Interval { state: string; starts_at: string; ends_at: string; detail: string; seconds: number }
 interface CameraCoverage { camera_id: string; camera_name: string; analysed_seconds: number; unanalysed_seconds: number; intervals: Interval[]; more_intervals: number }
 interface Coverage { range_seconds: number; searched_cameras: number; analysed_percent: number | null; fully_analysed: boolean; cameras: CameraCoverage[] }
@@ -58,10 +60,23 @@ function summary(result: Result): string {
   return parts.join(", ");
 }
 
+function ResultCard({ result, when, onOpen, similarity }: { result: Result; when: (iso: string) => string; onOpen: (result: Result) => void; similarity?: number }) {
+  return (
+    <button type="button" className="attr-card" onClick={() => onOpen(result)} aria-label={`Open ${result.camera_name} in Playback at ${when(result.first_seen_at)}: ${summary(result)}${similarity === undefined ? "" : `, ${Math.round(similarity * 100)}% similar`}`}>
+      <span className="attr-thumb">
+        {result.thumbnail_url ? <img src={result.thumbnail_url} alt="" loading="lazy" /> : <span className="attr-nopicture">No picture</span>}
+        {result.box && result.thumbnail_url ? <span className="attr-box" style={{ left: `${result.box.x * 100}%`, top: `${result.box.y * 100}%`, width: `${result.box.width * 100}%`, height: `${result.box.height * 100}%` }} /> : null}
+      </span>
+      <span className="attr-meta"><strong>{result.camera_name}</strong><span>{when(result.first_seen_at)}</span><span>{summary(result)}</span>{similarity === undefined ? null : <span className="attr-score">{Math.round(similarity * 100)}% similar</span>}</span>
+    </button>
+  );
+}
+
 /** Find people and vehicles across cameras by what they looked like and how they moved; each result opens Playback at that moment. */
 export function AttributeSearch({ settings, range, shownIds }: { settings: DisplaySettings; range: { start: number; end: number } | null; shownIds: string[] }) {
   const [filters, setFilters] = useState<Filters>(EMPTY);
   const [submitted, setSubmitted] = useState<Filters | null>(null);
+  const [similarTo, setSimilarTo] = useState<Result | null>(null);
   const options = useQuery({ queryKey: ["ai-search-options"], queryFn: ({ signal }) => api<Options>("/api/ai/search/options", { signal }), staleTime: 60 * 60_000 });
   const when = (iso: string) => formatSiteDateTime(Date.parse(iso), settings);
   const change = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
@@ -85,6 +100,12 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
       if (query.cameras === "view") shownIds.forEach(id => params.append("camera_ids", id));
       return api<Response>(`/api/ai/search?${params}`, { signal });
     },
+  });
+
+  const alike = useQuery({
+    queryKey: ["ai-similar", similarTo?.track_id],
+    enabled: similarTo !== null,
+    queryFn: ({ signal }) => api<SimilarResponse>(`/api/ai/tracks/${similarTo!.track_id}/similar`, { signal }),
   });
 
   function submit(event: FormEvent) {
@@ -177,17 +198,39 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
             <ul className="attr-grid" aria-label="Search results">
               {data.results.map(result => (
                 <li key={result.track_id}>
-                  <button type="button" className="attr-card" onClick={() => open(result)} aria-label={`Open ${result.camera_name} in Playback at ${when(result.first_seen_at)}: ${summary(result)}`}>
-                    <span className="attr-thumb">
-                      {result.thumbnail_url ? <img src={result.thumbnail_url} alt="" loading="lazy" /> : <span className="attr-nopicture">No picture</span>}
-                      {result.box && result.thumbnail_url ? <span className="attr-box" style={{ left: `${result.box.x * 100}%`, top: `${result.box.y * 100}%`, width: `${result.box.width * 100}%`, height: `${result.box.height * 100}%` }} /> : null}
-                    </span>
-                    <span className="attr-meta"><strong>{result.camera_name}</strong><span>{when(result.first_seen_at)}</span><span>{summary(result)}</span></span>
-                  </button>
+                  <ResultCard result={result} when={when} onOpen={open} />
+                  <button type="button" className="button attr-similar" data-variant="ghost" onClick={() => setSimilarTo(result)}
+                          aria-label={`Find similar to ${result.camera_name} at ${when(result.first_seen_at)}: ${summary(result)}`}>Find similar</button>
                 </li>
               ))}
             </ul>
           </>
+        ) : null}
+
+        {similarTo ? (
+          <section className="attr-similar-results" aria-label="Similar objects">
+            <header className="attr-similar-head">
+              <h3>Similar to {similarTo.camera_name}, {when(similarTo.first_seen_at)}</h3>
+              <button type="button" className="button" data-variant="ghost" onClick={() => setSimilarTo(null)}>Close</button>
+            </header>
+            {alike.isFetching ? <p className="muted" role="status">Looking…</p> : null}
+            {alike.error ? <p className="notice" data-tone="bad" role="alert">{failureText(alike.error)}</p> : null}
+            {alike.data ? (
+              <>
+                <p className="muted" role="status">
+                  {alike.data.results.length ? `${alike.data.results.length} similar object${alike.data.results.length === 1 ? "" : "s"} in the last 7 days, in time order. Similarity is how alike they look, not proof they are the same.` : "Nothing similar in the time that was analysed."}
+                  {alike.data.coverage.fully_analysed ? "" : " Some cameras were not analysed for the whole time, so absence here is not proof."}
+                </p>
+                <ul className="attr-grid" aria-label="Similar results">
+                  {alike.data.results.map(result => (
+                    <li key={result.track_id}>
+                      <ResultCard result={result} when={when} onOpen={open} similarity={result.similarity} />
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+          </section>
         ) : null}
       </div>
     </aside>
