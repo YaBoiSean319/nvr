@@ -134,6 +134,11 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(self.parse("man at night").time_of_day, (22 * 60, 5 * 60))
         self.assertEqual(self.parse("man in the morning").time_of_day, (5 * 60, 12 * 60))
         self.assertIsNone(self.parse("man after 99 pm").time_of_day)
+        for ambiguous in ("man after 6", "van from 3 cameras", "van by 2 trees", "man before 7"):
+            parsed = self.parse(ambiguous)
+            self.assertIsNone(parsed.time_of_day, ambiguous)
+            self.assertEqual(parsed.text, ambiguous)
+        self.assertEqual(self.parse("man after 14").time_of_day, (14 * 60, 24 * 60))
         self.assertEqual(self.parse("man after 6 pm").text, "man")
 
     def test_range_phrases_are_in_the_viewers_local_time(self):
@@ -159,6 +164,33 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(self.parse("person outside the back door").camera_ids, ["c-back"])
         self.assertEqual(self.parse("person at the bakery").camera_ids, [])
         self.assertEqual(self.parse("person at the bakery").text, "person at the bakery")
+
+    def test_where_in_the_frame_an_object_passed(self):
+        self.assertEqual(self.parse("red car in the left half of the frame").zone, "left")
+        self.assertEqual(self.parse("red car on the right side").zone, "right")
+        self.assertEqual(self.parse("person in the centre").zone, "centre")
+        self.assertEqual(self.parse("person in the center of the view").zone, "centre")
+        self.assertEqual(self.parse("red car in the left half of the frame").text, "red car")
+        for not_a_zone in ("man heading left", "man at the left", "car in the top"):
+            self.assertIsNone(self.parse(not_a_zone).zone, not_a_zone)
+
+    def test_words_about_the_object_are_never_taken_for_a_camera(self):
+        cameras = {"a": "Car Port", "b": "Garden", "c": "Right Gate", "d": "Front Door", "e": "Garage"}
+        for text, kept in (("white car after 9 pm", "white car"), ("person walking right", "person walking right"), ("person in front of the house", "person in front of the house")):
+            parsed = semantic.parse(text, cameras, {}, now=self.NOW)
+            self.assertEqual(parsed.camera_ids, [], text)
+        self.assertEqual(semantic.parse("white car at the garden", cameras, {}, now=self.NOW).camera_ids, ["b"])
+        self.assertEqual(semantic.parse("person at car port", cameras, {}, now=self.NOW).camera_ids, ["a"])  # The whole name still works
+
+    def test_more_time_phrases(self):
+        self.assertEqual(self.parse("man between 11 and 1 pm").time_of_day, (11 * 60, 13 * 60))
+        self.assertEqual(self.parse("man from 6 pm to 8 pm").time_of_day, (18 * 60, 20 * 60))
+        self.assertEqual(self.parse("man between 6 am and 8 am").time_of_day, (6 * 60, 8 * 60))
+        for text in ("man since 3 days", "man after 2024", "man after 6 pmx"):
+            self.assertIsNone(self.parse(text).time_of_day, text)
+        yesterday_evening = self.parse("man yesterday evening")
+        self.assertEqual(yesterday_evening.time_of_day, (17 * 60, 22 * 60))
+        self.assertEqual(yesterday_evening.text, "man")
 
     def test_what_the_object_is_and_looks_like(self):
         walker = self.parse("a man in a red jacket and blue jeans heading left")
@@ -290,6 +322,40 @@ class NarrowingTests(AskCase):
 
     def coverage_names(self, body: dict) -> list[str]:
         return [camera["camera_name"] for camera in body["coverage"]["cameras"]]
+
+
+class SiteClockTests(AskCase):
+    def test_the_sites_time_zone_decides_what_a_time_of_day_means(self):
+        track = self.indexed(self.d1, "vehicle", NOW.replace(hour=19, minute=0, second=0) - DAY, "white", vehicle_colour="white", vehicle_type="van")
+        self.assertEqual(self.order(self.ask("white van after 6 pm")), [track])  # 19:00 UTC, and the site is on UTC
+        with connect() as db:
+            db.execute("UPDATE site_display_settings SET time_zone='America/Los_Angeles' WHERE singleton_id=1")
+        local = (NOW.replace(hour=19, minute=0, second=0) - DAY).astimezone(__import__("zoneinfo").ZoneInfo("America/Los_Angeles"))
+        self.assertLess(local.hour, 18)  # Midday there
+        self.assertEqual(self.order(self.ask("white van after 6 pm")), [])
+        self.assertEqual(self.order(self.ask("white van after 6 pm", utc_offset_minutes=0)), [track])  # An explicit offset wins
+
+    def test_a_time_that_has_not_happened_yet_has_nothing_to_look_at(self):
+        body = self.ask("white van", start=(NOW + timedelta(hours=1)).isoformat(), end=(NOW + timedelta(hours=2)).isoformat())
+        self.assertEqual((body["results"], body["not_yet"], body["coverage"]["analysed_percent"]), ([], True, None))
+
+
+class ZoneTests(AskCase):
+    def test_a_zone_phrase_keeps_only_objects_that_passed_through_it(self):
+        at = NOW - timedelta(hours=2)
+        left = self.indexed(self.d1, "vehicle", at, "white", vehicle_colour="white", vehicle_type="van")
+        with connect() as db:
+            db.execute("DELETE FROM ai_detections WHERE track_id=?", (left,))
+        right = self.add_track(self.d1, "vehicle", at, vehicle_colour="white", vehicle_type="van", path=[(0.7, 0.5), (0.9, 0.5)])
+        both = self.add_track(self.d1, "vehicle", at, vehicle_colour="white", vehicle_type="van", path=[(0.2, 0.5), (0.9, 0.5)])
+        with connect() as db:
+            db.execute("DELETE FROM ai_tracks WHERE id=?", (left,))
+        left = self.add_track(self.d1, "vehicle", at, vehicle_colour="white", vehicle_type="van", path=[(0.1, 0.5), (0.3, 0.5)])
+        body = self.ask("white van in the left half of the frame")
+        self.assertEqual(set(self.order(body)), {left, both})
+        self.assertEqual(body["interpretation"]["zone"], "left")
+        self.assertEqual(set(self.order(self.ask("white van on the right side"))), {right, both})
+        self.assertEqual(set(self.order(self.ask("white van"))), {left, right, both})
 
 
 class AccessAndCoverageTests(AskCase):

@@ -15,7 +15,7 @@ interface SimilarResult extends Result { similarity: number; rank: number }
 interface SimilarResponse { track_id: string; results: SimilarResult[]; coverage: Coverage }
 interface AskResult extends Result { score: number | null; rank: number }
 interface AskResponse {
-  query: string; mode: "image-text" | "attributes" | "browse"; mode_note: string; results: AskResult[]; coverage: Coverage; coverage_note: string; unindexed: number; truncated: boolean;
+  query: string; mode: "image-text" | "attributes" | "browse"; mode_note: string; results: AskResult[]; coverage: Coverage; coverage_note: string; unindexed: number; truncated: boolean; not_yet: boolean;
   interpretation: { text: string; label: string | null; attributes: Record<string, string | string[]>; cameras: { id: string; name: string }[]; range: { start: string; end: string } | null; time_of_day: { from: string; to: string } | null };
 }
 interface Interval { state: string; starts_at: string; ends_at: string; detail: string; seconds: number }
@@ -84,7 +84,7 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
   const [submitted, setSubmitted] = useState<Filters | null>(null);
   const [similarTo, setSimilarTo] = useState<Result | null>(null);
   const [description, setDescription] = useState("");
-  const [asked, setAsked] = useState<string | null>(null);
+  const [asked, setAsked] = useState<{ text: string; sequence: number } | null>(null);
   const options = useQuery({ queryKey: ["ai-search-options"], queryFn: ({ signal }) => api<Options>("/api/ai/search/options", { signal }), staleTime: 60 * 60_000 });
   const when = (iso: string) => formatSiteDateTime(Date.parse(iso), settings);
   const change = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
@@ -119,14 +119,15 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
   const answer = useQuery({
     queryKey: ["ai-ask", asked],
     enabled: asked !== null,
-    queryFn: ({ signal }) => api<AskResponse>(`/api/ai/search/ask?${new URLSearchParams({ q: asked!, utc_offset_minutes: String(-new Date().getTimezoneOffset()) })}`, { signal }),
-    staleTime: 60_000,
+    // The site's own time zone decides what "6 pm" and "yesterday" mean; asking again always asks again (a question about "the last hour" goes stale).
+    queryFn: ({ signal }) => api<AskResponse>(`/api/ai/search/ask?${new URLSearchParams({ q: asked!.text })}`, { signal }),
+    staleTime: 0,
     retry: false,
   });
 
   function ask(event: FormEvent) {
     event.preventDefault();
-    if (description.trim()) setAsked(description.trim());
+    if (description.trim()) setAsked(current => ({ text: description.trim(), sequence: (current?.sequence ?? 0) + 1 }));
   }
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -150,7 +151,7 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
         <form className="attr-form attr-ask" onSubmit={ask} role="search" aria-label="Describe what you are looking for" noValidate>
           <label className="attr-field"><span>Describe what you are looking for</span>
             <input type="search" value={description} maxLength={300} placeholder="white van at the gate after 6 pm" onChange={event => setDescription(event.target.value)} />
-            <span className="muted">Time (“yesterday”, “after 6 pm”) and camera (“at the gate”) words narrow the search. Nothing leaves this server.</span>
+            <span className="muted">Time (“yesterday”, “after 6 pm”), camera or camera group names (“at the gate”) and parts of the frame (“in the left half”) narrow the search; other place words are ignored. Nothing leaves this server.</span>
           </label>
           <div className="attr-actions"><button type="submit" className="button" data-variant="primary" disabled={!description.trim() || answer.isFetching}>{answer.isFetching ? "Looking…" : "Ask"}</button></div>
         </form>
@@ -158,7 +159,8 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
         {answer.data ? (
           <section className="attr-answer" aria-label="Description results">
             <p className="muted" role="status">
-              {answer.data.results.length ? `${answer.data.results.length} result${answer.data.results.length === 1 ? "" : "s"}, best first.` : "Nothing matched in the time that was analysed."}{" "}
+              {answer.data.not_yet ? "The time asked for has not happened yet." : answer.data.results.length ? `${answer.data.results.length} result${answer.data.results.length === 1 ? "" : "s"}, best first.` : "Nothing matched in the time that was analysed."}{" "}
+              {answer.data.truncated ? "More objects than can be ranked at once were in range: ask about a shorter time or one camera. " : ""}
               {answer.data.interpretation.cameras.length ? `Cameras: ${answer.data.interpretation.cameras.map(camera => camera.name).join(", ")}. ` : ""}
               {answer.data.interpretation.time_of_day ? `Time of day: ${answer.data.interpretation.time_of_day.from} to ${answer.data.interpretation.time_of_day.to}. ` : ""}
               {answer.data.interpretation.range ? `From ${when(answer.data.interpretation.range.start)} to ${when(answer.data.interpretation.range.end)}. ` : "Last 7 days. "}
@@ -167,6 +169,7 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
             </p>
             <p className="notice" role="status" data-tone={answer.data.coverage.fully_analysed ? "good" : "warn"}>
               {answer.data.coverage.searched_cameras === 0 ? "No cameras were searched."
+                : answer.data.coverage.analysed_percent === null ? "Nothing to check: no time in range has happened yet."
                 : answer.data.coverage.fully_analysed ? `Every searched camera (${answer.data.coverage.searched_cameras}) was analysed for the whole range.`
                 : `${answer.data.coverage.analysed_percent}% of the searched time was analysed. ${answer.data.coverage.cameras.map(camera => `${camera.camera_name}: ${duration(camera.unanalysed_seconds)} not analysed`).join("; ")}. No match in time that was not analysed means it was not looked at.`}
             </p>

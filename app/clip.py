@@ -33,7 +33,7 @@ START, END = 49406, 49407
 SIZE = 224
 MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
 STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
-_PATTERN = re.compile(r"<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[^\W\d_]+|\d|[^\s\w]+", re.IGNORECASE)
+_PATTERN = re.compile(r"<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[^\W\d_]+|\d|[^\s\w]+|_", re.IGNORECASE)
 
 
 @lru_cache(maxsize=1)
@@ -146,14 +146,16 @@ def load_clip_model(path: Path = MODEL_DIR, provider: str = "CPU", core: Any = N
 
 
 _shared: dict[str, ClipModel | None] = {}
+_shared_lock = threading.Lock()
 
 
 def shared_model() -> ClipModel | None:
     """The model for this process, loaded once (None when it is not installed). Used to embed queries and, in the worker, pictures."""
     key = str(MODEL_DIR)
-    if key not in _shared:
-        _shared[key] = load_clip_model(MODEL_DIR)
-    return _shared[key]
+    with _shared_lock:  # Cameras start together: one load, one model, one inference lock
+        if key not in _shared:
+            _shared[key] = load_clip_model(MODEL_DIR)
+        return _shared[key]
 
 
 def store_embedding(db: sqlite3.Connection, track_id: str, model_id: str, vector: np.ndarray) -> None:

@@ -20,8 +20,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import clip
-from .attributes import PALETTE
-from .search import _TRACK_COLUMNS, _iso, _result
+from .attributes import PALETTE, zone_cells
+from .search import _TRACK_COLUMNS, ZONE_PRESETS, _iso, _result
 
 MAX_QUERY = 300
 MAX_CANDIDATES = 5000
@@ -33,10 +33,12 @@ VEHICLE_WORDS = {"van": "van", "minivan": "van", "car": "car", "sedan": "car", "
 VEHICLE_ANY = {"vehicle", "vehicles", "automobile"}
 PERSON_WORDS = {"person", "people", "man", "men", "woman", "women", "pedestrian", "pedestrians", "someone", "guy", "child", "kid", "walker", "driver"}
 COLOUR_ALIASES = {"grey": "gray", "silver": "gray", "navy": "blue", "violet": "purple"}
+OBJECT_WORDS = (set(PALETTE) | set(COLOUR_ALIASES) | set(VEHICLE_WORDS) | VEHICLE_ANY | PERSON_WORDS | UPPER_WORDS | LOWER_WORDS
+                | {"left", "right", "toward", "towards", "away", "stationary", "parked", "front", "back", "rear", "side", "top", "bottom", "centre", "center", "night", "walking", "driving", "moving", "heading", "person"})
 GENERIC_CAMERA_WORDS = {"camera", "cam", "the", "a", "an", "of", "and"}
 PARTS_OF_DAY = {"morning": (5 * 60, 12 * 60), "afternoon": (12 * 60, 17 * 60), "evening": (17 * 60, 22 * 60), "night": (22 * 60, 5 * 60)}
 DAY = 24 * 60
-_CLOCK = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?"
+_CLOCK = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?(?![\w:])"
 
 
 @dataclass
@@ -48,6 +50,7 @@ class Parsed:
     any_colours: list[str] = field(default_factory=list)
     start: datetime | None = None
     end: datetime | None = None
+    zone: str | None = None  # A preset of ``search.ZONE_PRESETS``: where in the frame the object passed
     time_of_day: tuple[int, int] | None = None  # Local minutes from midnight; the end is before the start for a window that crosses midnight
     notes: list[str] = field(default_factory=list)
 
@@ -65,6 +68,11 @@ def _minutes(hour: str, minute: str | None, meridiem: str | None) -> int | None:
     elif value > 24:
         return None
     return value * 60 + int(minute or 0) if value * 60 + int(minute or 0) <= DAY else None
+
+
+def _is_clock(hour: str, minute: str | None, meridiem: str | None) -> bool:
+    """A number is a time when it says am or pm, has minutes, or can only be a 24-hour hour: "after 6" or "from 3 cameras" is not one."""
+    return bool(meridiem or minute or int(hour) >= 13 or hour.startswith("0"))
 
 
 def _clock(text: str) -> str:
@@ -111,23 +119,25 @@ def _parse_time(text: str, parsed: Parsed, now: datetime, offset: timedelta) -> 
         parsed.start, parsed.end = now - amount * unit, now
         text = _cut(text, match.span())
     # An hour is read as 24-hour unless am or pm is given ("after 18:00", "before 9 am").
-    if match := take(rf"\bbetween {_CLOCK} and {_CLOCK}"):
+    if match := take(rf"\b(?:between|from) {_CLOCK} (?:and|to|until|till|-) {_CLOCK}"):
         second = _minutes(match.group(4), match.group(5), match.group(6))
         first = _minutes(match.group(1), match.group(2), match.group(3) or match.group(6))
-        if first is not None and second is not None:
+        if first is not None and second is not None and not match.group(3) and match.group(6) and first > second:
+            first -= 12 * 60  # "between 11 and 1 pm" is 11 am to 1 pm
+        if first is not None and second is not None and _is_clock(match.group(4), match.group(5), match.group(6)):
             parsed.time_of_day = (first, second)
             text = _cut(text, match.span())
     elif match := take(rf"\b(after|since|from) {_CLOCK}"):
         value = _minutes(match.group(2), match.group(3), match.group(4))
-        if value is not None:
+        if value is not None and _is_clock(match.group(2), match.group(3), match.group(4)):
             parsed.time_of_day = (value, DAY)
             text = _cut(text, match.span())
-    elif match := take(rf"\b(before|until|till|by) {_CLOCK}"):
+    elif match := take(rf"\b(before|until|till) {_CLOCK}"):
         value = _minutes(match.group(2), match.group(3), match.group(4))
-        if value is not None:
+        if value is not None and _is_clock(match.group(2), match.group(3), match.group(4)):
             parsed.time_of_day = (0, value)
             text = _cut(text, match.span())
-    elif match := take(r"\b(?:in the|during the|at) (morning|afternoon|evening|night)\b"):
+    elif match := take(r"\b(?:(?:in the|during the|at) |(?=morning|afternoon|evening))(morning|afternoon|evening|night)\b"):
         parsed.time_of_day = PARTS_OF_DAY[match.group(1)]
         text = _cut(text, match.span())
     return text
@@ -155,7 +165,7 @@ def _parse_cameras(text: str, parsed: Parsed, cameras: dict[str, str], groups: d
     if not chosen:
         shared = set.intersection(*(set(_words(name)) for name in cameras.values())) if cameras else set()
         for camera_id, name in cameras.items():
-            distinct = [word for word in _words(name) if word not in shared and not word.isdigit()]
+            distinct = [word for word in _words(name) if word not in shared and not word.isdigit() and word not in OBJECT_WORDS and COLOUR_ALIASES.get(word, word) not in PALETTE]
             for word in distinct:
                 if (found := re.search(rf"\b{re.escape(word)}\b", lowered)):
                     chosen.append(camera_id)
@@ -167,6 +177,17 @@ def _parse_cameras(text: str, parsed: Parsed, cameras: dict[str, str], groups: d
         start = matched_span[0]
         lead = re.search(r"(?:\b(?:at|on|near|by|in|from|outside|inside|around)\s+(?:the\s+)?)$", lowered[:start])
         text = _cut(text, (lead.start() if lead else start, matched_span[1]))
+    return text
+
+
+def _parse_zone(text: str, parsed: Parsed) -> str:
+    """Where in the frame the object passed: "in the left half", "on the right side of the frame", "in the centre"."""
+    match = re.search(r"\b(?:in|on|through|across|at)\s+the\s+(left|right|top|bottom|centre|center)\s*(?:half|side|part|third)?(?:\s+of\s+the\s+(?:frame|picture|image|view|scene))?",
+                      text, re.IGNORECASE)
+    if match and (match.group(0).lower().endswith(("half", "side", "part", "third", "frame", "picture", "image", "view", "scene")) or match.group(1).lower() in {"centre", "center"}):
+        name = match.group(1).lower()
+        parsed.zone = "centre" if name == "center" else name
+        return _cut(text, match.span())
     return text
 
 
@@ -213,6 +234,7 @@ def parse(text: str, cameras: dict[str, str], groups: dict[str, tuple[str, list[
     parsed = Parsed()
     remaining = _parse_time(" ".join(text.split())[:MAX_QUERY], parsed, now, timedelta(minutes=utc_offset_minutes))
     remaining = _parse_cameras(remaining, parsed, cameras, groups)
+    remaining = _parse_zone(remaining, parsed)
     _parse_attributes(remaining, parsed)
     remaining = re.sub(r"\b(?:at|on|in|from|near|by|around|during|the|a|an)\s*$", "", " ".join(remaining.split()), flags=re.IGNORECASE)
     remaining = re.sub(r"^\s*(?:show me|find|look for|search for|any|a|an|the)\b\s*", "", remaining, flags=re.IGNORECASE)
@@ -236,6 +258,12 @@ def rank(db: sqlite3.Connection, parsed: Parsed, camera_ids: list[str], start: d
     if parsed.label:
         clauses.append("t.label=?")
         values.append(parsed.label)
+    if parsed.zone:
+        zone = ZONE_PRESETS[parsed.zone]
+        clauses.append("(t.zone_mask & ?)!=0")
+        values.append(zone_cells(zone))
+        clauses.append("EXISTS (SELECT 1 FROM ai_detections d WHERE d.track_id=t.id AND d.box_x+d.box_width/2 BETWEEN ? AND ? AND d.box_y+d.box_height/2 BETWEEN ? AND ?)")
+        values.extend([zone["x"], zone["x"] + zone["width"], zone["y"], zone["y"] + zone["height"]])
     if parsed.time_of_day:
         first, last = parsed.time_of_day
         local = (f"(CAST(strftime('%H',t.first_seen_at,'{utc_offset_minutes:+d} minutes') AS INTEGER)*60+"
@@ -253,6 +281,7 @@ def rank(db: sqlite3.Connection, parsed: Parsed, camera_ids: list[str], start: d
         else:
             mode = "attributes" if parsed.facet_count or parsed.label else "browse"
     scored: list[tuple[float, str, sqlite3.Row]] = []
+    indexed_first = mode == "image-text"
     for row in rows:
         matched = _matches(row, parsed)
         if mode == "image-text":
@@ -264,7 +293,8 @@ def rank(db: sqlite3.Connection, parsed: Parsed, camera_ids: list[str], start: d
         else:
             score = 0.0
         scored.append((score, row["first_seen_at"], row))
-    scored.sort(key=lambda item: (-item[0], _negate(item[1])))
+    # Picture scores and attribute-only scores are on different scales: tracks with a picture embedding come first.
+    scored.sort(key=lambda item: (0 if not indexed_first or item[2]["id"] in clip_scores else 1, -item[0], _negate(item[1])))
     results = []
     for position, (score, _, row) in enumerate(scored[:limit], start=1):
         results.append({**_result(row), "score": None if mode == "browse" else round(min(1.0, score), 3), "rank": position})
@@ -279,7 +309,7 @@ def _negate(moment: str) -> tuple[int, ...]:
 
 def interpretation(parsed: Parsed, cameras: dict[str, str]) -> dict[str, Any]:
     return {
-        "text": parsed.text, "label": parsed.label, "attributes": {**parsed.facets, **({"any_colour": parsed.any_colours} if parsed.any_colours else {})},
+        "text": parsed.text, "label": parsed.label, "zone": parsed.zone, "attributes": {**parsed.facets, **({"any_colour": parsed.any_colours} if parsed.any_colours else {})},
         "cameras": [{"id": camera_id, "name": cameras[camera_id]} for camera_id in parsed.camera_ids if camera_id in cameras],
         "range": {"start": parsed.start.astimezone(timezone.utc).isoformat(), "end": parsed.end.astimezone(timezone.utc).isoformat()} if parsed.start and parsed.end else None,
         "time_of_day": describe_window(parsed.time_of_day) if parsed.time_of_day else None,

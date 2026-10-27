@@ -494,7 +494,7 @@ class DetectionManager:
         """The administrator's image-text model, loaded once for every camera (None when none is installed)."""
         from . import clip
         if not hasattr(self, "_clip_loaded"):
-            self._clip_loaded = await asyncio.to_thread(clip.shared_model)
+            self._clip_loaded = await asyncio.to_thread(clip.shared_model)  # Loaded once in the process, however many cameras ask at once
         return self._clip_loaded
 
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:

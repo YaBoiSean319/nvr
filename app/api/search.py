@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
@@ -78,7 +79,7 @@ def ask(
     start: str | None = Query(default=None, max_length=64),
     end: str | None = Query(default=None, max_length=64),
     camera_ids: list[str] | None = Query(default=None, max_length=500),
-    utc_offset_minutes: int = Query(default=0, ge=-840, le=840),
+    utc_offset_minutes: int | None = Query(default=None, ge=-840, le=840),
     limit: int = Query(default=30, ge=1, le=100),
 ) -> dict[str, object]:
     """Find tracks from a plain description such as "white van at the gate after 6 pm", ranked best first, with what was understood from it.
@@ -98,6 +99,13 @@ def ask(
     if (end_time - start_time).total_seconds() <= 0 or (end_time - start_time) > search.MAX_RANGE:
         raise HTTPException(status_code=422, detail=f"The range must be positive and at most {search.MAX_RANGE.days} days")
     with connect() as db:
+        if utc_offset_minutes is None:
+            # "6 pm" and "yesterday" mean the site's clock, the one every time in the application is shown in.
+            row = db.execute("SELECT time_zone FROM site_display_settings WHERE singleton_id=1").fetchone()
+            try:
+                utc_offset_minutes = int((ZoneInfo(row["time_zone"] if row else "UTC").utcoffset(now) or timedelta(0)).total_seconds() // 60)
+            except (ZoneInfoNotFoundError, ValueError):
+                utc_offset_minutes = 0
         names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras")}
         visible = {camera_id: names[camera_id] for camera_id in user.access.only(list(names))}  # Cameras that may not be seen are never recognised in a query
         groups: dict[str, tuple[str, list[str]]] = {}
@@ -116,9 +124,10 @@ def ask(
         if parsed.camera_ids:
             wanted = [camera_id for camera_id in wanted if camera_id in parsed.camera_ids]
         searched = {camera_id: visible[camera_id] for camera_id in wanted}
+        end_time = min(end_time, now)  # Nothing has been seen in the future: "this evening" at nine in the morning has nothing to look at yet
         if end_time > start_time:
             found = semantic.rank(db, parsed, list(searched), start_time, end_time, utc_offset_minutes, clip.shared_model(), limit)
-            coverage = search.coverage(db, searched, start_time, min(end_time, now))
+            coverage = search.coverage(db, searched, start_time, end_time)
         else:
             found = {"mode": "browse", "results": [], "candidates": 0, "unindexed": 0, "candidates_truncated": False}
             coverage = search.coverage(db, searched, start_time, start_time)
@@ -127,7 +136,7 @@ def ask(
              "browse": "Nothing in the description could be matched to an object, so these are the newest in range."}
     return {"query": q, "interpretation": semantic.interpretation(parsed, visible), "mode": found["mode"], "mode_note": notes[str(found["mode"])],
             "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(), "results": found["results"],
-            "candidates": found["candidates"], "unindexed": found["unindexed"], "truncated": found["candidates_truncated"], "coverage": coverage,
+            "not_yet": end_time <= start_time, "candidates": found["candidates"], "unindexed": found["unindexed"], "truncated": found["candidates_truncated"], "coverage": coverage,
             "coverage_note": "No match in time that was not analysed means nothing was looked at; unanalysed time is listed with the results."}
 
 
