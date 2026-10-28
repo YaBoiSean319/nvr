@@ -83,7 +83,7 @@ test("opening the app after it sat idle asks for the biometrics before anything 
 test("the session is kept in secure storage and signs the person back in after the cookie is gone", async ({ page, context }) => {
   seedFixtures(2, { alarm: true });
   await signInNext(page);
-  await expect.poll(() => page.evaluate(() => Object.keys(JSON.parse(localStorage.getItem("stub.creds") || "{}")).length)).toBe(1);
+  await expect.poll(() => storedSecrets(page)).toBe(1);
   const first = await page.evaluate(() => Object.values(JSON.parse(localStorage.getItem("stub.creds")))[0].password);
   expect(first).toMatch(/^nvrd_/);
   await context.clearCookies();
@@ -100,15 +100,18 @@ test("the session is kept in secure storage and signs the person back in after t
   await expect(page.getByLabel("Username")).toBeVisible();  // The old secret does not sign anyone in
 });
 
+// How many secrets the stand-in for the phone's secure storage holds (nothing stored at all counts as none).
+const storedSecrets = page => page.evaluate(() => Object.keys(JSON.parse(localStorage.getItem("stub.creds") || "{}")).length);
+
 test("an NVR that cannot be reached does not make the phone forget its secret", async ({ page, context }) => {
   seedFixtures(2, { alarm: true });
   await signInNext(page);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("stub.creds") !== "{}")).toBe(true);
+  await expect.poll(() => storedSecrets(page)).toBe(1);
   await context.clearCookies();
   await page.route("**/api/native/device-sessions/resume", route => route.abort());
   await page.reload();
   await expect(page.getByLabel("Username")).toBeVisible();  // Signed out for now ...
-  expect(await page.evaluate(() => localStorage.getItem("stub.creds") !== "{}")).toBe(true);  // ... but the secret is still there
+  expect(await storedSecrets(page)).toBe(1);  // ... but the secret is still there
   await page.unroute("**/api/native/device-sessions/resume");
   await page.reload();
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
