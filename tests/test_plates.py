@@ -346,7 +346,7 @@ class SearchTests(PlateCase):
         self.assertEqual(self.admin.get("/api/plates/search", params={"q": "AB", "start": "yesterday"}).status_code, 422)
 
     def test_a_person_sees_only_plates_on_cameras_they_may_see(self):
-        self.assertEqual(sorted(item["camera_id"] for item in self.search("AB*", self.limited)), [self.d1, self.d2])
+        self.assertEqual(sorted(item["camera_id"] for item in self.search("AB*", self.limited)), sorted([self.d1, self.d2]))
         self.assertEqual(self.search("AB12CDE", self.limited, camera_ids=[self.y1]), [])  # Asking for a hidden camera finds nothing and says nothing
         hidden = next(item for item in self.search("AB12CDE") if item["camera_id"] == self.y1)
         self.assertEqual(self.limited.get(f"/api/plates/reads/{hidden['id']}/crop").status_code, 404)
