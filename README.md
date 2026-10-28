@@ -74,6 +74,8 @@ Rules can pop their alarms into Live: each person who opts in sees the alarm's c
 
 ONVIF PTZ cameras can be moved from Live and the camera editor (buttons, keyboard and touch, click-to-centre), with presets, scheduled patrol tours and a control lease so one person drives a camera at a time (see [PTZ](docs/ptz.md)).
 
+360° fisheye cameras can be dewarped in Live (panorama, double panorama, one to four virtual PTZ views with pan and zoom by drag, wheel, touch and keyboard, kept in saved views), and an export can render a chosen view (see [360° cameras](docs/fisheye-dewarping.md)).
+
 Privacy masks black out areas of a camera's picture everywhere: written to cameras that support ONVIF masks, and otherwise drawn by the NVR into every live view, recording, snapshot and export. Administrators can see unmasked footage only for a stated, audited reason (see [privacy masks](docs/privacy-masks.md)).
 
 Access grants limit which cameras an operator sees, by camera group or for everyone holding an Entra role, optionally until an expiry; hidden cameras, their footage, alarms and exports behave as if they did not exist (see [camera access grants](docs/access-grants.md)).

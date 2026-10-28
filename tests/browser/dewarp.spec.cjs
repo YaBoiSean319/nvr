@@ -35,7 +35,7 @@ test.beforeAll(async () => {
 test.afterAll(() => { fs.rmSync(directory, { recursive: true, force: true }); });
 
 /** Open the harness with the fixture fisheye picture and a state; resolves once the stage has drawn. */
-async function open(page, state, size = { width: WIDTH, height: HEIGHT }) {
+async function open(page, state, size = { width: WIDTH, height: HEIGHT }, source = "image") {
   const picture = fixture("frame");
   await page.setViewportSize({ width: size.width + 40, height: size.height + 40 });
   const styles = fs.readFileSync(path.join(WEB, "src", "styles", "app.css"), "utf8");
@@ -43,9 +43,9 @@ async function open(page, state, size = { width: WIDTH, height: HEIGHT }) {
   await page.setContent(`<style>${dewarpCss}</style><body style="margin:0;background:#222"><img id="fixture" src="data:image/png;base64,${fs.readFileSync(picture).toString("base64")}" style="display:none"><div id="root"></div></body>`);
   await page.waitForFunction(() => document.getElementById("fixture").complete);
   await page.addScriptTag({ content: bundle });
-  await page.evaluate(options => window.dewarpHarness.mount(options), { lens: LENS, state, ...size });
+  await page.evaluate(options => window.dewarpHarness.mount(options), { lens: LENS, state, ...size, source });
   await expect(page.getByTestId("dewarp-stage")).toBeVisible();
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(source === "video" ? 600 : 150);
 }
 
 /** The stage's canvas pixels as grey values (rows of numbers), read through a 2D canvas. */
@@ -102,6 +102,15 @@ test("a panorama shows the room's vertical lines and horizontal bands straight",
   const stripes = rows.map(y => darkCentres(row(image, y)));
   expect(stripes[0].length).toBe(23);
   expect(spread(stripes, 23)).toBeLessThan(2.5);
+});
+
+test("a playing video of the fisheye picture dewarps straight too", async ({ page }) => {
+  // The path a Live tile takes: a video element, redrawn into the texture as it plays.
+  await open(page, { mode: "views", pan: 0, views: [{ pan: 0, tilt: -90, fov: 90 }] }, { width: WIDTH, height: HEIGHT }, "video");
+  const image = await pixels(page);
+  const verticals = [20, 150, 260, 460, 560, 700].map(y => darkCentres(row(image, y)));
+  expect(verticals[0].length).toBeGreaterThanOrEqual(9);
+  expect(spread(verticals, verticals[0].length)).toBeLessThan(2.5);
 });
 
 test("a double panorama shows two straight half circles", async ({ page }) => {
