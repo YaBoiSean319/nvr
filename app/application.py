@@ -122,6 +122,14 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(detail)})
 
     @app.middleware("http")
+    async def keep_nothing_on_the_phone(request: Request, call_next):
+        # The native app (its user agent says so) keeps no page, picture or footage beyond what is on screen: nothing it fetches may be cached.
+        response = await call_next(request)
+        if "NVRApp/" in request.headers.get("user-agent", ""):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.middleware("http")
     async def prevent_api_caching(request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
