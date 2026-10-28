@@ -17,6 +17,7 @@ import { PrivacySettings } from "./PrivacySettings";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { SitesSettings } from "./SitesSettings";
 import { StorageSettings } from "./StorageSettings";
+import { TieringSettings } from "./TieringSettings";
 
 const CATEGORIES = {
   general: { label: "General", page: GeneralSettings },
@@ -25,6 +26,7 @@ const CATEGORIES = {
   remote: { label: "Remote access", page: RemoteAccessSettings },
   privacy: { label: "Privacy & notices", page: PrivacySettings },
   recording: { label: "Recording & storage", page: StorageSettings },
+  tiering: { label: "Storage tiering", page: TieringSettings },
   coverage: { label: "Coverage & self-test", page: CoverageSettings },
   audit: { label: "Viewing audit", page: AuditSettings },
   hardening: { label: "Camera hardening", page: HardeningSettings },

@@ -144,6 +144,6 @@ test("native push is registered for the person and a tap on a notification opens
   await openNotificationSettings(page);
   await inbox(page).getByRole("button", { name: "Turn off on this device" }).click();
   await expect(inbox(page).getByText("Notifications are off for this device.").first()).toBeVisible();
-  expect((await (await page.request.get("/api/push/preferences")).json()).devices).toEqual([]);
+  await expect.poll(async () => (await (await page.request.get("/api/push/preferences")).json()).devices).toEqual([]);  // The interface says "off" as the request is sent: wait for the server to have removed it
   expect(token).toContain("fcm-registration-token");
 });

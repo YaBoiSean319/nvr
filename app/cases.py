@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import access as access_rules, viewing_audit
-from .storage import recording_file_path
+from .storage import segment_available
 from .store import connect
 
 MAX_TITLE = 200
@@ -237,7 +237,7 @@ def _available_segments(db: sqlite3.Connection, camera_id: str, start: datetime,
     found = []
     for row in rows:
         try:
-            if recording_file_path(row["relative_path"]).is_file():
+            if segment_available(row["relative_path"]):
                 found.append(row)
         except OSError:
             continue

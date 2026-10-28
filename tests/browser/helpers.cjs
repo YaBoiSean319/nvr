@@ -67,6 +67,13 @@ function seedSearchTracks() {
   return JSON.parse(result.stdout);
 }
 
+/** Two 40-day-old footage segments (real files) on camera 1, for storage tiering. */
+function seedTiering() {
+  const result = spawnSync("python", ["-m", "tests.browser.seed_tiering"], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
+  assert.equal(result.status, 0, `seeding tiering footage failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 /** Put the fixture NVR into a failover state: "takeover" makes it a standby that took over two minutes ago. */
 function seedFailover(state) {
   const result = spawnSync("python", ["-m", "tests.browser.seed_failover", state], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
@@ -173,4 +180,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedDigest, seedHealth, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedTiering, seedDigest, seedHealth, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

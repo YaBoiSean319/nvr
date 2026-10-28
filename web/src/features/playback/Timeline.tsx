@@ -184,7 +184,7 @@ function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWin
         const backfilled = segment.source === "backfill";
         const standby = segment.source === "failover";
         return span ? <span key={`s${segment.id}`} className="timeline-mark" data-mark={backfilled ? "backfilled" : standby ? "failover" : "recording"}
-                            title={`${backfilled ? "Backfilled from the camera's own recording" : standby ? "Recorded by the standby NVR while the primary was down" : "Recording"} ${describe(at(segment.starts_at), at(segment.ends_at))}`}
+                            title={`${backfilled ? "Backfilled from the camera's own recording" : standby ? "Recorded by the standby NVR while the primary was down" : "Recording"} ${describe(at(segment.starts_at), at(segment.ends_at))}${segment.archived ? " (on the cold storage tier: it plays a little more slowly)" : ""}`}
                             style={{ left: `${span.left}%`, width: `${span.width}%` }} /> : null;
       })}
       {row.gaps.map(gap => {
