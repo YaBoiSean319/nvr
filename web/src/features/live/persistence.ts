@@ -15,6 +15,7 @@ export function useLiveWorkspacePersistence(cameras: Camera[] | undefined) {
   // While an alarm layout is shown, the person's own arrangement is the one it will return to.
   const arrangement = useLiveStore(store => store.alarmLayout?.saved.arrangement ?? store.arrangement);
   const sidebarOpen = useLiveStore(store => store.sidebarOpen);
+  const dewarp = useLiveStore(store => store.dewarp);
 
   useEffect(() => {
     if (restored || !cameras) return;
@@ -23,7 +24,7 @@ export function useLiveWorkspacePersistence(cameras: Camera[] | undefined) {
     fetchLiveWorkspace(controller.signal)
       .then(saved => {
         const arrangement = saved.camera_ids === null ? { mode: "auto" as const, order: [], slots: [] } : fromSaved({ ...saved, camera_ids: saved.camera_ids }, available);
-        useLiveStore.getState().restore(arrangement, !saved.sidebar_collapsed);
+        useLiveStore.getState().restore(arrangement, !saved.sidebar_collapsed, saved.dewarp ?? {});
       })
       .catch(() => {
         if (!controller.signal.aborted) useLiveStore.getState().restore(useLiveStore.getState().arrangement, true);
@@ -34,9 +35,9 @@ export function useLiveWorkspacePersistence(cameras: Camera[] | undefined) {
   useEffect(() => {
     if (!restored) return;
     const timer = window.setTimeout(() => {
-      const layout = toSaved(arrangement);
+      const layout = toSaved(arrangement, dewarp);
       void saveLiveWorkspace({ ...layout, sidebar_collapsed: !sidebarOpen }).catch(() => undefined);
     }, SAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [arrangement, sidebarOpen, restored]);
+  }, [arrangement, sidebarOpen, dewarp, restored]);
 }

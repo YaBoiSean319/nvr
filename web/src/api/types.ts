@@ -1,3 +1,4 @@
+import type { DewarpState } from "@/features/dewarp/geometry";
 export type Role = "administrator" | "operator";
 export type ThemePreference = "system" | "light" | "dark";
 
@@ -210,6 +211,15 @@ export interface ExportRequest {
   include_audio: boolean;
   audio_camera_id: string | null;
   redaction_review_id?: string | null;
+  /** A dewarped view to render for a fisheye camera in its individual file, by camera id. */
+  dewarp?: Record<string, ExportDewarp>;
+}
+
+export interface ExportDewarp {
+  mode: "view" | "panorama" | "double_panorama";
+  pan: number;
+  tilt: number;
+  fov: number;
 }
 
 export interface SavedView {
@@ -219,6 +229,8 @@ export interface SavedView {
   grid_size: number;
   tile_camera_ids: (string | null)[];
   layout_mode: "auto" | "manual";
+  /** How the fisheye cameras in this view are shown (raw cameras are left out). */
+  dewarp?: Record<string, DewarpState>;
 }
 
 export interface CameraGroup {
@@ -234,6 +246,7 @@ export interface LiveWorkspaceState {
   grid_size: number;
   layout_mode: "auto" | "manual";
   sidebar_collapsed: boolean;
+  dewarp?: Record<string, DewarpState>;
 }
 
 export interface DisplaySettings {

@@ -84,3 +84,14 @@ Tested here: a local folder tier and an S3-compatible stand-in that checks AWS S
 
 Tested here: a camera stand-in that records the ONVIF commands it gets, with a simulated scene whose object walks out of the picture unless the camera follows (the commands keep it within a few percent of the centre), the lease rules, interruption, the lost timeout and home preset, privacy masks, a camera that stops answering, rule starts, and browser journeys. How well a real camera's motors, latency and the AI worker's rate work with the fixed gains is not tested.
 
+### Fisheye dewarping (#146)
+
+- [ ] **Unchecked.** A real 360° camera.
+  - Version:
+  - Environment: the camera (make, model, firmware, mount), its picture size and where the lens circle sits, the browser and its WebGL (a phone and a desktop).
+  - Steps: set the lens on the camera's Lens tab (mount, centre, radius, field of view) using the raw circle on a Live tile; show a panorama, a double panorama and one to four virtual views, and check straight things (door frames, a table edge) stay straight and the views turn the way you drag; check the lens numbers if they curve near the rim; use the keyboard, a touch screen and the wheel; save a view and reload it; export a virtual view and a panorama and compare each file with the tile; try a browser without WebGL.
+  - Owner:
+  - Evidence:
+
+Tested here: a synthetic fisheye picture of a room with straight lines (an equidistant lens model, ceiling, wall and floor mounts) rendered by the WebGL stage and by the export, straight to within about a pixel, and the two agreeing with a numpy reference; the same picture as a playing video; controls by keyboard, mouse and touch events; saved views and the workspace keeping views; exports through FFmpeg. Not tested here: a real fisheye lens (whose projection is not exactly equidistant), a stream from a real camera, or phones' WebGL.
+

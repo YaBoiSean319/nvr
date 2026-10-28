@@ -5,6 +5,7 @@
  * Manual: `slots` holds fixed positions in an N×N grid (null = empty position).
  */
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
+import type { DewarpState } from "@/features/dewarp/geometry";
 
 export type ManualSize = 1 | 4 | 9 | 16;
 
@@ -117,19 +118,21 @@ export interface SavedLayout {
   grid_size: number;
   tile_camera_ids: (string | null)[];
   layout_mode: "auto" | "manual";
+  dewarp: Record<string, DewarpState>;
 }
 
-export function toSaved(arrangement: Arrangement): SavedLayout {
+export function toSaved(arrangement: Arrangement, dewarp: Record<string, DewarpState> = {}): SavedLayout {
   const ids = members(arrangement);
+  const kept = Object.fromEntries(Object.entries(dewarp).filter(([id, state]) => ids.includes(id) && state.mode !== "raw"));
   if (arrangement.mode === "manual") {
-    return { camera_ids: ids, grid_size: arrangement.slots.length, tile_camera_ids: arrangement.slots, layout_mode: "manual" };
+    return { camera_ids: ids, grid_size: arrangement.slots.length, tile_camera_ids: arrangement.slots, layout_mode: "manual", dewarp: kept };
   }
   const size = ids.length <= 1 ? 1 : ids.length <= 4 ? 4 : ids.length <= 9 ? 9 : 16;
-  return { camera_ids: ids, grid_size: size, tile_camera_ids: [...ids, ...Array<null>(size - ids.length).fill(null)], layout_mode: "auto" };
+  return { camera_ids: ids, grid_size: size, tile_camera_ids: [...ids, ...Array<null>(size - ids.length).fill(null)], layout_mode: "auto", dewarp: kept };
 }
 
 /** Rebuild an arrangement, dropping cameras that no longer exist or are archived. */
-export function fromSaved(saved: SavedLayout, available: Set<string>): Arrangement {
+export function fromSaved(saved: Omit<SavedLayout, "dewarp">, available: Set<string>): Arrangement {
   const keep = (id: string | null) => (id !== null && available.has(id) ? id : null);
   if (saved.layout_mode === "manual" && [1, 4, 9, 16].includes(saved.grid_size)) {
     const slots = Array.from({ length: saved.grid_size }, (_, index) => keep(saved.tile_camera_ids[index] ?? null));

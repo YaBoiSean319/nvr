@@ -39,7 +39,7 @@ test("an administrator adds a cold tier, sets a policy, moves old footage and it
   await policy.getByRole("button", { name: "Save policy for default" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
   await page.getByRole("button", { name: "Move some footage now" }).click();
-  await expect(page.getByText("2 segments moved.")).toBeVisible();
+  await expect(page.getByText("2 segments moved.")).toBeVisible({ timeout: 25_000 }); // A busy CI runner copies and verifies slowly
   await expect(page.getByRole("list", { name: "Tier list" })).toContainText("2 segments");
   expect(fs.readdirSync(path.join(fs.realpathSync(cold), seeded.segments[0].camera_id)).length).toBe(2);
 

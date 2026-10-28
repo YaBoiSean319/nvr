@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { ApiError } from "@/api/client";
-import { useCreateExport, useRedactionKinds, useRedactionReview, useStartRedactionReview } from "@/api/queries";
-import type { Camera, DisplaySettings, TimelineCamera } from "@/api/types";
+import { useCreateExport, useLenses, useRedactionKinds, useRedactionReview, useStartRedactionReview } from "@/api/queries";
+import type { Camera, DisplaySettings, ExportDewarp, TimelineCamera } from "@/api/types";
+import { clampView, type Lens } from "@/features/dewarp/geometry";
+import { useLiveStore } from "@/features/live/store";
 import { useStatusPanel } from "@/features/status/StatusArea";
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
 import { formatSiteDateTime, localTimeCandidates, toLocalInput } from "@/lib/zonedTime";
@@ -29,6 +31,44 @@ function duration(ms: number): string {
 
 function covered(row: TimelineCamera | undefined, start: number, end: number): number {
   return (row ? intervalsOf(row) : []).reduce((sum, interval) => sum + Math.max(0, Math.min(end, interval.end) - Math.max(start, interval.start)), 0);
+}
+
+/** How a fisheye camera is rendered in the export: the raw circle, a panorama or a virtual view. Starts from how it is shown in Live, so the file matches the screen. */
+function DewarpChoice({ camera, lens, value, onChange }: { camera: Camera; lens: Lens; value: ExportDewarp | null; onChange: (value: ExportDewarp | null) => void }) {
+  const number = (text: string) => (text === "" ? Number.NaN : Number(text));
+  const choose = (choice: string) => {
+    if (choice === "raw") return onChange(null);
+    const live = useLiveStore.getState().dewarp[camera.id];
+    if (choice === "view") {
+      const shown = live?.mode === "views" ? live.views[0] : undefined;
+      return onChange({ mode: "view", ...(shown ?? clampView(lens.mount, { pan: 0, tilt: lens.mount === "ceiling" ? -45 : lens.mount === "floor" ? 45 : 0, fov: 90 })) });
+    }
+    onChange({ mode: choice as ExportDewarp["mode"], pan: live && live.mode === choice ? live.pan : 0, tilt: 0, fov: 90 });
+  };
+  return (
+    <div className="export-dewarp">
+      <label>
+        <span>{camera.name}</span>
+        <select aria-label={`How ${camera.name} is rendered`} value={value?.mode ?? "raw"} onChange={event => choose(event.target.value)}>
+          <option value="raw">Raw 360° circle</option>
+          <option value="panorama">Panorama</option>
+          {lens.mount !== "wall" ? <option value="double_panorama">Double panorama</option> : null}
+          <option value="view">Virtual view</option>
+        </select>
+      </label>
+      {value?.mode === "view" ? (
+        <span className="export-dewarp-view">
+          <label><span>Pan (°)</span><input type="number" step={1} value={Number.isNaN(value.pan) ? "" : value.pan} onChange={event => onChange({ ...value, pan: number(event.target.value) })} /></label>
+          <label><span>Tilt (°)</span><input type="number" step={1} value={Number.isNaN(value.tilt) ? "" : value.tilt} onChange={event => onChange({ ...value, tilt: number(event.target.value) })} /></label>
+          <label><span>Field of view (°)</span><input type="number" step={1} min={20} max={120} value={Number.isNaN(value.fov) ? "" : value.fov} onChange={event => onChange({ ...value, fov: number(event.target.value) })} /></label>
+        </span>
+      ) : value ? (
+        <span className="export-dewarp-view">
+          <label><span>Starts at (°)</span><input type="number" step={1} value={Number.isNaN(value.pan) ? "" : value.pan} onChange={event => onChange({ ...value, pan: number(event.target.value) })} /></label>
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
 /** A precise, second-level editor for one mark, in the site time zone. */
@@ -93,6 +133,8 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
   const [blur, setBlur] = useState<("faces" | "plates")[]>([]);
   // A review belongs to the exact cameras, range and kinds it was made for; changing any of them makes it stale.
   const [review, setReview] = useState<{ id: string; key: string } | null>(null);
+  const lenses = useLenses().data ?? {};
+  const [dewarp, setDewarp] = useState<Record<string, ExportDewarp>>({});
 
   const start = marks.in ?? range.start;
   const end = marks.out ?? range.end;
@@ -101,6 +143,9 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
   const coverage = selected.map(id => ({ id, name: cameras.get(id)?.name ?? "Camera", covered: covered(timeline.get(id), start, end) }));
   const span = end - start;
   const blurring = blur.length > 0;
+  const fisheyeSelected = selected.filter(id => lenses[id]);
+  const dewarped = Object.fromEntries(Object.entries(dewarp).filter(([id]) => selected.includes(id) && lenses[id]));
+  const dewarping = Object.keys(dewarped).length > 0;
   const reviewKey = JSON.stringify([selected, start, end, blur]);
   const currentReview = review && review.key === reviewKey ? review.id : null;
   const reviewState = useRedactionReview(currentReview).data?.state;
@@ -112,6 +157,9 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
     if (!selected.length) return "Choose at least one camera.";
     if (!individual && !grid) return "Choose at least one output.";
     if (blurring && !individual) return "Blurred exports are individual camera files.";
+    if (dewarping && !individual) return "A dewarped view is rendered in the individual camera file: include that output.";
+    if (dewarping && blurring) return "Blurring marks regions of the raw picture: choose a blur or a dewarped view, not both.";
+    if (Object.values(dewarped).some(view => !(Number.isFinite(view.pan) && Number.isFinite(view.tilt) && view.fov >= 20 && view.fov <= 120))) return "A virtual view needs a pan, a tilt and a field of view of 20 to 120 degrees.";
     if (coverage.every(item => item.covered <= 0)) return "There is no footage in this range for the selected cameras, so there is nothing to export.";
     if (audio && grid && !audioSource) return "Choose which camera's audio the grid uses.";
     return null;
@@ -150,6 +198,7 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
       include_audio: audio && (grid ? Boolean(audioSource) : audioCameras.length > 0),
       audio_camera_id: audio && grid ? audioSource || null : null,
       redaction_review_id: blurring ? currentReview : null,
+      ...(dewarping ? { dewarp: dewarped } : {}),
     });
   }
 
@@ -207,6 +256,17 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
             </>
           ) : <p className="muted">None of the selected cameras has audio enabled.</p>}
         </fieldset>
+
+        {fisheyeSelected.length ? (
+          <fieldset>
+            <legend>360° cameras</legend>
+            {fisheyeSelected.map(id => (
+              <DewarpChoice key={id} camera={cameras.get(id)!} lens={lenses[id]!} value={dewarp[id] ?? null}
+                            onChange={next => setDewarp(current => (next ? { ...current, [id]: next } : Object.fromEntries(Object.entries(current).filter(([key]) => key !== id))))} />
+            ))}
+            <p className="muted">A panorama or view is rendered in the camera's individual file, from the raw recording, with the same geometry as Live. The synchronized grid shows the raw circle.</p>
+          </fieldset>
+        ) : null}
 
         {kinds.data?.length ? (
           <fieldset>

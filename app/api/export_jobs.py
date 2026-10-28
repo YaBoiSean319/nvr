@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
-from app import footage_chain, viewing_audit
+from app import dewarp, footage_chain, viewing_audit
 from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 
 router = APIRouter()
@@ -34,6 +34,14 @@ def _export_for(job_id: str, user):
     return row
 
 
+class DewarpExport(BaseModel):
+    """The dewarped view to render for one fisheye camera: the same geometry and the same pan, tilt and field of view as in Live."""
+    mode: Literal["view", "panorama", "double_panorama"] = "view"
+    pan: float = Field(default=0, ge=-180, le=180)
+    tilt: float = Field(default=-90, ge=-90, le=90)
+    fov: float = Field(default=90, ge=dewarp.MIN_VIEW_FOV, le=dewarp.MAX_VIEW_FOV)
+
+
 class ExportRequest(BaseModel):
     camera_ids: list[str] = Field(min_length=1, max_length=MAX_EXPORT_CAMERAS)
     start: datetime
@@ -44,6 +52,8 @@ class ExportRequest(BaseModel):
     include_audio: bool = False
     audio_camera_id: str | None = None
     redaction_review_id: str | None = Field(default=None, max_length=64)
+    # A fisheye camera's individual file can be rendered as a dewarped view (the same geometry as Live) instead of the raw circle.
+    dewarp: dict[str, DewarpExport] = Field(default_factory=dict, max_length=MAX_EXPORT_CAMERAS)
 
     @model_validator(mode="after")
     def validate_interval(self) -> "ExportRequest":
@@ -63,6 +73,13 @@ class ExportRequest(BaseModel):
             raise ValueError("Grid tiles must include each selected camera exactly once")
         if self.redaction_review_id and self.output_modes != ["individual"]:
             raise ValueError("Redacted exports contain individual camera files only")
+        if self.dewarp:
+            if not set(self.dewarp) <= set(self.camera_ids):
+                raise ValueError("A dewarped view names a camera that is not in the export")
+            if "individual" not in self.output_modes:
+                raise ValueError("A dewarped view is rendered in the individual camera file: include the individual output")
+            if self.redaction_review_id:
+                raise ValueError("Redaction marks regions of the raw picture: choose redaction or a dewarped view, not both")
         if self.start.tzinfo is None or self.end.tzinfo is None or self.end <= self.start:
             raise ValueError("Export interval must include timezone-aware start and end times")
         if self.end - self.start > MAX_EXPORT_WINDOW:
@@ -96,7 +113,8 @@ async def create_export(
         int(user["id"]), [swap(camera_id) for camera_id in payload.camera_ids], start, end, payload.output_modes,
         [None if camera_id is None else swap(camera_id) for camera_id in payload.tile_camera_ids],
         payload.grid_resolution, payload.include_audio, swap(payload.audio_camera_id) if payload.audio_camera_id else None,
-        redaction_review_id=payload.redaction_review_id))
+        redaction_review_id=payload.redaction_review_id,
+        dewarp={swap(camera_id): view.model_dump() for camera_id, view in payload.dewarp.items()}))
 
 
 def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str, object]:
@@ -132,7 +150,7 @@ async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict
         int(user["id"]), original["camera_ids"],
         datetime.fromisoformat(original["start"]).astimezone(timezone.utc), datetime.fromisoformat(original["end"]).astimezone(timezone.utc),
         original["output_modes"], original["tile_camera_ids"], original["grid_resolution"], original["include_audio"],
-        original["audio_camera_id"], retry_of=job_id, redaction_review_id=original["redaction_review_id"]))
+        original["audio_camera_id"], retry_of=job_id, redaction_review_id=original["redaction_review_id"], dewarp=original["dewarp"], dewarp_lenses=original["dewarp_lenses"]))
 
 
 @router.get("/api/exports/{job_id}")

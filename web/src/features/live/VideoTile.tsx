@@ -1,7 +1,10 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router";
 import type { Camera } from "@/api/types";
+import { useLenses } from "@/api/queries";
+import { DewarpStage } from "@/features/dewarp/DewarpStage";
+import { RAW, choiceOf, stateFor } from "@/features/dewarp/geometry";
 import { LivePlayer, type PlayerSnapshot } from "./LivePlayer";
 import { LOW_DATA_MAX_TILES, QualityGovernor, useLowData, useViewingPrefs, type QualityChange } from "./bandwidth";
 import { CAMERA_DRAG_TYPE } from "@/features/cameras/CameraBrowser";
@@ -51,7 +54,13 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
   const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
   const override = useLiveStore(store => store.quality[camera.id]);
   const listeningId = useLiveStore(store => store.listeningId);
-  const { setActive, enlarge, unenlarge: restore, remove, setQuality, setListening, move } = useLiveStore.getState();
+  const { setActive, enlarge, unenlarge: restore, remove, setQuality, setListening, move, setDewarp } = useLiveStore.getState();
+  const lens = useLenses().data?.[camera.id];
+  const savedDewarp = useLiveStore(store => store.dewarp[camera.id]) ?? RAW;
+  // A wall-mounted camera sees 180 degrees: a double panorama (which only an API call can save for it) is drawn as a panorama.
+  const dewarpState = lens?.mount === "wall" && savedDewarp.mode === "double_panorama" ? { ...savedDewarp, mode: "panorama" as const } : savedDewarp;
+  const [noWebgl, setNoWebgl] = useState(false);
+  const onNoWebgl = useCallback(() => setNoWebgl(true), []);
   const lowData = useLowData();
   const intervalSeconds = useViewingPrefs(prefs => prefs.intervalSeconds);
   const hasSub = Boolean(camera.live_substream_available);
@@ -143,6 +152,9 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
     player.current?.setListening(listening);
   }, [listening]);
 
+  // A fisheye camera shown dewarped: the video keeps playing out of sight and the stage draws it. Without WebGL the raw picture stays, with a notice.
+  const dewarped = Boolean(lens) && dewarpState.mode !== "raw" && !noWebgl;
+  if (dewarpState.mode !== "raw" && noWebgl) qualityNote = "Dewarping needs WebGL, which this browser does not have (or has lost): showing the raw picture";
   const phase = lowDataPaused ? "paused" : state?.phase ?? "connecting";
   const live = phase === "live";
   const audioAvailable = Boolean(state?.audioAvailable && camera.audio_enabled);
@@ -187,6 +199,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       data-transport={state?.transport ?? undefined}
       data-quality={quality === "low" ? "sub" : "main"}
       data-quality-mode={manual ? "manual" : lowData ? "low-data" : "auto"}
+      data-dewarp={dewarped ? dewarpState.mode : undefined}
       tabIndex={0}
       role="group"
       aria-label={`${camera.name}: ${PHASE_LABEL[phase]}`}
@@ -200,8 +213,12 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
         event.dataTransfer.effectAllowed = "move";
       }}
     >
-      <video ref={video} className="tile-video" muted playsInline hidden={Boolean(fallbackUrl)} />
-      {fallbackUrl && !halted ? <img ref={image} className="tile-video" src={fallbackUrl} alt="" onError={() => player.current?.retry()} /> : null}
+      <video ref={video} className="tile-video" data-dewarped={dewarped || undefined} muted playsInline hidden={Boolean(fallbackUrl)} />
+      {fallbackUrl && !halted ? <img ref={image} className="tile-video" data-dewarped={dewarped || undefined} src={fallbackUrl} alt="" onError={() => player.current?.retry()} /> : null}
+      {dewarped && lens && !halted ? (
+        <DewarpStage getSource={() => (fallbackUrl ? image.current : video.current)} lens={lens} state={dewarpState} label={camera.name} playing={live}
+                     onChange={next => setDewarp(camera.id, next)} onUnsupported={onNoWebgl} />
+      ) : null}
       <div className="tile-top">
         <span className="tile-name" title={camera.name}>{camera.name}</span>
         <span className="tile-state" data-phase={phase}>
@@ -234,6 +251,21 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
                   aria-label={listening ? `Mute ${camera.name}` : `Listen to ${camera.name}`} title={listening ? "Mute" : "Listen"}>
             {listening ? "🔊" : "🔈"}
           </button>
+        ) : null}
+        {lens ? (
+          <select className="tile-quality" aria-label={`Dewarp ${camera.name}`} value={noWebgl ? "raw" : choiceOf(dewarpState)}
+                  onChange={event => {
+                    const value = event.target.value;
+                    setDewarp(camera.id, stateFor(lens.mount, value === "raw" || value === "panorama" || value === "double_panorama" ? value : (Number(value) as 1 | 2 | 3 | 4)));
+                  }}>
+            <option value="raw">Raw 360°</option>
+            <option value="panorama">Panorama</option>
+            {lens.mount !== "wall" ? <option value="double_panorama">Double panorama</option> : null}
+            <option value="1">1 view</option>
+            <option value="2">2 views</option>
+            <option value="3">3 views</option>
+            <option value="4">4 views</option>
+          </select>
         ) : null}
         <select className="tile-quality" aria-label={`Video quality for ${camera.name}`} value={override ?? "auto"} onChange={event => setQuality(camera.id, event.target.value as Quality)}>
           <option value="auto">Auto</option>
