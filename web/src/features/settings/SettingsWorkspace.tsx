@@ -6,6 +6,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { CoverageSettings } from "./CoverageSettings";
 import { DigestsSettings } from "./DigestsSettings";
 import { DiagnosticsSettings } from "./DiagnosticsSettings";
+import { EventSourcesSettings } from "./EventSourcesSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { HardeningSettings } from "./HardeningSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
@@ -24,6 +25,7 @@ const CATEGORIES = {
   hardening: { label: "Camera hardening", page: HardeningSettings },
   notifications: { label: "Notifications", page: NotificationsSettings },
   digests: { label: "Digests", page: DigestsSettings },
+  events: { label: "Event sources", page: EventSourcesSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },
   diagnostics: { label: "Diagnostics", page: DiagnosticsSettings },
 } as const;
