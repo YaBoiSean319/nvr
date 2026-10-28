@@ -8,7 +8,7 @@ Cameras with an ONVIF PTZ service can be moved from Live and from the camera edi
   - **Buttons:** press and hold an arrow to pan or tilt, and **+** or **−** to zoom. Letting go stops the camera.
   - **Keyboard:** with the tile focused, hold the arrow keys and **+** / **−**. Enter or Space also hold a focused button.
   - **Touch:** press and hold works on phones too. Every control is at least 40 px.
-- **Centre on click**, on a Live tile: turn it on, then click a point in the picture to centre the camera there. It is offered for cameras that support relative moves in field-of-view space (`TranslationSpaceFov`). Absolute and generic relative moves give no way to know how far a point in the picture is, so those cameras get the arrows only.
+- **Centre** (Centre on click), on a Live tile: turn it on, then click a point in the picture to centre the camera there. It is offered for cameras that support relative moves in field-of-view space (`TranslationSpaceFov`). Absolute and generic relative moves give no way to know how far a point in the picture is, so those cameras get the arrows only.
 - **Go to preset** recalls a saved position.
 - A move lasts at most 1.5 seconds unless renewed, so a camera stops by itself if the connection drops mid-move. Leaving the window or tab also stops it. Commands reach the camera in the order given.
 

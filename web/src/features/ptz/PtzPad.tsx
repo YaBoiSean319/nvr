@@ -186,8 +186,8 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
         <div className="ptz-row">
           {data.capabilities?.zoom ? ZOOM.map(item => <button key={item.label} {...holdProps(item.direction, item.label)}>{item.symbol}</button>) : null}
           {compact && data.capabilities?.centre ? (
-            <button type="button" className="button ptz-button" aria-pressed={centring} disabled={blocked} onClick={() => setCentring(!centring)}
-                    title="Click the picture to centre the camera there">Centre on click</button>
+            <button type="button" className="button ptz-button" aria-label="Centre on click" aria-pressed={centring} disabled={blocked} onClick={() => setCentring(!centring)}
+                    title="Click the picture to centre the camera there">Centre</button>
           ) : null}
           {data.capabilities?.pan_tilt && !tracking ? (
             <button type="button" className="button ptz-button" aria-pressed={choosing} disabled={blocked} onClick={() => { setChoosing(!choosing); setCentring(false); }}
