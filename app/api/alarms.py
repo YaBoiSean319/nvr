@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 
+from app import console
 from app import alarms
 from app.access import may_view_camera
 from app.principal import Administrator, CurrentUser, Principal
@@ -66,6 +67,7 @@ def _act(alarm_id: str, user: Principal, action) -> dict[str, object]:
 
 
 @router.get("/api/alarms")
+@console.federated(console.split_alarms, console.combine_alarms)
 def list_alarms(
     user: CurrentUser,
     state: Literal["open", "new", "acknowledged", "assigned", "resolved", "all"] = "open",

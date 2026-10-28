@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from app import console
 from app import clip, privacy, search, semantic, similar
 from app.attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES
 from app.principal import CurrentUser
@@ -28,6 +29,7 @@ def get_options(_: CurrentUser) -> dict[str, object]:
 
 
 @router.get("/api/ai/search")
+@console.federated(console.split_search, console.combine_search)
 def search_tracks(
     user: CurrentUser,
     start: str = Query(max_length=64),

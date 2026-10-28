@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 
+from app import console
 from app.access import EVERYTHING, Access
 from app.principal import Administrator, CurrentUser
 from app.store import connect
@@ -82,6 +83,7 @@ class CameraScheduleRequest(GroupScheduleRequest):
 
 
 @router.get("/api/camera-groups")
+@console.federated(console.split_plain, console.combine_groups)
 def list_camera_groups(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         groups = [group for group in db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE") if user.access.can_see_group(group["id"])]
