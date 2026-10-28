@@ -7,12 +7,15 @@
  * to the server's MJPEG fallback, labelled as such.
  */
 import { withUnmasked } from "@/features/privacy/store";
+import { mseHevc } from "@/lib/codecs";
 
 export type Phase = "connecting" | "live" | "stale" | "reconnecting" | "offline" | "error" | "paused";
 
 export interface PlayerSnapshot {
   phase: Phase;
   transport: "mse" | "mjpeg" | null;
+  /** The camera sends H.265 and the NVR converts it to H.264 for this browser. */
+  converted: boolean;
   detail: string | null;
   lastFrameAt: number | null;
   audioAvailable: boolean;
@@ -45,8 +48,11 @@ export class LivePlayer {
   private frameCallback: number | null = null;
   private disconnectedAt: number | null = null;
   private stopped = false;
+  /** Whether this connection asked for H.265 as it is; if the browser then cannot play it, the next asks for H.264 instead. */
+  private askedHevc = false;
+  private hevcBroken = false;
   private snapshot: PlayerSnapshot = {
-    phase: "connecting", transport: null, detail: null, lastFrameAt: null, audioAvailable: false, listening: false, profile: null,
+    phase: "connecting", transport: null, converted: false, detail: null, lastFrameAt: null, audioAvailable: false, listening: false, profile: null,
   };
 
   constructor(private readonly options: Options) {}
@@ -90,7 +96,8 @@ export class LivePlayer {
     if (this.stopped) return;
     const { cameraId, quality } = this.options;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(withUnmasked(`${scheme}//${location.host}/api/cameras/${encodeURIComponent(cameraId)}/live/stream?quality=${quality}`, cameraId));
+    this.askedHevc = !this.hevcBroken && mseHevc();
+    const socket = new WebSocket(withUnmasked(`${scheme}//${location.host}/api/cameras/${encodeURIComponent(cameraId)}/live/stream?quality=${quality}${this.askedHevc ? "&hevc=true" : ""}`, cameraId));
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.update({ phase: this.snapshot.lastFrameAt ? "reconnecting" : "connecting", detail: null });
@@ -122,10 +129,16 @@ export class LivePlayer {
         const mime = String(message.mime);
         if (!("MediaSource" in window) || !MediaSource.isTypeSupported(mime)) {
           this.closeSocket();
+          if (message.codec === "hevc" && this.askedHevc) {
+            // The browser said it could play H.265 and cannot: ask the NVR to convert it to H.264 instead of dropping to MJPEG.
+            this.hevcBroken = true;
+            this.connect();
+            return;
+          }
           this.useFallback(withUnmasked(`/api/cameras/${encodeURIComponent(this.options.cameraId)}/live?quality=${this.options.quality}`, this.options.cameraId));
           return;
         }
-        this.update({ transport: "mse", profile: message.profile === "sub" ? "sub" : "main", audioAvailable: Boolean(message.audio) });
+        this.update({ transport: "mse", converted: Boolean(message.transcoded), profile: message.profile === "sub" ? "sub" : "main", audioAvailable: Boolean(message.audio) });
         this.setupMedia(mime);
         return;
       }
@@ -134,6 +147,12 @@ export class LivePlayer {
         this.update({ listening: Boolean(message.on), detail: message.on ? this.snapshot.detail : (message.detail as string | null) ?? null });
         return;
       case "unsupported":
+        if (this.askedHevc && !this.hevcBroken) {
+          this.hevcBroken = true;
+          this.closeSocket();
+          this.connect();
+          return;
+        }
         this.useFallback(String(message.fallback));
         return;
       default:

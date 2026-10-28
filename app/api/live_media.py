@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_VIEWERS
+from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_TRANSCODES, MAX_LIVE_VIEWERS
 from app.live_hub import LiveHub, Viewer
 from app.principal import CurrentUser, current_user, requires_scope
 from app.store import connect
@@ -27,12 +27,36 @@ _live_view_lock = threading.Lock()
 _live_view_count = 0
 _live_audio_count = 0
 _live_camera_status: dict[str, dict[str, object]] = {}
+# H.265 conversions in use: stream key -> viewers. A viewer joining a conversion that is running costs nothing more; a new one needs a free place.
+_transcodes: dict[tuple[str, ...], int] = {}
 
 
 def live_counts() -> tuple[int, int]:
     """Live video streams and audio listeners being served right now."""
     with _live_view_lock:
         return _live_view_count, _live_audio_count
+
+
+def transcode_counts() -> tuple[int, int]:
+    """Conversions of H.265 to H.264 running, and the viewers they serve."""
+    with _live_view_lock:
+        return len(_transcodes), sum(_transcodes.values())
+
+
+def _acquire_transcode(key: tuple[str, ...]) -> bool:
+    with _live_view_lock:
+        if key not in _transcodes and len(_transcodes) >= MAX_LIVE_TRANSCODES:
+            return False
+        _transcodes[key] = _transcodes.get(key, 0) + 1
+        return True
+
+
+def _release_transcode(key: tuple[str, ...]) -> None:
+    with _live_view_lock:
+        if key in _transcodes:
+            _transcodes[key] -= 1
+            if _transcodes[key] <= 0:
+                del _transcodes[key]
 
 
 def _acquire_live_view(camera_id: str) -> bool:
@@ -266,6 +290,8 @@ def live_camera(
     return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
+HEVC_NAMES = {"hevc", "h265", "hev1", "hvc1"}
+
 # Close codes for the live WebSocket. 44xx mirror the HTTP status they stand for.
 CLOSE_UNAUTHORIZED, CLOSE_FORBIDDEN, CLOSE_NOT_FOUND, CLOSE_ARCHIVED = 4401, 4403, 4404, 4410
 CLOSE_UNSUPPORTED, CLOSE_BUSY, CLOSE_TOO_SLOW, CLOSE_STREAM_FAILED = 4415, 4429, 4408, 4502
@@ -298,8 +324,12 @@ async def live_stream(
     quality: Literal["low", "high"] = "low",
     audio: bool = False,
     unmasked: bool = False,
+    hevc: bool = False,
 ) -> None:
     """Fragmented MP4 live video for Media Source Extensions.
+
+    ``hevc`` says the browser can play H.265: an H.265 camera is then passed through as it is; otherwise it is converted to H.264 here, once for all of
+    its viewers (``init`` says ``transcoded``). The MJPEG ``fallback`` is only for when that fails too.
 
     Messages: a JSON ``init`` (MIME/codecs, profile, audio), the binary
     initialization segment, then binary media fragments, starting at a keyframe.
@@ -344,7 +374,10 @@ async def live_stream(
     video_filter = privacy.drawbox_filter(zones) if zones else None
     profile = "sub" if quality == "low" and camera["live_substream_url_ciphertext"] else "main"
     codec = (camera["video_codec"] or "").lower()
-    if not video_filter and profile == "main" and codec and codec not in {"h264", "avc", "avc1"}:
+    camera_is_hevc = codec in HEVC_NAMES and profile == "main"
+    hevc_copy = camera_is_hevc and hevc and not video_filter
+    transcode = camera_is_hevc and not hevc and not video_filter  # A masked picture is converted anyway (to H.264), whatever the camera sends
+    if not video_filter and profile == "main" and codec and codec not in {"h264", "avc", "avc1"} and not camera_is_hevc:
         await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback,
                                                      "detail": f"{codec.upper()} video cannot be played directly; use the fallback stream"})
         return
@@ -358,6 +391,11 @@ async def live_stream(
         await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
         return
     include_audio = bool(camera["audio_enabled"])
+    conversion_key = (camera_id, profile, "audio" if include_audio else "video", "h264", hashlib.sha256(source.encode()).hexdigest()[:16])
+    if transcode and not _acquire_transcode(conversion_key):
+        _release_live_view(camera_id)
+        await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted view and retry"})
+        return
     listening = audio and include_audio and _acquire_live_audio()
     hub: LiveHub = websocket.app.state.live_hub
     viewer = Viewer()
@@ -371,8 +409,9 @@ async def live_stream(
     # The source fingerprint keeps a changed stream URL (rotation, new profile) from
     # joining a stream that is still connected to the old one.
     fingerprint = hashlib.sha256(f"{source}|{video_filter or ''}".encode()).hexdigest()[:16]
-    stream = hub.join((camera_id, profile, "audio" if include_audio else "video", "masked" if video_filter else "direct", fingerprint),
-                      source, include_audio, viewer, mark_fresh, video_filter)
+    mode = "masked" if video_filter else "h264" if transcode else "hevc" if hevc_copy else "direct"
+    stream = hub.join((camera_id, profile, "audio" if include_audio else "video", mode, fingerprint),
+                      source, include_audio, viewer, mark_fresh, video_filter, transcode, hevc_copy)
     receiver = asyncio.create_task(websocket.receive())
     getter: asyncio.Task | None = None
     watching = viewing_audit.LiveSession(principal.id, camera_id, quality)
@@ -381,9 +420,14 @@ async def live_stream(
         if receiver.done():
             return
         if not stream.ready.is_set() or stream.failed:
+            if transcode or hevc_copy:
+                # H.265 could not be passed on or converted: only now is the compatibility stream offered.
+                await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback, "converted": transcode,
+                                                             "detail": "This camera's H.265 video could not be prepared for the browser; use the fallback stream"})
+                return
             await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera did not start streaming in time"})
             return
-        if "avc1" not in (stream.mime or ""):
+        if ("hvc1" not in (stream.mime or "") and "hev1" not in (stream.mime or "")) if hevc_copy else "avc1" not in (stream.mime or ""):
             await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": "unknown", "fallback": fallback,
                                                          "detail": "This camera's video cannot be played directly; use the fallback stream"})
             return
@@ -393,7 +437,8 @@ async def live_stream(
             _release_live_audio()
             listening = False
         include_audio = has_audio
-        await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening})
+        await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening,
+                                   "codec": "hevc" if hevc_copy else "h264", "transcoded": transcode, "accelerated": bool(getattr(stream, "accelerated", False))})
         await websocket.send_bytes(stream.init)
         while True:
             await watching.delivered()
@@ -447,5 +492,7 @@ async def live_stream(
         hub.leave(stream, viewer)
         if listening:
             _release_live_audio()
+        if transcode:
+            _release_transcode(conversion_key)
         _release_live_view(camera_id)
         watching.close()

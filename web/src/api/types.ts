@@ -247,6 +247,8 @@ export interface TimelineCamera {
   camera_id: string;
   name: string;
   recording_status: string;
+  /** What the camera records (for example h264 or hevc): H.265 is converted for a browser that cannot play it. */
+  video_codec: string | null;
   segments: { id: number; starts_at: string; ends_at: string; size_bytes: number; media_url: string; source: "live" | "backfill" }[];
   gaps: { starts_at: string; ends_at: string; state: GapState; reason: string; reason_code: GapReason; backfill: { state: string; message: string } | null }[];
   motion_events: { id: string; source_event_at: string; status: string }[];

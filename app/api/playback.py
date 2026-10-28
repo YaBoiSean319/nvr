@@ -50,7 +50,7 @@ def synchronized_playback_timeline(
     cameras: list[dict[str, object]] = []
     with connect() as db:
         for camera_id in payload.camera_ids:
-            camera = db.execute("SELECT id,name,recording_status,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            camera = db.execute("SELECT id,name,recording_status,audio_supported,audio_enabled,video_codec FROM cameras WHERE id=?", (camera_id,)).fetchone()
             if camera is None or not user.access.can_see(camera_id):  # A hidden camera is an unknown one.
                 raise HTTPException(status_code=422, detail="Playback request contains an unknown camera")
             recorded = coverage_timeline(db, camera_id, start, end)
@@ -74,7 +74,7 @@ def synchronized_playback_timeline(
                 "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
                 "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
                 (camera_id, end_text, start_text))]
-            cameras.append({"camera_id": camera_id, "name": camera["name"], "recording_status": camera["recording_status"],
+            cameras.append({"camera_id": camera_id, "name": camera["name"], "recording_status": camera["recording_status"], "video_codec": camera["video_codec"],
                             "audio_supported": None if camera["audio_supported"] is None else bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
                             "segments": segments, "coverage": coverage, "motion_events": events, "gaps": gaps,
                             "ai_detections": ai_detections, "ai_unanalyzed": ai_unanalyzed})
@@ -96,7 +96,9 @@ async def play_segment(
     segment_id: int,
     user: CurrentUser,
     unmasked: Annotated[bool, Query()] = False,
+    compat: Annotated[Literal["h264"] | None, Query()] = None,
 ) -> FileResponse:
+    """The recording. ``compat=h264`` asks for it converted to H.264, for a browser that cannot play the camera's H.265."""
     with connect() as db:
         row = db.execute(
             "SELECT relative_path,starts_at FROM recording_segments WHERE id=? AND camera_id=?",
@@ -114,8 +116,8 @@ async def play_segment(
     if not path.is_file():
         release_playback(path)
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
-    if zones:
-        # Recordings on disk are not masked: deliver a masked rendering, never the file itself.
+    if zones or compat:
+        # Recordings on disk are not masked: deliver a masked rendering, never the file itself. (Or, for ``compat``, the same picture as H.264.)
         try:
             masked = await privacy.masked_recording(path, zones)
         except (OSError, RuntimeError, asyncio.TimeoutError) as exc:

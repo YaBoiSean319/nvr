@@ -14,9 +14,9 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from . import footage_chain, privacy, redaction, viewing_audit
+from . import acceleration, footage_chain, privacy, redaction, viewing_audit
 from .display_settings import format_display_datetime
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
@@ -367,13 +367,14 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
 
 async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, cameras: list[dict[str, Any]],
                        tile_camera_ids: list[str | None], intervals: list[dict[str, Any]], resolution: str,
-                       display_settings: dict[str, str]) -> Path:
+                       display_settings: dict[str, str], hardware: bool = False) -> Path:
+    encoder = acceleration.encoder(crf=26, speed="ultrafast") if hardware else acceleration.build(None, crf=26, speed="ultrafast")
     width, height = (1920, 1080) if resolution == "1080p" else (3840, 2160)
     columns = int(len(tile_camera_ids) ** 0.5)
     tile_width, tile_height = width // columns, height // columns
     duration = sum((item["source_end"] - item["source_start"]).total_seconds() for item in intervals if not item["skipped"])
     by_id = {camera["camera_id"]: camera for camera in cameras}
-    args = ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c=black:s={tile_width}x{tile_height}:r=15:d={duration:.6f}"]
+    args = ["-hide_banner", "-loglevel", "error", *encoder.pre, "-f", "lavfi", "-i", f"color=c=black:s={tile_width}x{tile_height}:r=15:d={duration:.6f}"]
     graph: list[str] = []
     tile_outputs: list[str] = []
     next_input = 1
@@ -416,9 +417,9 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
                 cue += 1
     final_filter = f"{tile_outputs[0]}null" if len(tile_outputs) == 1 else "".join(tile_outputs) + f"xstack=inputs={len(tile_outputs)}:layout={layout}:fill=black"
     # Gap notices sit bottom-centre of the whole frame, apart from every tile's top-left label.
-    graph.append(f"{final_filter},{_subtitle_filter_path(gaps, width, height)}[out]")
+    graph.append(f"{final_filter},{_subtitle_filter_path(gaps, width, height)}" + (f"[gridframe];[gridframe]{encoder.vf_tail}[out]" if encoder.vf_tail else "[out]"))
     output = work_dir / "grid.mp4"
-    args.extend(["-filter_complex", ";".join(graph), "-map", "[out]", "-an", "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-t", f"{duration:.6f}", "-y", str(output)])
+    args.extend(["-filter_complex", ";".join(graph), "-map", "[out]", "-an", "-r", "15", *encoder.codec, "-movflags", "+faststart", "-t", f"{duration:.6f}", "-y", str(output)])
     await manager._run_ffmpeg(job_id, args)
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError("No playable synchronized grid video was produced")
@@ -857,10 +858,11 @@ class ExportManager:
                         lines.append(f"outpoint {(span['source_end'] - segment_start).total_seconds():.6f}\n")
                     manifest.write_text("".join(lines), encoding="utf-8")
                     first_overlay_samples = _write_source_time_subtitles(subtitle_path, camera["name"], spans, display_settings)
-                    await self._run_ffmpeg(job_id, [
-                        "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(manifest),
-                        "-map", "0:v:0", "-an", "-vf", privacy.with_mask(f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}", camera["privacy_zones"]),
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-movflags", "+faststart", "-y", str(render_path),
+                    chain = privacy.with_mask(f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}", camera["privacy_zones"])
+                    await self._render(job_id, lambda encoder, hardware: [
+                        "-hide_banner", "-loglevel", "error", *encoder.pre, *(acceleration.decode_args() if hardware else []), "-f", "concat", "-safe", "0", "-i", str(manifest),
+                        "-map", "0:v:0", "-an", "-vf", encoder.filters(chain),
+                        *encoder.codec, "-movflags", "+faststart", "-y", str(render_path),
                     ])
                     if job_id in self._cancelled:
                         raise ExportCancelled()
@@ -893,7 +895,14 @@ class ExportManager:
                 self._progress(job_id, 15 + round(55 * (camera["index"] + 1) / max(1, len(per_camera))))
 
             if "grid" in output_modes:
-                await _render_grid(self, job_id, work_dir, per_camera, tile_camera_ids, union, grid_resolution, display_settings)
+                for hardware in (True, False) if acceleration.selected() else (False,):
+                    try:
+                        await _render_grid(self, job_id, work_dir, per_camera, tile_camera_ids, union, grid_resolution, display_settings, hardware)
+                        break
+                    except RuntimeError as exc:
+                        if not hardware or job_id in self._cancelled:
+                            raise
+                        acceleration.disable(str(exc))
                 if include_audio:
                     source_camera = next(camera for camera in per_camera if camera["camera_id"] == audio_camera_id)
                     audio_path = work_dir / "grid.m4a"
@@ -1010,6 +1019,18 @@ class ExportManager:
             for path in acquired:
                 release_playback(path)
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    async def _render(self, job_id: str, build: "Callable[[acceleration.Encoder, bool], list[str]]") -> None:
+        """Run an FFmpeg render built for an encoder: on the graphics chip when there is one, and again in software if that fails."""
+        for hardware in (True, False) if acceleration.selected() else (False,):
+            encoder = acceleration.encoder(crf=26, speed="ultrafast") if hardware else acceleration.build(None, crf=26, speed="ultrafast")
+            try:
+                await self._run_ffmpeg(job_id, build(encoder, hardware))
+                return
+            except RuntimeError as exc:
+                if not hardware or job_id in self._cancelled:
+                    raise
+                acceleration.disable(str(exc))
 
     async def _run_ffmpeg(self, job_id: str, args: list[str]) -> None:
         executable = shutil.which("ffmpeg")

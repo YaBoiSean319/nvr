@@ -27,7 +27,18 @@ interface SystemStatus {
   configured_administrators: number;
   configured_cameras: number;
   self_test: { passed: boolean; finished_at: string; results: { passed: boolean | null }[] } | null;
+  acceleration: {
+    setting: string;
+    selected: string | null;
+    ffmpeg: boolean;
+    note: string | null;
+    disabled_reason: string | null;
+    backends: { name: string; label: string; encoder: boolean; device: boolean | null; usable: boolean; detail: string }[];
+  };
+  live: { viewers: number; audio_listeners: number; conversions: number; converted_viewers: number };
 }
+
+const ACCELERATION_NAME: Record<string, string> = { nvenc: "NVIDIA NVENC/NVDEC", qsv: "Intel Quick Sync", vaapi: "VAAPI" };
 
 /** Site date/time display with a server-rendered preview, and the system's own status. */
 export function GeneralSettings() {
@@ -99,6 +110,16 @@ export function GeneralSettings() {
             <ul className="plain-list">
               {system.data.workers.map(worker => <li key={worker.name}>{worker.name}: {worker.alive ? "running" : "not running"}{worker.state ? ` · ${worker.state}` : ""}{worker.restarts ? ` · restarted ${worker.restarts} time${worker.restarts === 1 ? "" : "s"}` : ""}</li>)}
             </ul>
+            <p data-testid="video-acceleration">
+              Video conversion and decoding: {system.data.acceleration.selected ? `hardware (${ACCELERATION_NAME[system.data.acceleration.selected] ?? system.data.acceleration.selected})` : "software"}
+              {system.data.acceleration.disabled_reason ? ` · ${system.data.acceleration.disabled_reason}` : system.data.acceleration.note ? ` · ${system.data.acceleration.note}` : ""}
+              {system.data.live.conversions ? ` · ${system.data.live.conversions} H.265 conversion${system.data.live.conversions === 1 ? "" : "s"} serving ${system.data.live.converted_viewers} viewer${system.data.live.converted_viewers === 1 ? "" : "s"}` : ""}
+            </p>
+            {system.data.acceleration.backends.length ? (
+              <ul className="plain-list" aria-label="Hardware acceleration found">
+                {system.data.acceleration.backends.map(backend => <li key={backend.name}>{backend.label}: {backend.usable ? "working" : "not available"} · {backend.detail}</li>)}
+              </ul>
+            ) : null}
             <p data-testid="self-test-summary">
               {system.data.self_test
                 ? `Self-test ${system.data.self_test.passed ? "passed" : `failed ${system.data.self_test.results.filter(result => result.passed === false).length} check(s)`} ${formatRelative(system.data.self_test.finished_at)}.`
