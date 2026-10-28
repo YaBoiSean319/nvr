@@ -54,7 +54,7 @@ class LiveViewTests(unittest.TestCase):
         payload = {"name": "Opening shift", "camera_ids": [self.camera, self.camera_two]}
         saved = self.client.put("/api/live/layouts/Opening%20shift", json={"camera_ids": payload["camera_ids"]})
         self.assertEqual(saved.status_code, 200, saved.text)
-        self.assertEqual(saved.json(), {"name": "Opening shift", "camera_ids": payload["camera_ids"]})
+        self.assertEqual(saved.json(), {"name": "Opening shift", "camera_ids": payload["camera_ids"], "dewarp": {}})
         self.active_user = principal(self.other_user_id, "other", "operator")
         self.assertEqual(self.client.get("/api/live/layouts").json(), {"layouts": []})
         invalid = self.client.put("/api/live/layouts/Bad", json={"camera_ids": [str(uuid.uuid4())]})
