@@ -99,6 +99,7 @@ export function RecordingTab({ camera, admin }: { camera: Camera; admin: boolean
   const forecast = useQuery({ queryKey: ["cameras", camera.id, "retention-forecast"], queryFn: ({ signal }) => getRetentionForecast(camera.id, signal), refetchInterval: 5 * 60_000 });
   const shown = forecast.data?.camera;
   return (
+    <>
     <form className="tab-form" aria-label="Recording settings" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
       <p className="notice">
         Effective now: <strong>{MODE_LABEL[effective]}</strong> from the {policy}. Storage volume: {camera.storage_volume_id ?? "default"} (set by the policy group).
@@ -146,7 +147,6 @@ export function RecordingTab({ camera, admin }: { camera: Camera; admin: boolean
           </div>
         ) : null}
       </fieldset>
-      {admin ? <BackfillSection cameraId={camera.id} /> : null}
       <fieldset className="field-group" disabled={readOnly}>
         <legend>Policy group</legend>
         <label className="field"><span>Group</span>
@@ -160,5 +160,8 @@ export function RecordingTab({ camera, admin }: { camera: Camera; admin: boolean
       </fieldset>
       {admin ? <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} /> : null}
     </form>
+    {/* Beside the form, not in it: backfill has its own request and its own save. */}
+    {admin ? <div className="tab-form"><BackfillSection cameraId={camera.id} /></div> : null}
+    </>
   );
 }

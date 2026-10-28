@@ -58,7 +58,7 @@ export function BackfillSection({ cameraId }: { cameraId: string }) {
       <label className="field"><span>Bandwidth limit (kbit/s)</span>
         <input type="number" min={64} max={1000000} placeholder={`${data.default_limit_kbps} (default)`} value={limit} onChange={event => setLimit(event.target.value)} />
       </label>
-      <p className="field-hint" role="status" data-tone={data.support.state === "unsupported" ? "warn" : undefined}>
+      <p className="field-hint" data-tone={data.support.state === "unsupported" ? "warn" : undefined}>
         {data.support.state === "unknown" ? "Not checked yet: it is checked when the first outage is filled." : data.support.message}
       </p>
       <div className="field-actions">
