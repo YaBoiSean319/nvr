@@ -12,6 +12,7 @@ import { LiveWorkspace } from "@/features/live/LiveWorkspace";
 import { useLiveStore } from "@/features/live/store";
 import { CamerasInventory, CamerasShell } from "@/features/admin/cameras/CamerasWorkspace";
 import { useCamerasStore } from "@/features/admin/cameras/store";
+import { FleetHealth } from "@/features/admin/cameras/FleetHealth";
 import { AddCameras } from "@/features/admin/cameras/add/AddCameras";
 import { GroupsWorkspace } from "@/features/admin/groups/GroupsWorkspace";
 import { RulesWorkspace } from "@/features/admin/rules/RulesWorkspace";
@@ -49,6 +50,7 @@ function router(me: Me) {
             element: <CamerasShell admin={me.role === "administrator"}><Outlet /></CamerasShell>,
             children: [
               { index: true, element: <CamerasInventory /> },
+              { path: "health", element: <FleetHealth /> },
               { path: "add", element: <AdminRoute me={me}><AddCameras /></AdminRoute> },
               { path: "groups", element: <AdminRoute me={me}><GroupsWorkspace /></AdminRoute> },
               { path: "rules", element: <AdminRoute me={me}><RulesWorkspace /></AdminRoute> },

@@ -16,6 +16,7 @@ function Sections({ admin }: { admin: boolean }) {
   return (
     <nav className="section-nav" aria-label="Camera administration">
       <NavLink to="/cameras" end className="section-link">Cameras</NavLink>
+      <NavLink to="/cameras/health" className="section-link">Health</NavLink>
       {admin ? <NavLink to="/cameras/add" className="section-link">Add Cameras</NavLink> : null}
       {admin ? <NavLink to="/cameras/groups" className="section-link">Groups &amp; Policies</NavLink> : null}
       {admin ? <NavLink to="/cameras/rules" className="section-link">Rules</NavLink> : null}
