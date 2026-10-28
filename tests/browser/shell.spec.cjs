@@ -57,7 +57,7 @@ test("administrators see every destination and status opens with the keyboard", 
   seedFixtures(3);
   await signInNext(page, ADMIN);
   const nav = page.getByRole("navigation", { name: "Workspaces" });
-  await expect(nav.getByRole("link")).toHaveText(["Live", "Playback", "Insights", "Cameras", "Settings"]);
+  await expect(nav.getByRole("link")).toHaveText(["Live", "Playback", "Insights", "Digests", "Cameras", "Settings"]);
   await expect(nav.getByRole("link", { name: "Live" })).toHaveAttribute("aria-current", "page");
 
   const recording = page.getByRole("button", { name: /^Recording:/ });
@@ -83,7 +83,7 @@ test("operators never see administrator destinations and the server refuses them
   await signInNext(page, OPERATOR);
   const nav = page.getByRole("navigation", { name: "Workspaces" });
   // Operators get read-only camera details (#67) but no configuration destinations.
-  await expect(nav.getByRole("link")).toHaveText(["Live", "Playback", "Insights", "Cameras"]);
+  await expect(nav.getByRole("link")).toHaveText(["Live", "Playback", "Insights", "Digests", "Cameras"]);
   await page.goto(`${NEXT}settings`);
   await expect(page.getByRole("heading", { name: "Administrator access required" })).toBeVisible();
   const branding = await page.request.get("/api/settings/branding");

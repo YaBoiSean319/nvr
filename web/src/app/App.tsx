@@ -16,6 +16,7 @@ import { AddCameras } from "@/features/admin/cameras/add/AddCameras";
 import { GroupsWorkspace } from "@/features/admin/groups/GroupsWorkspace";
 import { RulesWorkspace } from "@/features/admin/rules/RulesWorkspace";
 import { SettingsWorkspace } from "@/features/settings/SettingsWorkspace";
+import { DigestsList, DigestView } from "@/features/digests/DigestsWorkspace";
 import { InsightsWorkspace } from "@/features/insights/InsightsWorkspace";
 import { CasesList, CaseView } from "@/features/cases/CasesWorkspace";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
@@ -39,6 +40,8 @@ function router(me: Me) {
           { path: "live/*", element: <LiveWorkspace /> },
           { path: "playback/*", element: <PlaybackWorkspace /> },
           { path: "insights", element: <InsightsWorkspace /> },
+          { path: "digests", element: <DigestsList /> },
+          { path: "digests/:digestId", element: <DigestView /> },
           { path: "cases", element: <CasesList /> },
           { path: "cases/:caseId", element: <CaseView /> },
           {

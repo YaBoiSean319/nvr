@@ -11,6 +11,7 @@ const DESTINATIONS = [
   { to: "/live", label: "Live", admin: false },
   { to: "/playback", label: "Playback", admin: false },
   { to: "/insights", label: "Insights", admin: false },
+  { to: "/digests", label: "Digests", admin: false },
   { to: "/cameras", label: "Cameras", admin: false },
   { to: "/settings", label: "Settings", admin: true },
 ];

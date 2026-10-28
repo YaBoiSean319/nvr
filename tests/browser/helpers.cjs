@@ -63,6 +63,13 @@ function seedSearchTracks() {
   return JSON.parse(result.stdout);
 }
 
+/** Camera 1 gets three alarms, a recording gap, an incident, and a digest of them. */
+function seedDigest() {
+  const result = spawnSync("python", ["-m", "tests.browser.seed_digest"], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
+  assert.equal(result.status, 0, `seeding the digest failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 /** Detections on camera 1 that line up with its footage (seconds from the anchor), for the Playback object-track journeys. */
 function seedOverlayTracks(anchor) {
   const result = spawnSync("python", ["-m", "tests.browser.seed_overlay", "--anchor", anchor], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
@@ -142,4 +149,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedDigest, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

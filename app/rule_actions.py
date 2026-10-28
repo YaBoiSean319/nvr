@@ -300,13 +300,14 @@ async def _perform(delivery: dict[str, Any]) -> tuple[int | None, str | None, bo
         if kind in {"webhook", "slack", "teams"}:
             if kind == "webhook":
                 body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                headers = signed_headers(secret["signing_secret"], payload["event_id"], "rule.triggered", body)
+                headers = signed_headers(secret["signing_secret"], payload["event_id"], payload.get("event_type", "rule.triggered"), body)
             else:
-                text = _message(payload)
+                text = payload["message"] if payload.get("message") else _message(payload)  # A digest brings its own message
+                link_keys = (("thumbnail_url", "Snapshot"), ("alarm_url", "Open alarm"), ("digest_url", "Open the digest"))
                 if kind == "slack":
-                    links = [f"<{payload[key]}|{label}>" for key, label in (("thumbnail_url", "Snapshot"), ("alarm_url", "Open alarm")) if payload.get(key)]
+                    links = [f"<{payload[key]}|{label}>" for key, label in link_keys if payload.get(key)]
                 else:
-                    links = [f"[{label}]({payload[key]})" for key, label in (("thumbnail_url", "Snapshot"), ("alarm_url", "Open alarm")) if payload.get(key)]
+                    links = [f"[{label}]({payload[key]})" for key, label in link_keys if payload.get(key)]
                 body = json.dumps({"text": " · ".join([text, *links])}).encode("utf-8")
                 headers = {"Content-Type": "application/json"}
             status = await _post(secret["url"], body, headers, bool(settings.get("allow_private")))
