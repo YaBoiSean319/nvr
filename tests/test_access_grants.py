@@ -295,7 +295,7 @@ class RouteTests(GrantCase):
         ("GET", "/api/incidents"), ("POST", "/api/incidents/{incident_id}/acknowledge"),
         ("GET", "/api/live/layouts"), ("DELETE", "/api/live/layouts/{name}"), ("PUT", "/api/live/layouts/{name}"), ("GET", "/api/live/views"),
         ("GET", "/api/live/workspace"), ("PUT", "/api/live/workspace"), ("GET", "/api/live/alarm-pop-ins"), ("POST", "/api/playback/timeline"),
-        ("GET", "/api/ai/search"), ("GET", "/api/ai/search/options"), ("GET", "/api/ai/tracks/{track_id}/thumbnail"), ("GET", "/api/ai/tracks/{track_id}/similar"), ("GET", "/api/ai/search/ask"),
+        ("GET", "/api/ai/search"), ("GET", "/api/insights"), ("GET", "/api/insights/export.csv"), ("GET", "/api/ai/search/options"), ("GET", "/api/ai/tracks/{track_id}/thumbnail"), ("GET", "/api/ai/tracks/{track_id}/similar"), ("GET", "/api/ai/search/ask"),
         ("GET", "/api/cases"), ("POST", "/api/cases"), ("GET", "/api/cases/{case_id}"), ("PATCH", "/api/cases/{case_id}"), ("POST", "/api/cases/{case_id}/members"),
         ("DELETE", "/api/cases/{case_id}/members/{user_id}"), ("POST", "/api/cases/{case_id}/items"), ("DELETE", "/api/cases/{case_id}/items/{item_id}"), ("POST", "/api/cases/{case_id}/items/{item_id}/viewed"),
         ("POST", "/api/cases/{case_id}/close"), ("GET", "/api/cases/{case_id}/audit"), ("POST", "/api/cases/{case_id}/packages"),
