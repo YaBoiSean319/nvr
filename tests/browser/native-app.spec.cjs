@@ -3,44 +3,8 @@
 // What a real phone adds (the OS dialogs, FCM and APNs, the Keychain itself) is listed as post-merge checks in docs/mobile-app.md.
 const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
 
-const APP_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36 NVRApp/1.0";
+const { APP_AGENT, installBridge } = require("./native_bridge.cjs");
 test.use({ userAgent: APP_AGENT });
-
-function installBridge() {
-  const store = key => ({ get: () => JSON.parse(localStorage.getItem(key) || "{}"), set: value => localStorage.setItem(key, JSON.stringify(value)) });
-  const prefs = store("stub.prefs");
-  const creds = store("stub.creds");
-  const listeners = {};
-  const stub = { verify: { ok: !localStorage.getItem("stub.deny"), calls: 0 }, skew: 0, pushToken: "fcm-registration-token:" + "A".repeat(60), emit: (name, data) => (listeners[name] || []).forEach(callback => callback(data)) };
-  window.__stub = stub;
-  const realNow = Date.now.bind(Date);
-  Date.now = () => realNow() + stub.skew;
-  const on = (name, callback) => { (listeners[name] = listeners[name] || []).push(callback); return { remove() { listeners[name] = listeners[name].filter(item => item !== callback); } }; };
-  window.Capacitor = {
-    isNativePlatform: () => true,
-    getPlatform: () => "android",
-    Plugins: {
-      Preferences: {
-        get: async ({ key }) => ({ value: prefs.get()[key] ?? null }),
-        set: async ({ key, value }) => { const all = prefs.get(); all[key] = value; prefs.set(all); },
-        remove: async ({ key }) => { const all = prefs.get(); delete all[key]; prefs.set(all); },
-      },
-      NativeBiometric: {
-        isAvailable: async () => ({ isAvailable: true }),
-        verifyIdentity: async () => { stub.verify.calls += 1; if (!stub.verify.ok) throw new Error("cancelled"); },
-        setCredentials: async ({ server, username, password }) => { const all = creds.get(); all[server] = { username, password }; creds.set(all); },
-        getCredentials: async ({ server }) => { const found = creds.get()[server]; if (!found) throw new Error("no credentials"); return found; },
-        deleteCredentials: async ({ server }) => { const all = creds.get(); delete all[server]; creds.set(all); },
-      },
-      PushNotifications: {
-        requestPermissions: async () => ({ receive: "granted" }),
-        register: async () => { setTimeout(() => stub.emit("registration", { value: stub.pushToken }), 0); },
-        addListener: async (name, callback) => on(name, callback),
-      },
-      App: { addListener: async (name, callback) => on(name, callback) },
-    },
-  };
-}
 
 test.beforeEach(async ({ page }) => { await page.addInitScript(installBridge); });
 
@@ -136,6 +100,20 @@ test("the session is kept in secure storage and signs the person back in after t
   await expect(page.getByLabel("Username")).toBeVisible();  // The old secret does not sign anyone in
 });
 
+test("an NVR that cannot be reached does not make the phone forget its secret", async ({ page, context }) => {
+  seedFixtures(2, { alarm: true });
+  await signInNext(page);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("stub.creds") !== "{}")).toBe(true);
+  await context.clearCookies();
+  await page.route("**/api/native/device-sessions/resume", route => route.abort());
+  await page.reload();
+  await expect(page.getByLabel("Username")).toBeVisible();  // Signed out for now ...
+  expect(await page.evaluate(() => localStorage.getItem("stub.creds") !== "{}")).toBe(true);  // ... but the secret is still there
+  await page.unroute("**/api/native/device-sessions/resume");
+  await page.reload();
+  await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
+});
+
 test("native push is registered for the person and a tap on a notification opens its alarm", async ({ page }) => {
   const fixtures = seedFixtures(2, { alarm: true });
   await signInNext(page);
@@ -151,8 +129,12 @@ test("native push is registered for the person and a tap on a notification opens
   await expect(page).toHaveURL(new RegExp(`alarm=${fixtures.alarm.alarm_id}`));
   await expect(inbox(page)).toBeVisible();
   // A link that leaves the NVR is never followed.
-  await page.evaluate(() => window.__stub.emit("pushNotificationActionPerformed", { notification: { data: { url: "//evil.example/x" } } }));
+  for (const url of ["//evil.example/x", "/\\evil.example/x", "https://evil.example/x", "javascript:alert(1)"]) {
+    await page.evaluate(link => window.__stub.emit("pushNotificationActionPerformed", { notification: { data: { url: link } } }), url);
+  }
+  await page.waitForTimeout(300);
   await expect(page).not.toHaveURL(/evil\.example/);
+  await expect(inbox(page)).toBeVisible();  // Still in the app, on this NVR, on the same alarm
 
   // Turning it off removes the token.
   await page.reload();

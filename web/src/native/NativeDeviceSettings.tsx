@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { biometricsAvailable, DEFAULT_IDLE_MINUTES, IDLE_CHOICES, loadLockSettings, saveLastActive, saveLockSettings, type LockSettings } from "./lock";
 import { isNativeApp, nativeHomeUrl, writeSetting } from "./platform";
+import { disableNativePush } from "./push";
 import { forgetThisPhone } from "./session";
 
 /** In the native app only: the biometric lock and how long the app may sit idle before it asks again. */
@@ -38,7 +39,7 @@ export function NativeDeviceSettings() {
       <div className="field-actions">
         <button type="button" className="button" onClick={() => void (async () => {
           // Forget this NVR on the phone (its sign-in secret too) and go back to the start screen, which asks for an address.
-          await forgetThisPhone().catch(() => undefined);
+          await Promise.all([disableNativePush().catch(() => undefined), forgetThisPhone().catch(() => undefined)]);
           await writeSetting("server.url", null);
           window.location.assign(nativeHomeUrl());
         })()}>Use a different NVR</button>

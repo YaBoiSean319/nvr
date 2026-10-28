@@ -36,6 +36,7 @@ PLATFORMS = {"android": "fcm", "ios": "apns"}
 _FCM_TOKEN = re.compile(r"^[A-Za-z0-9:_.\-]{20,4096}$")
 _APNS_TOKEN = re.compile(r"^[0-9A-Fa-f]{64,200}$")
 _APPLE_ID = re.compile(r"^[A-Z0-9]{10}$")
+_PROJECT = re.compile(r"^[a-z][a-z0-9\-]{4,29}$")
 _BUNDLE = re.compile(r"^[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+$")
 
 
@@ -143,6 +144,8 @@ def _service_account(text: str) -> dict[str, Any]:
             raise ValueError
     except (ValueError, KeyError, TypeError, AttributeError):
         raise NativePushError("Paste the whole service-account JSON file from Firebase (Project settings, Service accounts)") from None
+    if not _PROJECT.match(str(account["project_id"])):
+        raise NativePushError("The Firebase project id in the file is not one Firebase issues")
     return account
 
 
@@ -190,6 +193,14 @@ def send(client: httpx.Client, kind: str, token: str, payload: dict[str, Any]) -
     return (_send_fcm if kind == "fcm" else _send_apns)(client, token, payload)
 
 
+def _json(response: httpx.Response) -> dict[str, Any]:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def _send_fcm(client: httpx.Client, token: str, payload: dict[str, Any]) -> tuple[int | None, str | None]:
     settings = _credentials()
     if settings["fcm_credentials_ciphertext"] is None:
@@ -200,9 +211,10 @@ def _send_fcm(client: httpx.Client, token: str, payload: dict[str, Any]) -> tupl
         now = int(time.time())
         assertion = _rs256({"iss": account["client_email"], "scope": FCM_SCOPE, "aud": FCM_TOKEN_URL, "iat": now, "exp": now + 3000}, account["private_key"])
         response = client.post(FCM_TOKEN_URL, data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion})
-        if not response.is_success or "access_token" not in response.json():
+        answer = _json(response)
+        if not response.is_success or "access_token" not in answer:
             raise PermissionError("Firebase rejected the service account")
-        return response.json()["access_token"], max(60.0, float(response.json().get("expires_in", 3600)) - 120)
+        return answer["access_token"], max(60.0, float(answer.get("expires_in", 3600)) - 120)
 
     try:
         bearer = _cached("fcm", access_token)
@@ -217,9 +229,14 @@ def _send_fcm(client: httpx.Client, token: str, payload: dict[str, Any]) -> tupl
     if response.status_code in (401, 403):
         _tokens.pop("fcm", None)
         return None, "Firebase rejected the credentials"
-    body = response.text
-    if response.status_code == 404 or (response.status_code == 400 and "registration token" in body.lower()):
+    # Only Firebase saying the token is unknown forgets the phone; a wrong project (also a 404) must not wipe every registration.
+    error = _json(response).get("error", {})
+    codes = {detail.get("errorCode") for detail in error.get("details", []) if isinstance(detail, dict)} if isinstance(error, dict) else set()
+    message = str(error.get("message", "")).lower() if isinstance(error, dict) else ""
+    if "UNREGISTERED" in codes or (response.status_code == 400 and "registration token" in message):
         return 410, "The device is no longer registered"
+    if response.status_code in (401, 403, 404):  # Never a status that makes the queue forget the phone
+        return None, f"HTTP {response.status_code}" + (" (check the Firebase project)" if response.status_code == 404 else "")
     return response.status_code, f"HTTP {response.status_code}"
 
 
@@ -236,11 +253,9 @@ def _send_apns(client: httpx.Client, token: str, payload: dict[str, Any]) -> tup
         "apns-expiration": str(int(time.time()) + TTL_SECONDS)})
     if response.is_success:
         return response.status_code, None
-    try:
-        reason = response.json().get("reason", "")
-    except ValueError:
-        reason = ""
-    if response.status_code == 410 or reason in ("BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"):
+    reason = str(_json(response).get("reason", ""))
+    # Only Apple saying the token is no longer registered forgets the phone: a bad token or topic is as likely the wrong environment or bundle id, which is the NVR's to fix.
+    if response.status_code == 410 or reason == "Unregistered":
         return 410, "The device is no longer registered"
     if response.status_code in (401, 403):
         _tokens.pop("apns", None)

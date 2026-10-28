@@ -6,9 +6,9 @@ name: Mobile app
 on:
   push:
     branches: [main]
-    paths: ['mobile/**', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'web/src/native/**', 'tests/browser/native*', '.github/workflows/mobile.yml']
   pull_request:
-    paths: ['mobile/**', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'web/src/native/**', 'tests/browser/native*', '.github/workflows/mobile.yml']
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: gradle/actions/wrapper-validation@v4
       - name: Install the app's dependencies
         working-directory: mobile
         run: npm ci --no-audit --no-fund
@@ -58,7 +59,9 @@ jobs:
         run: npx cap sync ios
       - name: Build for the iOS simulator
         working-directory: mobile
+        shell: bash
         run: |
+          set -o pipefail
           xcodebuild -project ios/App/App.xcodeproj -scheme App -sdk iphonesimulator -configuration Debug \
             -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build | tail -n 40
           test -d ios/build/Build/Products/Debug-iphonesimulator/App.app
@@ -118,3 +121,31 @@ jobs:
           name: smoke-screens
           path: smoke-*.png
           if-no-files-found: ignore
+
+  # The existing browser journeys, run as the app runs them: its user agent and a stand-in for Capacitor's bridge (NVR_APP_MODE, see tests/browser/helpers.cjs).
+  # Journeys that are about the installable web app or need the simulated camera are left to the main workflow.
+  web-in-app-mode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg
+      - name: Install dependencies and Chromium
+        run: |
+          python -m pip install -r requirements-dev.txt
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npm ci --prefix web --no-audit --no-fund
+          npm run build --prefix web
+      - name: Run the journeys as the app
+        run: npm run test:browser -- tests/browser/shell.spec.cjs tests/browser/alarms.spec.cjs tests/browser/settings.spec.cjs tests/browser/rules.spec.cjs tests/browser/access-grants.spec.cjs tests/browser/native-app.spec.cjs
+        env:
+          NVR_APP_MODE: '1'
+          NVR_BROWSER_REPORT_PRIVACY_SENTINEL: nvr-camera-browser-report-privacy-sentinel-v1

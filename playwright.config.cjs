@@ -99,6 +99,7 @@ module.exports = {
     // Local runs may point at a preinstalled Chromium; CI installs Playwright's own.
     launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {},
     hasTouch: true,
+    ...(process.env.NVR_APP_MODE ? { userAgent: require("./tests/browser/native_bridge.cjs").APP_AGENT } : {}),
     // Traces include authenticated network request bodies; do not retain them
     // with CI artifacts because browser journeys sign in using fixture credentials.
     trace: "off",

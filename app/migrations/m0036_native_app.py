@@ -3,7 +3,7 @@
 Native devices use the same subscription model as web push (``push_subscriptions`` with a ``kind``), so each person's rule, group and quiet-hours choices,
 the access checks and the delivery queue with its retries apply to them unchanged. ``native_push_settings`` holds the administrator's FCM service account
 and APNs key (encrypted, write-only). A *device session* is a long-lived secret the app keeps in the phone's Keychain or Keystore and exchanges, once the
-person has unlocked the phone, for an ordinary session; it is stored hashed, replaced each time it is used, and can be revoked.
+person has unlocked the phone, for an ordinary session; it is stored hashed, replaced each time it is used (the one before still works for a couple of minutes, in case the answer never reached the phone), and can be revoked.
 """
 from __future__ import annotations
 
@@ -36,6 +36,8 @@ def upgrade(db: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             token_hash TEXT NOT NULL UNIQUE,
+            previous_hash TEXT,
+            previous_until TEXT,
             device_label TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             last_used_at TEXT,

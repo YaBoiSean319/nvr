@@ -84,7 +84,7 @@ function SignedIn({ me }: { me: Me }) {
   // In the native app: keep a device secret in secure storage, tell the NVR which push token is current, and open the alarm a tapped notification is about.
   useEffect(() => {
     if (!isNativeApp()) return;
-    void rememberThisPhone(deviceLabel()).catch(() => undefined);
+    void rememberThisPhone(me.username, deviceLabel()).catch(() => undefined);
     void refreshNativePush();
     let stop: () => void = () => undefined;
     let gone = false;

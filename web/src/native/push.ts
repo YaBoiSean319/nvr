@@ -31,8 +31,11 @@ function obtainToken(): Promise<string> {
 }
 
 async function send(token: string): Promise<void> {
+  const previous = await readSetting(KEY_TOKEN);
   await api("/api/native/devices", { method: "POST", body: { platform: nativePlatform(), token, device_label: deviceLabel() } });
   await writeSetting(KEY_TOKEN, token);
+  // A token that was replaced is not this phone's any more: forget it, or the phone is notified twice until the push service drops it.
+  if (previous && previous !== token) await api("/api/native/devices/remove", { method: "POST", body: { token: previous } }).catch(() => undefined);
 }
 
 export async function enableNativePush(): Promise<void> {
@@ -57,13 +60,24 @@ export async function refreshNativePush(): Promise<void> {
   }
 }
 
-/** Open the alarm a tapped notification is about. Only paths on this NVR are followed. */
+/** The path (with its query) a notification asks to open, or null unless it is a page of this NVR. Parsed rather than pattern-matched: `/\\host` and `//host` both mean another site. */
+export function safePath(url: unknown): string | null {
+  if (typeof url !== "string" || url.length > 2048) return null;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return parsed.origin === window.location.origin ? `${parsed.pathname}${parsed.search}${parsed.hash}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Open the alarm a tapped notification is about. Only pages of this NVR are followed. */
 export async function watchNotificationTaps(open: (path: string) => void): Promise<() => void> {
   const push = plugin("PushNotifications");
   if (!push) return () => undefined;
   const handle = await push.addListener("pushNotificationActionPerformed", (action: { notification?: { data?: { url?: string } } }) => {
-    const url = action.notification?.data?.url;
-    if (typeof url === "string" && url.startsWith("/") && !url.startsWith("//")) open(url);
+    const path = safePath(action.notification?.data?.url);
+    if (path) open(path);
   });
   return () => void handle.remove();
 }

@@ -243,6 +243,7 @@ def _end_other_sessions(db: sqlite3.Connection, user_id: int, request: Request) 
     """After a change to how someone signs in, every other session of theirs ends; the one making the change stays."""
     raw = request.cookies.get(COOKIE_NAME)
     db.execute("DELETE FROM sessions WHERE user_id=? AND token_hash!=?", (user_id, token_digest(raw) if raw else ""))
+    db.execute("DELETE FROM device_sessions WHERE user_id=?", (user_id,))  # A phone's stored secret is a session too
 
 
 class PasswordRequest(BaseModel):
@@ -490,5 +491,6 @@ def reset_user_factors(user_id: int, admin: Administrator) -> Response:
         before = mfa.factors(db, user_id)
         mfa.reset_factors(db, user_id)
         db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        db.execute("DELETE FROM device_sessions WHERE user_id=?", (user_id,))
         record(db, admin.id, "mfa_reset", "user", user_id, username=target["username"], had_totp=before["totp"], passkeys=len(before["passkeys"]))
     return Response(status_code=status.HTTP_204_NO_CONTENT)

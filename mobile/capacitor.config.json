@@ -4,7 +4,9 @@
   "webDir": "www",
   "server": {
     "androidScheme": "https",
-    "allowNavigation": ["*"],
+    "allowNavigation": [
+      "*"
+    ],
     "cleartext": true
   },
   "android": {
@@ -17,7 +19,12 @@
     "contentInset": "always"
   },
   "plugins": {
-    "CapacitorHttp": { "enabled": true },
-    "PushNotifications": { "presentationOptions": ["badge", "sound", "alert"] }
+    "PushNotifications": {
+      "presentationOptions": [
+        "badge",
+        "sound",
+        "alert"
+      ]
+    }
   }
 }

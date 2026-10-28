@@ -48,8 +48,12 @@ class Services:
         if request.url.host == "oauth2.googleapis.com":
             return httpx.Response(200, json={"access_token": "ya29.test", "expires_in": 3600})
         if request.url.host == "fcm.googleapis.com":
-            return httpx.Response(self.fcm_status, json={"error": {"message": "The registration token is not a valid FCM registration token"}} if self.fcm_status == 400 else {"name": "projects/nvr-demo/messages/1"})
+            if self.fcm_status == 200:
+                return httpx.Response(200, json={"name": "projects/nvr-demo/messages/1"})
+            return httpx.Response(self.fcm_status, json=self.fcm_error if self.fcm_status == 404 else {"error": {"message": "The registration token is not a valid FCM registration token"}} if self.fcm_status == 400 else {"error": {"status": "PERMISSION_DENIED"}})
         return httpx.Response(self.apns_status, json={"reason": self.apns_reason} if self.apns_reason else {})
+
+    fcm_error = {"error": {"status": "NOT_FOUND", "details": [{"errorCode": "UNREGISTERED"}]}}
 
     def to(self, host: str) -> list[httpx.Request]:
         return [request for request in self.requests if request.url.host == host]
@@ -201,10 +205,23 @@ class DeliveryTests(NativeCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE kind='fcm'").fetchone()[0], 1)
             self.assertIn("rejected", db.execute("SELECT last_error FROM push_deliveries WHERE status='queued'").fetchone()[0])
 
-    def test_apns_reports_a_bad_device_token_as_gone_and_server_errors_retry(self):
-        self.register(self.limited, "ios", APNS_TOKEN)
-        self.services.apns_status, self.services.apns_reason = 400, "BadDeviceToken"
+    def test_a_wrong_firebase_project_does_not_wipe_the_registrations(self):
+        self.register(self.limited)
+        self.services.fcm_status, self.services.fcm_error = 404, {"error": {"status": "NOT_FOUND", "message": "Requested entity was not found."}}
         self.add_alarm(self.d1)
+        self.assertEqual(self.deliver(), ["retrying"])
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE kind='fcm'").fetchone()[0], 1)
+
+    def test_apns_forgets_only_unregistered_devices_and_server_errors_retry(self):
+        self.register(self.limited, "ios", APNS_TOKEN)
+        self.services.apns_status, self.services.apns_reason = 400, "BadDeviceToken"  # As likely the wrong environment as a stale token
+        self.add_alarm(self.d1)
+        self.assertEqual(self.deliver(), ["failed"])
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE kind='apns'").fetchone()[0], 1)
+        self.services.apns_status, self.services.apns_reason = 410, "Unregistered"
+        self.add_alarm(self.d2)
         self.assertEqual(self.deliver(), ["removed"])
         self.register(self.limited, "ios", APNS_TOKEN)
         self.services.apns_status, self.services.apns_reason = 503, "ServiceUnavailable"
@@ -245,8 +262,11 @@ class DeviceSessionTests(NativeCase):
         self.assertEqual(phone.get("/api/auth/me").status_code, 200)
         second = resumed.json()["token"]
         self.assertNotEqual(first, second)
-        self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": first}).status_code, 401)  # A copy of the old secret is useless
-        self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": second}).status_code, 200)
+        # The secret it replaced still works for a couple of minutes (the phone may never have heard the answer), and then is useless.
+        self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": first}).status_code, 200)
+        with connect() as db:
+            db.execute("UPDATE device_sessions SET previous_until=?", ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),))
+        self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": first}).status_code, 401)
 
     def test_secrets_are_stored_only_as_digests_and_expire_and_can_be_revoked(self):
         token = self.limited.post("/api/native/device-sessions", json={}).json()["token"]
@@ -272,9 +292,14 @@ class DeviceSessionTests(NativeCase):
         self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": mine}).status_code, 401)
 
     def test_anything_that_is_not_a_live_secret_is_the_same_401(self):
-        for token in ("nvrd_" + "x" * 43, "x" * 50, "nvrd_", "y" * 30):
+        for token in ("nvrd_" + "x" * 43, "x" * 50, "nvrd_", "y" * 30, "nvrd_" + "é" * 40):
             self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": token}).status_code, 401)
         self.assertEqual(TestClient(self.app).post("/api/native/device-sessions", json={}).status_code, 401)
+
+    def test_ending_a_persons_sessions_ends_their_phones_too(self):
+        token = self.limited.post("/api/native/device-sessions", json={}).json()["token"]
+        self.assertEqual(self.admin.delete(f"/api/admin/users/{self.limited_id}/mfa").status_code, 204)
+        self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": token}).status_code, 401)
 
     def test_a_removed_account_loses_its_phones_and_only_the_newest_ten_are_kept(self):
         for index in range(12):

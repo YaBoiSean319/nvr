@@ -17,16 +17,22 @@
   }
   function say(text) { problem.hidden = !text; problem.textContent = text || ""; }
 
-  // https anywhere; plain http only for a private network address (a home or office network, or a tunnel's own), which cannot be reached from outside.
+  // A private-network host: a name with no dots, *.local, localhost, or a private, loopback or link-local IP address (checked octet by octet, so "10.evil.com" is not one).
+  function isPrivateHost(host) {
+    if (host === "localhost" || host === "[::1]" || /^[^.:\[]+$/.test(host) || /^[^.]+\.local$/.test(host)) return true;
+    var octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (!octets) return false;
+    var n = octets.slice(1).map(Number);
+    if (n.some(function (part) { return part > 255; })) return false;
+    return n[0] === 10 || n[0] === 127 || (n[0] === 192 && n[1] === 168) || (n[0] === 172 && n[1] >= 16 && n[1] <= 31) || (n[0] === 169 && n[1] === 254);
+  }
+
+  // https anywhere; plain http only for a private network address, which cannot be reached from outside.
   function acceptable(address) {
     var url;
     try { url = new URL(address); } catch (e) { return null; }
     if (url.username || url.password || (url.protocol !== "https:" && url.protocol !== "http:")) return null;
-    if (url.protocol === "http:") {
-      var host = url.hostname;
-      var privateHost = /^(localhost|[^.]+\.local|10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(host) || host === "[::1]" || /^[^.]+$/.test(host);
-      if (!privateHost) return null;
-    }
+    if (url.protocol === "http:" && !isPrivateHost(url.hostname)) return null;
     return url.origin;
   }
 
@@ -41,7 +47,9 @@
       var last = Number(values[2]) || 0;
       var away = Date.now() - last >= idle * 60000;
       if (values[0] !== "1" || !away || !plugins.NativeBiometric) return true;
-      return plugins.NativeBiometric.verifyIdentity({ reason: "Unlock the NVR", title: "NVR", useFallback: true }).then(function () { return true; }, function () { return false; });
+      return plugins.NativeBiometric.verifyIdentity({ reason: "Unlock the NVR", title: "NVR", useFallback: true })
+        // Unlocked here, so the interface that opens next does not ask again.
+        .then(function () { return set("lock.last_active", String(Date.now())).then(function () { return true; }); }, function () { return false; });
     });
   }
 

@@ -200,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         before = factors(db, int(user["id"]))
         reset_factors(db, int(user["id"]))
         db.execute("DELETE FROM sessions WHERE user_id=?", (int(user["id"]),))
+        db.execute("DELETE FROM device_sessions WHERE user_id=?", (int(user["id"]),))  # A phone's stored secret is a session too
         record(db, None, "mfa_reset", "user", int(user["id"]), username=user["username"], had_totp=before["totp"], passkeys=len(before["passkeys"]), via="host")
     print(f"Removed the second factors of {user['username']}; they will sign in with their password and set up a new one if the policy asks.")
     return 0

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app import device_sessions, native_push
@@ -63,7 +63,7 @@ def create_device_session(payload: DeviceSessionRequest, user: CurrentUser) -> d
 
 
 @router.post("/api/native/device-sessions/resume")
-def resume_device_session(payload: ResumeRequest, response: Response, request: Request) -> dict[str, object]:
+def resume_device_session(payload: ResumeRequest, response: Response) -> dict[str, object]:
     """Exchange the phone's secret (after the person unlocks it) for a session and a replacement secret. Anything else is the same 401."""
     resumed = device_sessions.resume(payload.token)
     if resumed is None:

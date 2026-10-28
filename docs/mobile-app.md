@@ -19,7 +19,16 @@ Settings are written once and never shown again (`PUT /api/native/push-settings`
 
 ## Building
 
-CI (`.github/workflows/mobile.yml`) builds a debug APK, builds for the iOS simulator, and starts the APK in an Android emulator against a real NVR as a smoke test. Locally: `cd mobile && npm ci && npm run build:android` (Android Studio's SDK) or `npm run build:ios` (macOS with Xcode).
+CI (`.github/workflows/mobile.yml`) builds a debug APK, builds for the iOS simulator, starts the APK in an Android emulator against a real NVR (the emulator test seeds the NVR's address and checks that the app opens the NVR's own page), and runs the existing browser journeys (shell, alarms, settings, rules, access) as the app runs them: with its user agent and a stand-in for Capacitor's bridge (`NVR_APP_MODE=1`; the others need the installable web app's worker or the simulated camera and stay in the main workflow). Locally: `cd mobile && npm ci && npm run build:android` (Android Studio's SDK) or `npm run build:ios` (macOS with Xcode).
+
+## Things to know
+
+- **The NVR's own site is trusted with the bridge.** To open an NVR whose address is only known at run time, the shell lets its web view navigate anywhere (`allowNavigation`), and every page it opens can use the app's plugins, including the secure-storage secret. The address comes only from the start screen (https, or http on a private-network address, checked host by host), so this holds as long as your NVR does not redirect somewhere else. A native navigation check that confines the web view to the saved address is a worthwhile hardening step.
+- **The lock is a screen, not the Keychain.** The device secret is in the Keychain/Keystore but is not itself gated by the biometrics; with the lock off, a phone signs back in without asking. With it on, the app shows none of the interface until the phone says yes. A phone with no biometrics or passcode cannot be locked.
+- **Idle means no touches.** Watching a live view without touching the screen counts as idle.
+- **Notifications go through Google's and Apple's servers.** Unlike web push, their content (the rule and camera name, the time, and a link to a picture) is not end-to-end encrypted to the phone; the picture is fetched from your NVR by a short-lived signed link naming one alarm.
+- **Tapping a notification opens its alarm**, which shows its clip; there are no separate links to clips. A tap that launches an app that was closed is handled once the person has unlocked it and signed in (check this on real devices).
+- **Misconfigured push never loses phones.** Only FCM's "unregistered" and APNs' `Unregistered` forget a phone; wrong credentials, project, bundle id or environment show as errors on the delivery and are retried.
 
 ## Post-merge checks (not done in CI)
 
