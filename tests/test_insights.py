@@ -67,6 +67,12 @@ class CountTests(InsightsCase):
         self.assertEqual(self.series(body, f"zone:{self.zone_rule}:{self.d1}"), [[1, 1], [1, 0], [1, 0], [0, 0]])  # once per track, however often it re-enters
         self.assertEqual(self.series(body, f"line:{self.line_rule}:{self.d1}"), [[1, 0], [2, 0], [1, 0], [0, 0]])  # each crossing; the rule watches people only
 
+    def test_a_track_that_began_before_the_range_still_counts_for_the_zone_it_enters_inside_it(self):
+        self.add_track(self.d1, "person", BASE - timedelta(seconds=5), path=[(0.1, 0.5), (0.2, 0.5), (0.8, 0.5)], seconds=20, keyframe=False)  # Reaches the right half 15 s in
+        body = self.get(self.admin, camera_ids=[self.d1]).json()
+        self.assertEqual(self.series(body, f"camera:{self.d1}")[0], [0, 0])  # It began in the hour before
+        self.assertEqual(self.series(body, f"zone:{self.zone_rule}:{self.d1}")[0], [1, 0])
+
     def test_a_label_filter_and_a_day_unit(self):
         self.fixture_tracks()
         people = self.get(self.admin, camera_ids=[self.d1], label="person").json()

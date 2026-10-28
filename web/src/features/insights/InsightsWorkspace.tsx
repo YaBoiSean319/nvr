@@ -63,7 +63,7 @@ function Chart({ report, subject, format }: { report: Report; subject: Subject; 
           return (
             <g key={bucket.start} data-bucket={bucket.start} data-total={totals[index]} data-analysed={percent ?? "future"}>
               <title>{`${format(bucket.start)}: ${cell[people] ?? 0} people, ${cell[1 - people] ?? 0} vehicles${percent === null || percent === undefined ? " (not yet)" : partial ? ` (only ${percent}% analysed: counts may be lower than what happened)` : ""}`}</title>
-              {partial || percent === null || percent === undefined ? <rect x={x} y={CHART.top} width={Math.max(1, slot - 1)} height={plot} className="chart-unanalysed" data-testid="unanalysed-mark" /> : null}
+              {partial ? <rect x={x} y={CHART.top} width={Math.max(1, slot - 1)} height={plot} className="chart-unanalysed" data-testid="unanalysed-mark" /> : null}
               <rect x={x + 1} y={base - person} width={Math.max(1, slot - 3)} height={person} className="chart-person" />
               <rect x={x + 1} y={base - person - vehicle} width={Math.max(1, slot - 3)} height={vehicle} className="chart-vehicle" />
             </g>
@@ -200,7 +200,7 @@ export function InsightsWorkspace() {
           <label className="field"><span>Camera</span>
             <select aria-label="Heatmap camera" value={heatId} onChange={event => setHeatCamera(event.target.value)}>{active.filter(camera => selected.includes(camera.id)).map(camera => <option key={camera.id} value={camera.id}>{camera.name}</option>)}</select>
           </label>
-          <Heatmap cameraId={heatId} period={period} label={label} />
+          <Heatmap key={heatId} cameraId={heatId} period={period} label={label} />
         </>
       ) : null}
     </section>

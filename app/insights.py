@@ -133,16 +133,19 @@ def counts(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, end
                                                                                                                "direction": rule.condition.get("direction")})))
 
     for camera_id in ids:
-        track_rows = db.execute("SELECT id,label,first_seen_at FROM ai_tracks WHERE camera_id=? AND first_seen_at>=? AND first_seen_at<? ORDER BY first_seen_at",
+        # A track that began before the range can still enter a zone or cross a line inside it, so those are found from every track that overlaps the range.
+        track_rows = db.execute("SELECT id,label,first_seen_at FROM ai_tracks WHERE camera_id=? AND last_seen_at>=? AND first_seen_at<? ORDER BY first_seen_at",
                                 (camera_id, _iso(start), _iso(end))).fetchall()
         tracks = [row for row in track_rows if row["label"] in labels]
         own = series[f"camera:{camera_id}"]
         for row in tracks:
-            position = index(_parse(row["first_seen_at"]))
+            position = index(_parse(row["first_seen_at"]))  # a camera's count is the tracks that began in the hour
             if position is not None:
                 own[position][LABELS.index(row["label"])] += 1
         if not defined[camera_id] or not tracks:
             continue
+        watched = set().union(*(rule.classes for rule, _ in defined[camera_id]))
+        tracks = [row for row in tracks if row["label"] in watched]  # only the paths a rule could use are read
         paths: dict[str, list[sqlite3.Row]] = defaultdict(list)
         track_ids = [row["id"] for row in tracks]
         for offset in range(0, len(track_ids), CHUNK):
