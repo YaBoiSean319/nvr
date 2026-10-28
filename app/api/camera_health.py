@@ -13,7 +13,7 @@ router = APIRouter()
 def _fleet(user) -> dict[str, object]:
     visible = None if user.access.unrestricted else set(user.access.cameras or ())
     with connect() as db:
-        return camera_health.fleet(db, visible)
+        return camera_health.fleet(db, visible, show_errors=user.is_administrator)
 
 
 @router.get("/api/camera-health")

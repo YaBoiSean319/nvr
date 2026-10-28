@@ -22,8 +22,8 @@ Cameras with no ONVIF address have nothing from the camera itself and say so. No
 
 ## Firmware
 
-Within each make and model, among the cameras you may see, versions are compared in natural order (2.10 is newer than 2.9). Cameras below the newest are marked "Older than ..." and
-counted in a banner; "Older firmware only" shows just them. A model with one version, or only one camera, is not flagged. A camera you cannot see plays no part in what you are shown.
+Within each make and model, across the whole fleet, versions are compared in natural order (2.10 is newer than 2.9). Cameras below the newest are marked "Older than ..." and
+counted in a banner; "Older firmware only" shows just them. A model with one version, or only one camera, is not flagged. A camera you cannot see still counts when your cameras are judged, but you are not told its version.
 
 ## Not covered by automated tests
 

@@ -82,6 +82,32 @@ class ReportTests(HealthCase):
         self.assertEqual(later["onvif_contact_at"], first)  # The last contact that worked
         self.assertTrue(later["onvif_error"])
 
+    def test_the_reason_a_camera_could_not_be_reached_is_for_administrators_only(self):
+        camera = self.device(self.d1)
+        camera.close()
+        self.sample()
+        self.assertTrue(self.row(self.fleet(), self.d1)["onvif_error"])
+        limited = self.row(self.fleet(self.limited), self.d1)
+        self.assertIsNone(limited["onvif_error"])
+        self.assertTrue(limited["onvif_failed"])  # They are told it failed, not what the camera said
+
+    def test_one_camera_that_cannot_be_sampled_does_not_stop_the_others(self):
+        self.device(self.d1, firmware="1.0.0")
+        self.device(self.d2, firmware="2.0.0")
+        real = camera_health.read_onvif
+
+        async def flaky(row):
+            if row["id"] == self.d1:
+                raise RuntimeError("unexpected")
+            return await real(row)
+
+        with patch("app.camera_health.read_onvif", flaky):
+            self.sample()
+        report = self.fleet()
+        self.assertEqual(self.row(report, self.d2)["firmware"], "2.0.0")
+        with connect() as db:
+            self.assertIsNotNone(db.execute("SELECT onvif_checked_at FROM camera_health WHERE camera_id=?", (self.d1,)).fetchone()[0])  # Not retried at once
+
     def test_values_are_refreshed_only_when_stale(self):
         camera = self.device(self.d1)
         self.sample()
@@ -107,17 +133,31 @@ class FirmwareTests(HealthCase):
         self.assertEqual(pnm["outdated"], 0)
 
     def test_versions_compare_in_natural_order(self):
-        order = sorted(["2.9.1", "2.10.0", "2.10", "V1.2 build 5", "2.9.10"], key=camera_health.version_key)
-        self.assertEqual(order, ["2.9.1", "2.9.10", "2.10", "2.10.0", "V1.2 build 5"])
+        order = sorted(["2.9.1", "2.10.0", "2.10", "2.9.10", "1.2 build 5"], key=camera_health.version_key)
+        self.assertEqual(order, ["1.2 build 5", "2.9.1", "2.9.10", "2.10", "2.10.0"])
+        self.assertLess(camera_health.version_key("1.0-rc1"), camera_health.version_key("1.0"))  # A release is newer than its pre-release
+        self.assertLess(camera_health.version_key("1.0"), camera_health.version_key("1.0.1"))
+        self.assertEqual(camera_health.version_key("V2.1"), camera_health.version_key("2.1"))
+        self.assertEqual(camera_health.version_key("2.0A"), camera_health.version_key("2.0a"))
 
-    def test_firmware_is_compared_only_among_cameras_the_reader_may_see(self):
+    def test_spellings_of_one_version_are_not_called_outdated(self):
+        self.device(self.d1, model="XNV-6120R", firmware="v2.1")
+        self.device(self.d2, model="XNV-6120R", firmware="2.1")
+        self.sample()
+        self.assertEqual([self.row(self.fleet(), camera)["firmware_status"] for camera in (self.d1, self.d2)], ["uniform", "uniform"])
+
+    def test_firmware_is_compared_across_the_whole_fleet_but_a_reader_is_not_told_what_a_hidden_camera_runs(self):
         self.device(self.d1, model="XNV-6120R", firmware="2.9.1")
         self.device(self.y1, model="XNV-6120R", firmware="3.0.0")  # Hidden from the limited operator
         self.sample()
-        self.assertEqual(self.row(self.fleet(), self.d1)["firmware_status"], "outdated")
+        everything = self.fleet()
+        self.assertEqual((self.row(everything, self.d1)["firmware_status"], self.row(everything, self.d1)["newest_firmware"]), ("outdated", "3.0.0"))
         limited = self.fleet(self.limited)
-        self.assertEqual(self.row(limited, self.d1)["firmware_status"], "uniform")  # What the reader cannot see says nothing to them
+        self.assertEqual(self.row(limited, self.d1)["firmware_status"], "outdated")  # Judged against the fleet, so still flagged
+        self.assertIsNone(self.row(limited, self.d1)["newest_firmware"])  # but the version of a camera they cannot see is not named
         self.assertNotIn("3.0.0", json.dumps(limited))
+        self.assertEqual([item["cameras"] for item in limited["models"]], [1])
+        self.assertEqual({row["camera_id"] for row in limited["cameras"]}, {self.d1, self.d2})
 
 
 class CounterTests(HealthCase):

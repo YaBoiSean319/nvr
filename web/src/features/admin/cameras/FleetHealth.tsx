@@ -10,11 +10,11 @@ interface Row {
   uptime_seconds: number | null;
   configured: { codec: string | null; width: number | null; height: number | null; fps: number | null; bitrate_kbps: number | null };
   measured: { fps: number | null; bitrate_kbps: number | null; at: string | null };
-  dropped_frames: number | null; reconnects: number | null; onvif_contact_at: string | null; onvif_error: string | null;
+  dropped_frames: number | null; reconnects: number | null; onvif_contact_at: string | null; onvif_error: string | null; onvif_failed: boolean;
 }
 interface Fleet {
   generated_at: string; cameras: Row[]; outdated: number;
-  models: { manufacturer: string | null; model: string | null; cameras: number; newest: string; outdated: number; firmwares: { version: string; cameras: number }[] }[];
+  models: { manufacturer: string | null; model: string | null; cameras: number; newest: string | null; outdated: number; firmwares: { version: string; cameras: number }[] }[];
 }
 
 type SortKey = "name" | "model" | "firmware" | "uptime" | "bitrate" | "fps" | "dropped" | "reconnects" | "contact";
@@ -82,7 +82,7 @@ export function FleetHealth() {
       {fleet.data && fleet.data.outdated ? (
         <p className="notice" data-tone="warn" role="status" data-testid="fleet-outdated">
           {fleet.data.outdated} camera{fleet.data.outdated === 1 ? " is" : "s are"} on older firmware than others of the same model:{" "}
-          {fleet.data.models.filter(item => item.outdated).map(item => `${[item.manufacturer, item.model].filter(Boolean).join(" ")} (newest ${item.newest}, ${item.outdated} behind)`).join("; ")}.
+          {fleet.data.models.filter(item => item.outdated).map(item => `${[item.manufacturer, item.model].filter(Boolean).join(" ")} (${item.newest ? `newest ${item.newest}, ` : ""}${item.outdated} behind)`).join("; ")}.
         </p>
       ) : null}
       <div className="insights-controls" role="group" aria-label="Filter cameras">
@@ -109,14 +109,14 @@ export function FleetHealth() {
                 <td>{[row.manufacturer, row.model].filter(Boolean).join(" ") || NOT_REPORTED}</td>
                 <td>
                   {row.firmware ?? NOT_REPORTED}
-                  {row.firmware_status === "outdated" ? <span className="notice" data-tone="warn" data-testid="outdated-badge" title={`Newest of this model here: ${row.newest_firmware}`}> Older than {row.newest_firmware}</span> : null}
+                  {row.firmware_status === "outdated" ? <span className="notice" data-tone="warn" data-testid="outdated-badge" title={row.newest_firmware ? `Newest of this model: ${row.newest_firmware}` : "A newer version runs on a camera you cannot see"}> {row.newest_firmware ? `Older than ${row.newest_firmware}` : "Older than others of its model"}</span> : null}
                 </td>
                 <td>{duration(row.uptime_seconds)}</td>
-                <td>{pair(row.configured.bitrate_kbps, row.measured.bitrate_kbps, "kbit/s")}</td>
+                <td title={row.measured.at ? `Seen over the half hour to ${row.measured.at}` : undefined}>{pair(row.configured.bitrate_kbps, row.measured.bitrate_kbps, "kbit/s")}</td>
                 <td>{pair(row.configured.fps, row.measured.fps, "fps")}</td>
                 <td>{row.dropped_frames ?? NOT_REPORTED}</td>
                 <td>{row.reconnects ?? NOT_REPORTED}</td>
-                <td title={row.onvif_error ?? undefined}>{row.onvif_contact_at ? formatRelative(row.onvif_contact_at) : NOT_REPORTED}{row.onvif_error ? <span className="muted"> · last try failed</span> : null}</td>
+                <td title={row.onvif_error ?? undefined}>{row.onvif_contact_at ? formatRelative(row.onvif_contact_at) : NOT_REPORTED}{row.onvif_failed ? <span className="muted"> · last try failed</span> : null}</td>
               </tr>
             ))}
           </tbody>

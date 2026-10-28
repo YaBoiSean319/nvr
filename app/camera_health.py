@@ -34,7 +34,8 @@ SAMPLE_SECONDS = 600
 MEASURE_WINDOW = timedelta(minutes=30)
 ONVIF_CONCURRENCY = 4
 NOT_REPORTED = "Not reported"
-UP_STATES = ("recording", "buffering")
+UP_STATES = ("recording", "buffering")  # The same two as in the trigger of migration 33
+PRERELEASE = frozenset({"alpha", "beta", "rc", "pre", "dev", "preview", "a", "b"})
 
 
 def _now() -> datetime:
@@ -85,7 +86,7 @@ async def watch_progress(stream: asyncio.StreamReader | None, camera_id: str) ->
     counter = ProgressCounter(camera_id)
     try:
         while line := await stream.readline():
-            await asyncio.to_thread(counter.feed, line.decode("utf-8", errors="replace"))
+            counter.feed(line.decode("utf-8", errors="replace"))  # Parsing is trivial and the write happens only when frames were dropped
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001
@@ -100,7 +101,7 @@ async def read_onvif(row: sqlite3.Row) -> dict[str, Any]:
     from .onvif_profiles import choose_profiles
 
     credentials = json.loads(decrypt(row["motion_credentials_ciphertext"])) if row["motion_credentials_ciphertext"] else {}
-    host = urlsplit(row["device_service_url"]).hostname or row["camera_ip"] or ""
+    host = urlsplit(row["device_service_url"]).hostname or row["camera_ip"] or ""  # The port is in the device service address that is located next
     async with OnvifClient(host, credentials.get("username", ""), credentials.get("password", "")) as client:
         device = await client.locate_device(row["device_service_url"])
         info = await client.device_information(device)
@@ -171,6 +172,14 @@ async def sample_once(now: datetime | None = None) -> int:
     gate = asyncio.Semaphore(ONVIF_CONCURRENCY)
 
     async def refresh(row: sqlite3.Row) -> None:
+        try:
+            await refresh_one(row)
+        except Exception:  # noqa: BLE001 - one camera that cannot be sampled must not stop the others, or be retried at once
+            logger.exception("The health of camera %s could not be sampled", row["id"])
+            with connect() as db:
+                _store(db, row["id"], {"onvif_checked_at": _iso(now)} if row["device_service_url"] else {})
+
+    async def refresh_one(row: sqlite3.Row) -> None:
         values: dict[str, Any] = {}
         cutoff = _iso(now - timedelta(seconds=SAMPLE_SECONDS))
         if row["device_service_url"] and (row["onvif_checked_at"] is None or row["onvif_checked_at"] < cutoff):
@@ -191,7 +200,7 @@ async def sample_once(now: datetime | None = None) -> int:
         with connect() as db:
             _store(db, row["id"], values)
 
-    await asyncio.gather(*(refresh(row) for row in cameras), return_exceptions=False)
+    await asyncio.gather(*(refresh(row) for row in cameras))
     return len(cameras)
 
 
@@ -226,11 +235,16 @@ class HealthManager:
 
 def version_key(version: str) -> tuple[tuple[int, Any], ...]:
     """Firmware versions in natural order: runs of digits compare as numbers, so 2.10 is newer than 2.9, and text after a number sorts below a longer number."""
-    return tuple((0, int(token)) if token.isdigit() else (1, token.lower()) for token in re.findall(r"\d+|[A-Za-z]+", version))
+    tokens = re.findall(r"\d+|[A-Za-z]+", re.sub(r"^\s*[vV](?=\d)", "", version))
+    # A release sorts above its own pre-releases (1.0 above 1.0-rc1) and below a later number (1.0.1): the end of the version is a number lower than any real one.
+    return tuple((-1, token.lower()) if token.lower() in PRERELEASE else (0, int(token)) if token.isdigit() else (1, token.lower()) for token in tokens) + ((0, -1),)
 
 
-def firmware_status(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Per make and model among these cameras: the versions in use, the newest, and for each camera whether it is outdated, current or the only version."""
+def firmware_status(rows: list[dict[str, Any]], visible_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Per make and model across all these cameras: the versions in use, the newest, and for each camera whether it is outdated, current or the only version.
+
+    ``rows`` is the whole fleet, so a camera is judged against every camera of its model. ``visible_ids`` are the cameras the reader may see: the newest version is
+    named only if one of those runs it (a reader is not told what a camera they cannot see runs), and the summary counts only what they can see."""
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
         if row["model"] and row["firmware"]:
@@ -241,17 +255,25 @@ def firmware_status(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for row in members:
             versions[row["firmware"]] = versions.get(row["firmware"], 0) + 1
         newest = max(versions, key=version_key)
+        top = version_key(newest)  # Spellings of one version (case, a leading v) are one version
+        shown = [row for row in members if visible_ids is None or row["camera_id"] in visible_ids]
+        newest_shown = any(version_key(row["firmware"]) == top for row in shown)
         for row in members:
-            row["firmware_status"] = "uniform" if len(versions) == 1 else "current" if row["firmware"] == newest else "outdated"
-            row["newest_firmware"] = newest if len(versions) > 1 else None
-        models.append({"manufacturer": members[0]["manufacturer"], "model": members[0]["model"], "cameras": len(members), "newest": newest,
-                       "firmwares": [{"version": version, "cameras": count} for version, count in sorted(versions.items(), key=lambda item: version_key(item[0]), reverse=True)],
-                       "outdated": sum(1 for row in members if row["firmware_status"] == "outdated")})
+            row["firmware_status"] = "uniform" if len({version_key(version) for version in versions}) == 1 else "current" if version_key(row["firmware"]) == top else "outdated"
+            row["newest_firmware"] = newest if row["firmware_status"] == "outdated" and newest_shown else None
+        if not shown:
+            continue
+        seen: dict[str, int] = {}
+        for row in shown:
+            seen[row["firmware"]] = seen.get(row["firmware"], 0) + 1
+        models.append({"manufacturer": shown[0]["manufacturer"], "model": shown[0]["model"], "cameras": len(shown), "newest": newest if newest_shown else None,
+                       "firmwares": [{"version": version, "cameras": count} for version, count in sorted(seen.items(), key=lambda item: version_key(item[0]), reverse=True)],
+                       "outdated": sum(1 for row in shown if row["firmware_status"] == "outdated")})
     return sorted(models, key=lambda item: (-item["outdated"], (item["model"] or "").lower()))
 
 
-def fleet(db: sqlite3.Connection, visible: set[str] | None, now: datetime | None = None) -> dict[str, Any]:
-    """Every camera the reader may see with its health values; one row per camera, in name order. Reads stored values only."""
+def fleet(db: sqlite3.Connection, visible: set[str] | None, now: datetime | None = None, *, show_errors: bool = False) -> dict[str, Any]:
+    """Every camera the reader may see with its health values; one row per camera, in name order. Reads stored values only. ``show_errors`` adds why the last ONVIF try failed."""
     now = now or _now()
     counters: dict[tuple[str, str], float] = {(row["name"], row["camera_id"]): row["value"] for row in db.execute(
         "SELECT name,camera_id,value FROM metric_counters WHERE name IN (?,?,?)", (RECONNECTS, FRAMES_DROPPED, metrics.SEGMENTS_DROPPED))}
@@ -259,8 +281,6 @@ def fleet(db: sqlite3.Connection, visible: set[str] | None, now: datetime | None
     for camera in db.execute("SELECT c.id,c.name,c.camera_brand,c.recording_status,c.video_codec,c.video_width,c.video_height,g.name AS group_name,h.* "
                              "FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id LEFT JOIN camera_health h ON h.camera_id=c.id "
                              "WHERE c.archived_at IS NULL ORDER BY c.name COLLATE NOCASE,c.id"):
-        if visible is not None and camera["id"] not in visible:
-            continue
         counted = camera["camera_id"] is not None or any((name, camera["id"]) in counters for name in (RECONNECTS, FRAMES_DROPPED))
         up_since = camera["stream_up_since"] if camera["recording_status"] in UP_STATES else None
         rows.append({
@@ -273,10 +293,12 @@ def fleet(db: sqlite3.Connection, visible: set[str] | None, now: datetime | None
             "dropped_frames": int(counters.get((FRAMES_DROPPED, camera["id"]), 0)) if counted else None,
             "reconnects": int(counters.get((RECONNECTS, camera["id"]), 0)) if counted else None,
             "dropped_segments": int(counters.get((metrics.SEGMENTS_DROPPED, camera["id"]), 0)) if counted else None,
-            "onvif_contact_at": camera["onvif_contact_at"], "onvif_checked_at": camera["onvif_checked_at"], "onvif_error": camera["onvif_error"],
+            "onvif_contact_at": camera["onvif_contact_at"], "onvif_checked_at": camera["onvif_checked_at"], "onvif_failed": bool(camera["onvif_error"]),
+            "onvif_error": camera["onvif_error"] if show_errors else None,  # What the camera answered can name its address: administrators only
         })
-    models = firmware_status(rows)
-    return {"generated_at": _iso(now), "cameras": rows, "models": models, "outdated": sum(1 for row in rows if row["firmware_status"] == "outdated")}
+    models = firmware_status(rows, visible)
+    shown = [row for row in rows if visible is None or row["camera_id"] in visible]
+    return {"generated_at": _iso(now), "cameras": shown, "models": models, "outdated": sum(1 for row in shown if row["firmware_status"] == "outdated")}
 
 
 def _safe(value: Any) -> str:
