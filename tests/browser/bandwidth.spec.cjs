@@ -90,10 +90,11 @@ test("a Main or Sub choice is never overridden by Auto", async ({ page }) => {
   await expect(only).toHaveAttribute("data-quality", "main");
   await expect(only).toHaveAttribute("data-quality-mode", "manual");
   await expect(only).toHaveAttribute("data-phase", "live", { timeout: 20_000 });
+  const before = network.connections.length;
   network.slow = true;
   await page.waitForTimeout(INTERVAL_SECONDS * 1_000 * 3 + 6_000);
   await expect(only).toHaveAttribute("data-quality", "main");
-  expect(network.connections.filter(connection => connection.quality === "low")).toHaveLength(0);
+  expect(network.connections.slice(before)).toEqual([]); // Not one reconnect, to either stream
   await expect(only.getByTestId("tile-quality-note")).toHaveCount(0);
 });
 
