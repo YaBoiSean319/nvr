@@ -9,12 +9,14 @@ import { GeneralSettings } from "./GeneralSettings";
 import { HardeningSettings } from "./HardeningSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
 import { NotificationsSettings } from "./NotificationsSettings";
+import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { StorageSettings } from "./StorageSettings";
 
 const CATEGORIES = {
   general: { label: "General", page: GeneralSettings },
   appearance: { label: "Appearance & branding", page: AppearanceSettings },
   access: { label: "Users & access", page: AccessSettings },
+  remote: { label: "Remote access", page: RemoteAccessSettings },
   recording: { label: "Recording & storage", page: StorageSettings },
   coverage: { label: "Coverage & self-test", page: CoverageSettings },
   audit: { label: "Viewing audit", page: AuditSettings },

@@ -246,3 +246,26 @@ test("Coverage & self-test: a self-test run on demand, and coverage per camera w
   await openSettings(page, "General");
   await expect(page.getByTestId("self-test-summary")).toContainText(/Self-test (passed|failed)/);
 });
+
+test("Remote access: how the page was reached, no warnings on the local network, and a second factor for remote sessions", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openSettings(page, "Remote access");
+  const connected = page.getByRole("region", { name: "How you are connected" });
+  await expect(connected).toContainText("127.0.0.1 · the local network");
+  await expect(connected).toContainText("Plain HTTP");
+  await expect(connected).toContainText("None. Set NVR_TRUSTED_PROXIES");
+  // Opened on the local network, nothing here is exposed: there is nothing to warn about.
+  await expect(page.getByRole("region", { name: "Warnings" }).getByRole("status")).toContainText("Nothing to warn about");
+
+  const remote = page.getByRole("checkbox", { name: /Require a second factor for sessions from outside the local network/ });
+  await expect(remote).not.toBeChecked();
+  await press(remote, "Space");
+  await expect(remote).toBeChecked();
+  await page.reload();
+  await expect(page.getByRole("checkbox", { name: /Require a second factor for sessions from outside the local network/ })).toBeChecked();
+  const saved = await (await page.request.get("/api/admin/security")).json();
+  expect(saved).toEqual({ mfa_policy: "off", remote_mfa: true });
+  // Turning it on while connected from the local network does not ask this session for anything.
+  await expect(page.getByRole("heading", { level: 1, name: "Remote access" })).toBeVisible();
+});

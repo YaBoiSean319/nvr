@@ -127,9 +127,14 @@ def policy(db: sqlite3.Connection) -> str:
     return db.execute("SELECT mfa_policy FROM security_settings WHERE singleton_id=1").fetchone()["mfa_policy"]
 
 
-def required_for(policy_value: str, role: str, local: bool) -> bool:
-    """Whether the policy asks this account for a second factor (Entra accounts never are)."""
-    return local and (policy_value == "all" or (policy_value == "administrators" and role == "administrator"))
+def remote_required(db: sqlite3.Connection) -> bool:
+    """Whether sessions from outside the local network need a second factor (#132)."""
+    return bool(db.execute("SELECT remote_mfa FROM security_settings WHERE singleton_id=1").fetchone()["remote_mfa"])
+
+
+def required_for(policy_value: str, role: str, local: bool, remote_policy: bool = False, remote: bool = False) -> bool:
+    """Whether the policy asks this account for a second factor (Entra accounts never are): by role, or because the session is remote and remote sessions need one."""
+    return local and (policy_value == "all" or (policy_value == "administrators" and role == "administrator") or (remote_policy and remote))
 
 
 def reset_factors(db: sqlite3.Connection, user_id: int) -> None:

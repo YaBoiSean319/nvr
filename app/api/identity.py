@@ -16,7 +16,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from authlib.integrations.starlette_client import OAuth
 
-from app import auth_limits as limits, mfa
+from app import auth_limits as limits, mfa, network
 from app.access import ensure_default_grant
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
 from app.security import hash_password, new_session_token, spend_password_time, token_digest, verify_password
@@ -164,12 +164,13 @@ def bootstrap(payload: BootstrapRequest, response: Response) -> dict[str, str]:
     return {"username": username, "role": "administrator"}
 
 
-def signed_in(response: Response, user: sqlite3.Row, account: str, address: str) -> dict[str, object]:
+def signed_in(response: Response, user: sqlite3.Row, account: str, address: str, remote: bool) -> dict[str, object]:
     """Start the session, clear the account's failures, and say whether the policy still owes a second factor."""
     start_session(response, int(user["id"]))
     limits.succeeded(account, address)
     with connect() as db:
-        owes = mfa.required_for(mfa.policy(db), user["role"], local=user["provider_issuer"] is None) and not mfa.has_factor(db, int(user["id"]))
+        owes = mfa.required_for(mfa.policy(db), user["role"], local=user["provider_issuer"] is None, remote_policy=mfa.remote_required(db),
+                                remote=remote) and not mfa.has_factor(db, int(user["id"]))
     return {"username": user["username"], "role": user["role"], **({"mfa_enrolment_required": True} if owes else {})}
 
 
@@ -193,7 +194,7 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
             limits.release(account, address)  # The password was right; the second step is where guessing continues.
             methods = [name for name, available in (("passkey", bool(found["passkeys"])), ("totp", found["totp"]), ("recovery", found["recovery_codes_remaining"] > 0)) if available]
             return {"mfa_required": True, "challenge": mfa.new_challenge(db, "login", int(user["id"])), "methods": methods}
-    return signed_in(response, user, account, address)
+    return signed_in(response, user, account, address, network.request_is_remote(request))
 
 
 @router.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)

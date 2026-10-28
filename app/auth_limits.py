@@ -16,13 +16,13 @@ guessing.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, Request
 
+from . import network
 from .audit import record
 from .store import connect
 
@@ -41,14 +41,8 @@ def _parse(value: str) -> datetime:
 
 
 def client_address(request: Request) -> str:
-    """The peer's address; behind a reverse proxy you trust, the address it saw (``NVR_TRUST_FORWARDED_FOR``).
-
-    The last ``X-Forwarded-For`` entry is the one the nearest proxy added, which a client cannot forge."""
-    if os.environ.get("NVR_TRUST_FORWARDED_FOR", "").lower() in {"1", "true", "yes"}:
-        forwarded = request.headers.get("x-forwarded-for", "").split(",")[-1].strip()
-        if forwarded:
-            return forwarded[:64]
-    return request.client.host if request.client else "unknown"
+    """The caller's address: the peer's, or behind a trusted proxy (``NVR_TRUSTED_PROXIES``) the address it reports (see ``network``)."""
+    return network.client_address(request)
 
 
 def account_key(username: str) -> str:

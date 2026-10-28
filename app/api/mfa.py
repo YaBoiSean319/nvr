@@ -9,7 +9,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app import auth_limits as limits, mfa, webauthn
+from app import auth_limits as limits, mfa, network, webauthn
 from app.api.identity import signed_in
 from app.audit import record
 from app.principal import COOKIE_NAME, Administrator, CurrentUser, Principal
@@ -23,7 +23,7 @@ NO_FACTOR_FOR_ENTRA = "This account signs in with Microsoft Entra; its second fa
 
 
 def _origin(request: Request) -> str:
-    return request.headers.get("origin") or f"{request.url.scheme}://{request.headers.get('host', '')}"
+    return request.headers.get("origin") or network.origin(request)
 
 
 def _relying_party(request: Request) -> webauthn.RelyingParty:
@@ -98,7 +98,7 @@ def verify_second_factor(payload: SecondFactorRequest, request: Request, respons
     with connect() as db:
         _consume(db, payload.challenge)
         record(db, user_id, "mfa_recovery_code_used" if payload.method == "recovery" else "mfa_used", "user", user_id, method=payload.method, address=address)
-    return signed_in(response, user, account, address)
+    return signed_in(response, user, account, address, network.request_is_remote(request))
 
 
 def _passkeys_of(db: sqlite3.Connection, user_id: int) -> list[dict[str, Any]]:
@@ -156,7 +156,7 @@ def verify_passkey_second_factor(payload: PasskeyAssertion, request: Request, re
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     with connect() as db:
         record(db, user_id, "mfa_used", "user", user_id, method="passkey", address=address)
-    return signed_in(response, user, account, address)
+    return signed_in(response, user, account, address, network.request_is_remote(request))
 
 
 # --- Sign-in: a passkey alone -----------------------------------------------------------
@@ -200,7 +200,7 @@ def passkey_sign_in(payload: PasskeyAssertion, request: Request, response: Respo
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     with connect() as db:
         record(db, int(user["id"]), "mfa_used", "user", int(user["id"]), method="passkey_sign_in", address=address)
-    return signed_in(response, user, account, address)
+    return signed_in(response, user, account, address, network.request_is_remote(request))
 
 
 # --- Enrolment, from the account menu ---------------------------------------------------
@@ -271,12 +271,14 @@ def _summary(user: Principal) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT provider_issuer,passkey_sign_in FROM users WHERE id=?", (user.id,)).fetchone()
         policy = mfa.policy(db)
+        remote_required = mfa.remote_required(db)
         found = mfa.factors(db, user.id)
     local = row is not None and row["provider_issuer"] is None
     return {
         "local": local,
         "policy": policy,
         "required": mfa.required_for(policy, user.role, local),
+        "remote_required": remote_required,
         "totp": found["totp"],
         "passkeys": [{key: item[key] for key in ("id", "name", "created_at", "last_used_at")} for item in found["passkeys"]],
         "recovery_codes_remaining": found["recovery_codes_remaining"],
@@ -433,22 +435,26 @@ def regenerate_recovery_codes(payload: PasswordRequest, request: Request, user: 
 
 class PolicyRequest(BaseModel):
     mfa_policy: Literal["off", "administrators", "all"]
+    remote_mfa: bool | None = None  # Whether sessions from outside the local network need a second factor; left as it is when absent
 
 
 @router.get("/api/admin/security")
-def get_security_policy(_: Administrator) -> dict[str, str]:
+def get_security_policy(_: Administrator) -> dict[str, object]:
     with connect() as db:
-        return {"mfa_policy": mfa.policy(db)}
+        return {"mfa_policy": mfa.policy(db), "remote_mfa": mfa.remote_required(db)}
 
 
 @router.put("/api/admin/security")
-def put_security_policy(payload: PolicyRequest, admin: Administrator) -> dict[str, str]:
+def put_security_policy(payload: PolicyRequest, admin: Administrator) -> dict[str, object]:
     with connect() as db:
-        before = mfa.policy(db)
-        db.execute("UPDATE security_settings SET mfa_policy=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (payload.mfa_policy,))
+        before, remote_before = mfa.policy(db), mfa.remote_required(db)
+        remote = remote_before if payload.remote_mfa is None else payload.remote_mfa
+        db.execute("UPDATE security_settings SET mfa_policy=?,remote_mfa=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (payload.mfa_policy, int(remote)))
         if before != payload.mfa_policy:
             record(db, admin.id, "mfa_policy_changed", "security_settings", 1, before=before, after=payload.mfa_policy)
-    return {"mfa_policy": payload.mfa_policy}
+        if remote != remote_before:
+            record(db, admin.id, "remote_mfa_changed", "security_settings", 1, before=remote_before, after=remote)
+    return {"mfa_policy": payload.mfa_policy, "remote_mfa": remote}
 
 
 @router.get("/api/admin/users")

@@ -1,0 +1,24 @@
+# Reach the NVR over a WireGuard tunnel that the NVR's site dials out (docs/remote-access.md, "WireGuard"): no port is opened at the site.
+#
+#   Put the site's WireGuard client configuration at ./deploy/wireguard/wg_confs/wg0.conf (see the guide), then
+#   docker compose -f compose.yaml -f compose.wireguard.yaml up -d
+#
+# The hub is a host you control with a public address that the site and your devices both connect to. WireGuard carries the traffic encrypted, so
+# the NVR is opened over plain HTTP at its WireGuard address and there is no proxy to trust. WG_SUBNET (the tunnel's addresses) is counted as the local
+# network; leave it out of NVR_LOCAL_NETWORKS below if you would rather have people on the tunnel treated as remote (and asked for a second factor).
+services:
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - ./deploy/wireguard:/config
+  nvr:
+    environment:
+      NVR_LOCAL_NETWORKS: ${WG_SUBNET:-10.13.13.0/24}

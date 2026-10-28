@@ -692,3 +692,6 @@
 .redaction-field input, .redaction-field select { height: 28px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); }
 .backfill-jobs { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
 .backfill-jobs li { display: grid; gap: 1px; }
+.detail-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.detail-list dt { color: var(--n-muted); }
+.detail-list dd { margin: 0; overflow-wrap: anywhere; }
