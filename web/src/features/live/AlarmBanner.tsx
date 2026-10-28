@@ -6,7 +6,8 @@ const capitalised = (text: string) => text.charAt(0).toUpperCase() + text.slice(
 const LABEL: Record<string, string> = { covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused" };
 
 export function popInSummary(alarm: PopIn, time: string): string {
-  return `${alarm.rule_name}: ${alarm.camera_name} · ${LABEL[alarm.label] ?? capitalised(alarm.label)}${time ? ` at ${time}` : ""}`;
+  const label = alarm.label.startsWith("plate:") ? `Plate ${alarm.label.slice(6)}` : LABEL[alarm.label] ?? capitalised(alarm.label);
+  return `${alarm.rule_name}: ${alarm.camera_name} · ${label}${time ? ` at ${time}` : ""}`;
 }
 
 /** Shown over Live while an alarm layout replaces the person's own: what it is, what waits, and the way back. */

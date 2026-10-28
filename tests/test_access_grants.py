@@ -309,6 +309,8 @@ class RouteTests(GrantCase):
     FILTERED |= {("GET", "/api/console/status"), ("GET", "/api/alarms/{alarm_id:consoleid}"), ("GET", "/api/ai/tracks/{track_id:consoleid}/thumbnail")}
     FILTERED |= {(method, "/api/alarms/{alarm_id:consoleid}/{rest:path}") for method in ("POST", "PUT", "PATCH", "DELETE")}
     FILTERED |= {(method, "/api/cameras/{camera_id:consoleid}/{rest:path}") for method in ("GET",)}
+    # Licence plates (#142): reads are searched only on cameras the person may see, and a crop is hidden (404) like its camera.
+    FILTERED |= {("GET", "/api/plates/search"), ("GET", "/api/plates/reads/{read_id}/crop")}
     # Routes that name no camera and return none: the person's own settings, sign-in and public information.
     NO_CAMERA_DATA = {
         ("GET", "/api/ai/settings"), ("GET", "/api/alarm-settings"), ("GET", "/api/alarms/assignees"), ("GET", "/api/auth/me"),

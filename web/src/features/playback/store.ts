@@ -55,6 +55,8 @@ interface PlaybackState {
   tracked: { id: string; cameraId: string } | null;
   /** The attribute search drawer, which shares its place beside Playback with the export drawer. */
   attributeSearchOpen: boolean;
+  /** The plate search drawer, in the same place. */
+  plateSearchOpen: boolean;
   /** Cameras chosen for export; null means every searched camera. */
   exportCameraIds: string[] | null;
   restoredFor: string | null;
@@ -83,6 +85,7 @@ interface PlaybackState {
   setOverlayOn: (on: boolean) => void;
   trackObject: (tracked: { id: string; cameraId: string } | null) => void;
   setAttributeSearchOpen: (open: boolean) => void;
+  setPlateSearchOpen: (open: boolean) => void;
   setExportCameraIds: (ids: string[] | null) => void;
   restore: (username: string, available: Set<string>, defaults: SearchDraft) => void;
   reset: () => void;
@@ -108,6 +111,7 @@ const initial = {
   overlayOn: false,
   tracked: null,
   attributeSearchOpen: false,
+  plateSearchOpen: false,
   exportCameraIds: null,
   restoredFor: null,
 };
@@ -167,13 +171,14 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       const marks = { ...state.marks, [kind]: time };
       // Completing a range opens the export drawer beside Playback.
       const completed = marks.in !== null && marks.out !== null && (state.marks.in === null || state.marks.out === null);
-      return { marks, exportOpen: state.exportOpen || completed, attributeSearchOpen: state.attributeSearchOpen && !completed };
+      return { marks, exportOpen: state.exportOpen || completed, attributeSearchOpen: state.attributeSearchOpen && !completed, plateSearchOpen: state.plateSearchOpen && !completed };
     }),
   clearMarks: () => set({ marks: { in: null, out: null } }),
   setOverlayOn: overlayOn => set(state => ({ overlayOn, tracked: overlayOn ? state.tracked : null })),
   trackObject: tracked => set({ tracked }),
-  setExportOpen: exportOpen => set(state => ({ exportOpen, attributeSearchOpen: exportOpen ? false : state.attributeSearchOpen })),
-  setAttributeSearchOpen: attributeSearchOpen => set(state => ({ attributeSearchOpen, exportOpen: attributeSearchOpen ? false : state.exportOpen })),
+  setExportOpen: exportOpen => set(state => ({ exportOpen, attributeSearchOpen: exportOpen ? false : state.attributeSearchOpen, plateSearchOpen: exportOpen ? false : state.plateSearchOpen })),
+  setAttributeSearchOpen: attributeSearchOpen => set(state => ({ attributeSearchOpen, exportOpen: attributeSearchOpen ? false : state.exportOpen, plateSearchOpen: attributeSearchOpen ? false : state.plateSearchOpen })),
+  setPlateSearchOpen: plateSearchOpen => set(state => ({ plateSearchOpen, exportOpen: plateSearchOpen ? false : state.exportOpen, attributeSearchOpen: plateSearchOpen ? false : state.attributeSearchOpen })),
   setExportCameraIds: exportCameraIds => set({ exportCameraIds }),
   restore: (username, available, defaults) => {
     const saved = readSaved(username);

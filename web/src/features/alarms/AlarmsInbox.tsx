@@ -12,7 +12,9 @@ import {
   type Alarm, type AlarmFilter, type AlarmQuery,
 } from "./api";
 
-const LABEL = { person: "Person", vehicle: "Vehicle", covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused" } as const;
+const LABEL: Record<string, string> = { person: "Person", vehicle: "Vehicle", covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused" };
+/** What an alarm was about: an object, tampering, or a licence plate ("plate:AB12CDE"). */
+const labelOf = (label: string) => (label.startsWith("plate:") ? `Plate ${label.slice(6)}` : LABEL[label] ?? label);
 
 function useWhen() {
   const display = useDisplaySettings();
@@ -59,7 +61,7 @@ export function AlarmsInbox({ onNavigate, initialAlarmId = null }: { onNavigate:
         {(alarms.data?.alarms ?? []).map(alarm => (
           <li key={alarm.id} data-state={alarm.state}>
             <button type="button" className="row-select alarm-row" onClick={() => setSelectedId(alarm.id)}>
-              <span>{alarm.rule_name}: {LABEL[alarm.label]} on {alarm.camera_name ?? "a removed camera"}</span>
+              <span>{alarm.rule_name}: {labelOf(alarm.label)} on {alarm.camera_name ?? "a removed camera"}</span>
               <span className="muted">{STATE_LABEL[alarm.state]}{alarm.assigned_to ? ` to ${alarm.assigned_to}` : ""} · {when(alarm.occurred_at)}</span>
             </button>
           </li>
@@ -129,7 +131,7 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
     <article className="alarm-detail" aria-label={`Alarm: ${data.rule_name}`}>
       <button type="button" className="button" onClick={onBack}><span aria-hidden="true">← </span>All alarms</button>
       <header>
-        <h3>{data.rule_name}: {LABEL[data.label]} on {data.camera_name ?? "a removed camera"}</h3>
+        <h3>{data.rule_name}: {labelOf(data.label)} on {data.camera_name ?? "a removed camera"}</h3>
         <p className="muted">{when(data.occurred_at)} · <span data-state={data.state}>{STATE_LABEL[data.state]}{data.assigned_to ? ` to ${data.assigned_to}` : ""}</span></p>
       </header>
       {data.snapshot_url ? <img className="alarm-snapshot" src={data.snapshot_url} alt={`Snapshot from ${data.camera_name ?? "the camera"} at the alarm time`} /> : null}
