@@ -69,16 +69,12 @@ test("Auto steps down to the substream on a slow connection and back up when it 
   await expect(big).toHaveAttribute("data-quality", "main", { timeout: 90_000 });
   await expect(big.getByTestId("tile-quality-note")).toContainText(/recovered.*back on Main/i);
 
-  const mine = network.connections.filter((connection, index) => index >= 0);
-  const times = mine.filter(connection => connection.quality).map(connection => connection.at);
-  // Connections: the grid's substream, then the enlarged main stream, then the step down, then the step up.
-  const qualities = mine.map(connection => connection.quality);
-  expect(qualities.join(",")).toMatch(/high,low,high$/);
-  const changes = mine.slice(-3).map(connection => connection.at);
-  for (let index = 1; index < changes.length; index += 1) {
-    expect(changes[index] - changes[index - 1]).toBeGreaterThanOrEqual(INTERVAL_SECONDS * 1_000 - 500);
+  // The last three connections are the enlarged main stream, the step down and the step up, each at least an interval after the one before.
+  const last = network.connections.slice(-3);
+  expect(last.map(connection => connection.quality)).toEqual(["high", "low", "high"]);
+  for (let index = 1; index < last.length; index += 1) {
+    expect(last[index].at - last[index - 1].at).toBeGreaterThanOrEqual(INTERVAL_SECONDS * 1_000 - 500);
   }
-  expect(times.length).toBeGreaterThanOrEqual(3);
 });
 
 test("a Main or Sub choice is never overridden by Auto", async ({ page }) => {

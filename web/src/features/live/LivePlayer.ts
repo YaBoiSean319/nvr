@@ -184,7 +184,7 @@ export class LivePlayer {
     const { video } = this.options;
     video.muted = !this.snapshot.listening;
     video.src = this.objectUrl;
-    video.onwaiting = () => this.options.onStall?.(Date.now());
+    video.onwaiting = () => this.snapshot.phase === "live" && this.options.onStall?.(Date.now()); // buffering at connect is not a slow link
     source.addEventListener("sourceopen", () => {
       if (this.source !== source) return;
       const buffer = source.addSourceBuffer(mime);

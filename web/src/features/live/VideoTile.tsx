@@ -94,6 +94,9 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
     document.addEventListener("visibilitychange", onChange);
     return () => document.removeEventListener("visibilitychange", onChange);
   }, []);
+  useEffect(() => {
+    if (!lowData) setTapped(false);
+  }, [lowData]);
   const overCap = lowData && lowDataCapped && !tapped;
   const lowDataPaused = !suspended && lowData && (overCap || !onScreen || !pageVisible);
   const halted = suspended || lowDataPaused;
