@@ -18,6 +18,10 @@ camera becomes the event. A saved rule never fires for moments before it was las
 saved. Every rule event raises an alarm (see ``app.alarms``). Test mode replays
 the same evaluation over stored tracks without writing.
 
+An ``external_event`` rule is not about objects either: it fires when an event from a building system (a door forced, a panic button; see
+``app.external_events``) is tied to a camera it watches, filtered by source, event type and subject, with the usual schedule and cooldown. Test mode
+replays the events kept.
+
 A ``tamper`` rule is not about objects. It fires when camera tamper detection (see ``app.tamper``) confirms a covered,
 moved or defocused camera, once per detection and for the kinds the rule lists (all three if it lists none): its schedule,
 cooldown and scope apply as to any rule, and it raises an alarm labelled with the kind. Test mode replays the tamper
@@ -327,10 +331,59 @@ def _replay_tamper(rule: Rule, start: datetime, end: datetime) -> list[dict[str,
     return events
 
 
+def _external_matches(rule: Rule, event: dict[str, Any]) -> bool:
+    """Whether an external event is one the rule asks about: each list in the condition (sources, event types, subjects) is a filter, and an empty one lets everything through."""
+    condition = rule.condition
+    return ((not condition.get("source_ids") or event["source_id"] in condition["source_ids"]) and (not condition.get("types") or event["type"] in condition["types"])
+            and (not condition.get("subjects") or event["subject"] in condition["subjects"]))
+
+
+def fire_external(db: sqlite3.Connection, camera_id: str, event: dict[str, Any], at: datetime) -> int:
+    """Raise an alarm for each ``external_event`` rule that watches the camera and asks about this event, inside the caller's transaction."""
+    groups = _camera_groups(db, camera_id)
+    fired = 0
+    for rule in load_rules(db):
+        if rule.condition_type != "external_event" or not rule.watches_camera(camera_id, groups) or not _external_matches(rule, event):
+            continue
+        if at < rule.active_from or not rule.scheduled(at):
+            continue
+        if rule.cooldown and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                                        (rule.id, camera_id, (at - rule.cooldown).isoformat(), (at + rule.cooldown).isoformat())).fetchone():
+            continue
+        event_id = str(uuid.uuid4())
+        db.execute("INSERT INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (event_id, rule.id, rule.name, camera_id, f"external-{event['id']}-{camera_id}", None, event["type"], "external_event", at.isoformat(), FULL_FRAME))
+        create_alarm(db, event_id)
+        fired += 1
+    return fired
+
+
+def _replay_external(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """The external events of [start, end) the rule would have fired on, from those kept."""
+    with connect() as db:
+        rows = db.execute(
+            "SELECT e.id,e.source_id,e.type,e.subject,e.occurred_at,k.camera_id,c.name AS camera_name FROM external_events e JOIN external_event_cameras k ON k.event_id=e.id "
+            "JOIN cameras c ON c.id=k.camera_id WHERE e.occurred_at>=? AND e.occurred_at<? ORDER BY e.occurred_at,e.id",
+            (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat())).fetchall()
+        groups = {row["camera_id"]: _camera_groups(db, row["camera_id"]) for row in rows}
+    events, last = [], {}
+    for row in rows:
+        at = _parse(row["occurred_at"])
+        if not rule.watches_camera(row["camera_id"], groups[row["camera_id"]]) or not _external_matches(rule, dict(row)) or at < rule.active_from or not rule.scheduled(at):
+            continue
+        if rule.cooldown and row["camera_id"] in last and abs(at - last[row["camera_id"]]) < rule.cooldown:
+            continue
+        last[row["camera_id"]] = at
+        events.append({"camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": None, "label": row["type"], "occurred_at": at.isoformat(), "box": json.loads(FULL_FRAME)})
+    return events
+
+
 def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
     """What the rule would have fired over stored tracks in [start, end); writes nothing."""
     if rule.condition_type == "tamper":
         return _replay_tamper(rule, start, end)
+    if rule.condition_type == "external_event":
+        return _replay_external(rule, start, end)
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
         tracks = db.execute(

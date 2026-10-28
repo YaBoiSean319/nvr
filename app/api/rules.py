@@ -81,7 +81,20 @@ class Tamper(BaseModel):
         return sorted(set(value), key=["covered", "moved", "defocused"].index)
 
 
-Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper], Field(discriminator="type")]
+class ExternalEvent(BaseModel):
+    """An event from a building system (a door, an intercom, a sensor) tied to the camera; each list narrows it, and an empty one means any."""
+    type: Literal["external_event"]
+    source_ids: list[str] = Field(default_factory=list, max_length=50)
+    types: list[str] = Field(default_factory=list, max_length=50)
+    subjects: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("types", "subjects", "source_ids")
+    @classmethod
+    def trimmed_distinct(cls, value: list[str]) -> list[str]:
+        return sorted({item.strip() for item in value if item.strip()})
+
+
+Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper, ExternalEvent], Field(discriminator="type")]
 
 
 class ScheduleInterval(BaseModel):
@@ -150,7 +163,7 @@ class RuleDefinition(BaseModel):
     def valid_definition(self) -> "RuleDefinition":
         if not self.camera_ids and not self.group_ids:
             raise ValueError("Choose at least one camera or group")
-        if self.condition.type == "tamper":
+        if self.condition.type in ("tamper", "external_event"):
             self.classes = []
         elif not self.classes:
             raise ValueError("Choose at least one object class")

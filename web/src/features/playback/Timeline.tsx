@@ -130,6 +130,7 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
           <li><i data-mark="uncertain" />Uncertain</li>
           <li><i data-mark="motion" />Motion</li>
           <li><i data-mark="ai" />AI detection</li>
+          <li><i data-mark="event" />Outside event</li>
           <li><i data-mark="unanalyzed" />Not analyzed</li>
         </ul>
         {loading ? <span className="spinner" aria-label="Loading timeline" /> : null}
@@ -207,6 +208,15 @@ function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWin
         return position >= 0 && position <= 100
           ? <span key={`a${detection.id}`} className="timeline-point" data-mark="ai" data-label={detection.label}
                   title={`${detection.label === "person" ? "Person" : "Vehicle"} (${Math.round(detection.confidence * 100)}%) at ${formatSiteTime(at(detection.first_seen_at), settings, true)}`}
+                  style={{ left: `${position}%` }} />
+          : null;
+      })}
+      {(row.external_events ?? []).map(event => {
+        const position = percent(at(event.occurred_at), window);
+        return position >= 0 && position <= 100
+          ? <span key={`x${event.id}`} className="timeline-point" data-mark="event" data-type={event.type}
+                  onPointerDown={pointer => { if (pointer.button === 0) { pointer.stopPropagation(); playbackClock.seek(at(event.occurred_at)); } }}
+                  title={`${event.label}${event.subject ? ` · ${event.subject}` : ""} (${event.source_name}) at ${formatSiteTime(at(event.occurred_at), settings, true)}${event.message ? `: ${event.message}` : ""}`}
                   style={{ left: `${position}%` }} />
           : null;
       })}

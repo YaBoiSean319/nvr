@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useCameraGroups, useCameras, useDisplaySettings } from "@/api/queries";
+import { api } from "@/api/client";
 import { Modal } from "@/components/Modal";
 import { formatSiteDateTime } from "@/lib/zonedTime";
 import type { ScheduleInterval } from "../cameras/api";
@@ -17,11 +18,14 @@ import {
 } from "./api";
 
 const NEW = "new";
+const splitList = (text: string) => text.split(",").map(item => item.trim()).filter(Boolean);
 const CLASS_LABEL: Record<ObjectClass, string> = { person: "People", vehicle: "Vehicles" };
 
 function summary(rule: Rule): string {
   const subject = rule.condition.type === "tamper"
     ? rule.condition.kinds.map(kind => TAMPER_LABEL[kind].toLowerCase()).join(", ")
+    : rule.condition.type === "external_event"
+    ? (rule.condition.types.join(", ") || "any event")
     : rule.classes.map(item => CLASS_LABEL[item].toLowerCase()).join(" and ");
   return `${CONDITION_LABEL[rule.condition.type]} · ${subject}${rule.enabled ? "" : " · disabled"}`;
 }
@@ -84,6 +88,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
   const cameras = useCameras();
   const groups = useCameraGroups();
   const display = useDisplaySettings();
+  const eventSources = useQuery({ queryKey: ["admin", "event-sources"], queryFn: ({ signal }) => api<{ sources: { id: string; name: string }[] }>("/api/event-sources", { signal }).then(result => result.sources) });
   const published = useMemo(() => (rule ? definitionOf(rule) : newRule()), [rule]);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -175,7 +180,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
         <fieldset className="field-group">
           <legend>Condition</legend>
           <div className="field-row">
-            <label className="field"><span>{condition.type === "tamper" ? "When" : "When an object"}</span>
+            <label className="field"><span>{condition.type === "tamper" || condition.type === "external_event" ? "When" : "When an object"}</span>
               <select value={condition.type} onChange={event => setCondition(switchCondition(condition, event.target.value as Condition["type"]))}>
                 {(Object.keys(CONDITION_LABEL) as Condition["type"][]).map(type => <option key={type} value={type}>{CONDITION_LABEL[type]}</option>)}
               </select>
@@ -201,7 +206,23 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
               </label>
             ) : null}
           </div>
-          {condition.type === "tamper" ? (
+          {condition.type === "external_event" ? (
+            <fieldset className="plain">
+              <legend className="field-heading">Outside events</legend>
+              <p className="muted field-hint">Fires when an event that an administrator mapped to one of this rule's cameras arrives. Leave a box empty to accept any. Set sources up under Settings, Event sources.</p>
+              <label className="field"><span>Sources</span>
+                <select multiple value={condition.source_ids} onChange={event => setCondition({ ...condition, source_ids: Array.from(event.target.selectedOptions, option => option.value) })}>
+                  {(eventSources.data ?? []).map(source => <option key={source.id} value={source.id}>{source.name}</option>)}
+                </select>
+              </label>
+              <label className="field"><span>Event types (comma separated)</span>
+                <input value={condition.types.join(", ")} placeholder="door_forced, panic_button" onChange={event => setCondition({ ...condition, types: splitList(event.target.value) })} />
+              </label>
+              <label className="field"><span>Doors or sensors (comma separated)</span>
+                <input value={condition.subjects.join(", ")} placeholder="main-door" onChange={event => setCondition({ ...condition, subjects: splitList(event.target.value) })} />
+              </label>
+            </fieldset>
+          ) : condition.type === "tamper" ? (
             <fieldset className="plain">
               <legend className="field-heading">Kinds of tampering</legend>
               <p className="muted field-hint">Fires once when a camera is confirmed covered, moved or defocused. Turn detection on for each camera under its Tamper tab.</p>

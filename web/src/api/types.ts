@@ -254,6 +254,8 @@ export interface TimelineCamera {
   motion_events: { id: string; source_event_at: string; status: string }[];
   ai_detections: { id: string; label: "person" | "vehicle"; confidence: number; first_seen_at: string; last_seen_at: string }[];
   ai_unanalyzed: { state: string; starts_at: string; ends_at: string | null; detail: string }[];
+  /** Outside events (doors, sensors, buttons) an administrator mapped to this camera. */
+  external_events?: { id: string; type: string; label: string; subject: string | null; message: string | null; occurred_at: string; source_name: string }[];
 }
 
 export interface PlaybackTimeline {

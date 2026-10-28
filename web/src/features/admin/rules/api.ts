@@ -14,7 +14,8 @@ export type Condition =
   | { type: "line_crossing"; line: Line; direction: CrossingDirection }
   | { type: "loitering"; zone: Zone; dwell_seconds: number }
   | { type: "wrong_way"; zone: Zone; direction: TravelDirection }
-  | { type: "tamper"; kinds: TamperKind[] };
+  | { type: "tamper"; kinds: TamperKind[] }
+  | { type: "external_event"; source_ids: string[]; types: string[]; subjects: string[] };
 
 export interface RuleScheduleInterval { days: number[]; start: string; end: string }
 export interface RuleSchedule { timezone: string; intervals: RuleScheduleInterval[] }
@@ -100,6 +101,7 @@ export const CONDITION_LABEL: Record<Condition["type"], string> = {
   loitering: "Stays in a zone",
   wrong_way: "Moves the wrong way",
   tamper: "Camera is covered, moved or defocused",
+  external_event: "An outside event (door, sensor, button)",
 };
 
 export const TRAVEL_LABEL: Record<TravelDirection, string> = { right: "Rightwards", left: "Leftwards", down: "Downwards", up: "Upwards" };
@@ -108,6 +110,7 @@ const DEFAULT_ZONE: Zone = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };
 
 /** A condition of another type that keeps whatever geometry the two share. */
 export function switchCondition(current: Condition, type: Condition["type"]): Condition {
+  if (type === "external_event") return { type, source_ids: [], types: [], subjects: [] };
   if (type === "tamper") return { type, kinds: current.type === "tamper" ? current.kinds : [...TAMPER_KINDS] };
   const zone = "zone" in current ? current.zone : DEFAULT_ZONE;
   if (type === "line_crossing") return { type, line: current.type === "line_crossing" ? current.line : { x1: 0.5, y1: 0.1, x2: 0.5, y2: 0.9 }, direction: "both" };
@@ -134,6 +137,8 @@ export function definitionProblem(definition: RuleDefinition): string | null {
   if (!definition.camera_ids.length && !definition.group_ids.length) return "Choose at least one camera or group.";
   if (definition.condition.type === "tamper") {
     if (!definition.condition.kinds.length) return "Choose at least one kind of tampering.";
+  } else if (definition.condition.type === "external_event") {
+    // Objects are not part of an outside event.
   } else if (!definition.classes.length) return "Choose people, vehicles or both.";
   if (definition.condition.type === "loitering" && !(definition.condition.dwell_seconds >= 1)) return "Enter how many seconds an object must stay.";
   if (!(definition.cooldown_seconds >= 0)) return "Enter a cooldown of 0 seconds or more.";
