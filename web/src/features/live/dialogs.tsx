@@ -4,13 +4,15 @@ import { useSaveView } from "@/api/queries";
 import type { Camera, Role, SavedView } from "@/api/types";
 import { Modal } from "@/components/Modal";
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
+import type { DewarpState } from "@/features/dewarp/geometry";
 import { toSaved, type Arrangement } from "./arrangement";
 import type { LoadedView } from "./store";
 
-export function SaveAsDialog({ open, onOpenChange, arrangement, role, existing, onSaved }: {
+export function SaveAsDialog({ open, onOpenChange, arrangement, dewarp, role, existing, onSaved }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   arrangement: Arrangement;
+  dewarp: Record<string, DewarpState>;
   role: Role;
   existing: SavedView[];
   onSaved: (view: LoadedView) => void;
@@ -24,7 +26,7 @@ export function SaveAsDialog({ open, onOpenChange, arrangement, role, existing, 
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!trimmed || trimmed.length > 60) return;
-    save.mutate({ name: trimmed, scope, layout: toSaved(arrangement) }, {
+    save.mutate({ name: trimmed, scope, layout: toSaved(arrangement, dewarp) }, {
       onSuccess: () => {
         onSaved({ name: trimmed, scope });
         onOpenChange(false);
@@ -34,7 +36,7 @@ export function SaveAsDialog({ open, onOpenChange, arrangement, role, existing, 
   }
 
   return (
-    <Modal open={open} onOpenChange={onOpenChange} title="Save view as" description="Saves these cameras, their order and the layout. Search dates are never part of a view."
+    <Modal open={open} onOpenChange={onOpenChange} title="Save view as" description="Saves these cameras, their order and the layout, and how each 360° camera is dewarped (panorama, virtual views and where they point). Search dates are never part of a view."
       footer={<>
         <button type="button" className="button" onClick={() => onOpenChange(false)}>Cancel</button>
         <button type="submit" form="save-view-form" className="button" data-variant="primary" disabled={!trimmed || save.isPending}>

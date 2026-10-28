@@ -3,6 +3,7 @@ import { create } from "zustand";
 import * as arrange from "./arrangement";
 import type { Arrangement, ManualSize } from "./arrangement";
 import { MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
+import type { DewarpState } from "@/features/dewarp/geometry";
 
 export type Quality = "auto" | "main" | "sub";
 
@@ -41,6 +42,10 @@ interface LiveState {
   enlargedId: string | null;
   sidebarOpen: boolean;
   quality: Record<string, Quality>;
+  /** How each fisheye camera is shown (raw when absent), kept with the camera and saved with views and the workspace. */
+  dewarp: Record<string, DewarpState>;
+  /** The dewarp state of the loaded view when it was loaded or saved, to tell when it has changed. */
+  baselineDewarp: Record<string, DewarpState> | null;
   notice: string | null;
   /** The one camera that may be audible; audio always starts muted and is never restored. */
   listeningId: string | null;
@@ -54,9 +59,10 @@ interface LiveState {
   place: (slot: number, id: string) => void;
   move: (id: string, direction: -1 | 1) => void;
   setLayout: (size: ManualSize | "auto") => void;
-  load: (arrangement: Arrangement, view: LoadedView | null) => void;
+  load: (arrangement: Arrangement, view: LoadedView | null, dewarp?: Record<string, DewarpState>) => void;
+  setDewarp: (id: string, state: DewarpState) => void;
   markSaved: (view: LoadedView) => void;
-  restore: (arrangement: Arrangement, sidebarOpen: boolean) => void;
+  restore: (arrangement: Arrangement, sidebarOpen: boolean, dewarp?: Record<string, DewarpState>) => void;
   setActive: (id: string) => void;
   enlarge: (id: string) => void;
   unenlarge: () => void;
@@ -86,6 +92,8 @@ const initial = {
   enlargedId: null,
   sidebarOpen: true,
   quality: {},
+  dewarp: {},
+  baselineDewarp: null,
   notice: null,
   listeningId: null,
   restored: false,
@@ -133,12 +141,16 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({ arrangement, notice: notice ?? null, enlargedId: null });
   },
   // Choosing a view is the person taking the screen back: any alarm layout ends.
-  load: (arrangement, view) =>
-    set({ arrangement, view, alarmLayout: null, baseline: view ? arrangement : null, enlargedId: null, listeningId: null, notice: null,
-          activeId: arrange.members(arrangement)[0] ?? null }),
-  markSaved: view => set(state => ({ view, baseline: state.arrangement })),
-  restore: (arrangement, sidebarOpen) =>
-    set({ arrangement, sidebarOpen, restored: true, activeId: arrange.members(arrangement)[0] ?? null }),
+  load: (arrangement, view, dewarp) =>
+    set(state => {
+      const shown = dewarp ?? (view ? {} : state.dewarp); // A saved view brings its own dewarping; an ad-hoc selection keeps how each camera was shown
+      return { arrangement, view, alarmLayout: null, baseline: view ? arrangement : null, dewarp: shown, baselineDewarp: view ? shown : null, enlargedId: null, listeningId: null, notice: null,
+               activeId: arrange.members(arrangement)[0] ?? null };
+    }),
+  setDewarp: (id, next) => set(state => ({ dewarp: next.mode === "raw" ? Object.fromEntries(Object.entries(state.dewarp).filter(([key]) => key !== id)) : { ...state.dewarp, [id]: next } })),
+  markSaved: view => set(state => ({ view, baseline: state.arrangement, baselineDewarp: state.dewarp })),
+  restore: (arrangement, sidebarOpen, dewarp) =>
+    set({ arrangement, sidebarOpen, restored: true, dewarp: dewarp ?? {}, activeId: arrange.members(arrangement)[0] ?? null }),
   setActive: id => set({ activeId: id }),
   enlarge: id => set({ enlargedId: id, activeId: id }),
   unenlarge: () => set({ enlargedId: null }),
@@ -175,6 +187,14 @@ export function useCameraIds(): string[] {
   return useMemo(() => arrange.members(arrangement), [arrangement]);
 }
 
+/** The dewarp states of the cameras in an arrangement that are not raw: what a saved view keeps. */
+export function keptDewarp(dewarp: Record<string, DewarpState>, arrangement: Arrangement): Record<string, DewarpState> {
+  const ids = new Set(arrange.members(arrangement));
+  return Object.fromEntries(Object.entries(dewarp).filter(([id, state]) => ids.has(id) && state.mode !== "raw"));
+}
+
 export function useDirty(): boolean {
-  return useLiveStore(state => state.view !== null && state.baseline !== null && !arrange.sameArrangement(state.arrangement, state.baseline));
+  return useLiveStore(state => state.view !== null && state.baseline !== null
+    && (!arrange.sameArrangement(state.arrangement, state.baseline)
+      || JSON.stringify(keptDewarp(state.dewarp, state.arrangement)) !== JSON.stringify(keptDewarp(state.baselineDewarp ?? {}, state.baseline))));
 }

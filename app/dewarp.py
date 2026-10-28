@@ -12,7 +12,8 @@ Camera frame: x right, y up, z along the optical axis. World frame: z up. The mo
 
 A view looks along ``d(pan, tilt)``: ``pan`` is the azimuth (degrees) about the vertical axis, ``tilt`` the elevation above the horizon. A virtual-PTZ view is a pinhole
 camera along ``d`` with the horizon kept level and a horizontal field of view ``fov``. A panorama maps its width to azimuth (360 degrees, 180 on a wall) and its height to
-elevation, both linearly. A double panorama stacks two 180-degree panoramas. Output pixel ``(i, j)`` is sampled at its centre; ``y`` is up in the formulas.
+elevation, both linearly, with azimuth running the way a person turning right looks (smaller on a ceiling or floor mount, larger on a wall mount). A double panorama stacks two
+180-degree panoramas, the second continuing where the first ends. Output pixel ``(i, j)`` is sampled at its centre; ``y`` is up in the formulas.
 """
 from __future__ import annotations
 
@@ -117,14 +118,17 @@ def rays(mount: str, view: View, width: int, height: int) -> np.ndarray:
         ray /= np.linalg.norm(ray, axis=-1, keepdims=True)
         return ray @ view_matrix(mount, view.pan, view.tilt).T
     top, bottom = ELEVATION_RANGE[mount]
+    # A person turning right looks at a smaller azimuth on a ceiling or floor mount (azimuth grows counter-clockwise seen from above) and a larger one on a wall mount,
+    # so a panorama runs towards smaller azimuths to the right on the first two: it agrees with a virtual view looking at the same place.
+    sign = 1.0 if mount == "wall" else -1.0
     if view.mode == "panorama":
         span = AZIMUTH_SPAN[mount]
-        azimuth = view.pan + x * span / 2.0
+        azimuth = view.pan + sign * x * span / 2.0
         elevation = top + t * (bottom - top)
     elif view.mode == "double_panorama":
         strip = np.where(t < 0.5, 0, 1)
         within = np.where(t < 0.5, t * 2.0, t * 2.0 - 1.0)
-        azimuth = view.pan - 180.0 + strip * 180.0 + (x + 1.0) / 2.0 * 180.0
+        azimuth = view.pan + sign * (strip * 180.0 + (x + 1.0) / 2.0 * 180.0)
         elevation = top + within * (bottom - top)
     else:
         raise ValueError(f"Unknown mode {view.mode!r}")

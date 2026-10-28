@@ -46,7 +46,7 @@ export function LiveBrowser({ cameras, loading, error }: { cameras: Camera[] | u
   }
 
   function openView(view: SavedView) {
-    load(fromSaved(view, new Set(available.keys())), { name: view.name, scope: view.scope });
+    load(fromSaved(view, new Set(available.keys())), { name: view.name, scope: view.scope }, view.dewarp ?? {});
     reveal();
   }
 

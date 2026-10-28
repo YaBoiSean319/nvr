@@ -18,6 +18,7 @@ const LAYOUTS: { label: string; size: ManualSize }[] = [
 export function ViewBar({ role }: { role: Role }) {
   const arrangement = useLiveStore(store => store.arrangement);
   const view = useLiveStore(store => store.view);
+  const dewarp = useLiveStore(store => store.dewarp);
   const { markSaved, setLayout, load } = useLiveStore.getState();
   const dirty = useDirty();
   const cameraIds = useCameraIds();
@@ -43,7 +44,7 @@ export function ViewBar({ role }: { role: Role }) {
       </span>
       {canSave && dirty ? (
         <button type="button" className="button" disabled={save.isPending}
-                onClick={() => save.mutate({ name: view.name, scope: view.scope, layout: toSaved(arrangement) }, { onSuccess: () => markSaved(view) })}>
+                onClick={() => save.mutate({ name: view.name, scope: view.scope, layout: toSaved(arrangement, dewarp) }, { onSuccess: () => markSaved(view) })}>
           Save
         </button>
       ) : null}
@@ -92,14 +93,14 @@ export function ViewBar({ role }: { role: Role }) {
         <button type="button" className="button" data-variant="danger" disabled={remove.isPending}
                 onClick={() => {
                   if (window.confirm(`Delete the view “${view.name}”? Cameras stay on screen.`)) {
-                    remove.mutate(view, { onSuccess: () => load(arrangement, null) });
+                    remove.mutate(view, { onSuccess: () => load(arrangement, null, dewarp) });
                   }
                 }}>
           Delete view
         </button>
       ) : null}
       {error ? <span className="view-error" role="alert">{error instanceof ApiError ? error.detail : "The view could not be changed."}</span> : null}
-      <SaveAsDialog open={saveAs} onOpenChange={setSaveAs} arrangement={arrangement} role={role} existing={views.data ?? []}
+      <SaveAsDialog open={saveAs} onOpenChange={setSaveAs} arrangement={arrangement} dewarp={dewarp} role={role} existing={views.data ?? []}
                     onSaved={saved => markSaved(saved)} />
     </div>
   );

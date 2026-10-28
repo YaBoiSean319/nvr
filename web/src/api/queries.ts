@@ -4,6 +4,7 @@ import { forgetThisDevice } from "@/features/alarms/pushDevice";
 import { isNativeApp } from "@/native/platform";
 import { disableNativePush } from "@/native/push";
 import { forgetThisPhone, resumeFromSecureStorage } from "@/native/session";
+import type { Lens } from "@/features/dewarp/geometry";
 import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, RedactionEdit, RedactionReview, SavedView, ThemePreference } from "./types";
 
 export const keys = {
@@ -246,6 +247,15 @@ export function useDeleteView() {
     mutationFn: ({ name, scope }: { name: string; scope: SavedView["scope"] }) =>
       api<void>(`/api/live/${scope === "shared" ? "shared-layouts" : "layouts"}/${encodeURIComponent(name)}`, { method: "DELETE" }),
     onSuccess: () => client.invalidateQueries({ queryKey: viewKeys.views }),
+  });
+}
+
+/** The lens of every fisheye camera this person may see, by camera id: what lets Live dewarp it. */
+export function useLenses() {
+  return useQuery({
+    queryKey: ["cameras", "lenses"] as const,
+    queryFn: ({ signal }) => api<{ lenses: Record<string, Lens> }>("/api/cameras/lenses", { signal }).then(result => result.lenses),
+    staleTime: 60_000,
   });
 }
 

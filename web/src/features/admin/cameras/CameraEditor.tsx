@@ -14,6 +14,7 @@ import { HealthTab } from "./HealthTab";
 import { MotionTab } from "./MotionTab";
 import { NeighboursTab } from "./NeighboursTab";
 import { PrivacyTab } from "./PrivacyTab";
+import { LensTab } from "./LensTab";
 import { PtzTab } from "./PtzTab";
 import { RecordingTab } from "./RecordingTab";
 import { ScheduleTab } from "./ScheduleTab";
@@ -28,6 +29,7 @@ export const TAB_LABEL: Record<EditorTab, string> = {
   motion: "Motion",
   ai: "AI",
   ptz: "PTZ",
+  lens: "Lens (360°)",
   privacy: "Privacy",
   neighbours: "Neighbours",
   schedule: "Schedule & Retention",
@@ -44,6 +46,7 @@ const CONTENT: TabContent = {
   motion: (camera, admin) => <MotionTab key={camera.id} camera={camera} admin={admin} />,
   ai: (camera, admin) => <AiTab key={camera.id} camera={camera} admin={admin} />,
   ptz: (camera, admin) => <PtzTab key={camera.id} camera={camera} admin={admin} />,
+  lens: (camera, admin) => <LensTab key={camera.id} camera={camera} admin={admin} />,
   privacy: (camera, admin) => <PrivacyTab key={camera.id} camera={camera} admin={admin} />,
   neighbours: (camera, admin) => <NeighboursTab key={camera.id} camera={camera} admin={admin} />,
   schedule: (camera, admin) => <ScheduleTab key={camera.id} camera={camera} admin={admin} />,

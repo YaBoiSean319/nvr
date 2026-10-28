@@ -441,7 +441,8 @@ class ExportJobTests(unittest.TestCase):
         self.assertIn("FFmpeg is unavailable", failed["error"])
 
     def test_jobs_are_authenticated_scoped_and_cancelable(self):
-        job_id = self._create()
+        # Recorded but not handed to the worker (it would start at once and be running, not queued, by the time the cancel arrives); the poll would not pick it up for a second.
+        job_id = create_export_record(self.user_id, [self.camera], datetime.fromisoformat("2026-10-20T09:59:59.500000+00:00"), datetime.fromisoformat("2026-10-20T10:00:00.800000+00:00"))
         own = self.client.get(f"/api/exports/{job_id}")
         self.assertEqual(own.status_code, 200)
         app.dependency_overrides[current_user] = lambda: principal(self.other_user_id, "second", "operator")

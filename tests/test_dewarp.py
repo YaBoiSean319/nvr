@@ -108,18 +108,28 @@ class GeometryTests(unittest.TestCase):
         self.assertTrue(left_tint(-128)[2] > 240 and left_tint(-128)[0] < 200)  # Blue
         self.assertTrue(left_tint(-38)[0] > 240 and left_tint(-38)[1] > 240 and left_tint(-38)[2] < 190)  # Yellow
 
+    def test_a_panorama_and_a_virtual_view_agree_which_side_is_which(self):
+        # Standing under a ceiling camera and looking towards azimuth 90 degrees, red (0-90) is on the right and green (90-180) on the left; the panorama says the same.
+        view = dewarp.render(frame(), dewarp.Lens(), dewarp.View("view", 90, -25, 60))
+        self.assertTrue(view[360, 200, 1] > 240 and view[360, 200, 0] < 200)  # Left: green
+        self.assertTrue(view[360, 1080, 0] > 240 and view[360, 1080, 1] < 200)  # Right: red
+        strip = dewarp.render(frame(), dewarp.Lens(), dewarp.View("panorama", 90))
+        # Centred on 90 degrees: left of centre is larger azimuths (green), right is smaller (red)
+        self.assertTrue(strip[60, 700 - 200, 1] > 240 and strip[60, 700 - 200, 0] < 200)
+        self.assertTrue(strip[60, 960 + 200, 0] > 240 and strip[60, 960 + 200, 1] < 200)
+
     def test_a_double_panorama_is_two_half_circles_one_above_the_other(self):
         out = dewarp.render(frame(), dewarp.Lens(), dewarp.View("double_panorama", 0))
         self.assertEqual(out.shape[:2], (720, 1280))
         top, bottom = grey(out)[:360], grey(out)[360:]
-        # The top strip starts at -180 degrees and the bottom one at 0: the stripes of each sit 15 degrees apart over a half circle.
+        # The strips run towards smaller azimuths to the right: the top one from 0 to -180 degrees, the bottom one on from -180 to -360. Each has its stripes 15 degrees apart.
         top_rows = [dark_centres(top[row]) for row in (20, 70, 120)]
         bottom_rows = [dark_centres(bottom[row]) for row in (20, 70, 120)]
         self.assertEqual((len(top_rows[0]), len(bottom_rows[0])), (11, 11), (top_rows[0], bottom_rows[0]))
         self.assertLess(drift(top_rows, 11), 1.5)
         self.assertLess(drift(bottom_rows, 11), 1.5)
-        self.assertGreater(out[100, 100, 2], 240)  # Top strip: blue (180-270 degrees) at the left (it starts at -180 degrees)
-        self.assertTrue(out[460, 100, 0] > 240 and out[460, 100, 1] < 200)  # Bottom strip: red (0-90) at the left
+        self.assertTrue(out[100, 100, 0] > 240 and out[100, 100, 1] > 240 and out[100, 100, 2] < 190)  # Top strip: yellow (270-360 degrees, just below 0) at the left
+        self.assertTrue(out[460, 100, 1] > 240 and out[460, 100, 0] < 200)  # Bottom strip: green (90-180, just above -180) at the left
 
     def test_a_wall_mounted_and_a_floor_mounted_lens_dewarp_straight_too(self):
         # Wall: its optical axis is horizontal; the floor grid is below the picture's horizon, the walls' stripes are vertical.
