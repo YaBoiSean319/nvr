@@ -72,6 +72,13 @@ def resume_device_session(payload: ResumeRequest, response: Response, request: R
     return {"username": resumed["username"], "role": resumed["role"], "token": resumed["token"], "expires_at": resumed["expires_at"]}
 
 
+@router.post("/api/native/device-sessions/revoke", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_by_secret(payload: ResumeRequest, user: CurrentUser) -> Response:
+    """The phone signing out: forget the session this secret belongs to (always 204, so it says nothing about secrets)."""
+    device_sessions.revoke_token(int(user["id"]), payload.token)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/api/native/device-sessions")
 def list_device_sessions(user: CurrentUser) -> dict[str, object]:
     return {"sessions": device_sessions.listing(int(user["id"]))}

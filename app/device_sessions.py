@@ -81,6 +81,12 @@ def revoke(user_id: int, session_id: str) -> bool:
         return db.execute("DELETE FROM device_sessions WHERE id=? AND user_id=?", (session_id, user_id)).rowcount > 0
 
 
+def revoke_token(user_id: int, token: str) -> bool:
+    """End the session this secret belongs to (the phone signing itself out), if it is this person's."""
+    with connect() as db:
+        return db.execute("DELETE FROM device_sessions WHERE token_hash=? AND user_id=?", (token_digest(token), user_id)).rowcount > 0
+
+
 def _json(text: str) -> str:
     import json
     return json.dumps(text)

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>NVR</title>
+  <link rel="stylesheet" href="connect.css">
+</head>
+<body>
+  <main>
+    <h1>NVR</h1>
+    <p id="status" role="status">Starting…</p>
+    <form id="connect" hidden>
+      <label for="address">Address of your NVR</label>
+      <input id="address" name="address" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://nvr.example.com" required>
+      <p class="hint">Use the address you open the NVR at in a browser, or the one your tunnel gives it.</p>
+      <button type="submit">Connect</button>
+    </form>
+    <p id="problem" role="alert" hidden></p>
+  </main>
+  <script src="connect.js"></script>
+</body>
+</html>

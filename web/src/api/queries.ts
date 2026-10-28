@@ -1,6 +1,9 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
 import { forgetThisDevice } from "@/features/alarms/pushDevice";
+import { isNativeApp } from "@/native/platform";
+import { disableNativePush } from "@/native/push";
+import { forgetThisPhone, resumeFromSecureStorage } from "@/native/session";
 import type { Branding, MfaChallenge, Camera, CameraGroup, DisplaySettings, ExportJob, ExportRequest, Incident, LiveWorkspaceState, Me, PlaybackTimeline, RedactionEdit, RedactionReview, SavedView, ThemePreference } from "./types";
 
 export const keys = {
@@ -30,7 +33,11 @@ export function useMe(enabled = true) {
       try {
         return await api<Me>("/api/auth/me", { signal, quietUnauthorized: true });
       } catch (error) {
-        if (error instanceof ApiError && error.unauthorized) return null;
+        if (error instanceof ApiError && error.unauthorized) {
+          // The app signs back in with the secret in the phone's secure storage (the lock has already been passed to get here).
+          if (isNativeApp() && (await resumeFromSecureStorage())) return api<Me>("/api/auth/me", { signal, quietUnauthorized: true }).catch(() => null);
+          return null;
+        }
         throw error;
       }
     },
@@ -98,6 +105,7 @@ export function useSignOut() {
     mutationFn: async () => {
       // A shared device should stop getting the previous person's alarms; never let this block signing out.
       await forgetThisDevice().catch(() => undefined);
+      if (isNativeApp()) await Promise.all([disableNativePush().catch(() => undefined), forgetThisPhone().catch(() => undefined)]);
       return api<void>("/api/auth/logout", { method: "POST" });
     },
     onSettled: () => {

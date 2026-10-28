@@ -1,0 +1,9 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; min-height: 100dvh; display: grid; place-items: center; background: #f4f6f8; color: #14202b; }
+@media (prefers-color-scheme: dark) { body { background: #10161c; color: #e6edf3; } input { background: #1b2530; color: inherit; } }
+main { width: min(26rem, 100% - 2rem); padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+label { display: block; font-weight: 600; margin-bottom: .4rem; }
+input { width: 100%; box-sizing: border-box; font-size: 1rem; padding: .7rem; border: 1px solid #8795a1; border-radius: .5rem; }
+button { margin-top: 1rem; width: 100%; font-size: 1rem; padding: .8rem; border: 0; border-radius: .5rem; background: #1f6feb; color: #fff; }
+.hint { font-size: .85rem; opacity: .75; }
+#problem { color: #c0392b; }

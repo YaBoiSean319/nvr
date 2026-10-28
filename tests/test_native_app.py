@@ -263,6 +263,14 @@ class DeviceSessionTests(NativeCase):
         self.assertEqual(self.limited.delete(f"/api/native/device-sessions/{fresh['id']}").status_code, 204)
         self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": fresh["token"]}).status_code, 401)
 
+    def test_a_phone_signs_itself_out_by_its_secret_and_only_its_own(self):
+        mine = self.limited.post("/api/native/device-sessions", json={"device_label": "Mine"}).json()["token"]
+        theirs = self.full.post("/api/native/device-sessions", json={"device_label": "Theirs"}).json()["token"]
+        self.assertEqual(self.limited.post("/api/native/device-sessions/revoke", json={"token": theirs}).status_code, 204)
+        self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": theirs}).status_code, 200)  # Not another person's
+        self.assertEqual(self.limited.post("/api/native/device-sessions/revoke", json={"token": mine}).status_code, 204)
+        self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": mine}).status_code, 401)
+
     def test_anything_that_is_not_a_live_secret_is_the_same_401(self):
         for token in ("nvrd_" + "x" * 43, "x" * 50, "nvrd_", "y" * 30):
             self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": token}).status_code, 401)
