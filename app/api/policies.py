@@ -15,7 +15,8 @@ from app.access import EVERYTHING, Access
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.scheduling import effective_policy, validate_schedule
-from app.retention import coverage_summary, effective_retention
+from app import notices
+from app.retention import coverage_summary, effective_purpose, effective_retention
 from app.storage import assign_group_volume, configured_volumes, refresh_registry, storage_status
 from app.incidents import sync_storage_incidents
 from app.request_validation import normalize_required_group_name
@@ -40,6 +41,8 @@ class CameraGroupMembershipRequest(BaseModel):
 
 class RetentionRequest(BaseModel):
     retention_days: int = Field(ge=1, le=3650)
+    purpose: str | None = Field(default=None, max_length=300)  # Left out, what is saved is kept
+    legal_basis: str | None = Field(default=None, max_length=300)
 
 
 class StorageAssignmentRequest(BaseModel):
@@ -185,8 +188,10 @@ def get_group_retention(group_id: str, _: CurrentUser) -> dict[str, object]:
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
-        row = db.execute("SELECT retention_days,updated_at FROM retention_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,)).fetchone()
-    return {"group_id": group_id, "configured": row is not None, "retention_days": int(row["retention_days"]) if row else 30, "policy_source": "group" if row else "default", "updated_at": row["updated_at"] if row else None}
+        row = db.execute("SELECT retention_days,purpose,legal_basis,updated_at FROM retention_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,)).fetchone()
+        required = notices.settings(db)["require_purpose"]
+    return {"group_id": group_id, "configured": row is not None, "retention_days": int(row["retention_days"]) if row else 30, "policy_source": "group" if row else "default", "updated_at": row["updated_at"] if row else None,
+            "purpose": row["purpose"] if row else "", "legal_basis": row["legal_basis"] if row else "", "needs_purpose": bool(row and required and not row["purpose"].strip())}
 
 
 @router.put("/api/camera-groups/{group_id}/retention")
@@ -194,7 +199,13 @@ def set_group_retention(group_id: str, payload: RetentionRequest, _: Administrat
     with connect() as db:
         if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera group not found")
-        db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days) VALUES('group',?,?) ON CONFLICT(scope_type,scope_id) DO UPDATE SET retention_days=excluded.retention_days,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", (group_id,payload.retention_days))
+        saved = db.execute("SELECT purpose,legal_basis FROM retention_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,)).fetchone()
+        try:
+            purpose, legal_basis = notices.check_policy_text(db, saved["purpose"] if saved and payload.purpose is None else payload.purpose or "",
+                                                             saved["legal_basis"] if saved and payload.legal_basis is None else payload.legal_basis or "")
+        except notices.NoticeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days,purpose,legal_basis) VALUES('group',?,?,?,?) ON CONFLICT(scope_type,scope_id) DO UPDATE SET retention_days=excluded.retention_days,purpose=excluded.purpose,legal_basis=excluded.legal_basis,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", (group_id,payload.retention_days,purpose,legal_basis))
     return get_group_retention(group_id, _=None)
 
 
@@ -215,7 +226,9 @@ def get_camera_retention(camera_id: str, _: CurrentUser) -> dict[str, object]:
         days, source = effective_retention(db, camera_id)
         summary = coverage_summary(db, camera_id)
         local = db.execute("SELECT 1 FROM retention_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,)).fetchone()
-    return {"camera_id": camera_id, "inherits_group": local is None, **summary, "policy_source": source}
+        purpose, legal_basis = effective_purpose(db, camera_id)
+        needs_purpose = notices.settings(db)["require_purpose"] and not purpose.strip()
+    return {"camera_id": camera_id, "inherits_group": local is None, **summary, "policy_source": source, "purpose": purpose, "legal_basis": legal_basis, "needs_purpose": needs_purpose}
 
 
 @router.put("/api/cameras/{camera_id}/retention")
@@ -223,7 +236,13 @@ def set_camera_retention(camera_id: str, payload: RetentionRequest, _: Administr
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
-        db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days) VALUES('camera',?,?) ON CONFLICT(scope_type,scope_id) DO UPDATE SET retention_days=excluded.retention_days,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", (camera_id,payload.retention_days))
+        saved = db.execute("SELECT purpose,legal_basis FROM retention_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,)).fetchone()
+        try:
+            purpose, legal_basis = notices.check_policy_text(db, saved["purpose"] if saved and payload.purpose is None else payload.purpose or "",
+                                                             saved["legal_basis"] if saved and payload.legal_basis is None else payload.legal_basis or "")
+        except notices.NoticeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days,purpose,legal_basis) VALUES('camera',?,?,?,?) ON CONFLICT(scope_type,scope_id) DO UPDATE SET retention_days=excluded.retention_days,purpose=excluded.purpose,legal_basis=excluded.legal_basis,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", (camera_id,payload.retention_days,purpose,legal_basis))
     return get_camera_retention(camera_id, _=None)
 
 

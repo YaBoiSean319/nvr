@@ -123,6 +123,32 @@ def effective_retention(db, camera_id: str) -> tuple[int, str]:
     return DEFAULT_RETENTION_DAYS, "default"
 
 
+def effective_purpose(db, camera_id: str) -> tuple[str, str]:
+    """(purpose, legal basis) of the retention policy that governs a camera: its own, its group's, or the site default's."""
+    camera = db.execute("SELECT group_id FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    scopes = [("camera", camera_id)] + ([("group", camera["group_id"])] if camera is not None and camera["group_id"] else [])
+    for scope_type, scope_id in scopes:
+        row = db.execute("SELECT purpose,legal_basis FROM retention_policy_overrides WHERE scope_type=? AND scope_id=?", (scope_type, scope_id)).fetchone()
+        # A policy saved only to change the days has no purpose of its own: the next one up supplies it.
+        if row and row["purpose"].strip():
+            return row["purpose"], row["legal_basis"]
+    row = db.execute("SELECT default_purpose,default_legal_basis FROM privacy_settings WHERE singleton_id=1").fetchone()
+    return (row["default_purpose"], row["default_legal_basis"]) if row else ("", "")
+
+
+def record_deletion(db, camera_id: str, size_bytes: int, starts_at: str, ends_at: str, now: datetime) -> None:
+    """Count one automatically deleted segment in the day's record for its camera (inside the transaction that deletes it)."""
+    days, _ = effective_retention(db, camera_id)
+    purpose, basis = effective_purpose(db, camera_id)
+    camera = db.execute("SELECT name FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    stamp = now.astimezone(timezone.utc).isoformat()
+    db.execute(
+        "INSERT INTO retention_deletions(camera_id,day,camera_name,segments,bytes,retention_days,purpose,legal_basis,oldest_deleted_at,newest_deleted_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(camera_id,day) DO UPDATE SET segments=segments+1,bytes=bytes+excluded.bytes,camera_name=excluded.camera_name,retention_days=excluded.retention_days,"
+        "purpose=excluded.purpose,legal_basis=excluded.legal_basis,oldest_deleted_at=MIN(oldest_deleted_at,excluded.oldest_deleted_at),newest_deleted_at=MAX(newest_deleted_at,excluded.newest_deleted_at)",
+        (camera_id, stamp[:10], camera["name"] if camera else camera_id, 1, max(0, int(size_bytes)), days, purpose, basis, starts_at, ends_at))
+
+
 def coverage_summary(db, camera_id: str, root: Path | None = None, now: datetime | None = None) -> dict[str, object]:
     root = (root or recordings_path()).resolve()
     now = now or datetime.now(timezone.utc)
@@ -225,6 +251,7 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                     skipped_leased+=1
                     continue
                 db.execute("DELETE FROM recording_segments WHERE id=?", (row["id"],))
+                record_deletion(db,current["camera_id"],int(current["size_bytes"]),current["starts_at"],current["ends_at"],now)
             removed_segments += 1
             removed_bytes += int(current["size_bytes"])
         except (OSError,sqlite3.Error):

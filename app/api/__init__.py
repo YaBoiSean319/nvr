@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import access_grants, ai_settings, alarms, alerts, automation, backups, cameras, coverage, detections, export_jobs, footage, identity, installable, mfa, live_alarms, footage_chain, live_media, privacy, ptz, live_views, onboarding, operations, playback, policies, push, rules, site_settings, system, tamper, viewing_audit, scrape, disks, hardening, camera_inspect, capabilities, search, cases, redaction, backfill, remote_access, insights, digests, camera_health, external_events
+from . import access_grants, ai_settings, alarms, alerts, automation, backups, cameras, coverage, detections, export_jobs, footage, identity, installable, mfa, live_alarms, footage_chain, live_media, privacy, ptz, live_views, onboarding, operations, playback, policies, push, rules, site_settings, system, tamper, viewing_audit, scrape, disks, hardening, camera_inspect, capabilities, search, cases, redaction, backfill, remote_access, insights, digests, camera_health, external_events, notices
 
 ROUTERS: tuple[APIRouter, ...] = (
     system.router,
@@ -22,6 +22,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     digests.router,
     camera_health.router,
     external_events.router,
+    notices.router,
     cases.router,
     automation.router,
     site_settings.router,
