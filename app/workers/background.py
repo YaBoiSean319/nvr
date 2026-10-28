@@ -1,10 +1,16 @@
-"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat and configuration backups."""
+"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat, configuration backups, event digests, camera health, building-system events and Home Assistant, and the multi-site console's site health, and the failover recorder's lease, configuration copy and takeover."""
 from __future__ import annotations
 
 from app.backup import BackupManager
+from app.camera_health import HealthManager
 from app.capabilities import CapabilityManager
+from app.console import ConsoleManager
+from app.digests import DigestManager
+from app.external_events import ExternalEventManager
+from app.failover import FailoverManager
 from app.hardening import HardeningManager
 from app.heartbeat import HeartbeatManager
+from app.home_assistant import HomeAssistantManager
 from app.push import PushManager
 from app.footage_chain import FootageChainManager
 from app.ptz import PtzTourManager
@@ -26,6 +32,12 @@ class BackgroundService:
         self.capabilities = CapabilityManager()
         self.heartbeat = HeartbeatManager()
         self.backups = BackupManager()
+        self.digests = DigestManager()
+        self.camera_health = HealthManager()
+        self.external_events = ExternalEventManager()
+        self.home_assistant = HomeAssistantManager()
+        self.console = ConsoleManager()
+        self.failover = FailoverManager()
 
     async def start(self) -> None:
         await self.webhooks.start()
@@ -38,8 +50,20 @@ class BackgroundService:
         await self.capabilities.start()
         await self.heartbeat.start()
         await self.backups.start()
+        await self.digests.start()
+        await self.camera_health.start()
+        await self.external_events.start()
+        await self.home_assistant.start()
+        await self.console.start()
+        await self.failover.start()
 
     async def stop(self) -> None:
+        await self.failover.stop()
+        await self.console.stop()
+        await self.home_assistant.stop()
+        await self.external_events.stop()
+        await self.camera_health.stop()
+        await self.digests.stop()
         await self.backups.stop()
         await self.heartbeat.stop()
         await self.capabilities.stop()

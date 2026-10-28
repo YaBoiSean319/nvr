@@ -67,6 +67,12 @@ function seedSearchTracks() {
   return JSON.parse(result.stdout);
 }
 
+/** Put the fixture NVR into a failover state: "takeover" makes it a standby that took over two minutes ago. */
+function seedFailover(state) {
+  const result = spawnSync("python", ["-m", "tests.browser.seed_failover", state], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
+  assert.equal(result.status, 0, `seeding failover failed: ${result.stderr || result.stdout}`);
+}
+
 /** With no arguments, four plate reads (with crops) on cameras 1 and 2, newest first AB12CDE, AB1ZCDE, KT55QRS, ZZ99ZZZ; seedPlates("read", plate, camera) stores one more read now, raising the rules that watch it. */
 function seedPlates(...read) {
   const result = spawnSync("python", ["-m", "tests.browser.seed_plates", ...read.map(String)], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
@@ -167,4 +173,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedDigest, seedHealth, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedDigest, seedHealth, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

@@ -24,10 +24,12 @@ REASONS = {
     "recording_disabled": "Recording disabled",
     "worker_restart": "Recorder restarting",
     "no_motion": "No motion",
+    "failover_standby": "Standby (the primary records)",
+    "failover_yield": "Held for the standby",
     "unknown": "Unknown",
 }
 # Gaps the camera's policy expects: they do not count against its coverage.
-EXPECTED = frozenset({"outside_schedule", "recording_disabled", "no_motion"})
+EXPECTED = frozenset({"outside_schedule", "recording_disabled", "no_motion", "failover_standby", "failover_yield"})
 STREAM_FAULTS = frozenset({"camera_offline", "stream_error", "disk_unavailable"})
 REPORT_GAPS = 5
 
@@ -42,6 +44,8 @@ def reason_code(camera: sqlite3.Row | dict[str, Any], policy: dict[str, Any], he
         return None
     if not camera["enabled"] or not camera["recording_enabled"]:
         return "recording_disabled"
+    if policy.get("held"):
+        return str(policy["held"])
     if policy["mode"] == "disabled":
         return "outside_schedule" if policy.get("scheduled") else "recording_disabled"
     if health["state"] == "expected_idle":
@@ -76,6 +80,8 @@ def timeline(db: sqlite3.Connection, camera_id: str, start: datetime, end: datet
     found = gaps(coverage, spans, start, end)
     from . import backfill
     backfill.annotate_gaps(db, camera_id, found)  # What is being done about each outage: filled from the camera's own recording, waiting, or why not
+    from . import failover
+    failover.annotate_gaps(db, found)  # Time before a standby took over, and what that means
     return {"segments": [dict(row) for row in segments], "coverage": coverage, "gaps": found}
 
 

@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app import backup, logforward, migrations
+from app import backup, failover, logforward, migrations
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
@@ -171,6 +171,7 @@ def main() -> int:
         migrations.pre_migration_hooks.append(backup.pre_migration_backup)
     initialize()
     backup.reconcile_after_restore()
+    failover.prepare_startup()  # A primary does not record until it has heard from the standby
     supervisor = Supervisor([
         Worker("recorder", "app.workers.recorder"),
         Worker("exporter", "app.workers.exporter"),

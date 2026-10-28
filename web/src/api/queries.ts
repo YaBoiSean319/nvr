@@ -292,3 +292,18 @@ export function useConsoleStatus() {
     staleTime: 10_000,
   });
 }
+
+export interface FailoverStatus {
+  role: "off" | "primary" | "standby"; headline: string; recording_held: string | null; peer_state: string | null; last_contact_at: string | null;
+  takeover_active: boolean; takeover_started_at: string | null; epoch: number; last_error: string | null; last_sync_at: string | null; last_sync_error: string | null; config_created_at: string | null;
+}
+
+/** Where failover stands on this NVR (a primary, a standby, or off), for the status area. */
+export function useFailoverStatus() {
+  return useQuery({
+    queryKey: ["failover", "status"],
+    queryFn: ({ signal }) => api<FailoverStatus>("/api/failover/status", { signal }),
+    refetchInterval: 10_000,
+    staleTime: 5_000,
+  });
+}

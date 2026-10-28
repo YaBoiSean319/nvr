@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router";
 import { create } from "zustand";
 import { ApiError } from "@/api/client";
-import { useAcknowledgeIncident, useCameras, useConsoleStatus, useExportJobs, useOpenIncidents, type ConsoleSite } from "@/api/queries";
+import { useAcknowledgeIncident, useCameras, useConsoleStatus, useExportJobs, useFailoverStatus, useOpenIncidents, type ConsoleSite, type FailoverStatus } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { Drawer } from "@/components/Drawer";
 import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
@@ -12,7 +12,7 @@ import { usePlaybackStore } from "@/features/playback/store";
 import { formatRelative } from "@/lib/time";
 import { summarize, type StatusSummary, type Tone } from "./summary";
 
-type Section = "video" | "recording" | "incidents" | "jobs" | "sites";
+type Section = "video" | "recording" | "incidents" | "jobs" | "sites" | "failover";
 
 /** Which part of the status drawer is open; other workspaces can open it (for example, export jobs). */
 export const useStatusPanel = create<{ section: Section | null; show: (section: Section | null) => void }>(set => ({
@@ -52,6 +52,16 @@ function useLinkFromAddress() {
   }, [navigate]);
 }
 
+function failoverTone(status: FailoverStatus): Tone {
+  if (status.role === "standby") return status.takeover_active ? "bad" : status.last_sync_error ? "warn" : "good";
+  return status.peer_state === "ok" ? "good" : status.peer_state === "unreachable" || status.peer_state === "refused" || status.peer_state === "error" ? "warn" : "warn";
+}
+
+function failoverLabel(status: FailoverStatus): string {
+  if (status.role === "standby") return status.takeover_active ? "Failover: standby recording" : "Failover: standby";
+  return status.peer_state === "ok" ? "Failover: standby watching" : status.peer_state === "handback" ? "Failover: bringing footage back" : "Failover: check standby";
+}
+
 function Chip({ tone, label, onClick }: { tone: Tone; label: string; onClick: () => void }) {
   return (
     <button type="button" className="status-chip" onClick={onClick}>
@@ -67,6 +77,7 @@ export function StatusArea() {
   const incidents = useOpenIncidents();
   const jobs = useExportJobs();
   const consoleStatus = useConsoleStatus();
+  const failover = useFailoverStatus().data;
   const sites = consoleStatus.data?.enabled ? consoleStatus.data.sites : [];
   const downSites = sites.filter(site => site.state === "unreachable" || site.state === "refused");
   const section = useStatusPanel(state => state.section);
@@ -88,6 +99,7 @@ export function StatusArea() {
         <Chip tone={summary.incidents.tone} label={summary.incidents.label} onClick={() => setSection("incidents")} />
         <Chip tone={summary.jobs.tone} label={summary.jobs.label} onClick={() => setSection("jobs")} />
         {sites.length ? <Chip tone={downSites.length ? "bad" : "good"} label={downSites.length ? `Sites: ${downSites.length} unreachable` : `Sites: ${sites.length} reachable`} onClick={() => setSection("sites")} /> : null}
+        {failover && failover.role !== "off" ? <Chip tone={failoverTone(failover)} label={failoverLabel(failover)} onClick={() => setSection("failover")} /> : null}
         <Chip tone={counts?.new ? "bad" : openAlarms ? "warn" : "good"} label={alarmLabel} onClick={() => inbox.setOpen(true)} />
       </div>
       <Drawer open={inbox.open} onOpenChange={inbox.setOpen} title="Alarms"
@@ -96,7 +108,7 @@ export function StatusArea() {
       </Drawer>
       <Drawer open={section !== null} onOpenChange={open => !open && setSection(null)} title="Operational status"
               description="Live video health and recording health are reported separately; a live picture does not prove footage is being written.">
-        <StatusDetails summary={summary} focus={section} sites={sites} />
+        <StatusDetails summary={summary} focus={section} sites={sites} failover={failover} />
       </Drawer>
     </>
   );
@@ -116,7 +128,7 @@ function CameraList({ cameras, empty }: { cameras: Camera[]; empty: string }) {
   );
 }
 
-function StatusDetails({ summary, focus, sites }: { summary: StatusSummary; focus: Section | null; sites: ConsoleSite[] }) {
+function StatusDetails({ summary, focus, sites, failover }: { summary: StatusSummary; focus: Section | null; sites: ConsoleSite[]; failover: FailoverStatus | undefined }) {
   const acknowledge = useAcknowledgeIncident();
   return (
     <div className="status-details">
@@ -167,6 +179,17 @@ function StatusDetails({ summary, focus, sites }: { summary: StatusSummary; focu
               </li>
             ))}
           </ul>
+        </section>
+      ) : null}
+      {failover && failover.role !== "off" ? (
+        <section aria-labelledby="status-failover" data-focused={focus === "failover"}>
+          <h3 id="status-failover">Failover</h3>
+          <p>{failover.headline}</p>
+          <p className="muted">
+            {failover.role === "standby" ? `Last heard from the primary ${failover.last_contact_at ? formatRelative(failover.last_contact_at) : "never"}` : `Last answer from the standby ${failover.last_contact_at ? formatRelative(failover.last_contact_at) : "never"}`}
+            {failover.role === "standby" ? ` · configuration copied ${failover.last_sync_at ? formatRelative(failover.last_sync_at) : "never"}` : ""}
+            {failover.last_error ? ` · ${failover.last_error}` : ""}{failover.last_sync_error ? ` · ${failover.last_sync_error}` : ""}
+          </p>
         </section>
       ) : null}
       <section aria-labelledby="status-jobs" data-focused={focus === "jobs"}>

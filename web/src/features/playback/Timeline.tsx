@@ -125,6 +125,7 @@ export function Timeline({ settings, range, cameraIds, cameras, timeline, loadin
         <ul className="timeline-legend" aria-label="Timeline legend">
           <li><i data-mark="recording" />Recording</li>
           <li><i data-mark="backfilled" />Backfilled from the camera</li>
+          <li><i data-mark="failover" />Recorded by the standby NVR</li>
           <li><i data-mark="missing" />No recording</li>
           <li><i data-mark="failure" />Failure</li>
           <li><i data-mark="uncertain" />Uncertain</li>
@@ -181,14 +182,15 @@ function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWin
       {row.segments.map(segment => {
         const span = visibleSpan(at(segment.starts_at), at(segment.ends_at), window);
         const backfilled = segment.source === "backfill";
-        return span ? <span key={`s${segment.id}`} className="timeline-mark" data-mark={backfilled ? "backfilled" : "recording"}
-                            title={`${backfilled ? "Backfilled from the camera's own recording" : "Recording"} ${describe(at(segment.starts_at), at(segment.ends_at))}`}
+        const standby = segment.source === "failover";
+        return span ? <span key={`s${segment.id}`} className="timeline-mark" data-mark={backfilled ? "backfilled" : standby ? "failover" : "recording"}
+                            title={`${backfilled ? "Backfilled from the camera's own recording" : standby ? "Recorded by the standby NVR while the primary was down" : "Recording"} ${describe(at(segment.starts_at), at(segment.ends_at))}`}
                             style={{ left: `${span.left}%`, width: `${span.width}%` }} /> : null;
       })}
       {row.gaps.map(gap => {
         const span = visibleSpan(at(gap.starts_at), at(gap.ends_at), window);
         return span ? <span key={`g${gap.starts_at}`} className="timeline-mark" data-mark={gap.state} data-reason={gap.reason_code}
-                            title={`${GAP_LABEL[gap.state] ?? gap.state}: ${REASON_LABEL[gap.reason_code] ?? gap.reason_code}. ${gap.reason}${gap.backfill ? ` Backfill ${gap.backfill.state}${gap.backfill.message ? `: ${gap.backfill.message}` : ""}.` : ""} (${describe(at(gap.starts_at), at(gap.ends_at))})`}
+                            title={`${GAP_LABEL[gap.state] ?? gap.state}: ${REASON_LABEL[gap.reason_code] ?? gap.reason_code}. ${gap.reason}${gap.backfill ? ` Backfill ${gap.backfill.state}${gap.backfill.message ? `: ${gap.backfill.message}` : ""}.` : ""}${gap.failover ? ` ${gap.failover.message}.` : ""} (${describe(at(gap.starts_at), at(gap.ends_at))})`}
                             style={{ left: `${span.left}%`, width: `${span.width}%` }} /> : null;
       })}
       {row.ai_unanalyzed.map(interval => {

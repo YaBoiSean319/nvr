@@ -9,5 +9,7 @@ export const REASON_LABEL: Record<GapReason, string> = {
   recording_disabled: "Recording disabled",
   worker_restart: "Recorder restarting",
   no_motion: "No motion",
+  failover_standby: "Standby (the primary records)",
+  failover_yield: "Held for the standby",
   unknown: "Unknown",
 };
