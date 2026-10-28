@@ -19,7 +19,7 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
-from . import coverage, metrics, tamper, viewing_audit
+from . import camera_health, coverage, metrics, tamper, viewing_audit
 from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
@@ -485,6 +485,7 @@ class RecordingManager:
             db.execute("UPDATE cameras SET motion_source_status=?,server_motion_status=?,last_error=NULL WHERE id=?",
                        ("connecting" if row["motion_service_url"] else "unsupported", "waiting" if fallback_enabled else "disabled", camera_id))
         event_task: asyncio.Task[None] | None = None
+        progress_task: asyncio.Task[None] | None = None
         fallback_task: asyncio.Task[None] | None = None
         proc: asyncio.subprocess.Process | None = None
         source_state = {"value": "connecting" if row["motion_service_url"] else "unsupported"}
@@ -493,7 +494,7 @@ class RecordingManager:
             list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
             audio_args = audio_recording_args(bool(row["audio_enabled"]))
             args = [
-                executable, "-hide_banner", "-nostats", "-loglevel", "error",
+                executable, "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
                 "-i", "pipe:0", "-map", "0:v:0", *audio_args, "-c:v", "copy",
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", str(list_size),
@@ -501,8 +502,9 @@ class RecordingManager:
                 "-hls_segment_filename", str(spool / "segment-%06d.ts"), str(spool / "live.m3u8"),
             ]
             proc = await asyncio.create_subprocess_exec(
-                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
+            progress_task = asyncio.create_task(camera_health.watch_progress(proc.stdout, camera_id), name=f"progress-{camera_id}")
             if proc.stdin is None:
                 raise OSError("Unable to pass stream source to FFmpeg")
             proc.stdin.write(_manifest_bytes(source))
@@ -557,6 +559,9 @@ class RecordingManager:
                 db.execute("UPDATE cameras SET recording_status='reconnecting',motion_source_status='unavailable',last_error='Camera motion buffer could not start',stream_fault=? WHERE id=?",
                            (await _stream_fault(source), camera_id))
         finally:
+            if progress_task:
+                progress_task.cancel()
+                await asyncio.gather(progress_task, return_exceptions=True)
             if event_task:
                 event_task.cancel()
                 await asyncio.gather(event_task, return_exceptions=True)
@@ -695,7 +700,7 @@ class RecordingManager:
             self._set_status(camera_id, "connecting")
             audio_args = audio_recording_args(bool(row["audio_enabled"]))
             args = [
-                executable, "-hide_banner", "-nostats", "-loglevel", "error",
+                executable, "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
                 "-i", "pipe:0",
                 "-map", "0:v:0", *audio_args, "-c:v", "copy", "-f", "segment",
@@ -707,11 +712,13 @@ class RecordingManager:
             env = os.environ.copy()
             env["TZ"] = "UTC"
             process: asyncio.subprocess.Process | None = None
+            progress_task: asyncio.Task[None] | None = None
             try:
                 process = await asyncio.create_subprocess_exec(
-                    *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+                    *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL, env=env
                 )
+                progress_task = asyncio.create_task(camera_health.watch_progress(process.stdout, camera_id), name=f"progress-{camera_id}")
                 if process.stdin is None:
                     raise OSError("Unable to pass stream source to FFmpeg")
                 process.stdin.write(_manifest_bytes(source))
@@ -763,4 +770,8 @@ class RecordingManager:
             except OSError:
                 failures += 1
                 self._set_status(camera_id, "reconnecting", "Camera stream could not start; retrying", fault=await _stream_fault(source))
+            finally:
+                if progress_task:
+                    progress_task.cancel()
+                    await asyncio.gather(progress_task, return_exceptions=True)
             await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
