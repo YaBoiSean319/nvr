@@ -8,6 +8,7 @@ snapshot stream just because a camera sends H.265; that only happens if both pas
 
 - One conversion is shared by every viewer of the same stream, and counts once toward `MAX_LIVE_TRANSCODES` (4). A
   fifth different stream is refused with "busy" until one ends. Privacy-masked streams are already re-encoded and are not counted.
+- A camera's low-quality stream, whose codec is not recorded, is converted whenever the camera is H.265 and the browser is not given H.265 as it is.
 - The tile reads "converted" when the video was converted on the server.
 
 ## Recorded video
@@ -28,7 +29,7 @@ export rendering and AI decoding.
 | `NVR_HWACCEL=nvenc|qsv|vaapi` | Try only that backend |
 | `NVR_VAAPI_DEVICE` | Render device, default the first `/dev/dri/renderD*` |
 
-If an accelerated job fails, it is redone in software and acceleration stays off until restart; Settings > General >
+If an accelerated job fails, it is redone in software; if that works, acceleration stays off until restart (a failure in both is the camera or file, not the device); Settings > General >
 System status shows the reason. In a container, pass the device in (`devices: ["/dev/dri:/dev/dri"]` for Intel/AMD, or the
 NVIDIA container runtime) and make sure the FFmpeg in the image has the encoder.
 

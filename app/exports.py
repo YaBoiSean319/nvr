@@ -895,14 +895,18 @@ class ExportManager:
                 self._progress(job_id, 15 + round(55 * (camera["index"] + 1) / max(1, len(per_camera))))
 
             if "grid" in output_modes:
+                hardware_failure = None
                 for hardware in (True, False) if acceleration.selected() else (False,):
                     try:
                         await _render_grid(self, job_id, work_dir, per_camera, tile_camera_ids, union, grid_resolution, display_settings, hardware)
-                        break
                     except RuntimeError as exc:
                         if not hardware or job_id in self._cancelled:
                             raise
-                        acceleration.disable(str(exc))
+                        hardware_failure = str(exc)
+                        continue
+                    if hardware_failure:
+                        acceleration.disable(hardware_failure)
+                    break
                 if include_audio:
                     source_camera = next(camera for camera in per_camera if camera["camera_id"] == audio_camera_id)
                     audio_path = work_dir / "grid.m4a"
@@ -1022,15 +1026,19 @@ class ExportManager:
 
     async def _render(self, job_id: str, build: "Callable[[acceleration.Encoder, bool], list[str]]") -> None:
         """Run an FFmpeg render built for an encoder: on the graphics chip when there is one, and again in software if that fails."""
+        hardware_failure = None
         for hardware in (True, False) if acceleration.selected() else (False,):
             encoder = acceleration.encoder(crf=26, speed="ultrafast") if hardware else acceleration.build(None, crf=26, speed="ultrafast")
             try:
                 await self._run_ffmpeg(job_id, build(encoder, hardware))
-                return
             except RuntimeError as exc:
                 if not hardware or job_id in self._cancelled:
                     raise
-                acceleration.disable(str(exc))
+                hardware_failure = str(exc)  # Maybe the device did not work: redo it in software
+                continue
+            if hardware_failure:
+                acceleration.disable(hardware_failure)  # Software worked where the device did not
+            return
 
     async def _run_ffmpeg(self, job_id: str, args: list[str]) -> None:
         executable = shutil.which("ffmpeg")

@@ -215,6 +215,7 @@ class LiveStream:
         # Converted to H.264 for a browser that cannot play the camera's H.265; or passed through as H.265 (tagged so Safari plays it).
         self.transcode, self.hevc_copy = transcode, hevc_copy
         self.accelerated = False
+        self._hardware_failure: str | None = None
         self.source = source
         self.include_audio = include_audio
         self.on_fragment = on_fragment
@@ -295,8 +296,8 @@ class LiveStream:
             except (OSError, RuntimeError, asyncio.TimeoutError, ValueError) as exc:
                 if not (hardware and self.init is None):
                     raise
-                # The device did not work for this stream: say so, stop using it, and do the same work in software.
-                acceleration.disable(str(exc) or "the hardware encoder failed to start")
+                # Maybe the device did not work: do the same work in software, and turn the device off only if that works (a dead camera fails both ways).
+                self._hardware_failure = str(exc) or "the hardware encoder failed to start"
                 await self._session(executable, False)
         except asyncio.CancelledError:
             raise
@@ -340,6 +341,8 @@ class LiveStream:
                 if self.init is None and fragmenter.init is not None:
                     self.init = fragmenter.init
                     self.mime = codec_string(self.init)
+                    if self._hardware_failure and not hardware:
+                        acceleration.disable(self._hardware_failure)
                     self.ready.set()
         finally:
             if self.process and self.process.returncode is None:

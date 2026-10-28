@@ -374,9 +374,10 @@ async def live_stream(
     video_filter = privacy.drawbox_filter(zones) if zones else None
     profile = "sub" if quality == "low" and camera["live_substream_url_ciphertext"] else "main"
     codec = (camera["video_codec"] or "").lower()
-    camera_is_hevc = codec in HEVC_NAMES and profile == "main"
-    hevc_copy = camera_is_hevc and hevc and not video_filter
-    transcode = camera_is_hevc and not hevc and not video_filter  # A masked picture is converted anyway (to H.264), whatever the camera sends
+    camera_is_hevc = codec in HEVC_NAMES
+    hevc_copy = camera_is_hevc and hevc and profile == "main" and not video_filter
+    # A masked picture is converted anyway (to H.264). The low-quality stream's codec is not recorded, so for an H.265 camera it is always converted unless passed on as H.265.
+    transcode = camera_is_hevc and not hevc_copy and not video_filter
     if not video_filter and profile == "main" and codec and codec not in {"h264", "avc", "avc1"} and not camera_is_hevc:
         await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback,
                                                      "detail": f"{codec.upper()} video cannot be played directly; use the fallback stream"})
@@ -427,7 +428,8 @@ async def live_stream(
                 return
             await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera did not start streaming in time"})
             return
-        if ("hvc1" not in (stream.mime or "") and "hev1" not in (stream.mime or "")) if hevc_copy else "avc1" not in (stream.mime or ""):
+        wanted = ("hvc1", "hev1") if hevc_copy else ("avc1",)
+        if not any(name in (stream.mime or "") for name in wanted):
             await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": "unknown", "fallback": fallback,
                                                          "detail": "This camera's video cannot be played directly; use the fallback stream"})
             return
@@ -438,7 +440,7 @@ async def live_stream(
             listening = False
         include_audio = has_audio
         await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening,
-                                   "codec": "hevc" if hevc_copy else "h264", "transcoded": transcode, "accelerated": bool(getattr(stream, "accelerated", False))})
+                                   "codec": "hevc" if hevc_copy else "h264", "transcoded": transcode, "accelerated": bool(stream.accelerated)})
         await websocket.send_bytes(stream.init)
         while True:
             await watching.delivered()

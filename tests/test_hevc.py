@@ -347,6 +347,18 @@ class HevcLiveTests(unittest.TestCase):
         with self.client.websocket_connect("/api/cameras/old/live/stream") as websocket:
             self.assertEqual(websocket.receive_json()["type"], "unsupported")
 
+    def test_a_dead_camera_is_not_blamed_on_the_device(self):
+        acceleration._state = {"setting": "auto", "selected": "vaapi", "backends": [], "software_encoder": "libx264", "ffmpeg": True, "note": None, "disabled_reason": None, "checked_at": ""}
+        self.add_camera("broken", "Dead", feed=False)
+        with self.client.websocket_connect("/api/cameras/broken/live/stream") as websocket:
+            self.assertEqual(websocket.receive_json()["type"], "unsupported")
+        self.assertEqual(acceleration.selected(), "vaapi")
+
+    def test_the_low_quality_stream_of_an_h265_camera_is_converted_too(self):
+        with self.client.websocket_connect("/api/cameras/cam/live/stream?quality=low") as websocket:
+            init, _, _ = self.receive(websocket, 1)
+        self.assertEqual((init["codec"], init["transcoded"]), ("h264", True))
+
     def test_a_device_that_fails_is_given_up_on_and_the_viewer_still_gets_video_in_software(self):
         acceleration._state = {"setting": "auto", "selected": "vaapi", "backends": [], "software_encoder": "libx264", "ffmpeg": True, "note": None, "disabled_reason": None, "checked_at": ""}
         with patch.dict(os.environ, {"NVR_VAAPI_DEVICE": "/dev/dri/does-not-exist"}):

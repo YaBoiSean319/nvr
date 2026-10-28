@@ -294,6 +294,7 @@ async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
                 await asyncio.to_thread(_sweep, root)
                 partial = root / f"{digest}.{uuid.uuid4().hex}.partial.mp4"
                 try:
+                    hardware_failure = None
                     for hardware in (True, False) if acceleration.selected() else (False,):
                         encoder = acceleration.encoder(crf=23, speed="veryfast") if hardware else acceleration.build(None, crf=23, speed="veryfast")
                         chain = encoder.filters(drawbox_filter(zones) if zones else None)
@@ -303,8 +304,10 @@ async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
                         except RuntimeError as exc:
                             if not hardware:
                                 raise
-                            acceleration.disable(str(exc))  # The device did not work: the same render is done in software
+                            hardware_failure = str(exc)  # Maybe the device did not work: the same render is done in software
                             continue
+                        if hardware_failure:
+                            acceleration.disable(hardware_failure)  # Software worked where the device did not
                         break
                     partial.replace(target)
                 finally:

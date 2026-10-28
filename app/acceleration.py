@@ -130,15 +130,22 @@ def current() -> dict[str, Any]:
     """This process's view of the machine, found the first time it is asked for."""
     global _state
     with _lock:
+        if _state is not None:
+            return dict(_state)
+    found = detect()  # Slow (it runs FFmpeg): never while holding the lock
+    with _lock:
         if _state is None:
-            _state = detect()
+            _state = found
         return dict(_state)
 
 
 def refresh() -> dict[str, Any]:
+    """Check the machine again. A failure already seen in use is kept: it is not undone by a fresh look."""
     global _state
     found = detect()
     with _lock:
+        if _state is not None and _state.get("disabled_reason"):
+            found["selected"], found["disabled_reason"] = None, _state["disabled_reason"]
         _state = found
         return dict(found)
 
@@ -153,8 +160,6 @@ def disable(reason: str) -> None:
         if _state is not None and _state["selected"] is not None:
             _state["disabled_reason"] = f"Turned off after a failure: {reason}"[:300]
             _state["selected"] = None
-        elif _state is None:
-            return
 
 
 def encoder(*, crf: int = 23, speed: str = "veryfast") -> Encoder:

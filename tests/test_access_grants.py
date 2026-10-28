@@ -538,6 +538,7 @@ class LiveSocketTests(GrantCase):
         mime = 'video/mp4; codecs="avc1.64001f"'
         init = b"init"
         failed = None
+        accelerated = False
 
         class ready:  # noqa: N801 - mimics asyncio.Event for the one thing the socket uses it for
             @staticmethod
