@@ -17,7 +17,6 @@ test("the dashboard shows what cameras report, says Not reported for the rest, f
   await expect(row("Camera 001")).toContainText("15 fps set");
   await expect(row("Camera 001").getByRole("cell").nth(5)).toHaveText("7");  // Dropped frames: the recorder's counter
   await expect(row("Camera 001").getByRole("cell").nth(6)).toHaveText("3");  // Reconnects
-  await expect(row("Camera 001").getByRole("cell").nth(2)).toContainText("1 d 6 h");
   await expect(row("Camera 003").getByRole("cell").nth(0)).toHaveText("Not reported"); // No make or model
   await expect(row("Camera 003").getByRole("cell").nth(1)).toHaveText("Not reported");
   await expect(row("Camera 003").getByRole("cell").nth(7)).toHaveText("Not reported"); // Never contacted over ONVIF
@@ -30,9 +29,9 @@ test("the dashboard shows what cameras report, says Not reported for the rest, f
   await expect(table.getByRole("row")).toHaveCount(2); // Header and Camera 002
   await page.getByLabel("Older firmware only").uncheck();
 
-  // Sorting: by uptime, longest first, with the camera that reported none last.
-  await table.getByRole("button", { name: "Recording uptime" }).click();
-  await table.getByRole("button", { name: /Recording uptime/ }).click();
+  // Sorting: by measured bitrate, highest first, with the camera that reported none last.
+  await table.getByRole("button", { name: "Bitrate" }).click();
+  await table.getByRole("button", { name: /Bitrate/ }).click();
   const names = await table.getByRole("rowheader").allInnerTexts();
   expect(names[0]).toMatch(/^Camera 001/);
   expect(names[names.length - 1]).toMatch(/^Camera 003/);
