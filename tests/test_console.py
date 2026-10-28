@@ -320,6 +320,31 @@ class TokenTests(ConsoleCase):
             self.assertIn(response.status_code, (403, 404, 405, 422), (method, path, response.status_code))
         self.assertEqual({camera["name"] for camera in self.a.admin().get("/api/cameras").json()["cameras"]}, {"Gate A1", "Gate A2"})
 
+    def test_the_proxy_only_reads_and_never_goes_outside_a_cameras_own_pages(self):
+        self.federate()
+        camera = self.cid(self.a, "Gate A1")
+        segment = self.a.made["segment"]["id"]
+        for path in (f"/api/cameras/{camera}/segments/{segment}/media/../../../../api/admin/sessions", f"/api/cameras/{camera}/%2e%2e/%2e%2e/admin/sessions",
+                     f"/api/cameras/{camera}/credentials", f"/api/cameras/{camera}/segments/{segment}/media?%75nmasked=1&unmasked=true"):
+            response = self.admin.get(path)
+            self.assertIn(response.status_code, (200, 400, 404, 422), path)
+            self.assertNotIn("sessions", response.text[:200] if response.status_code == 200 else "")
+        self.assertEqual(self.admin.post(f"/api/cameras/{camera}/live/status", json={}).status_code in (404, 405), True)
+
+    def test_a_site_that_answers_nonsense_is_left_out_without_harming_the_rest(self):
+        self.federate()
+        real = console.call
+
+        async def garbled(link, method, path, **kwargs):
+            if link.name == "Alpha" and path == "/api/alarms":
+                return httpx.Response(200, json={"alarms": [{"nothing": "useful"}], "counts": {}, "rules": []})
+            return await real(link, method, path, **kwargs)
+
+        with mock.patch.object(console, "call", garbled):
+            response = self.admin.get("/api/alarms?state=all&limit=50")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("nothing", response.text)
+
     def test_sites_are_for_administrators(self):
         self.federate()
         for client in (self.limited, self.full):

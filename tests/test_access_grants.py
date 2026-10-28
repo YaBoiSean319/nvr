@@ -308,7 +308,7 @@ class RouteTests(GrantCase):
     # and the lists ask only the sites they may see.
     FILTERED |= {("GET", "/api/console/status"), ("GET", "/api/alarms/{alarm_id:consoleid}"), ("GET", "/api/ai/tracks/{track_id:consoleid}/thumbnail")}
     FILTERED |= {(method, "/api/alarms/{alarm_id:consoleid}/{rest:path}") for method in ("POST", "PUT", "PATCH", "DELETE")}
-    FILTERED |= {(method, "/api/cameras/{camera_id:consoleid}/{rest:path}") for method in ("GET", "POST", "PUT", "PATCH", "DELETE")}
+    FILTERED |= {(method, "/api/cameras/{camera_id:consoleid}/{rest:path}") for method in ("GET",)}
     # Routes that name no camera and return none: the person's own settings, sign-in and public information.
     NO_CAMERA_DATA = {
         ("GET", "/api/ai/settings"), ("GET", "/api/alarm-settings"), ("GET", "/api/alarms/assignees"), ("GET", "/api/auth/me"),

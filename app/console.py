@@ -5,8 +5,9 @@ stored encrypted and never returned) and nothing of its footage. Everything a si
 so the interface that shows this NVR's own cameras shows the sites' as well: live and playback are proxied through the console to the site, and the camera list,
 camera groups (one per site), alarms, playback timelines and attribute search are asked of every site the person may see, concurrently, and merged.
 
-A site that does not answer is marked unreachable at once and left alone for ``RETRY_AFTER`` seconds before one request tries it again, so one site being down never
-makes the console wait for it again and again: the others keep answering at their own speed. A site is never asked about anything the person has not been
+A site that does not answer is marked unreachable at once, and no request tries it again: only the health check does (every few seconds, with a short timeout), and it
+brings the site back when it answers. So one site being down never makes the console wait for it again and again, whether for a request or a merged list: the others keep
+answering at their own speed. A site is never asked about anything the person has not been
 granted (a grant for a site, or for every camera).
 """
 from __future__ import annotations
@@ -37,15 +38,22 @@ from .webhooks import validate_target_url
 
 logger = logging.getLogger("nvr.console")
 
-RETRY_AFTER = 10.0        # seconds a site that failed is left alone before one request tries it again
 HEALTH_SECONDS = 15.0     # how often every site's health is refreshed
+RECHECK_SECONDS = 5.0     # how often a site that is down is tried again (by the health check alone)
 INVENTORY_SECONDS = 4.0   # a site's camera list is reused for this long
 FAN_OUT_SECONDS = 8.0     # no site makes a merged answer wait longer than this
 TIMEOUT = httpx.Timeout(6.0, connect=2.0)
+MAX_JSON_BYTES = 16 * 1024 * 1024  # The largest answer taken from a site to be read and merged
+MAX_FRAME_BYTES = 8 * 1024 * 1024  # The largest message relayed in either direction of a live video
 MAX_SITES = 50
 SITE_ID = re.compile(r"^[a-z0-9]{8}$")
 NEEDED_SCOPES = ("read", "media")
-HIDDEN_CAMERA_FIELDS = ("camera_ip", "device_service_url", "onvif_profile_token", "live_substream_profile_token")
+# The only fields of a site's camera that reach a console user: what the interface needs to list, group and judge a camera, and nothing about how the site reaches it.
+CAMERA_FIELDS = ("name", "archived_at", "enabled", "recording_mode", "recording_enabled", "recording_status", "last_video_at", "last_footage_write_at", "recording_fault_since",
+                 "recording_health", "audio_enabled", "audio_supported", "audio_status", "live_substream_available", "video", "last_probe_at", "last_error", "effective_recording_mode",
+                 "recording_policy_source", "schedule_timezone", "retention_days", "retention_policy_source", "camera_brand", "motion_source_status", "motion_source_configured",
+                 "motion_pre_roll_seconds", "motion_post_roll_seconds", "motion_fallback_enabled", "motion_zones", "motion_sensitivity", "server_motion_status")
+HIDDEN_KEYS = frozenset({"camera_ip", "device_service_url", "onvif_profile_token", "live_substream_profile_token", "stream_url", "storage_volume_id", "free_bytes"})
 
 
 class ConsoleError(Exception):
@@ -80,7 +88,8 @@ class SiteLink:
     enabled: bool
     fingerprint: tuple
     client: httpx.AsyncClient
-    retry_at: float = 0.0
+    allow_private: bool = False
+    down: bool = False
     last_contact_at: str | None = None
     last_checked_at: str | None = None
     last_error: str | None = None
@@ -92,20 +101,21 @@ class SiteLink:
     persisted_at: float = 0.0
 
     @property
-    def down(self) -> bool:
-        return time.monotonic() < self.retry_at
-
-    @property
     def state(self) -> str:
         return "disabled" if not self.enabled else "unreachable" if self.down else "refused" if self.refused else "ok"
 
+    @property
+    def available(self) -> bool:
+        """Whether its cameras can be watched now."""
+        return self.enabled and not self.down and not self.refused
+
     def failed(self, reason: str) -> None:
-        self.retry_at = time.monotonic() + RETRY_AFTER
+        self.down = True
         self.last_error = reason
         self.last_checked_at = _now_iso()
 
     def answered(self, refused: bool = False) -> None:
-        self.retry_at = 0.0
+        self.down = False
         self.refused = refused
         self.last_contact_at = self.last_checked_at = _now_iso()
         self.last_error = "The site refused the console's token" if refused else None
@@ -145,9 +155,10 @@ class Registry:
             enabled, rows = await run_in_threadpool(_read)
             kept: dict[str, SiteLink] = {}
             for row in rows:
-                fingerprint = (row["base_url"], bytes(row["token_ciphertext"]), bool(row["enabled"]), row["name"])
+                fingerprint = (row["base_url"], bytes(row["token_ciphertext"]), bool(row["enabled"]))
                 link = self.links.get(row["id"])
                 if link is not None and link.fingerprint == fingerprint:
+                    link.name, link.allow_private = row["name"], bool(row["allow_private"])  # A rename keeps what is known about the site
                     kept[row["id"]] = link
                     continue
                 try:
@@ -155,7 +166,7 @@ class Registry:
                 except (RuntimeError, ValueError):
                     logger.warning("The token of site %s cannot be read", row["name"])
                     continue
-                fresh = SiteLink(row["id"], row["name"], row["base_url"], token, bool(row["enabled"]), fingerprint, _client(row["base_url"], token), last_contact_at=row["last_contact_at"],
+                fresh = SiteLink(row["id"], row["name"], row["base_url"], token, bool(row["enabled"]), fingerprint, _client(row["base_url"], token), bool(row["allow_private"]), last_contact_at=row["last_contact_at"],
                                  last_checked_at=row["last_checked_at"], last_error=row["last_error"], camera_count=row["camera_count"], open_alarms=row["open_alarms"])
                 if link is not None:  # Changed (a new address or token): what was learned about the old one does not carry over, except that it was reached
                     fresh.last_contact_at = link.last_contact_at
@@ -191,15 +202,25 @@ async def active() -> bool:
 
 # --- talking to a site ------------------------------------------------------------------------------------------------------------------------
 
-async def call(link: SiteLink, method: str, path: str, *, params: Any = None, body: Any = None, headers: dict[str, str] | None = None) -> httpx.Response:
-    """One request to a site. Raises ``SiteDown`` without trying when the site failed a moment ago."""
-    if link.down:
+async def call(link: SiteLink, method: str, path: str, *, params: Any = None, body: Any = None, headers: dict[str, str] | None = None, probe: bool = False) -> httpx.Response:
+    """One request to a site. Raises ``SiteDown`` without trying when the site is down: only a ``probe`` (the health check) tries a site that is."""
+    if link.down and not probe:
         raise SiteDown(link.last_error or "No answer")
     try:
-        response = await link.client.request(method, path, params=params, json=body, headers=headers)
+        request = link.client.build_request(method, path, params=params, json=body, headers=headers)
+        response = await link.client.send(request, stream=True)
+        try:
+            if int(response.headers.get("content-length", "0") or 0) > MAX_JSON_BYTES:
+                raise SiteDown("The answer was too large")
+            await response.aread()
+        finally:
+            await response.aclose()
     except httpx.HTTPError as exc:
         link.failed(type(exc).__name__ or "No answer")
         raise SiteDown(link.last_error or "No answer") from exc
+    if response.status_code in (502, 503, 504):
+        link.failed(f"HTTP {response.status_code}")
+        raise SiteDown(link.last_error or "No answer")
     link.answered(refused=response.status_code in (401, 403))
     return response
 
@@ -214,6 +235,10 @@ async def stream(link: SiteLink, method: str, path: str, *, query: str = "", hea
     except httpx.HTTPError as exc:
         link.failed(type(exc).__name__ or "No answer")
         raise SiteDown(link.last_error or "No answer") from exc
+    if response.status_code in (502, 503, 504):
+        await response.aclose()
+        link.failed(f"HTTP {response.status_code}")
+        raise SiteDown(link.last_error or "No answer")
     link.answered(refused=response.status_code in (401, 403))
     return response
 
@@ -246,10 +271,24 @@ def rewrite_url(site_id: str, value: str) -> str:
     return value
 
 
+IDENTIFIERS = frozenset({"camera_id", "track_id", "rule_id", "alarm_id"})
+
+
+def scrub(value: Any) -> Any:
+    """Whatever a site says, without the fields that say how it reaches its cameras (an address, a stream URL, a storage volume)."""
+    if isinstance(value, dict):
+        return {key: scrub(item) for key, item in value.items() if key not in HIDDEN_KEYS}
+    if isinstance(value, list):
+        return [scrub(item) for item in value]
+    return value
+
+
 def rewrite(site_id: str, value: Any) -> Any:
     """Every URL a site hands out that names one of its cameras, tracks or alarms, and every ``camera_id``, in the console's terms."""
     if isinstance(value, dict):
-        return {key: (prefixed(site_id, item) if key == "camera_id" and isinstance(item, str) and item else rewrite(site_id, item)) for key, item in value.items()}
+        return {key: (prefixed(site_id, item) if key in IDENTIFIERS and isinstance(item, str) and item
+                      else [prefixed(site_id, entry) if isinstance(entry, str) and entry else entry for entry in item] if key == "camera_ids" and isinstance(item, list)
+                      else rewrite(site_id, item)) for key, item in value.items()}
     if isinstance(value, list):
         return [rewrite(site_id, item) for item in value]
     if isinstance(value, str) and value.startswith("/api/"):
@@ -258,16 +297,13 @@ def rewrite(site_id: str, value: Any) -> Any:
 
 
 def console_camera(link: SiteLink, camera: dict[str, Any]) -> dict[str, Any]:
-    """A site's camera as a console user sees it: named under the site, with nothing about how the site reaches it."""
-    view = rewrite(link.id, dict(camera))
-    view["id"] = prefixed(link.id, camera["id"])
-    view["group_name"] = link.name
-    view["site"] = {"id": link.id, "name": link.name}
-    for name in HIDDEN_CAMERA_FIELDS:
-        if name in view:
-            view[name] = None
-    view["stream_url"] = ""
-    view["storage_volume_id"] = None
+    """A site's camera as a console user sees it: named under the site, with only what the interface needs and nothing about how the site reaches it."""
+    view = scrub(rewrite(link.id, {key: camera[key] for key in CAMERA_FIELDS if key in camera}))
+    view.update({"id": prefixed(link.id, camera["id"]), "group_name": link.name, "site": {"id": link.id, "name": link.name},
+                 "camera_ip": None, "device_service_url": None, "onvif_profile_token": None, "live_substream_profile_token": None, "stream_url": "", "storage_volume_id": None})
+    coverage = camera.get("retention_coverage")
+    if isinstance(coverage, dict):
+        view["retention_coverage"] = scrub(coverage)
     return view
 
 
@@ -336,8 +372,8 @@ async def combine_cameras(local: dict[str, Any], context: Context) -> dict[str, 
     cameras = list(local["cameras"])
     for link, found in results:
         for camera in (found if isinstance(found, list) else link.cameras):
-            view = {**camera, "site_unreachable": link.down}
-            if link.down:  # What the interface shows of a camera's health: it cannot be reached because its site cannot
+            view = {**camera, "site_unreachable": not link.available}
+            if not link.available:  # What the interface shows of a camera's health: it cannot be reached because its site cannot
                 view["recording_health"] = {**camera.get("recording_health", {}), "state": "camera_unreachable", "detail": f"The site {link.name} cannot be reached", "video_fresh": False}
             cameras.append(view)
     return {**local, "cameras": cameras, "sites": [site_status(link) for link in context.links]}
@@ -397,16 +433,25 @@ async def combine_alarms(local: dict[str, Any] | None, context: Context) -> dict
     for link, answer in results:
         if not isinstance(answer, dict):
             continue
-        for alarm in answer.get("alarms", []):
-            view = rewrite(link.id, alarm)
-            view["id"] = prefixed(link.id, alarm["id"])
-            view["track_id"] = prefixed(link.id, alarm["track_id"]) if alarm.get("track_id") else None
-            view["rule_id"] = prefixed(link.id, alarm["rule_id"]) if alarm.get("rule_id") else None
-            view["site"] = {"id": link.id, "name": link.name}
-            alarms.append(view)
-        for key, value in answer.get("counts", {}).items():
-            counts[key] = counts.get(key, 0) + int(value)
-        rules.extend({"id": prefixed(link.id, rule["id"]), "name": f"{rule['name']} ({link.name})"} for rule in answer.get("rules", []))
+        try:
+            site_alarms = []
+            for alarm in answer.get("alarms", []):
+                view = rewrite(link.id, alarm)
+                view["id"] = prefixed(link.id, alarm["id"])
+                view["track_id"] = prefixed(link.id, alarm["track_id"]) if alarm.get("track_id") else None
+                view["rule_id"] = prefixed(link.id, alarm["rule_id"]) if alarm.get("rule_id") else None
+                view["site"] = {"id": link.id, "name": link.name}
+                str(view["occurred_at"])  # a sort key: an answer without it is malformed
+                site_alarms.append(view)
+            site_counts = {key: int(value) for key, value in answer.get("counts", {}).items()}
+            site_rules = [{"id": prefixed(link.id, rule["id"]), "name": f"{rule['name']} ({link.name})"} for rule in answer.get("rules", [])]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            link.last_error = "The site answered in a form the console does not understand"  # only this site is left out
+            continue
+        alarms.extend(site_alarms)
+        for key, value in site_counts.items():
+            counts[key] = counts.get(key, 0) + value
+        rules.extend(site_rules)
     alarms.sort(key=lambda item: (item["occurred_at"], item["id"]), reverse=True)
     return {"alarms": alarms[: kwargs["limit"]], "counts": counts, "rules": rules, "sites": [site_status(link) for link in context.links]}
 
@@ -451,7 +496,13 @@ async def combine_timeline(local: dict[str, Any] | None, context: Context) -> di
         response = await call(link, "POST", "/api/playback/timeline", body={"camera_ids": remote[link.id], "start": start, "end": end})
         if response.status_code != 200:
             raise SiteDown(f"HTTP {response.status_code}")
-        return [{**rewrite(link.id, entry)} for entry in response.json()["cameras"]]
+        try:
+            entries = [{**rewrite(link.id, entry)} for entry in response.json()["cameras"]]
+            for entry in entries:
+                str(entry["camera_id"])
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            raise SiteDown("unreadable answer") from error
+        return entries
 
     by_id = {camera["camera_id"]: camera for camera in (local["cameras"] if local else [])}
     for link, answer in await fan_out(context.links, ask):
@@ -510,18 +561,31 @@ async def combine_search(local: dict[str, Any] | None, context: Context) -> dict
             unsearched.append({"site": link.name, "reason": "unreachable"})
             fully = False
             continue
-        for item in answer["results"]:
-            view = rewrite(link.id, item)
-            view["track_id"] = prefixed(link.id, item["track_id"])
-            view["site"] = {"id": link.id, "name": link.name}
-            results.append(view)
-        truncated = truncated or bool(answer["truncated"])
-        coverage = answer["coverage"]
-        coverage_cameras.extend(rewrite(link.id, coverage["cameras"]))
-        searched += coverage["searched_cameras"]
-        fully = fully and bool(coverage["fully_analysed"])
-        if coverage["analysed_percent"] is not None:
-            percents.append((coverage["analysed_percent"], coverage["searched_cameras"]))
+        try:
+            site_results = []
+            for item in answer["results"]:
+                view = rewrite(link.id, item)
+                view["track_id"] = prefixed(link.id, item["track_id"])
+                view["site"] = {"id": link.id, "name": link.name}
+                str(view["first_seen_at"])
+                site_results.append(view)
+            coverage = answer["coverage"]
+            site_cameras = rewrite(link.id, coverage["cameras"])
+            site_searched = int(coverage["searched_cameras"])
+            site_fully, site_truncated = bool(coverage["fully_analysed"]), bool(answer["truncated"])
+            site_percent = float(coverage["analysed_percent"]) if coverage["analysed_percent"] is not None else None
+        except (KeyError, TypeError, ValueError, AttributeError):
+            link.last_error = "The site answered in a form the console does not understand"
+            unsearched.append({"site": link.name, "reason": "unreadable answer"})
+            fully = False
+            continue
+        results.extend(site_results)
+        truncated = truncated or site_truncated
+        coverage_cameras.extend(site_cameras)
+        searched += site_searched
+        fully = fully and site_fully
+        if site_percent is not None:
+            percents.append((site_percent, site_searched))
     results.sort(key=lambda item: (item["first_seen_at"], item["track_id"]), reverse=kwargs.get("order", "desc") == "desc")
     limit = kwargs["limit"]
     weight = sum(count for _, count in percents)
@@ -579,10 +643,13 @@ def admin_view(row: sqlite3.Row) -> dict[str, Any]:
 
 
 class ConsoleManager:
-    """Keeps every site's health current: a camera count and the open alarms, asked of all sites at once, and written down so that the last contact is known after a restart."""
+    """Keeps every site's health current. A site that is down is tried again every few seconds (and only here); every site is looked at in full less often: its camera
+    count and open alarms, asked of all sites at once and written down so that the last contact is known after a restart."""
 
-    def __init__(self, seconds: float = HEALTH_SECONDS) -> None:
+    def __init__(self, seconds: float = HEALTH_SECONDS, recheck: float = RECHECK_SECONDS, first_delay: float = 2.0) -> None:
         self.seconds = seconds
+        self.recheck = recheck
+        self.first_delay = first_delay
         self.task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -594,23 +661,30 @@ class ConsoleManager:
             await asyncio.gather(self.task, return_exceptions=True)
         self.task = None
 
-    async def check(self) -> None:
+    async def check(self, only_down: bool = False) -> None:
         await registry.load(max_age=0)
         if not registry.enabled:
             return
 
         async def look(link: SiteLink) -> None:
-            link.retry_at = 0.0  # The poll is the one request that is allowed to try a site that failed
-            cameras = await call(link, "GET", "/api/cameras")
+            try:
+                check_url(link.base_url, link.allow_private)  # the address is judged again at every look: DNS may have moved
+            except ConsoleError as error:
+                raise SiteDown(str(error)) from error
+            cameras = await call(link, "GET", "/api/cameras", probe=True)
             if cameras.status_code == 200:
                 link.cameras = [console_camera(link, camera) for camera in cameras.json().get("cameras", [])]
                 link.camera_count, link.cameras_at = len(link.cameras), time.monotonic()
-            alarms = await call(link, "GET", "/api/alarms", params={"state": "open", "limit": 1})
+            if only_down:
+                return
+            alarms = await call(link, "GET", "/api/alarms", params={"state": "open", "limit": 1}, probe=True)
             if alarms.status_code == 200:
                 link.open_alarms = sum(alarms.json()["counts"].get(key, 0) for key in ("new", "acknowledged", "assigned"))
 
-        await fan_out([link for link in registry.links.values() if link.enabled], look)
-        await run_in_threadpool(self._persist)
+        links = [link for link in registry.links.values() if link.enabled and (link.down or not only_down)]
+        if links:
+            await fan_out(links, look)
+            await run_in_threadpool(self._persist)
 
     def _persist(self) -> None:
         with connect() as db:
@@ -619,12 +693,16 @@ class ConsoleManager:
                            (link.last_contact_at, link.last_checked_at, link.last_error, link.camera_count, link.open_alarms, link.id))
 
     async def _run(self) -> None:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(self.first_delay)
+        last_full = 0.0
         while True:
             try:
-                await self.check()
+                full = time.monotonic() - last_full >= self.seconds
+                await self.check(only_down=not full)
+                if full:
+                    last_full = time.monotonic()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
                 logger.exception("The console's health check failed")
-            await asyncio.sleep(self.seconds)
+            await asyncio.sleep(self.recheck)

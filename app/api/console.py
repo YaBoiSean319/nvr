@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 from typing import Any
+from urllib.parse import parse_qsl, urlencode
 
 import websockets
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, status
@@ -19,7 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.convertors import Convertor, register_url_convertor
 from urllib.parse import quote
 
-from app import console, network
+from app import console, network, viewing_audit
 from app.api import live_media
 from app.audit import record
 from app.credentials import encrypt
@@ -43,6 +45,8 @@ class ConsoleIdConvertor(Convertor):
 
 register_url_convertor("consoleid", ConsoleIdConvertor())
 
+# What a person can ask of a site's camera through the console: look and watch, nothing else (the site's token is limited the same way, as a second guard).
+CAMERA_PATHS = (re.compile(r"^live$"), re.compile(r"^live/status$"), re.compile(r"^segments/\d{1,12}/(media|snapshot|frame-neighbor)$"))
 PASS_REQUEST = ("range", "if-none-match", "if-modified-since", "content-type", "accept")
 PASS_RESPONSE = ("content-type", "content-length", "content-range", "accept-ranges", "etag", "last-modified", "cache-control", "content-disposition", "x-content-type-options")
 
@@ -194,9 +198,8 @@ async def check_site(site_id: str, _: Administrator) -> dict[str, object]:
     row = await run_in_threadpool(_row, site_id)
     if link is None or row is None:
         raise HTTPException(status_code=404, detail="Site not found")
-    link.retry_at = 0.0
     try:
-        await console.call(link, "GET", "/api/cameras")
+        await console.call(link, "GET", "/api/cameras", probe=True)
     except console.SiteDown:
         pass
     return console.admin_view(row)
@@ -214,8 +217,13 @@ def _link_for(identifier: str, user) -> tuple[console.SiteLink, str]:
 
 
 def _query(raw: str) -> str:
-    """The query as sent to the site, without ``unmasked``: whether someone may lift a privacy mask is decided here, never by the site's token."""
-    return "&".join(part for part in raw.split("&") if part and not part.lower().startswith("unmasked="))
+    """The query as sent to the site, without ``unmasked`` in any spelling: whether someone may lift a privacy mask is decided here, never by the site's token."""
+    return urlencode([(key, value) for key, value in parse_qsl(raw, keep_blank_values=True, max_num_fields=50) if key.strip().lower() != "unmasked"])
+
+
+def _plain(value: str) -> bool:
+    """One path segment that names something: no dots-only, separators, query or fragment, or control characters."""
+    return bool(value) and value not in (".", "..") and len(value) <= 200 and not re.search(r"[/\\?#%\x00-\x1f\x7f]", value)
 
 
 async def _forward(request: Request, link: console.SiteLink, path: str) -> Response:
@@ -233,24 +241,34 @@ async def _forward(request: Request, link: console.SiteLink, path: str) -> Respo
             data = json.loads(raw)
         except ValueError:
             return Response(raw, status_code=upstream.status_code, media_type="application/json")
-        return JSONResponse(console.rewrite(link.id, data), status_code=upstream.status_code)
+        return JSONResponse(console.scrub(console.rewrite(link.id, data)), status_code=upstream.status_code)
     return StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code, headers={name: upstream.headers[name] for name in PASS_RESPONSE if name in upstream.headers},
                              background=BackgroundTask(upstream.aclose))
 
 
-@router.api_route("/api/cameras/{camera_id:consoleid}/{rest:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
+@router.api_route("/api/cameras/{camera_id:consoleid}/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
+@requires_scope("media")
 async def camera_through_console(camera_id: str, rest: str, request: Request, user: CurrentUser) -> Response:
-    """Live, snapshots, footage and the rest of what a camera offers, through the site that owns it (the site's own token decides what is allowed)."""
+    """Live status, snapshots and footage of a site's camera, through the site that owns it. Only these, and only to look."""
     await console.registry.load()
     link, local = _link_for(camera_id, user)
-    return await _forward(request, link, f"/api/cameras/{quote(local)}/{rest}")
+    if not _plain(local) or not any(pattern.match(rest) for pattern in CAMERA_PATHS) or any(not _plain(part) for part in rest.split("/")):
+        raise HTTPException(status_code=404, detail="Not found")
+    kind = "snapshot" if rest.endswith("/snapshot") else "playback" if rest.endswith("/media") or rest.endswith("/frame-neighbor") else "live" if rest == "live" else None
+    if kind == "playback":
+        await asyncio.to_thread(viewing_audit.safely, viewing_audit.touch_playback, user.id, camera_id)
+    elif kind:
+        await asyncio.to_thread(viewing_audit.safely, viewing_audit.record_events, user.id, [camera_id], kind, f"console:{rest}")
+    return await _forward(request, link, f"/api/cameras/{quote(local, safe='')}/{rest}")
 
 
 @router.get("/api/alarms/{alarm_id:consoleid}")
 async def alarm_through_console(alarm_id: str, request: Request, user: CurrentUser) -> Response:
     await console.registry.load()
     link, local = _link_for(alarm_id, user)
-    response = await _forward(request, link, f"/api/alarms/{quote(local)}")
+    if not _plain(local):
+        raise HTTPException(status_code=404, detail="Not found")
+    response = await _forward(request, link, f"/api/alarms/{quote(local, safe='')}")
     if isinstance(response, JSONResponse) and response.status_code == 200:
         data = json.loads(response.body)
         data["id"], data["site"] = alarm_id, {"id": link.id, "name": link.name}
@@ -269,10 +287,13 @@ async def alarm_action_at_the_site(alarm_id: str, rest: str, user: CurrentUser) 
 
 
 @router.get("/api/ai/tracks/{track_id:consoleid}/thumbnail")
+@requires_scope("media")
 async def thumbnail_through_console(track_id: str, request: Request, user: CurrentUser) -> Response:
     await console.registry.load()
     link, local = _link_for(track_id, user)
-    return await _forward(request, link, f"/api/ai/tracks/{quote(local)}/thumbnail")
+    if not _plain(local):
+        raise HTTPException(status_code=404, detail="Not found")
+    return await _forward(request, link, f"/api/ai/tracks/{quote(local, safe='')}/thumbnail")
 
 
 async def _refuse(websocket: WebSocket, code: int, kind: str, detail: str) -> None:
@@ -302,14 +323,17 @@ async def live_through_console(websocket: WebSocket, camera_id: str) -> None:
     except HTTPException:
         await _refuse(websocket, live_media.CLOSE_NOT_FOUND, "not_found", "Camera not found")
         return
-    if link.down:
+    if not _plain(local):
+        await _refuse(websocket, live_media.CLOSE_NOT_FOUND, "not_found", "Camera not found")
+        return
+    if not link.available:
         await _refuse(websocket, live_media.CLOSE_STREAM_FAILED, "error", f"The site {link.name} cannot be reached")
         return
     scheme = "wss" if link.base_url.startswith("https") else "ws"
     query = _query(websocket.url.query)
-    url = f"{scheme}://{link.base_url.split('://', 1)[1].rstrip('/')}/api/cameras/{quote(local)}/live/stream" + (f"?{query}" if query else "")
+    url = f"{scheme}://{link.base_url.split('://', 1)[1].rstrip('/')}/api/cameras/{quote(local, safe='')}/live/stream" + (f"?{query}" if query else "")
     try:
-        upstream = await websockets.connect(url, additional_headers={"Authorization": f"Bearer {link.token}"}, max_size=None, open_timeout=5, ping_interval=20, proxy=None)
+        upstream = await websockets.connect(url, additional_headers={"Authorization": f"Bearer {link.token}"}, max_size=console.MAX_FRAME_BYTES, open_timeout=5, ping_interval=20, proxy=None)
     except (OSError, TimeoutError, websockets.WebSocketException):
         link.failed("No answer")
         await _refuse(websocket, live_media.CLOSE_STREAM_FAILED, "error", f"The site {link.name} cannot be reached")
@@ -324,20 +348,25 @@ async def live_through_console(websocket: WebSocket, camera_id: str) -> None:
             if data is not None:
                 await upstream.send(data)
 
-    async def to_viewer() -> None:
+    link.answered()
+    watching = viewing_audit.LiveSession(principal.id, camera_id, str(websocket.query_params.get("quality", "low")))
+
+    async def to_viewer_audited() -> None:
         async for data in upstream:
             if isinstance(data, str):
                 await websocket.send_text(data)
             else:
                 await websocket.send_bytes(data)
+                await watching.delivered()
 
-    tasks = [asyncio.create_task(to_site()), asyncio.create_task(to_viewer())]
+    tasks = [asyncio.create_task(to_site()), asyncio.create_task(to_viewer_audited())]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        watching.close()
         code, reason = upstream.close_code or 1000, upstream.close_reason or ""
         await upstream.close()
         try:

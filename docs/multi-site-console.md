@@ -33,3 +33,11 @@ A site that does not answer is marked **unreachable** at once and left alone for
 - Operators only ever reach sites they have been granted. A site they have no grant for is the same "not found" as one that does not exist, in lists, in links and over WebSocket.
 - The camera lists, timelines, alarms and search run concurrently with a bound of eight seconds per answer.
 - A site's token is used from the console server only; browsers never see it.
+
+## What the console will and will not do through a site
+
+- Reads only. Pages of a site's camera (live, footage, thumbnails, status) go through a fixed list of paths with `GET` and `HEAD`; anything else answers 404 or 405. Alarms are handled at the site that owns them; the console says so (409) instead of changing them.
+- Viewing footage or live video through the console is written to the console's viewing audit under the person's name; the site sees only the console's token.
+- `unmasked` is never passed on: privacy masks stay applied for anything that comes through the console.
+- Answers are size-limited, and a site that answers with nonsense or with a server error is treated as failing: only that site is left out, with its last contact shown.
+- The address is checked again at every health look, not only when the site is added, and a site that is down is looked at again every few seconds, so it returns promptly after an outage.
