@@ -35,9 +35,12 @@ Retention, deleting a segment and deleting a camera's footage remove the cold co
 
 - A tier's location cannot be changed, or the tier removed, while footage is on it.
 - Moving needs the recorder's hot copy to be readable; footage already unavailable is not moved.
+- Playing footage from an object store is cache-then-serve, not streaming: the segment is fetched whole into the read-through cache (verified against its hash) and then served, so the first play of a cold segment waits for the download.
+- A configuration backup does not know about footage moved after it was taken: restoring an older backup loses track of what moved (the objects stay in the bucket).
+- A bad copy found when verifying is not deleted (its name is shared with any other mover); it is overwritten on the next pass.
 - Cold storage is not a backup: it holds the footage that left the disks, one copy, with whatever durability the store gives.
 - Tested here with a local folder and with a stand-in S3 server that checks AWS Signature Version 4 and upload hashes, and with the signing code checked against examples AWS publishes; the CI workflow also runs the object-store tests against MinIO when it can start one. Try your own store (see the acceptance checklist) before relying on it.
 
 ## API
 
-Administrators: `GET /api/admin/tiering`; `POST /api/admin/tiering/tiers`, `PUT`/`DELETE …/tiers/<id>`, `POST …/tiers/<id>/check`; `PUT`/`DELETE /api/admin/tiering/policies/<volume>`; `POST /api/admin/tiering/run` (moves up to five of each policy's oldest segments now). Changes are in the audit log (`cold_tier_created`, `cold_tier_updated`, `cold_tier_deleted`, `tier_policy_changed`, `tier_policy_removed`). Timeline segments carry `archived`.
+Administrators: `GET /api/admin/tiering`; `POST /api/admin/tiering/tiers`, `PUT`/`DELETE …/tiers/<id>`, `POST …/tiers/<id>/check`; `PUT`/`DELETE /api/admin/tiering/policies/<volume>`; `POST /api/admin/tiering/run` (moves up to five of each policy's oldest segments now). Changes are in the audit log (`cold_tier_created`, `cold_tier_updated`, `cold_tier_deleted`, `tier_policy_changed`, `tier_policy_removed`, `cold_tier_checked`, `tiering_run_now`). Timeline segments carry `archived`.

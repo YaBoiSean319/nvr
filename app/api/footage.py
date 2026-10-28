@@ -205,7 +205,8 @@ def delete_archived_camera_footage(
         segments = db.execute("SELECT id,relative_path,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE camera_id=?", (camera_id,)).fetchall()
         try:
             for row in segments:
-                recording_file_path(row["relative_path"]) if not row["tier_id"] else None  # Hot storage that is not there is refused here, as before
+                if not row["tier_id"]:
+                    recording_file_path(row["relative_path"])  # Hot storage that is not there is refused here, as before
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=503, detail="Assigned recording storage is unavailable") from exc
         if not remove_segment_files(segments):

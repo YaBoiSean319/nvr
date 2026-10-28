@@ -186,7 +186,7 @@ async def _render_audio(manager: "ExportManager", job_id: str, work_dir: Path, s
     audio_presence: dict[Path, bool] = {}
     for span in spans:
         segment = span["segment"]
-        source_path = recording_file_path(segment["relative_path"])
+        source_path = await asyncio.to_thread(recording_file_path, segment["relative_path"])
         if source_path not in audio_presence:
             audio_presence[source_path] = await asyncio.to_thread(_has_audio, source_path)
         if not audio_presence[source_path]:
@@ -762,7 +762,7 @@ class ExportManager:
                         raise RuntimeError("Audio export requires at least one administrator-enabled camera audio source")
                 for camera in per_camera:
                     for segment in camera["segments"]:
-                        path = recording_file_path(segment["relative_path"])
+                        path = await asyncio.to_thread(recording_file_path, segment["relative_path"])
                         if not path.is_file():
                             raise RuntimeError("A source recording is unavailable; no partial export was produced")
                         acquire_playback(path)

@@ -531,7 +531,7 @@ def reconcile_after_restore() -> dict[str, int] | None:
     if not marker.exists():
         return None
     from .recording import recordings_path
-    from .storage import recording_file_path
+    from .storage import segment_available
 
     if not recordings_path().is_dir():
         # Recordings are not mounted: do not mistake that for lost footage. Try again next start.
@@ -545,11 +545,11 @@ def reconcile_after_restore() -> dict[str, int] | None:
             checked += 1
             try:
                 # Refuses segments on a storage volume that is not mounted.
-                path = recording_file_path(row["relative_path"])
+                present = segment_available(row["relative_path"])
             except (OSError, ValueError):
                 skipped_volumes += 1
                 continue
-            if not path.is_file():
+            if not present:
                 db.execute(
                     "UPDATE recording_segments SET unavailable_at=?,unavailable_reason=? WHERE id=?",
                     (stamp, "Footage file was not found after a configuration restore", row["id"]),

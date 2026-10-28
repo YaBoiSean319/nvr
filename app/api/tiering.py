@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Response, status
-from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import tiering
@@ -116,7 +115,7 @@ def _local_path(text: str) -> str:
     return str(resolved)
 
 
-def _fields(body: TierInput, current=None) -> dict[str, Any]:
+def _fields(body: TierInput) -> dict[str, Any]:
     fields: dict[str, Any] = {"name": body.name, "kind": body.kind, "allow_private": int(body.allow_private), "s3_region": body.s3_region, "s3_prefix": body.s3_prefix,
                               "local_path": None, "s3_endpoint": None, "s3_bucket": None}
     if body.kind == "local":
@@ -137,25 +136,31 @@ def _probe(tier_id: str) -> None:
     except (OSError, S3Error) as exc:
         raise HTTPException(status_code=422, detail=f"The cold tier does not work: {exc}") from None
     finally:
-        tiering._close(store)
+        tiering.close_store(store)
 
 
 @router.post("/api/admin/tiering/tiers", status_code=status.HTTP_201_CREATED)
-async def create_tier(body: TierInput, user: Administrator) -> dict[str, Any]:
+def create_tier(body: TierInput, user: Administrator) -> dict[str, Any]:
     if body.kind == "s3" and not (body.access_key and body.secret_key):
         raise HTTPException(status_code=422, detail="Enter the access key and the secret key")
     fields = _fields(body)
     tier_id = str(uuid.uuid4())
     with connect() as db:
-        if db.execute("SELECT COUNT(*) FROM cold_tiers").fetchone()[0] >= MAX_TIERS:
-            raise HTTPException(status_code=422, detail=f"At most {MAX_TIERS} cold tiers")
-        if db.execute("SELECT 1 FROM cold_tiers WHERE name=?", (fields["name"],)).fetchone():
-            raise HTTPException(status_code=409, detail="A cold tier with this name already exists")
-        sealed = tiering.seal_credentials(body.access_key, body.secret_key) if body.access_key and body.secret_key else None
-        columns = ",".join(fields)
-        db.execute(f"INSERT INTO cold_tiers(id,{columns},credentials_ciphertext,created_by) VALUES(?,{','.join('?' * len(fields))},?,?)", (tier_id, *fields.values(), sealed, int(user["id"])))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT COUNT(*) FROM cold_tiers").fetchone()[0] >= MAX_TIERS:
+                raise HTTPException(status_code=422, detail=f"At most {MAX_TIERS} cold tiers")
+            if db.execute("SELECT 1 FROM cold_tiers WHERE name=?", (fields["name"],)).fetchone():
+                raise HTTPException(status_code=409, detail="A cold tier with this name already exists")
+            sealed = tiering.seal_credentials(body.access_key, body.secret_key) if body.access_key and body.secret_key else None
+            columns = ",".join(fields)
+            db.execute(f"INSERT INTO cold_tiers(id,{columns},credentials_ciphertext,created_by) VALUES(?,{','.join('?' * len(fields))},?,?)", (tier_id, *fields.values(), sealed, int(user["id"])))
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
     try:
-        await run_in_threadpool(_probe, tier_id)
+        _probe(tier_id)
     except HTTPException:
         with connect() as db:
             db.execute("DELETE FROM cold_tiers WHERE id=?", (tier_id,))  # Not kept unless it works
@@ -167,7 +172,7 @@ async def create_tier(body: TierInput, user: Administrator) -> dict[str, Any]:
 
 
 @router.put("/api/admin/tiering/tiers/{tier_id}")
-async def update_tier(tier_id: str, body: TierInput, user: Administrator) -> dict[str, Any]:
+def update_tier(tier_id: str, body: TierInput, user: Administrator) -> dict[str, Any]:
     fields = _fields(body)
     with connect() as db:
         current = db.execute("SELECT * FROM cold_tiers WHERE id=?", (tier_id,)).fetchone()
@@ -181,13 +186,19 @@ async def update_tier(tier_id: str, body: TierInput, user: Administrator) -> dic
             raise HTTPException(status_code=409, detail="Footage is stored on this tier: its location cannot change (move the footage first)")
         if db.execute("SELECT 1 FROM cold_tiers WHERE name=? AND id<>?", (fields["name"], tier_id)).fetchone():
             raise HTTPException(status_code=409, detail="A cold tier with this name already exists")
+        if not (body.access_key and body.secret_key) and body.kind == "s3" and current["credentials_ciphertext"] is None:
+            raise HTTPException(status_code=422, detail="Enter the access key and the secret key")
         sets = ",".join(f"{name}=?" for name in fields)
         db.execute(f"UPDATE cold_tiers SET {sets} WHERE id=?", (*fields.values(), tier_id))
         if body.access_key and body.secret_key:
             db.execute("UPDATE cold_tiers SET credentials_ciphertext=? WHERE id=?", (tiering.seal_credentials(body.access_key, body.secret_key), tier_id))
-        elif body.kind == "s3" and current["credentials_ciphertext"] is None:
-            raise HTTPException(status_code=422, detail="Enter the access key and the secret key")
-    await run_in_threadpool(_probe, tier_id)
+    try:
+        _probe(tier_id)
+    except HTTPException:
+        with connect() as db:  # Settings that do not work are not kept, as when a tier is created
+            restore = ",".join(f"{name}=?" for name in (*fields, "credentials_ciphertext"))
+            db.execute(f"UPDATE cold_tiers SET {restore} WHERE id=?", (*(current[name] for name in (*fields, "credentials_ciphertext")), tier_id))
+        raise
     with connect() as db:
         db.execute("UPDATE cold_tiers SET last_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL,failures=0 WHERE id=?", (tier_id,))
         record(db, int(user["id"]), "cold_tier_updated", "cold_tier", tier_id, name=fields["name"], credentials_replaced=bool(body.access_key))
@@ -195,17 +206,18 @@ async def update_tier(tier_id: str, body: TierInput, user: Administrator) -> dic
 
 
 @router.post("/api/admin/tiering/tiers/{tier_id}/check")
-async def check_tier(tier_id: str, _: Administrator) -> dict[str, Any]:
+def check_tier(tier_id: str, user: Administrator) -> dict[str, Any]:
     with connect() as db:
         if db.execute("SELECT 1 FROM cold_tiers WHERE id=?", (tier_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Cold tier not found")
     try:
-        await run_in_threadpool(_probe, tier_id)
+        _probe(tier_id)
     except HTTPException as exc:
-        await run_in_threadpool(tiering.note_health, tier_id, str(exc.detail))
+        tiering.note_health(tier_id, str(exc.detail))
         raise
-    await run_in_threadpool(tiering.note_health, tier_id, None)
+    tiering.note_health(tier_id, None)
     with connect() as db:
+        record(db, int(user["id"]), "cold_tier_checked", "cold_tier", tier_id)
         return _view(db)
 
 
@@ -235,13 +247,23 @@ def put_policy(volume_id: str, body: PolicyInput, user: Administrator) -> dict[s
     if volume_id not in configured_volumes():
         raise HTTPException(status_code=404, detail="Storage volume not found")
     with connect() as db:
-        if db.execute("SELECT 1 FROM cold_tiers WHERE id=?", (body.tier_id,)).fetchone() is None:
-            raise HTTPException(status_code=422, detail="Unknown cold tier")
-        db.execute("INSERT INTO tier_policies(volume_id,tier_id,after_days,rate_kbps,enabled) VALUES(?,?,?,?,?) ON CONFLICT(volume_id) DO UPDATE SET tier_id=excluded.tier_id,"
-                   "after_days=excluded.after_days,rate_kbps=excluded.rate_kbps,enabled=excluded.enabled,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
-                   (volume_id, body.tier_id, body.after_days, body.rate_kbps, int(body.enabled)))
-        record(db, int(user["id"]), "tier_policy_changed", "storage_volume", volume_id, tier_id=body.tier_id, after_days=body.after_days, enabled=body.enabled)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM cold_tiers WHERE id=?", (body.tier_id,)).fetchone() is None:
+                raise HTTPException(status_code=422, detail="Unknown cold tier")
+            _write_policy(db, volume_id, body, user)
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
         return _view(db)
+
+
+def _write_policy(db, volume_id: str, body: PolicyInput, user) -> None:
+    db.execute("INSERT INTO tier_policies(volume_id,tier_id,after_days,rate_kbps,enabled) VALUES(?,?,?,?,?) ON CONFLICT(volume_id) DO UPDATE SET tier_id=excluded.tier_id,"
+               "after_days=excluded.after_days,rate_kbps=excluded.rate_kbps,enabled=excluded.enabled,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+               (volume_id, body.tier_id, body.after_days, body.rate_kbps, int(body.enabled)))
+    record(db, int(user["id"]), "tier_policy_changed", "storage_volume", volume_id, tier_id=body.tier_id, after_days=body.after_days, enabled=body.enabled)
 
 
 @router.delete("/api/admin/tiering/policies/{volume_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -254,8 +276,9 @@ def delete_policy(volume_id: str, user: Administrator) -> Response:
 
 
 @router.post("/api/admin/tiering/run")
-async def run_now(_: Administrator) -> dict[str, Any]:
+def run_now(user: Administrator) -> dict[str, Any]:
     """Move up to five of each policy's oldest eligible segments now, instead of waiting for the next pass."""
-    outcomes = await run_in_threadpool(tiering.run_once, None, 5)
+    outcomes = tiering.run_once(None, 5)
     with connect() as db:
+        record(db, int(user["id"]), "tiering_run_now", "storage_tiering", "all", moved=outcomes.get("moved", 0))
         return {"moved": outcomes.get("moved", 0), "outcomes": outcomes, **_view(db)}

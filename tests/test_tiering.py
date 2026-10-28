@@ -245,7 +245,9 @@ class LocalTierTests(TierCase):
         def die_midway(store, source, key, sha, size, rate=None):
             target = store.path(key)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.with_name(f".{target.name}.partial").write_bytes(source.read_bytes()[:100])
+            crashed = target.with_name(f".{target.name}.1.1.partial")
+            crashed.write_bytes(source.read_bytes()[:100])
+            os.utime(crashed, (0, 0))
             broke.append(key)
             raise OSError("The disk went away")
 
@@ -304,7 +306,11 @@ class LocalTierTests(TierCase):
             self.assertEqual(tiering.run_once(), {"failed": 1})
         self.assertIsNone(self.row(segment_id)["tier_id"])
         self.assertEqual(self.hot(segment_id).read_bytes(), payload)
-        self.assertFalse((self.cold / self.row(segment_id)["relative_path"]).exists())
+        # The bad copy is not deleted (its name is shared with any other mover); it is not referenced, and the next pass overwrites it.
+        with connect() as db:
+            db.execute("UPDATE tier_moves SET updated_at='2000-01-01T00:00:00+00:00'")
+        self.assertEqual(tiering.run_once(), {"moved": 1})
+        self.assertEqual((self.cold / self.row(segment_id)["relative_path"]).read_bytes(), payload)
         del real
 
     def test_footage_that_no_longer_matches_its_signed_chain_is_not_carried_over(self):
@@ -442,6 +448,7 @@ class ObjectStoreTierTests(TierCase):
                 self.assertEqual(len(self.media(self.d1, segment_id).content), 3 * 1024 * 1024)
             self.assertEqual(len(list(tiering.cache_dir().glob("*.mp4"))), 3)  # Under the limit: all kept
         small = 4 * 1024 * 1024
+        self.enterContext(mock.patch.object(tiering, "EVICT_GRACE_SECONDS", 0))
         files = sorted(tiering.cache_dir().glob("*.mp4"), key=lambda path: path.stat().st_mtime)
         retention.acquire_playback(files[0])
         try:
@@ -454,6 +461,39 @@ class ObjectStoreTierTests(TierCase):
         tiering.evict(limit=small)
         self.assertEqual(len(list(tiering.cache_dir().glob("*.mp4"))), 1)
         self.assertEqual(len(self.media(self.d1, ids[0]).content), 3 * 1024 * 1024)  # Back from the bucket when asked for again
+
+    def test_two_movers_of_one_segment_leave_its_object_in_place(self):
+        segment_id, payload = self.segment(self.d1, 40)
+        self.policy(self.s3_tier())
+        results: list[str] = []
+
+        def opener(tier):
+            store = tiering.ObjectStore(tier)
+            real_put = store.put
+
+            def put(*args, **kwargs):
+                real_put(*args, **kwargs)
+                if not results:
+                    results.append(tiering.move_segment(segment_id))  # The other mover gets all the way through while this one is between copying and switching
+            store.put = put
+            return store
+
+        self.assertEqual(tiering.move_segment(segment_id, opener=opener), "already")
+        self.assertEqual(results, ["moved"])
+        self.assertEqual(len(self.stub.objects), 1)  # The shared object was not deleted by the one that lost
+        self.assertEqual(self.media(self.d1, segment_id).content, payload)
+
+    def test_footage_deleted_part_way_through_a_move_leaves_no_object_behind(self):
+        segment_id, _ = self.segment(self.d1, 40)
+        self.policy(self.s3_tier())
+        self.stub.fail["PUT"] = 503
+        self.assertEqual(tiering.run_once(), {"failed": 1})
+        with connect() as db:
+            db.execute("DELETE FROM recording_segments WHERE id=?", (segment_id,))
+        self.assertEqual(tiering.move_segment(segment_id), "gone")
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tier_moves").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tier_orphans").fetchone()[0], 1)
 
     def test_hash_chain_verification_passes_for_footage_in_a_bucket(self):
         first, _ = self.segment(self.d1, 40)

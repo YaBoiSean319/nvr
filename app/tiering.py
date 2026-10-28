@@ -44,6 +44,9 @@ _fetch_locks: dict[str, threading.Lock] = {}
 _fetch_guard = threading.Lock()
 
 
+EVICT_GRACE_SECONDS = 120
+
+
 class TierError(OSError):
     """A cold tier that cannot be used (unreachable, refused, a copy that did not match)."""
 
@@ -116,7 +119,10 @@ class LocalStore:
     def put(self, source: Path, key: str, sha256: str, size: int, rate: Callable[[int], None] | None = None) -> None:
         target = self.path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(f".{target.name}.partial")
+        partial = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.partial")  # Two movers of one segment never share a partial file
+        for stale in target.parent.glob(f".{target.name}.*.partial"):  # Left by a copy that died; one being written is not an hour old
+            if time.time() - stale.stat().st_mtime > 3600:
+                stale.unlink(missing_ok=True)
         try:
             with source.open("rb") as reader, partial.open("wb") as writer:
                 while chunk := reader.read(1024 * 1024):
@@ -182,7 +188,7 @@ def open_store(tier: Tier) -> LocalStore | ObjectStore:
     return LocalStore(tier) if tier.kind == "local" else ObjectStore(tier)
 
 
-def _close(store: Any) -> None:
+def close_store(store: Any) -> None:
     if hasattr(store, "close"):
         store.close()
 
@@ -242,7 +248,7 @@ def cold_path(relative_path: str) -> Path | None:
             return store.path(row["tier_key"])
         return _fetch_cached(store, tier, row)
     finally:
-        _close(store)
+        close_store(store)
 
 
 def _fetch_cached(store: ObjectStore, tier: Tier, row: sqlite3.Row) -> Path:
@@ -277,7 +283,14 @@ def evict(keep: Path | None = None, limit: int | None = None) -> int:
     directory = cache_dir()
     if not directory.is_dir():
         return 0
-    files = sorted((path for path in directory.glob("*.mp4") if path != keep), key=lambda path: path.stat().st_mtime)
+    for stale in directory.glob(".*.partial"):  # Left by a fetch that died; one being written is minutes old at most
+        try:
+            if time.time() - stale.stat().st_mtime > 3600:
+                stale.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # A copy fetched or read moments ago is about to be played (the caller has not taken its lease yet): it is the last to go.
+    files = sorted((path for path in directory.glob("*.mp4") if path != keep and time.time() - path.stat().st_mtime > EVICT_GRACE_SECONDS), key=lambda path: path.stat().st_mtime)
     total = sum(path.stat().st_size for path in directory.glob("*.mp4"))
     removed = 0
     for path in files:
@@ -367,7 +380,7 @@ def sweep_orphans(opener: Callable[[Tier], Any] = open_store) -> int:
         except (OSError, S3Error):
             continue
         finally:
-            _close(store)
+            close_store(store)
         with connect() as db:
             db.execute("DELETE FROM tier_orphans WHERE tier_id=? AND tier_key=?", (orphan["tier_id"], orphan["tier_key"]))
         removed += 1
@@ -411,7 +424,10 @@ def move_segment(segment_id: int, now: datetime | None = None, opener: Callable[
     with connect() as db:
         row = db.execute("SELECT * FROM recording_segments WHERE id=?", (segment_id,)).fetchone()
         if row is None:
-            db.execute("DELETE FROM tier_moves WHERE segment_id=?", (segment_id,))
+            begun = db.execute("SELECT tier_id,tier_key FROM tier_moves WHERE segment_id=?", (segment_id,)).fetchone()
+            if begun is not None:  # The footage was deleted part way through a move: its copy is nobody's now
+                db.execute("INSERT OR IGNORE INTO tier_orphans(tier_id,tier_key) VALUES(?,?)", (begun["tier_id"], begun["tier_key"]))
+                db.execute("DELETE FROM tier_moves WHERE segment_id=?", (segment_id,))
             return "gone"
         if row["tier_id"]:
             return "already"
@@ -452,8 +468,7 @@ def move_segment(segment_id: int, now: datetime | None = None, opener: Callable[
             store.put(source, key, sha, size, rate)
             copied_sha, copied_size = store.read_digest(key, rate)
             if (copied_sha, copied_size) != (sha, size):
-                store.delete(key)
-                raise TierError("The copy on the cold tier did not match the footage; it was removed")
+                raise TierError("The copy on the cold tier did not match the footage; the next pass sends it again")  # The key is shared with any other mover: it is overwritten, not deleted
         except (OSError, S3Error) as exc:
             message = str(exc)
             note_health(tier.id, message)
@@ -465,7 +480,10 @@ def move_segment(segment_id: int, now: datetime | None = None, opener: Callable[
             try:
                 again = blocked(db, segment_id, now)
                 current = db.execute("SELECT tier_id,size_bytes FROM recording_segments WHERE id=?", (segment_id,)).fetchone()
-                if again or current is None or current["tier_id"] or int(current["size_bytes"]) != size:
+                if current is not None and current["tier_id"] and not again:
+                    db.execute("ROLLBACK")  # Another mover switched it first, to this same object: leave the object alone
+                    return "already"
+                if again or current is None or int(current["size_bytes"]) != size:
                     db.execute("ROLLBACK")
                     _discard_copy(store, key, segment_id)
                     return again or "gone"
@@ -478,7 +496,7 @@ def move_segment(segment_id: int, now: datetime | None = None, opener: Callable[
             db.execute("COMMIT")
         note_health(tier.id, None)
     finally:
-        _close(store)
+        close_store(store)
     # The segment now lives on the tier; the hot file goes unless someone is playing it, and then a later pass takes it.
     if unlink_if_unleased(source):
         _forget_move(segment_id)
