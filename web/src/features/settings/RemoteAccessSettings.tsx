@@ -33,8 +33,9 @@ export function RemoteAccessSettings() {
   const client = useQueryClient();
   const shown = useQuery({ queryKey: KEY, queryFn: ({ signal }) => api<RemoteAccess>("/api/admin/remote-access", { signal }) });
   const change = useMutation({
-    mutationFn: (value: { mfa_policy: Policy; remote_mfa: boolean }) => api("/api/admin/security", { method: "PUT", body: value }),
-    onSuccess: () => client.invalidateQueries({ queryKey: KEY }),
+    // Only this setting is sent: the policy for local accounts, which Users & access changes, is left as it is.
+    mutationFn: (value: { remote_mfa: boolean }) => api("/api/admin/security", { method: "PUT", body: value }),
+    onSuccess: () => Promise.all([client.invalidateQueries({ queryKey: KEY }), client.invalidateQueries({ queryKey: ["admin", "security"] })]),
   });
   const data = shown.data;
   if (!data) return <p className="muted" role="status">{shown.isError ? "How the NVR is reached could not be loaded." : "Loading…"}</p>;
@@ -78,7 +79,7 @@ export function RemoteAccessSettings() {
         <h2 className="field-heading">Remote sessions</h2>
         <label className="check">
           <input type="checkbox" checked={data.remote_mfa} disabled={change.isPending}
-                 onChange={event => change.mutate({ mfa_policy: data.mfa_policy, remote_mfa: event.target.checked })} />
+                 onChange={event => change.mutate({ remote_mfa: event.target.checked })} />
           Require a second factor for sessions from outside the local network
         </label>
         <p className="muted field-hint">

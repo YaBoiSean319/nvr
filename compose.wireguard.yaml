@@ -4,8 +4,9 @@
 #   docker compose -f compose.yaml -f compose.wireguard.yaml up -d
 #
 # The hub is a host you control with a public address that the site and your devices both connect to. WireGuard carries the traffic encrypted, so
-# the NVR is opened over plain HTTP at its WireGuard address and there is no proxy to trust. WG_SUBNET (the tunnel's addresses) is counted as the local
-# network; leave it out of NVR_LOCAL_NETWORKS below if you would rather have people on the tunnel treated as remote (and asked for a second factor).
+# the NVR is opened over plain HTTP at its WireGuard address and there is no proxy to trust. By default people on the tunnel count as outside the local
+# network: Settings shows a plain-HTTP warning (the tunnel does encrypt it) and a second factor can be required of them. To treat them as local instead,
+# set WG_LOCAL_NETWORKS to the tunnel's addresses (for example 10.13.13.0/24), which also silences the warning and lifts that requirement.
 services:
   wireguard:
     image: lscr.io/linuxserver/wireguard:latest
@@ -21,4 +22,4 @@ services:
       - ./deploy/wireguard:/config
   nvr:
     environment:
-      NVR_LOCAL_NETWORKS: ${WG_SUBNET:-10.13.13.0/24}
+      NVR_LOCAL_NETWORKS: ${WG_LOCAL_NETWORKS:-}

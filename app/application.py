@@ -14,7 +14,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import api
+from . import api, network
 from .api import web_interface
 from .backup import BackupManager
 from .detection import DetectionManager
@@ -126,6 +126,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         session_cookie="nvr_oidc_flow",
         max_age=600,
     )
+    app.add_middleware(network.TrustedProxyMiddleware)  # Outermost: everything below sees the scheme and host a trusted proxy reports
     for router in api.ROUTERS:
         app.include_router(router)
     # Last: the interface's client-route catch-all must never shadow an API route.

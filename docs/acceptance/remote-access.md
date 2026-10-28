@@ -38,7 +38,7 @@ For every setup, after it is up, sign in as an administrator through the tunnel 
 2. `docker compose -f compose.yaml -f compose.wireguard.yaml up -d`.
 3. [ ] `docker compose exec wireguard wg show` shows a recent handshake with the hub.
 4. [ ] From a device on the tunnel, `http://<NVR tunnel address>:8280` opens the sign-in page.
-5. [ ] Settings > Remote access shows the caller as inside the local network (the tunnel subnet is listed in `NVR_LOCAL_NETWORKS`) and no plain-HTTP warning. Remove the subnet from `NVR_LOCAL_NETWORKS` and confirm the caller is then shown as outside, with the plain-HTTP warning.
+5. [ ] Settings > Remote access shows the caller as outside the local network, with the plain-HTTP warning (the tunnel does encrypt it). Set `WG_LOCAL_NETWORKS` to the tunnel's addresses, recreate the NVR container, and confirm the caller is then shown as inside the local network with no warning.
 6. [ ] With the tunnel down on the device, the NVR is unreachable from it.
 
 ## Results

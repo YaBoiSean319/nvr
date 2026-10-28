@@ -14,18 +14,18 @@ Use `docker compose -f compose.yaml -f compose.<setup>.yaml up -d`. Every overri
 
 A proxy hides who is calling behind its own address and reports the caller in headers (`X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`), which anyone who can reach the NVR directly could send too. So the NVR believes those headers **only from a peer listed in `NVR_TRUSTED_PROXIES`** (addresses and networks, comma-separated; names are not accepted):
 
-- **The caller's address** is the first entry of `X-Forwarded-For`, read from the right, that is not itself a trusted proxy. Entries a caller prepends are therefore never believed. If any entry is not an address, or there are more than ten, the header is ignored and the peer's address is used.
+- **The caller's address** is the first entry of `X-Forwarded-For`, read from the right, that is not itself a trusted proxy. Entries a caller prepends are therefore never believed. Entries may carry a port (`1.2.3.4:5678`, `[::1]:80`); `::ffff:a.b.c.d` is read as `a.b.c.d`. If any entry is not an address, or there are more than ten, the header is unusable. Only the `X-Forwarded-*` headers are read, not the newer `Forwarded` header: make the proxy send `X-Forwarded-For`.
 - **HTTPS** is the last `X-Forwarded-Proto`, and **the host** the last `X-Forwarded-Host` (when it is a plausible host name); otherwise the connection's own scheme and `Host`. Passkeys use them to know the address the browser used.
-- From anyone else the headers are ignored, even on a deployment that has a trusted proxy. The NVR does not leave this to its web server: uvicorn's own forwarded-header handling, which trusts any sender on `127.0.0.1`, is turned off.
+- From anyone else the headers are ignored, even on a deployment that has a trusted proxy. The NVR does not leave this to its web server: uvicorn's own forwarded-header handling, which trusts any sender on `127.0.0.1`, is turned off, and the NVR's own does the work (so redirects and links also use the scheme and host a trusted proxy reports). **If you ran the NVR behind a proxy on the same host before this, list `127.0.0.1` in `NVR_TRUSTED_PROXIES`**; until you do, its callers are treated as remote.
 - `NVR_TRUST_FORWARDED_FOR=true`, from before trusted proxies existed, still counts sign-in attempts by the last `X-Forwarded-For` entry from any sender. It is only safe when the NVR can be reached through the proxy alone; Settings warns about it, and it is replaced by listing the proxy.
 
 The proxies the overrides use run on the host network and reach the NVR on `127.0.0.1`, so they set `NVR_TRUSTED_PROXIES=127.0.0.1`. For another proxy, give its address or network (for example the Docker network of a Traefik or nginx container).
 
-**A request that carries forwarded headers from a peer that is not listed is treated as coming from outside the local network**, never as local: a proxy the NVR was not told about stands between it and the caller, so the caller is unknown.
+**Wherever the caller cannot be known, it counts as outside the local network, never as local:** forwarded headers from a peer that is not listed (a proxy the NVR was not told about), a trusted proxy that sends no usable `X-Forwarded-For` (missing, malformed or more than ten entries), and everything that rests on `NVR_TRUST_FORWARDED_FOR`, which any sender could write. This is what stops someone outside from looking local by sending a header of their own.
 
 ## Where "local" ends
 
-A caller is *remote* when its address is outside the local networks: loopback, private (`10/8`, `172.16/12`, `192.168/16`), link-local, IPv6 unique-local, and Tailscale's `100.64/10`. Add more with `NVR_LOCAL_NETWORKS` (for example a WireGuard subnet). An address that cannot be read counts as remote.
+A caller is *remote* when its address is outside the local networks: loopback, private (`10/8`, `172.16/12`, `192.168/16`), link-local and IPv6 unique-local. Add more with `NVR_LOCAL_NETWORKS`. **Tailscale's range (`100.64/10`) and a WireGuard tunnel's addresses are not local unless you list them**, so the second factor for remote sessions applies to people on a tailnet or tunnel; listing the range treats them as being at the site. An address that cannot be read counts as remote.
 
 ## The live video socket
 
@@ -40,7 +40,7 @@ Administrators see how the page reached the NVR (the caller's address and whethe
 - **Forwarded headers from a peer that is not a trusted proxy**, which were ignored: everybody behind it looks like one address, and HTTPS cannot be seen.
 - `NVR_TRUST_FORWARDED_FOR` without trusted proxies; entries of `NVR_TRUSTED_PROXIES` that are not addresses; an `NVR_PUBLIC_URL` that is plain `http://`; the session cookie not marked Secure over HTTPS (set `NVR_COOKIE_SECURE=true`).
 
-**Require a second factor for sessions from outside the local network** makes a local account without a passkey or authenticator app reach only enrolment when it signs in from outside, and asks a session started locally as soon as it is used from outside (it is checked on every request). Set up your own factor first. People who already have one are asked for it as always; Microsoft Entra accounts (their tenant's multi-factor) and API tokens are unchanged. The change is audited (`remote_mfa_changed`).
+**Require a second factor for sessions from outside the local network** makes a local account without a passkey or authenticator app reach only enrolment when it signs in from outside, and asks a session started locally as soon as it is used from outside (it is checked on every request). Set up your own factor first. People who already have one are asked for it as always. It applies to browser sessions of local accounts: Microsoft Entra accounts (their tenant's multi-factor), API tokens and video-wall sessions are unchanged, as they are for the policy in Users & access. The change is audited (`remote_mfa_changed`).
 
 ## Environment
 
@@ -62,7 +62,7 @@ Administrators see how the page reached the NVR (the caller's address and whethe
 
 ## WireGuard
 
-The site dials out to a hub (a small host with a public address, which you run); your devices connect to the same hub. Nothing is opened at the site; the hub needs one UDP port. Put the site's client configuration (with `PersistentKeepalive = 25`, the NVR's tunnel address, and `AllowedIPs` covering your devices' tunnel addresses) at `deploy/wireguard/wg_confs/wg0.conf` and start `compose.wireguard.yaml`. Browse to `http://<NVR tunnel address>:8280`: the tunnel encrypts it, so there is no proxy to trust, and the tunnel's subnet (`WG_SUBNET`, default `10.13.13.0/24`) is counted as the local network. (Passkeys, and the camera's HTTPS-only browser features, need an HTTPS address; use Tailscale or Cloudflare if you want those.) Keep the private keys out of the repository; `deploy/wireguard/` is for your own configuration.
+The site dials out to a hub (a small host with a public address, which you run); your devices connect to the same hub. Nothing is opened at the site; the hub needs one UDP port. Put the site's client configuration (with `PersistentKeepalive = 25`, the NVR's tunnel address, and `AllowedIPs` covering your devices' tunnel addresses) at `deploy/wireguard/wg_confs/wg0.conf` and start `compose.wireguard.yaml`. Browse to `http://<NVR tunnel address>:8280`: the tunnel encrypts it, so there is no proxy to trust. By default people on the tunnel count as outside the local network, so Settings shows a plain-HTTP warning (which the tunnel makes harmless) and the second factor can be required of them; set `WG_LOCAL_NETWORKS` to the tunnel's addresses to treat them as local instead, which silences the warning and lifts that requirement. (Passkeys need an HTTPS address; use Tailscale or Cloudflare if you want them.) Keep the private keys out of the repository; `deploy/wireguard/` is for your own configuration.
 
 ## What the NVR does not do
 

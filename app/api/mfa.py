@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import auth_limits as limits, mfa, network, webauthn
 from app.api.identity import signed_in
@@ -277,7 +277,7 @@ def _summary(user: Principal) -> dict[str, object]:
     return {
         "local": local,
         "policy": policy,
-        "required": mfa.required_for(policy, user.role, local),
+        "required": mfa.required_for(policy, user.role, local),  # By role only; "remote_required" is the other rule, which depends on where each request comes from
         "remote_required": remote_required,
         "totp": found["totp"],
         "passkeys": [{key: item[key] for key in ("id", "name", "created_at", "last_used_at")} for item in found["passkeys"]],
@@ -434,8 +434,15 @@ def regenerate_recovery_codes(payload: PasswordRequest, request: Request, user: 
 # --- Administrators ---------------------------------------------------------------------
 
 class PolicyRequest(BaseModel):
-    mfa_policy: Literal["off", "administrators", "all"]
-    remote_mfa: bool | None = None  # Whether sessions from outside the local network need a second factor; left as it is when absent
+    """What to change: the policy for local accounts, and whether sessions from outside the local network need a second factor. Either may be left out to stay as it is."""
+    mfa_policy: Literal["off", "administrators", "all"] | None = None
+    remote_mfa: bool | None = None
+
+    @model_validator(mode="after")
+    def says_something(self) -> "PolicyRequest":
+        if self.mfa_policy is None and self.remote_mfa is None:
+            raise ValueError("Say which setting to change")
+        return self
 
 
 @router.get("/api/admin/security")
@@ -448,13 +455,14 @@ def get_security_policy(_: Administrator) -> dict[str, object]:
 def put_security_policy(payload: PolicyRequest, admin: Administrator) -> dict[str, object]:
     with connect() as db:
         before, remote_before = mfa.policy(db), mfa.remote_required(db)
+        policy = before if payload.mfa_policy is None else payload.mfa_policy
         remote = remote_before if payload.remote_mfa is None else payload.remote_mfa
-        db.execute("UPDATE security_settings SET mfa_policy=?,remote_mfa=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (payload.mfa_policy, int(remote)))
-        if before != payload.mfa_policy:
-            record(db, admin.id, "mfa_policy_changed", "security_settings", 1, before=before, after=payload.mfa_policy)
+        db.execute("UPDATE security_settings SET mfa_policy=?,remote_mfa=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (policy, int(remote)))
+        if before != policy:
+            record(db, admin.id, "mfa_policy_changed", "security_settings", 1, before=before, after=policy)
         if remote != remote_before:
             record(db, admin.id, "remote_mfa_changed", "security_settings", 1, before=remote_before, after=remote)
-    return {"mfa_policy": payload.mfa_policy, "remote_mfa": remote}
+    return {"mfa_policy": policy, "remote_mfa": remote}
 
 
 @router.get("/api/admin/users")

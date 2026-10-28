@@ -138,12 +138,13 @@ class SchemeHostOriginTests(NetworkCase):
 
 class RemoteTests(NetworkCase):
     def test_which_addresses_are_outside_the_local_network(self):
-        for local in ("127.0.0.1", "::1", "10.2.3.4", "172.16.0.9", "172.31.255.1", "192.168.1.20", "169.254.1.1", "fe80::1", "fd12:3456::1", "100.64.0.1", "100.127.1.1"):
+        for local in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "10.2.3.4", "172.16.0.9", "172.31.255.1", "192.168.1.20", "169.254.1.1", "fe80::1", "fd12:3456::1"):
             self.assertFalse(network.is_remote(local), local)
-        for remote in ("8.8.8.8", "203.0.113.9", "172.32.0.1", "100.128.0.1", "2001:db8::1", "unknown", "junk", ""):
-            self.assertTrue(network.is_remote(remote), remote)
-        os.environ["NVR_LOCAL_NETWORKS"] = "203.0.113.0/24, nonsense"
+        for remote in ("8.8.8.8", "203.0.113.9", "172.32.0.1", "100.64.0.1", "100.127.1.1", "100.128.0.1", "2001:db8::1", "::ffff:8.8.8.8", "unknown", "junk", ""):
+            self.assertTrue(network.is_remote(remote), remote)  # A tailnet is remote until it is listed
+        os.environ["NVR_LOCAL_NETWORKS"] = "203.0.113.0/24, 100.64.0.0/10, nonsense"
         self.assertFalse(network.is_remote("203.0.113.9"))
+        self.assertFalse(network.is_remote("100.100.1.1"))
 
     def test_a_caller_behind_a_proxy_that_was_not_listed_counts_as_remote_not_local(self):
         local_through_unknown_proxy = make_request("192.168.1.10", {"x-forwarded-for": "203.0.113.9"})
@@ -153,8 +154,27 @@ class RemoteTests(NetworkCase):
         self.assertFalse(network.request_is_remote(make_request("192.168.1.10", {"x-forwarded-for": "192.168.1.55"})))
         self.assertTrue(network.request_is_remote(make_request("192.168.1.10", {"x-forwarded-for": "203.0.113.9"})))
         os.environ.pop("NVR_TRUSTED_PROXIES")
-        os.environ["NVR_TRUST_FORWARDED_FOR"] = "1"  # The older option did choose to believe the header
-        self.assertFalse(network.request_is_remote(make_request("192.168.1.10", {"x-forwarded-for": "192.168.1.55"})))
+        os.environ["NVR_TRUST_FORWARDED_FOR"] = "1"  # Anybody can write that header, so it never makes a caller local, whatever it says
+        self.assertTrue(network.request_is_remote(make_request("192.168.1.10", {"x-forwarded-for": "192.168.1.55"})))
+        self.assertTrue(network.request_is_remote(make_request("8.8.8.8", {"x-forwarded-for": "192.168.1.55"})))
+        self.assertFalse(network.request_is_remote(make_request("192.168.1.10")))
+
+    def test_a_trusted_proxy_that_does_not_say_who_is_calling_cannot_make_the_caller_local(self):
+        self.trust("127.0.0.1")
+        for headers in ({}, {"x-forwarded-for": "junk"}, {"x-forwarded-for": "192.168.1.5, junk"}, {"x-forwarded-for": ", ".join(f"192.168.1.{index}" for index in range(1, 12))},
+                        {"forwarded": "for=192.168.1.5;proto=https"}, {"x-forwarded-proto": "https"}):
+            self.assertTrue(network.request_is_remote(make_request("127.0.0.1", headers)), headers)
+        self.assertFalse(network.request_is_remote(make_request("127.0.0.1", {"x-forwarded-for": "192.168.1.5"})))
+        self.assertTrue(network.request_is_remote(make_request("127.0.0.1", {"x-forwarded-for": "203.0.113.9"})))
+
+    def test_ports_and_mapped_addresses_in_the_chain_are_read(self):
+        self.trust("127.0.0.1")
+        for header, expected in (("203.0.113.9:5678", "203.0.113.9"), ("[2001:db8::7]:443", "2001:db8::7"), ("[2001:db8::7]", "2001:db8::7"), ("::ffff:203.0.113.9", "203.0.113.9"),
+                                 ("6.6.6.6, 203.0.113.9:80", "203.0.113.9")):
+            self.assertEqual(network.client_address(make_request("127.0.0.1", {"x-forwarded-for": header})), expected, header)
+        for bad in ("203.0.113.9:", "203.0.113.9:port", "[2001:db8::7", "[2001:db8::7]x", "1.2.3.4:99999999"):
+            self.assertEqual(network.client_address(make_request("127.0.0.1", {"x-forwarded-for": bad})), "127.0.0.1", bad)
+        self.assertTrue(network.peer_is_trusted_proxy(make_request("::ffff:127.0.0.1")))  # The proxy's own address may arrive mapped
 
 
 class WarningTests(NetworkCase):
@@ -204,7 +224,7 @@ class LiveServer:
     """The real application under uvicorn on a loopback port, with its forwarded-header handling left to the NVR (as in production)."""
 
     def __init__(self, app) -> None:
-        self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", proxy_headers=False, lifespan="on"))
+        self.server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=0, log_level="warning", proxy_headers=False, lifespan="on"))
         self.thread = threading.Thread(target=self.server.run, daemon=True)
         self.thread.start()
         deadline = time.monotonic() + 20
@@ -233,10 +253,14 @@ class ProxiedCase(NetworkCase):
         self.proxy = ReverseProxy(self.live.port)
         self.addCleanup(self.live.close)
         self.addCleanup(self.proxy.close)
-        self.direct = httpx.Client(base_url=f"http://127.0.0.1:{self.live.port}", timeout=20)
+        self.direct = self.local_client()
         self.addCleanup(self.direct.close)
         setup = self.direct.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD})
         self.assertEqual(setup.status_code, 201, setup.text)
+
+    def local_client(self) -> httpx.Client:
+        """A client on the local network that is not the proxy: it connects from 127.0.0.9, where the proxy is 127.0.0.1."""
+        return httpx.Client(base_url=f"http://127.0.0.1:{self.live.port}", timeout=20, transport=httpx.HTTPTransport(local_address="127.0.0.9"))
 
     def through_proxy(self) -> httpx.Client:
         client = httpx.Client(base_url=f"http://127.0.0.1:{self.proxy.port}", timeout=20)
@@ -282,7 +306,7 @@ class ProxyDetectionTests(ProxiedCase):
         self.trust("10.9.9.0/24")  # Not the loopback peer the direct request comes from
         self.assertEqual(self.direct.post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 200)
         shown = self.reach_with(self.direct, {"X-Forwarded-For": "203.0.113.9", "X-Forwarded-Proto": "https", "X-Forwarded-Host": "evil.example"})
-        self.assertEqual((shown["client_address"], shown["https"], shown["host"], shown["peer_is_trusted_proxy"]), ("127.0.0.1", False, f"127.0.0.1:{self.live.port}", False))
+        self.assertEqual((shown["client_address"], shown["https"], shown["host"], shown["peer_is_trusted_proxy"]), ("127.0.0.9", False, f"127.0.0.1:{self.live.port}", False))
         self.assertEqual(shown["remote"], True)  # Forwarded headers from an unlisted peer: the caller is unknown, so remote, not local
 
     def test_with_no_trusted_proxy_configured_the_proxy_is_just_a_peer_and_settings_says_what_to_do(self):
@@ -295,7 +319,7 @@ class ProxyDetectionTests(ProxiedCase):
     def test_a_direct_local_visit_is_local_and_unremarkable(self):
         self.direct.post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD})
         shown = self.reach(self.direct)
-        self.assertEqual((shown["client_address"], shown["remote"], shown["https"]), ("127.0.0.1", False, False))
+        self.assertEqual((shown["client_address"], shown["remote"], shown["https"]), ("127.0.0.9", False, False))
         self.assertEqual(shown["warnings"], [])
 
     def test_sign_in_limits_count_each_person_behind_the_proxy_separately_only_when_it_is_trusted(self):
@@ -331,7 +355,7 @@ class WarningsThroughTheProxyTests(ProxiedCase):
 
     def test_only_administrators_can_see_how_the_nvr_is_reached(self):
         self.add_operator()
-        client = httpx.Client(base_url=f"http://127.0.0.1:{self.live.port}", timeout=20)
+        client = self.local_client()
         self.addCleanup(client.close)
         self.assertEqual(client.get("/api/admin/remote-access").status_code, 401)
         client.post("/api/auth/login", json={"username": "viewer", "password": OPERATOR_PASSWORD})
@@ -370,6 +394,45 @@ class LiveSocketTests(ProxiedCase):
             connect(direct, origin="https://evil.example", open_timeout=15)
 
 
+class TrustedProxyMiddlewareTests(NetworkCase):
+    """What the rest of the application sees of the scheme and host: a trusted proxy's word, and nobody else's."""
+
+    def seen(self, peer: str, scope_type: str = "http", scheme: str = "http", **headers: str) -> dict:
+        import asyncio
+        captured: dict = {}
+
+        async def inner(scope, receive, send):
+            captured.update(scope)
+        pairs = [("host", "127.0.0.1:8280"), *[(key.replace("_", "-"), value) for key, value in headers.items()]]
+        scope = {"type": scope_type, "scheme": scheme, "path": "/", "query_string": b"", "server": ("127.0.0.1", 8280), "client": (peer, 40000),
+                 "headers": [(key.encode(), value.encode()) for key, value in pairs]}
+        asyncio.run(network.TrustedProxyMiddleware(inner)(scope, None, None))
+        return captured
+
+    def test_a_trusted_proxys_scheme_and_host_become_the_applications(self):
+        self.trust("127.0.0.1")
+        scope = self.seen("127.0.0.1", x_forwarded_proto="https", x_forwarded_host="nvr.example.test")
+        self.assertEqual(scope["scheme"], "https")
+        self.assertEqual(dict(scope["headers"])[b"host"], b"nvr.example.test")
+        socket = self.seen("127.0.0.1", "websocket", "ws", x_forwarded_proto="https", x_forwarded_host="nvr.example.test")
+        self.assertEqual(socket["scheme"], "wss")
+        self.assertEqual(self.seen("127.0.0.1", "websocket", "ws", x_forwarded_proto="http")["scheme"], "ws")
+
+    def test_nobody_else_can_change_them_and_without_trusted_proxies_nothing_is_touched(self):
+        self.trust("127.0.0.1")
+        scope = self.seen("198.51.100.4", x_forwarded_proto="https", x_forwarded_host="evil.example")
+        self.assertEqual((scope["scheme"], dict(scope["headers"])[b"host"]), ("http", b"127.0.0.1:8280"))
+        os.environ.pop("NVR_TRUSTED_PROXIES")
+        scope = self.seen("127.0.0.1", x_forwarded_proto="https", x_forwarded_host="evil.example")
+        self.assertEqual((scope["scheme"], dict(scope["headers"])[b"host"]), ("http", b"127.0.0.1:8280"))
+
+    def test_an_unreadable_forwarded_host_is_left_alone_and_other_kinds_of_scope_pass_through(self):
+        self.trust("127.0.0.1")
+        scope = self.seen("127.0.0.1", x_forwarded_host="evil.example/path", x_forwarded_proto="https")
+        self.assertEqual((scope["scheme"], dict(scope["headers"])[b"host"]), ("https", b"127.0.0.1:8280"))
+        self.assertEqual(self.seen("127.0.0.1", "lifespan")["type"], "lifespan")
+
+
 class RemoteSecondFactorTests(ProxiedCase):
     def set_policy(self, **payload) -> httpx.Response:
         self.direct.post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD})
@@ -394,7 +457,7 @@ class RemoteSecondFactorTests(ProxiedCase):
         self.trust("127.0.0.1")
         self.add_operator()
         self.set_policy(remote_mfa=True)
-        local = httpx.Client(base_url=f"http://127.0.0.1:{self.live.port}", timeout=20)
+        local = self.local_client()
         self.addCleanup(local.close)
         self.assertNotIn("mfa_enrolment_required", self.sign_in(local))
         self.assertEqual(local.get("/api/cameras").status_code, 200)
@@ -425,6 +488,30 @@ class RemoteSecondFactorTests(ProxiedCase):
         client = self.through_proxy()
         self.proxy.client = "192.168.1.60"  # Claims to be local, but its headers come from a peer nobody listed
         self.assertTrue(self.sign_in(client)["mfa_enrolment_required"])
+
+    def test_a_caller_cannot_look_local_by_sending_a_header_the_proxy_cannot_read(self):
+        self.trust("127.0.0.1")
+        self.add_operator()
+        self.set_policy(remote_mfa=True)
+        self.proxy.client = "203.0.113.9"
+        for sent in ("junk", "192.168.1.5, junk", ", ".join(f"192.168.1.{index}" for index in range(1, 12))):
+            client = self.through_proxy()
+            response = client.post("/api/auth/login", json={"username": "viewer", "password": OPERATOR_PASSWORD}, headers={"X-Forwarded-For": sent})
+            self.assertTrue(response.json().get("mfa_enrolment_required"), sent)  # The proxy appended to a chain it cannot read
+        # A proxy that passes on nothing about the caller leaves the caller unknown, which is remote.
+        self.proxy.forward = False
+        self.assertTrue(self.sign_in(self.through_proxy())["mfa_enrolment_required"])
+        self.proxy.forward = True
+        self.proxy.client = "192.168.1.60"
+        self.assertNotIn("mfa_enrolment_required", self.sign_in(self.through_proxy()))
+
+    def test_either_setting_can_be_changed_alone_and_one_must_be_given(self):
+        self.direct.post("/api/auth/login", json={"username": "keeper", "password": TEST_PASSWORD})
+        self.assertEqual(self.direct.put("/api/admin/security", json={"remote_mfa": True}).json(), {"mfa_policy": "off", "remote_mfa": True})
+        self.assertEqual(self.direct.put("/api/admin/security", json={"mfa_policy": "off"}).json(), {"mfa_policy": "off", "remote_mfa": True})  # The other setting was left as it was
+        self.assertEqual(self.direct.put("/api/admin/security", json={}).status_code, 422)
+        self.assertEqual(self.direct.put("/api/admin/security", json={"remote_mfa": "sometimes"}).status_code, 422)
+        self.assertEqual(self.direct.get("/api/admin/security").json(), {"mfa_policy": "off", "remote_mfa": True})
 
     def test_an_account_with_a_second_factor_is_asked_for_it_as_before_and_without_the_requirement_nothing_changes(self):
         self.trust("127.0.0.1")
