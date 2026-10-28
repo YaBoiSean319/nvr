@@ -301,6 +301,8 @@ class RouteTests(GrantCase):
         ("POST", "/api/cases/{case_id}/close"), ("GET", "/api/cases/{case_id}/audit"), ("POST", "/api/cases/{case_id}/packages"),
         ("GET", "/api/cases/{case_id}/packages/{package_id}"), ("DELETE", "/api/cases/{case_id}/packages/{package_id}"), ("GET", "/api/cases/{case_id}/packages/{package_id}/download"),
         ("POST", "/api/cases/{case_id}/packages/{package_id}/verify"), ("GET", "/api/playback/overlay"), ("GET", "/api/playback/overlay/tracks/{track_id}"),
+        ("POST", "/api/redaction/reviews"), ("GET", "/api/redaction/reviews/{review_id}"), ("PATCH", "/api/redaction/reviews/{review_id}"),
+        ("POST", "/api/redaction/reviews/{review_id}/confirm"),
     }
     # Routes that name no camera and return none: the person's own settings, sign-in and public information.
     NO_CAMERA_DATA = {
@@ -310,7 +312,7 @@ class RouteTests(GrantCase):
         ("DELETE", "/api/me/security/passkeys/{passkey_id}"), ("POST", "/api/me/security/recovery-codes"), ("DELETE", "/api/me/security/totp"),
         ("POST", "/api/me/security/totp/begin"), ("POST", "/api/me/security/totp/confirm"), ("GET", "/api/push/preferences"),
         ("PUT", "/api/push/preferences"), ("GET", "/api/push/public-key"), ("POST", "/api/push/subscriptions"), ("POST", "/api/push/subscriptions/remove"),
-        ("GET", "/api/settings/display"),
+        ("GET", "/api/settings/display"), ("GET", "/api/redaction/models"),
     }
 
     def query_gated(self, route) -> bool:

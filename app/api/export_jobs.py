@@ -43,6 +43,7 @@ class ExportRequest(BaseModel):
     grid_resolution: Literal["1080p", "4k"] = "1080p"
     include_audio: bool = False
     audio_camera_id: str | None = None
+    redaction_review_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def validate_interval(self) -> "ExportRequest":
@@ -60,6 +61,8 @@ class ExportRequest(BaseModel):
                 len([item for item in self.tile_camera_ids if item is not None]) != len(set(item for item in self.tile_camera_ids if item is not None)) or
                 set(item for item in self.tile_camera_ids if item is not None) != set(self.camera_ids)):
             raise ValueError("Grid tiles must include each selected camera exactly once")
+        if self.redaction_review_id and self.output_modes != ["individual"]:
+            raise ValueError("Redacted exports contain individual camera files only")
         if self.start.tzinfo is None or self.end.tzinfo is None or self.end <= self.start:
             raise ValueError("Export interval must include timezone-aware start and end times")
         if self.end - self.start > MAX_EXPORT_WINDOW:
@@ -92,7 +95,8 @@ async def create_export(
     return _submit(request, user, lambda: create_export_record(
         int(user["id"]), [swap(camera_id) for camera_id in payload.camera_ids], start, end, payload.output_modes,
         [None if camera_id is None else swap(camera_id) for camera_id in payload.tile_camera_ids],
-        payload.grid_resolution, payload.include_audio, swap(payload.audio_camera_id) if payload.audio_camera_id else None))
+        payload.grid_resolution, payload.include_audio, swap(payload.audio_camera_id) if payload.audio_camera_id else None,
+        redaction_review_id=payload.redaction_review_id))
 
 
 def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str, object]:
@@ -128,7 +132,7 @@ async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict
         int(user["id"]), original["camera_ids"],
         datetime.fromisoformat(original["start"]).astimezone(timezone.utc), datetime.fromisoformat(original["end"]).astimezone(timezone.utc),
         original["output_modes"], original["tile_camera_ids"], original["grid_resolution"], original["include_audio"],
-        original["audio_camera_id"], retry_of=job_id))
+        original["audio_camera_id"], retry_of=job_id, redaction_review_id=original["redaction_review_id"]))
 
 
 @router.get("/api/exports/{job_id}")
