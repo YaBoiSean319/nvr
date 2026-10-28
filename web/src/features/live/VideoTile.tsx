@@ -143,7 +143,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
         <span className="tile-state" data-phase={phase}>
           <span className="status-dot" data-tone={live ? "good" : phase === "connecting" ? undefined : phase === "stale" || phase === "reconnecting" ? "warn" : "bad"} aria-hidden="true" />
           {PHASE_LABEL[phase]}
-          {state?.transport === "mjpeg" ? " · compatibility" : state?.profile === "sub" ? " · sub" : ""}
+          {state?.transport === "mjpeg" ? " · compatibility" : state?.converted ? " · converted" : state?.profile === "sub" ? " · sub" : ""}
         </span>
       </div>
       {!live ? (

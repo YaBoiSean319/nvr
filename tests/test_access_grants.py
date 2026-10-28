@@ -538,6 +538,7 @@ class LiveSocketTests(GrantCase):
         mime = 'video/mp4; codecs="avc1.64001f"'
         init = b"init"
         failed = None
+        accelerated = False
 
         class ready:  # noqa: N801 - mimics asyncio.Event for the one thing the socket uses it for
             @staticmethod
@@ -551,7 +552,7 @@ class LiveSocketTests(GrantCase):
     def stub_hub(self):
         stream = self.StubStream()
 
-        def join(key, source, include_audio, viewer, on_fragment=None, video_filter=None):
+        def join(key, source, include_audio, viewer, on_fragment=None, video_filter=None, transcode=False, hevc_copy=False):
             viewer.offer(b"fragment")
             return stream
 
@@ -745,7 +746,7 @@ class LeakTests(GrantCase):
             db.execute("INSERT INTO access_grants(subject_type,subject,scope_type,group_id,expires_at) VALUES('user',?,'group',?,?)", (str(self.limited_id), self.dock, soon))
         stream = LiveSocketTests.StubStream()
 
-        def join(key, source, include_audio, viewer, on_fragment=None, video_filter=None):
+        def join(key, source, include_audio, viewer, on_fragment=None, video_filter=None, transcode=False, hevc_copy=False):
             viewer.offer(b"fragment")
             return stream
 

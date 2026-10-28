@@ -34,6 +34,8 @@ The `nvr-data` volume stores the database and account/session state. `nvr-secret
 | `NVR_TRUST_FORWARDED_FOR` | false | Count sign-in attempts by the last `X-Forwarded-For` address; only behind a proxy you control (older; prefer `NVR_TRUSTED_PROXIES`) |
 | `NVR_TRUSTED_PROXIES` | none | Addresses or networks of your reverse proxy or tunnel: forwarded client address, HTTPS and host are believed only from these; see [remote access](docs/remote-access.md) |
 | `NVR_LOCAL_NETWORKS` | none | Networks counted as local besides private, loopback, link-local and Tailscale ranges |
+| `NVR_HWACCEL` | auto | Graphics-chip video work: `auto`, `none`, or `nvenc`, `qsv`, `vaapi`; see [H.265 and hardware acceleration](docs/hevc-and-acceleration.md) |
+| `NVR_VAAPI_DEVICE` | first render device | The `/dev/dri/renderD*` device VAAPI and Quick Sync use |
 | `NVR_ALLOWED_ORIGINS` | none | Extra browser origins allowed to open the live video socket (`NVR_PUBLIC_URL` is always allowed) |
 | `NVR_LOG_FORWARD_URL` | unset | Forward logs off-host: `syslog+tcp://host:514`, `syslog+tls://host:6514`, `otlp+http://host:4318` or `otlp+https://…`; see [metrics and log forwarding](docs/metrics-and-log-forwarding.md) |
 | `NVR_HARDENING_PROBE_GAP_SECONDS` | `3600` | The least time between two hardening probes of the same camera (asking whether it offers RTSPS or HTTPS); see [camera hardening](docs/camera-hardening.md) |

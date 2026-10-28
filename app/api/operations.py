@@ -11,7 +11,7 @@ from app.version import APP_VERSION
 from app.workers import liveness, supervised
 from app.principal import Administrator
 from app.store import connect, database_path
-from app import diagnostics, self_test
+from app import acceleration, diagnostics, self_test
 
 router = APIRouter()
 
@@ -19,6 +19,14 @@ router = APIRouter()
 class DiagnosticCaptureRequest(BaseModel):
     enabled: bool
     hours: int = Field(default=4, ge=1, le=24)
+
+
+def _live() -> dict[str, int]:
+    """Live video being served from this process: streams and viewers, and the H.265 conversions among them."""
+    from app.api.live_media import live_counts, transcode_counts
+    viewers, listeners = live_counts()
+    conversions, converted = transcode_counts()
+    return {"viewers": viewers, "audio_listeners": listeners, "conversions": conversions, "converted_viewers": converted}
 
 
 @router.get("/api/system/status")
@@ -43,6 +51,8 @@ def system_status(user: Administrator) -> dict[str, object]:
         "configured_cameras": camera_count,
         "storage": storage,
         "self_test": self_test.latest(),
+        "acceleration": acceleration.current(),
+        "live": _live(),
     }
 
 

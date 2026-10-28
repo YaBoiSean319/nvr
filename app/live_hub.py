@@ -1,7 +1,8 @@
 """Shared live streams: one camera connection, many viewers.
 
-FFmpeg copies the camera's H.264 video (and, when the administrator enabled it,
-AAC audio) into fragmented MP4 without re-encoding the picture. A ``LiveStream``
+FFmpeg copies the camera's H.264 (or, for a browser that can play it, H.265) video (and, when the administrator enabled it,
+AAC audio) into fragmented MP4 without re-encoding the picture. A browser that cannot play H.265 is given the same camera converted to H.264
+instead (``transcode``), once for all of its viewers, on a graphics chip when there is one (``acceleration``). A ``LiveStream``
 splits that output into an initialization segment and media fragments and fans
 them out to every viewer of the same camera profile. A viewer that joins late
 starts at the most recent keyframe fragment, so it decodes immediately. The
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Iterator
 
+from . import acceleration
 from .recording import _PROTOCOLS, _manifest_bytes
 
 logger = logging.getLogger("nvr.live")
@@ -55,6 +57,22 @@ def _child(data: bytes, parent: tuple[int, int, int], kind: str) -> tuple[int, i
     return None
 
 
+def hevc_codec(init: bytes) -> str | None:
+    """The RFC 6381 codec string (``hvc1.1.6.L93.B0``) of an H.265 track from its ``hvcC`` box, or None when there is none."""
+    marker = init.find(b"hvcC")
+    if marker < 0 or marker + 4 + 13 > len(init):
+        return None
+    record = init[marker + 4:marker + 4 + 13]
+    space, tier, profile = record[1] >> 6, (record[1] >> 5) & 1, record[1] & 0x1F
+    compatibility = int(f"{struct.unpack('>I', record[2:6])[0]:032b}"[::-1], 2)  # The flags are written in reverse bit order
+    constraints = list(record[6:12])
+    while constraints and constraints[-1] == 0:
+        constraints.pop()
+    tag = "hvc1" if init.find(b"hvc1") >= 0 else "hev1"
+    parts = [f"{tag}.{'' if space == 0 else 'ABC'[space - 1]}{profile}", f"{compatibility:x}", f"{'L' if tier == 0 else 'H'}{record[12]}", *(f"{value:02X}" for value in constraints)]
+    return ".".join(parts)
+
+
 def codec_string(init: bytes) -> str:
     """The MSE codecs parameter for an initialization segment."""
     codecs = []
@@ -62,6 +80,8 @@ def codec_string(init: bytes) -> str:
     if marker >= 0 and marker + 8 <= len(init):
         profile, compatibility, level = init[marker + 5], init[marker + 6], init[marker + 7]
         codecs.append(f"avc1.{profile:02x}{compatibility:02x}{level:02x}")
+    elif (hevc := hevc_codec(init)) is not None:
+        codecs.append(hevc)
     if init.find(b"mp4a") >= 0:
         codecs.append("mp4a.40.2")
     return f'video/mp4; codecs="{", ".join(codecs)}"'
@@ -187,10 +207,15 @@ class Viewer:
 
 class LiveStream:
     def __init__(self, key: tuple[str, ...], source: str, include_audio: bool,
-                 on_fragment: Callable[[], None] | None = None, video_filter: str | None = None) -> None:
+                 on_fragment: Callable[[], None] | None = None, video_filter: str | None = None,
+                 transcode: bool = False, hevc_copy: bool = False) -> None:
         self.key = key
         # A privacy mask: the video is transcoded with it drawn in, instead of passed through.
         self.video_filter = video_filter
+        # Converted to H.264 for a browser that cannot play the camera's H.265; or passed through as H.265 (tagged so Safari plays it).
+        self.transcode, self.hevc_copy = transcode, hevc_copy
+        self.accelerated = False
+        self._hardware_failure: str | None = None
         self.source = source
         self.include_audio = include_audio
         self.on_fragment = on_fragment
@@ -233,28 +258,63 @@ class LiveStream:
         for viewer in list(self.viewers):
             viewer.offer(item)
 
+    @property
+    def converts(self) -> bool:
+        """Whether the picture is re-encoded (masked, or H.265 converted) rather than copied."""
+        return self.video_filter is not None or self.transcode
+
+    def _arguments(self, executable: str, hardware: bool) -> list[str]:
+        args = [executable, "-hide_banner", "-nostats", "-loglevel", "error", "-fflags", "+genpts"]
+        encoder = acceleration.encoder(crf=26, speed="ultrafast") if hardware else acceleration.build(None, crf=26, speed="ultrafast")
+        if self.converts:
+            args += [*encoder.pre, *(acceleration.decode_args() if hardware else [])]
+        args += ["-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS, "-i", "pipe:0", "-map", "0:v:0"]
+        if self.converts:
+            chain = encoder.filters(self.video_filter)
+            if chain:
+                args += ["-vf", chain]
+            if encoder.name is None:
+                args += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-g", "30"]
+            else:
+                args += [*encoder.codec, "-g", "30"]
+        else:
+            args += ["-c:v", "copy"] + (["-tag:v", "hvc1"] if self.hevc_copy else [])
+        if self.include_audio:
+            args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "64k", "-ac", "1"]
+        else:
+            args += ["-an"]
+        return args + ["-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "300000", "pipe:1"]
+
     async def _run(self) -> None:
         executable = shutil.which("ffmpeg")
         try:
             if not executable:
                 raise RuntimeError("Live video is unavailable because FFmpeg is missing")
-            args = [
-                executable, "-hide_banner", "-nostats", "-loglevel", "error", "-fflags", "+genpts",
-                "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS, "-i", "pipe:0",
-                "-map", "0:v:0",
-            ]
-            if self.video_filter:
-                args += ["-vf", self.video_filter, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                         "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-g", "30"]
-            else:
-                args += ["-c:v", "copy"]
-            if self.include_audio:
-                args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "64k", "-ac", "1"]
-            else:
-                args += ["-an"]
-            args += ["-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "300000", "pipe:1"]
+            hardware = self.converts and acceleration.selected() is not None
+            try:
+                await self._session(executable, hardware)
+            except (OSError, RuntimeError, asyncio.TimeoutError, ValueError) as exc:
+                if not (hardware and self.init is None):
+                    raise
+                # Maybe the device did not work: do the same work in software, and turn the device off only if that works (a dead camera fails both ways).
+                self._hardware_failure = str(exc) or "the hardware encoder failed to start"
+                await self._session(executable, False)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            self.failed = "No video arrived from the camera for 15 seconds"
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.failed = str(exc) or "The camera stream failed"
+        finally:
+            if self.failed:
+                self.ready.set()
+                self._broadcast(None)
+
+    async def _session(self, executable: str, hardware: bool) -> None:
+        self.accelerated = hardware
+        try:
             self.process = await asyncio.create_subprocess_exec(
-                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                *self._arguments(executable, hardware), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
             self.connections += 1
             assert self.process.stdin and self.process.stdout
@@ -281,13 +341,9 @@ class LiveStream:
                 if self.init is None and fragmenter.init is not None:
                     self.init = fragmenter.init
                     self.mime = codec_string(self.init)
+                    if self._hardware_failure and not hardware:
+                        acceleration.disable(self._hardware_failure)
                     self.ready.set()
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            self.failed = "No video arrived from the camera for 15 seconds"
-        except (OSError, RuntimeError, ValueError) as exc:
-            self.failed = str(exc) or "The camera stream failed"
         finally:
             if self.process and self.process.returncode is None:
                 self.process.terminate()
@@ -296,9 +352,6 @@ class LiveStream:
                 except asyncio.TimeoutError:
                     self.process.kill()
                     await self.process.wait()
-            if self.failed:
-                self.ready.set()
-                self._broadcast(None)
 
 
 class LiveHub:
@@ -308,10 +361,11 @@ class LiveHub:
         self.streams: dict[tuple[str, ...], LiveStream] = {}
 
     def join(self, key: tuple[str, ...], source: str, include_audio: bool, viewer: Viewer,
-             on_fragment: Callable[[], None] | None = None, video_filter: str | None = None) -> LiveStream:
+             on_fragment: Callable[[], None] | None = None, video_filter: str | None = None,
+             transcode: bool = False, hevc_copy: bool = False) -> LiveStream:
         stream = self.streams.get(key)
         if stream is None or stream.failed:
-            stream = LiveStream(key, source, include_audio, on_fragment, video_filter)
+            stream = LiveStream(key, source, include_audio, on_fragment, video_filter, transcode, hevc_copy)
             self.streams[key] = stream
             stream.start()
         stream.add(viewer)
@@ -333,7 +387,8 @@ class LiveHub:
 
     def snapshot(self) -> list[dict[str, object]]:
         return [{"key": list(stream.key), "viewers": len(stream.viewers), "camera_connections": stream.connections,
-                 "ready": stream.init is not None, "failed": stream.failed} for stream in self.streams.values()]
+                 "ready": stream.init is not None, "failed": stream.failed, "transcoded": stream.transcode,
+                 "accelerated": stream.accelerated} for stream in self.streams.values()]
 
 
 def now_iso() -> str:

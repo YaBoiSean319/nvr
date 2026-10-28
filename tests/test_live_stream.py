@@ -108,7 +108,7 @@ class LiveStreamTests(unittest.TestCase):
         self.assertEqual((message["type"], code), ("unauthorized", 4401))
         self.assertEqual(self._refusal("/api/cameras/missing/live/stream"), ({"type": "not_found", "detail": "Camera not found"}, 4404))
         with connect() as db:
-            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode,video_codec) VALUES('hevc','Yard',?,'motion','hevc')", (encrypt(RTSP),))
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode,video_codec) VALUES('hevc','Yard',?,'motion','mjpeg')", (encrypt(RTSP),))  # H.265 is converted now (tests/test_hevc.py)
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode,archived_at) VALUES('old','Old',?,'motion','2026-01-01T00:00:00Z')", (encrypt(RTSP),))
         message, code = self._refusal("/api/cameras/hevc/live/stream?quality=high")
         self.assertEqual((message["type"], message["fallback"], code), ("unsupported", "/api/cameras/hevc/live?quality=high", 4415))

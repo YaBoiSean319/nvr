@@ -14,7 +14,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import api, network
+from . import acceleration, api, network
 from .api import web_interface
 from .backup import BackupManager
 from .detection import DetectionManager
@@ -76,6 +76,8 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         started = {}
         heartbeat = None
         app.state.live_hub = LiveHub()
+        # Which graphics acceleration works here is found out in the background, so starting is not held up by test encodes.
+        app.state.acceleration_probe = asyncio.create_task(asyncio.to_thread(acceleration.refresh), name="acceleration-probe")
         try:
             if start_workers and supervised():
                 # Background work runs in supervised worker processes; the web

@@ -38,6 +38,7 @@ services:
       NVR_SMART_DEVICES: ${NVR_SMART_DEVICES:-}
     # Disk health (SMART) needs the recording disks passed through. Uncomment and name your disks, and tell the NVR which disk holds each volume;
     # without this, Settings > Recording & storage reports disk health as "not available". See docs/disk-health-and-retention-forecast.md.
+    # For hardware video acceleration (docs/hevc-and-acceleration.md), pass the graphics device in, e.g. under devices: "/dev/dri:/dev/dri"
     # devices:
     #   - /dev/sda:/dev/sda
     # cap_add:

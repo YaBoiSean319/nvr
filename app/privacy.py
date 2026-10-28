@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import acceleration
 from .access import may_view_camera
 from .credentials import decrypt
 from .store import connect
@@ -273,8 +274,9 @@ def _sweep(root: Path) -> None:
 
 
 async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
-    """A masked copy of a recording, rendered once per recording and mask and kept for a day.
-    Renders are few at a time, so scrubbing through masked footage cannot exhaust the processor."""
+    """A masked copy of a recording, rendered once per recording and mask and kept for a day (with no zones: the same recording converted to H.264,
+    for a browser that cannot play its H.265). Renders are few at a time, so scrubbing through footage cannot exhaust the processor, and use the
+    graphics chip when there is one, falling back to software if it fails."""
     global _render_slots
     digest = hashlib.sha256(f"{source}|{source.stat().st_mtime_ns}|{json.dumps(zones, sort_keys=True)}".encode()).hexdigest()[:32]
     root = _copies_root()
@@ -292,8 +294,21 @@ async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
                 await asyncio.to_thread(_sweep, root)
                 partial = root / f"{digest}.{uuid.uuid4().hex}.partial.mp4"
                 try:
-                    await _ffmpeg(["-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-vf", drawbox_filter(zones),
-                                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", "-y", str(partial)], timeout=600)
+                    hardware_failure = None
+                    for hardware in (True, False) if acceleration.selected() else (False,):
+                        encoder = acceleration.encoder(crf=23, speed="veryfast") if hardware else acceleration.build(None, crf=23, speed="veryfast")
+                        chain = encoder.filters(drawbox_filter(zones) if zones else None)
+                        try:
+                            await _ffmpeg([*encoder.pre, *(acceleration.decode_args() if hardware else []), "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
+                                           *(["-vf", chain] if chain else []), *encoder.codec, "-c:a", "copy", "-movflags", "+faststart", "-y", str(partial)], timeout=600)
+                        except RuntimeError as exc:
+                            if not hardware:
+                                raise
+                            hardware_failure = str(exc)  # Maybe the device did not work: the same render is done in software
+                            continue
+                        if hardware_failure:
+                            acceleration.disable(hardware_failure)  # Software worked where the device did not
+                        break
                     partial.replace(target)
                 finally:
                     partial.unlink(missing_ok=True)

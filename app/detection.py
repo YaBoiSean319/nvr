@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from . import acceleration
 from .credentials import decrypt
 from .recording import _manifest_bytes, _PROTOCOLS, safe_stream_url
 from .store import connect
@@ -322,10 +323,25 @@ def _camera_source(camera_id: str, use_substream: bool) -> str:
 
 
 async def _raw_frames(source: str, fps: float):
+    """Decoded frames of a camera, decoded on the graphics chip when there is one. If the device gives no frames where software does, it is turned off."""
+    hardware = bool(acceleration.decode_args())
+    got = 0
+    async for frame in _decode_frames(source, fps, hardware):
+        got += 1
+        yield frame
+    if got == 0 and hardware:
+        async for frame in _decode_frames(source, fps, False):
+            if got == 0:
+                acceleration.disable("hardware decoding gave no frames where software decoding did")
+            got += 1
+            yield frame
+
+
+async def _decode_frames(source: str, fps: float, hardware: bool):
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("FFmpeg is unavailable")
-    args = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+    args = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", *(acceleration.decode_args() if hardware else []), "-f", "concat", "-safe", "0",
             "-protocol_whitelist", _PROTOCOLS, "-i", "pipe:0", "-an", "-vf", f"fps={fps},scale={MODEL_WIDTH}:{MODEL_HEIGHT}:flags=bilinear",
             "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]
     proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
