@@ -17,22 +17,39 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 
+SITE_SEPARATOR = "~"
+
+
+def site_of(identifier: str) -> str | None:
+    """The site an identifier of the multi-site console belongs to (``<site>~<id at that site>``), or None for this NVR's own."""
+    site, separator, local = identifier.partition(SITE_SEPARATOR)
+    return site if separator and site and local else None
+
+
 @dataclass(frozen=True)
 class Access:
-    """The cameras and camera groups a person may see. ``None`` means every one."""
+    """The cameras and camera groups a person may see, and the sites of a multi-site console whose cameras they may see. ``None`` means every one."""
 
     cameras: frozenset[str] | None = None
     groups: frozenset[str] | None = None
+    sites: frozenset[str] | None = None
 
     @property
     def unrestricted(self) -> bool:
         return self.cameras is None
 
     def can_see(self, camera_id: str) -> bool:
-        return self.cameras is None or camera_id in self.cameras
+        if self.cameras is None:
+            return True
+        site = site_of(camera_id)
+        return camera_id in self.cameras if site is None else self.can_see_site(site)
 
     def can_see_group(self, group_id: str) -> bool:
-        return self.groups is None or group_id in self.groups
+        site = site_of(group_id)
+        return (self.groups is None or group_id in self.groups) if site is None else self.can_see_site(site)
+
+    def can_see_site(self, site_id: str) -> bool:
+        return self.cameras is None or (self.sites is not None and site_id in self.sites)
 
     def only(self, camera_ids: Iterable[str]) -> list[str]:
         """The permitted ones among ``camera_ids``, in order."""
@@ -40,7 +57,7 @@ class Access:
 
 
 EVERYTHING = Access()
-NOTHING = Access(frozenset(), frozenset())
+NOTHING = Access(frozenset(), frozenset(), frozenset())
 
 
 def _now() -> datetime:
@@ -64,6 +81,17 @@ def live_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = Non
                       ((now or _now()).isoformat(), str(user_id), *roles)).fetchall()
 
 
+def live_site_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = None) -> frozenset[str]:
+    """The sites of a multi-site console a person has been given, by a grant of their own or of an Entra role they hold."""
+    row = db.execute("SELECT provider_roles_json FROM users WHERE id=?", (user_id,)).fetchone()
+    roles = _roles(row["provider_roles_json"]) if row is not None else []
+    clause = "(subject_type='user' AND subject=?)"
+    if roles:
+        clause += " OR (subject_type='role' AND subject IN (%s))" % ",".join("?" * len(roles))
+    return frozenset(item[0] for item in db.execute(f"SELECT site_id FROM site_grants WHERE (expires_at IS NULL OR expires_at>?) AND ({clause})",
+                                                    ((now or _now()).isoformat(), str(user_id), *roles)))
+
+
 def effective_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = None) -> list[sqlite3.Row]:
     """The grants that count: the automatic "all cameras" default gives way once a role the person holds has grants of its own."""
     grants = live_grants(db, user_id, now)
@@ -80,13 +108,14 @@ def resolve(db: sqlite3.Connection, user_id: int, role: str, now: datetime | Non
     if any(grant["scope_type"] == "all" for grant in grants):
         return EVERYTHING
     groups = frozenset(grant["group_id"] for grant in grants if grant["scope_type"] == "group")
+    sites = live_site_grants(db, user_id, now)
     if not groups:
-        return NOTHING
+        return Access(frozenset(), frozenset(), sites) if sites else NOTHING
     marks = ",".join("?" * len(groups))
     cameras = frozenset(row[0] for row in db.execute(
         f"SELECT id FROM cameras WHERE group_id IN ({marks}) UNION SELECT camera_id FROM camera_group_memberships WHERE group_id IN ({marks})",
         (*groups, *groups)))
-    return Access(cameras, groups)
+    return Access(cameras, groups, sites)
 
 
 def may_view_camera(db: sqlite3.Connection, user_id: int, camera_id: str) -> bool:

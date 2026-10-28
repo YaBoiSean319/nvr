@@ -13,6 +13,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app import console
 from app.principal import Administrator, CurrentUser
 from app.store import connect
 from app.credentials import encrypt, decrypt
@@ -390,6 +391,7 @@ async def _resolve_camera_source(payload: CameraProbeRequest, service_url: str |
 
 
 @router.get("/api/cameras")
+@console.federated(console.split_plain, console.combine_cameras)
 def list_cameras(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         rows = [row for row in db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE")

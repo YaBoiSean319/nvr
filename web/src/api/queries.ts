@@ -280,3 +280,15 @@ export function usePlaybackTimeline(cameraIds: string[], range: { start: string;
     staleTime: 30_000,
   });
 }
+
+export interface ConsoleSite { id: string; name: string; state: "ok" | "unreachable" | "refused" | "disabled"; last_contact_at: string | null; last_error: string | null; camera_count: number | null; open_alarms: number | null }
+
+/** Whether this NVR is a multi-site console and how each site the person may see is doing. */
+export function useConsoleStatus() {
+  return useQuery({
+    queryKey: ["console", "status"],
+    queryFn: ({ signal }) => api<{ enabled: boolean; sites: ConsoleSite[] }>("/api/console/status", { signal }),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
+}

@@ -19,8 +19,10 @@ MAX_GRANTS_PER_SUBJECT = 50
 
 
 class GrantInput(BaseModel):
-    scope_type: Literal["all", "group"]
+    scope_type: Literal["all", "group", "site"]
     group_id: str | None = Field(default=None, max_length=64)
+    # A site of the multi-site console: every camera of that site
+    site_id: str | None = Field(default=None, max_length=64)
     expires_at: datetime | None = None
 
     @field_validator("expires_at")
@@ -55,9 +57,19 @@ def _view(db: sqlite3.Connection, row: sqlite3.Row, now: str) -> dict[str, Any]:
             "expired": bool(row["expires_at"] and row["expires_at"] <= now), "created_at": row["created_at"]}
 
 
+def _site_view(db: sqlite3.Connection, row: sqlite3.Row, now: str) -> dict[str, Any]:
+    site = db.execute("SELECT name FROM console_sites WHERE id=?", (row["site_id"],)).fetchone()
+    user = db.execute("SELECT username FROM users WHERE id=?", (int(row["subject"]),)).fetchone() if row["subject_type"] == "user" else None
+    return {"id": f"site-{row['id']}", "subject_type": row["subject_type"], "subject": row["subject"], "subject_name": (user["username"] if user else None) or row["subject"],
+            "scope_type": "site", "group_id": None, "group_name": None, "site_id": row["site_id"], "site_name": site["name"] if site else None, "expires_at": row["expires_at"],
+            "default": False, "expired": bool(row["expires_at"] and row["expires_at"] <= now), "created_at": row["created_at"]}
+
+
 def _snapshot(db: sqlite3.Connection, subject_type: str, subject: str) -> list[dict[str, Any]]:
-    return [{"scope_type": row["scope_type"], "group_id": row["group_id"], "expires_at": row["expires_at"]}
-            for row in db.execute("SELECT * FROM access_grants WHERE subject_type=? AND subject=? ORDER BY id", (subject_type, subject))]
+    grants = [{"scope_type": row["scope_type"], "group_id": row["group_id"], "expires_at": row["expires_at"]}
+              for row in db.execute("SELECT * FROM access_grants WHERE subject_type=? AND subject=? ORDER BY id", (subject_type, subject))]
+    return grants + [{"scope_type": "site", "site_id": row["site_id"], "expires_at": row["expires_at"]}
+                     for row in db.execute("SELECT * FROM site_grants WHERE subject_type=? AND subject=? ORDER BY id", (subject_type, subject))]
 
 
 @router.get("/api/admin/access-grants")
@@ -66,12 +78,14 @@ def list_grants(_: Administrator) -> dict[str, object]:
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:
         grants = [_view(db, row, now) for row in db.execute("SELECT * FROM access_grants ORDER BY subject_type, id")]
+        grants += [_site_view(db, row, now) for row in db.execute("SELECT * FROM site_grants ORDER BY subject_type, id")]
         operators = [{"id": row["id"], "username": row["username"], "local": row["provider_issuer"] is None}
                      for row in db.execute("SELECT id,username,provider_issuer FROM users WHERE role='operator' ORDER BY username COLLATE NOCASE")]
         roles = {role for row in db.execute("SELECT provider_roles_json FROM users") for role in json.loads(row[0] or "[]") if isinstance(role, str)}
-        roles |= {row["subject"] for row in db.execute("SELECT subject FROM access_grants WHERE subject_type='role'")}
+        roles |= {row["subject"] for row in db.execute("SELECT subject FROM access_grants WHERE subject_type='role' UNION SELECT subject FROM site_grants WHERE subject_type='role'")}
+        sites = [{"id": row["id"], "name": row["name"]} for row in db.execute("SELECT id,name FROM console_sites ORDER BY name COLLATE NOCASE")]
         groups = [{"id": row["id"], "name": row["name"]} for row in db.execute("SELECT id,name FROM camera_groups ORDER BY name COLLATE NOCASE")]
-    return {"grants": grants, "operators": operators, "roles": sorted(roles), "groups": groups}
+    return {"grants": grants, "operators": operators, "roles": sorted(roles), "groups": groups, "sites": sites}
 
 
 @router.put("/api/admin/access-grants")
@@ -99,16 +113,28 @@ def replace_grants(payload: SubjectGrants, admin: Administrator) -> dict[str, ob
                 if grant.scope_type == "group":
                     if not grant.group_id or db.execute("SELECT 1 FROM camera_groups WHERE id=?", (grant.group_id,)).fetchone() is None:
                         raise HTTPException(status_code=422, detail="Choose an existing camera group")
-                elif grant.group_id:
-                    raise HTTPException(status_code=422, detail="A grant for every camera names no group")
-                key = (grant.scope_type, grant.group_id)
+                elif grant.scope_type == "site":
+                    if not grant.site_id or db.execute("SELECT 1 FROM console_sites WHERE id=?", (grant.site_id,)).fetchone() is None:
+                        raise HTTPException(status_code=422, detail="Choose an existing site")
+                    if grant.group_id:
+                        raise HTTPException(status_code=422, detail="A grant for a site names no camera group")
+                elif grant.group_id or grant.site_id:
+                    raise HTTPException(status_code=422, detail="A grant for every camera names no group or site")
+                if grant.scope_type != "site" and grant.site_id:
+                    raise HTTPException(status_code=422, detail="Only a grant for a site names a site")
+                key = (grant.scope_type, grant.group_id, grant.site_id)
                 if key in seen:
-                    raise HTTPException(status_code=422, detail="Each group can be granted only once")
+                    raise HTTPException(status_code=422, detail="Each group or site can be granted only once")
                 seen.add(key)
             subject = str(user["id"]) if payload.subject_type == "user" else label
             before = _snapshot(db, payload.subject_type, subject)
             db.execute("DELETE FROM access_grants WHERE subject_type=? AND subject=?", (payload.subject_type, subject))
+            db.execute("DELETE FROM site_grants WHERE subject_type=? AND subject=?", (payload.subject_type, subject))
             for grant in payload.grants:
+                if grant.scope_type == "site":
+                    db.execute("INSERT INTO site_grants(subject_type,subject,site_id,expires_at,created_by) VALUES(?,?,?,?,?)",
+                               (payload.subject_type, subject, grant.site_id, grant.expires_at.astimezone(timezone.utc).isoformat() if grant.expires_at else None, admin.id))
+                    continue
                 db.execute("INSERT INTO access_grants(subject_type,subject,scope_type,group_id,expires_at,created_by) VALUES(?,?,?,?,?,?)",
                            (payload.subject_type, subject, grant.scope_type, grant.group_id,
                             grant.expires_at.astimezone(timezone.utc).isoformat() if grant.expires_at else None, admin.id))

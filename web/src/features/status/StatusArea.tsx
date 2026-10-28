@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router";
 import { create } from "zustand";
 import { ApiError } from "@/api/client";
-import { useAcknowledgeIncident, useCameras, useExportJobs, useOpenIncidents } from "@/api/queries";
+import { useAcknowledgeIncident, useCameras, useConsoleStatus, useExportJobs, useOpenIncidents, type ConsoleSite } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { Drawer } from "@/components/Drawer";
 import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
@@ -12,7 +12,7 @@ import { usePlaybackStore } from "@/features/playback/store";
 import { formatRelative } from "@/lib/time";
 import { summarize, type StatusSummary, type Tone } from "./summary";
 
-type Section = "video" | "recording" | "incidents" | "jobs";
+type Section = "video" | "recording" | "incidents" | "jobs" | "sites";
 
 /** Which part of the status drawer is open; other workspaces can open it (for example, export jobs). */
 export const useStatusPanel = create<{ section: Section | null; show: (section: Section | null) => void }>(set => ({
@@ -66,6 +66,9 @@ export function StatusArea() {
   const cameras = useCameras();
   const incidents = useOpenIncidents();
   const jobs = useExportJobs();
+  const consoleStatus = useConsoleStatus();
+  const sites = consoleStatus.data?.enabled ? consoleStatus.data.sites : [];
+  const downSites = sites.filter(site => site.state === "unreachable" || site.state === "refused");
   const section = useStatusPanel(state => state.section);
   const setSection = useStatusPanel(state => state.show);
   const summary = summarize(cameras.data, incidents.data, jobs.data);
@@ -84,6 +87,7 @@ export function StatusArea() {
         <Chip tone={summary.video.tone} label={summary.video.label} onClick={() => setSection("video")} />
         <Chip tone={summary.incidents.tone} label={summary.incidents.label} onClick={() => setSection("incidents")} />
         <Chip tone={summary.jobs.tone} label={summary.jobs.label} onClick={() => setSection("jobs")} />
+        {sites.length ? <Chip tone={downSites.length ? "bad" : "good"} label={downSites.length ? `Sites: ${downSites.length} unreachable` : `Sites: ${sites.length} reachable`} onClick={() => setSection("sites")} /> : null}
         <Chip tone={counts?.new ? "bad" : openAlarms ? "warn" : "good"} label={alarmLabel} onClick={() => inbox.setOpen(true)} />
       </div>
       <Drawer open={inbox.open} onOpenChange={inbox.setOpen} title="Alarms"
@@ -92,7 +96,7 @@ export function StatusArea() {
       </Drawer>
       <Drawer open={section !== null} onOpenChange={open => !open && setSection(null)} title="Operational status"
               description="Live video health and recording health are reported separately; a live picture does not prove footage is being written.">
-        <StatusDetails summary={summary} focus={section} />
+        <StatusDetails summary={summary} focus={section} sites={sites} />
       </Drawer>
     </>
   );
@@ -112,7 +116,7 @@ function CameraList({ cameras, empty }: { cameras: Camera[]; empty: string }) {
   );
 }
 
-function StatusDetails({ summary, focus }: { summary: StatusSummary; focus: Section | null }) {
+function StatusDetails({ summary, focus, sites }: { summary: StatusSummary; focus: Section | null; sites: ConsoleSite[] }) {
   const acknowledge = useAcknowledgeIncident();
   return (
     <div className="status-details">
@@ -148,6 +152,23 @@ function StatusDetails({ summary, focus }: { summary: StatusSummary; focus: Sect
           <p className="muted">No active incidents.</p>
         )}
       </section>
+      {sites.length ? (
+        <section aria-labelledby="status-sites" data-focused={focus === "sites"}>
+          <h3 id="status-sites">Sites</h3>
+          <ul className="status-list">
+            {sites.map(site => (
+              <li key={site.id}>
+                <strong>{site.name}</strong>
+                <span className="muted">
+                  {site.state === "ok" ? "Reachable" : site.state === "refused" ? "Refused the console's token" : site.state === "disabled" ? "Off" : "Unreachable"}
+                  {" · last contact "}{site.last_contact_at ? formatRelative(site.last_contact_at) : "never"}
+                  {site.camera_count !== null ? ` · ${site.camera_count} cameras` : ""}{site.open_alarms ? ` · ${site.open_alarms} open alarms` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
       <section aria-labelledby="status-jobs" data-focused={focus === "jobs"}>
         <h3 id="status-jobs">Export jobs</h3>
         <ExportJobs />

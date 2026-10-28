@@ -304,6 +304,11 @@ class RouteTests(GrantCase):
         ("POST", "/api/redaction/reviews"), ("GET", "/api/redaction/reviews/{review_id}"), ("PATCH", "/api/redaction/reviews/{review_id}"),
         ("POST", "/api/redaction/reviews/{review_id}/confirm"),
     }
+    # The multi-site console (#141): a site's camera, alarm or track is reached through a site the person has been granted (checked first, and by the camera path parameter above the route),
+    # and the lists ask only the sites they may see.
+    FILTERED |= {("GET", "/api/console/status"), ("GET", "/api/alarms/{alarm_id:consoleid}"), ("GET", "/api/ai/tracks/{track_id:consoleid}/thumbnail")}
+    FILTERED |= {(method, "/api/alarms/{alarm_id:consoleid}/{rest:path}") for method in ("POST", "PUT", "PATCH", "DELETE")}
+    FILTERED |= {(method, "/api/cameras/{camera_id:consoleid}/{rest:path}") for method in ("GET",)}
     # Routes that name no camera and return none: the person's own settings, sign-in and public information.
     NO_CAMERA_DATA = {
         ("GET", "/api/ai/settings"), ("GET", "/api/alarm-settings"), ("GET", "/api/alarms/assignees"), ("GET", "/api/auth/me"),

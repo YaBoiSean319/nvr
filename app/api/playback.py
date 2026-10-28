@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
+from app import console
 from app import external_events, privacy, viewing_audit
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
@@ -40,6 +41,7 @@ class SynchronizedPlaybackRequest(BaseModel):
 
 @router.post("/api/playback/timeline")
 @requires_scope("read")
+@console.federated(console.split_timeline, console.combine_timeline)
 def synchronized_playback_timeline(
     payload: SynchronizedPlaybackRequest,
     user: CurrentUser,

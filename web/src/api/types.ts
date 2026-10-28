@@ -44,6 +44,9 @@ export type RecordingHealthState =
 export interface Camera {
   id: string;
   name: string;
+  /** Present on a camera that belongs to a site of the multi-site console. */
+  site?: { id: string; name: string };
+  site_unreachable?: boolean;
   group_name: string | null;
   camera_ip: string | null;
   archived_at: string | null;
