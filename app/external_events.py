@@ -42,8 +42,8 @@ MAX_MESSAGE = 500
 TYPE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
 HOME_ASSISTANT_SOURCE = "home-assistant"
 RECONCILE_SECONDS = 5.0
-LABELS = {"door_granted": "Door: access granted", "door_denied": "Door: access denied", "door_forced": "Door forced open", "door_held_open": "Door held open",
-          "intercom_call": "Intercom call", "panic": "Panic button", "sensor": "Sensor"}
+LABELS = {"door_granted": "Door: access granted", "door_denied": "Door: access denied", "door_forced": "Door forced open", "door_held_open": "Door held open", "door_held": "Door held open",
+          "intercom_call": "Intercom call", "panic": "Panic button", "panic_button": "Panic button", "sensor": "Sensor"}
 
 
 class SourceError(ValueError):
@@ -242,7 +242,7 @@ def _validated(db: sqlite3.Connection, fields: dict[str, Any], current: sqlite3.
         return kind, secret, settings, None
     if kind == "mqtt":
         previous = json.loads(current["settings_json"]) if current is not None else {}
-        settings = {"topic": _check_filter(fields.get("topic") or previous.get("topic") or ""), "allow_private": bool(fields.get("allow_private", previous.get("allow_private", False)))}
+        settings = {"topic": _check_filter(fields.get("topic") or previous.get("topic") or ""), "allow_private": bool(previous.get("allow_private", False) if fields.get("allow_private") is None else fields["allow_private"])}
         if fields.get("url"):
             try:
                 rule_actions._check_broker(fields["url"].strip(), settings["allow_private"])

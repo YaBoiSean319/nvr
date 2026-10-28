@@ -108,6 +108,8 @@ class InboundTests(EventCase):
         self.assertEqual(self.send(source, {}, raw=b"not json").status_code, 422)
         self.assertEqual(self.send(source, {}, raw=b"[]").status_code, 422)
         self.assertEqual(self.send(source, {}, raw=b"x" * 20_000).status_code, 413)
+        chunked = TestClient(self.app).post(f"/api/inbound/events/{source}", content=(b"x" * 4096 for _ in range(8)), headers={"Content-Type": "application/json"})
+        self.assertEqual(chunked.status_code, 413)  # No length declared, still capped
 
     def test_an_event_from_the_past_is_placed_when_it_happened(self):
         source = self.http_source()
@@ -289,6 +291,20 @@ class MqttTests(EventCase):
         self.assertEqual({item["type"] for item in self.timeline(self.d1)}, {"door_forced", "mqtt_message"})
         self.assertEqual(len(self.admin.get("/api/alarms", params={"state": "open"}).json()["alarms"]), 2)
         self.assertEqual(broker.connections[0]["username"], "door")
+
+    def test_a_retained_message_is_not_taken_as_a_new_event(self):
+        broker = self.broker(username="door", password="pw")
+        broker.retained["building/doors/main"] = {"topic": "building/doors/main", "payload": json.dumps({"type": "door_forced"}).encode(), "qos": 0, "retain": True}
+        source = self.mqtt_source(broker)
+        self.run_manager(broker, [], seconds=1.0)
+        self.assertEqual(self.admin.get(f"/api/event-sources/{source}/events").json()["events"], [])
+
+    def test_editing_an_mqtt_source_keeps_its_private_network_setting(self):
+        broker = self.broker(username="door", password="pw")
+        source = self.mqtt_source(broker)
+        self.admin.put(f"/api/event-sources/{source}", json={"name": "Renamed", "kind": "mqtt", "topic": "building/doors/#"})
+        listed = {item["id"]: item for item in self.admin.get("/api/event-sources").json()["sources"]}
+        self.assertTrue(listed[source]["allow_private"])
 
     def test_a_broker_that_refuses_the_login_is_reported_not_retried_hard(self):
         broker = self.broker(username="door", password="right")

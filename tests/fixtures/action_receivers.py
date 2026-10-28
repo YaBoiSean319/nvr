@@ -122,7 +122,7 @@ class MqttBroker:
                             with broker.lock:
                                 retained = [message for message in broker.retained.values() if any(broker.matches(item, message["topic"]) for item in filters)]
                             for message in retained:
-                                broker.send(self.wfile, message["topic"], message["payload"])
+                                broker.send(self.wfile, message["topic"], message["payload"], retain=True)
                         elif kind == 12:  # PINGREQ
                             self.wfile.write(bytes([0xD0, 0]))
                         elif kind == 14:  # DISCONNECT
@@ -142,7 +142,7 @@ class MqttBroker:
         return topic_matches(topic_filter, topic)
 
     @staticmethod
-    def send(stream, topic: str, payload: bytes) -> None:
+    def send(stream, topic: str, payload: bytes, retain: bool = False) -> None:
         body = struct.pack("!H", len(topic.encode())) + topic.encode() + payload
         length, encoded = len(body), bytearray()
         while True:
@@ -150,7 +150,7 @@ class MqttBroker:
             encoded.append(byte | (0x80 if length else 0))
             if not length:
                 break
-        stream.write(bytes([0x30]) + bytes(encoded) + body)
+        stream.write(bytes([0x30 | int(retain)]) + bytes(encoded) + body)
         stream.flush()
 
     def deliver(self, topic: str, payload: bytes) -> int:

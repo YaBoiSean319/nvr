@@ -55,6 +55,7 @@ _TABLES = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS external_events_time_idx ON external_events(occurred_at)",
+    "CREATE INDEX IF NOT EXISTS external_events_received_idx ON external_events(received_at)",
     """
     CREATE TABLE IF NOT EXISTS external_event_cameras (
         event_id TEXT NOT NULL REFERENCES external_events(id) ON DELETE CASCADE,

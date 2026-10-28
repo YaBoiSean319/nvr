@@ -215,6 +215,7 @@ function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWin
         const position = percent(at(event.occurred_at), window);
         return position >= 0 && position <= 100
           ? <span key={`x${event.id}`} className="timeline-point" data-mark="event" data-type={event.type}
+                  onPointerDown={pointer => { if (pointer.button === 0) { pointer.stopPropagation(); playbackClock.seek(at(event.occurred_at)); } }}
                   title={`${event.label}${event.subject ? ` · ${event.subject}` : ""} (${event.source_name}) at ${formatSiteTime(at(event.occurred_at), settings, true)}${event.message ? `: ${event.message}` : ""}`}
                   style={{ left: `${position}%` }} />
           : null;

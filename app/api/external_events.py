@@ -35,7 +35,7 @@ class SourceBody(BaseModel):
     secret: str | None = Field(default=None, max_length=256)
     url: str | None = Field(default=None, max_length=2048)
     topic: str | None = Field(default=None, max_length=1024)
-    allow_private: bool = False
+    allow_private: bool | None = None  # Left out, an MQTT source keeps what it had
     mappings: list[MappingBody] | None = Field(default=None, max_length=500)
 
 
@@ -63,7 +63,8 @@ def _limited(source_id: str) -> bool:
         return True
     window.append(now)
     if len(_recent) > 1000:
-        _recent.clear()
+        for key in [key for key, times in _recent.items() if not times or now - times[-1] > 60]:
+            del _recent[key]
     return False
 
 
@@ -72,12 +73,19 @@ def _limited(source_id: str) -> bool:
 @router.post("/api/inbound/events/{source_id}", status_code=202)
 async def inbound(source_id: str, request: Request) -> JSONResponse:
     """Accept an event from a building system. It must be signed with the source's secret (see docs/external-events.md); anything else is refused."""
-    if _limited(source_id[:64]):
+    # Counted per sender address as well as per source, so someone who only knows a source's id cannot use up the real sender's allowance.
+    if _limited(f"{source_id[:64]}|{request.client.host if request.client else ''}"):
         return JSONResponse({"detail": "Too many events"}, status_code=429)
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > external_events.MAX_BODY_BYTES:
         return JSONResponse({"detail": "The event is too large"}, status_code=413)
-    body = await request.body()
+    # A chunked body declares no length: read it with a cap rather than buffering whatever arrives.
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > external_events.MAX_BODY_BYTES:
+            return JSONResponse({"detail": "The event is too large"}, status_code=413)
+    body = bytes(body)
     try:
         result = external_events.receive_http(source_id, body, request.headers)
     except EventRefused as exc:

@@ -186,6 +186,7 @@ async def subscribe(broker: Broker, filters: list[str], on_message, *, client_id
             if header >> 4 != 3:
                 continue  # PINGRESP, or anything else a broker may send
             qos = (header >> 1) & 0x03
+            retained = bool(header & 1)
             length = struct.unpack("!H", body[:2])[0]
             topic, offset = body[2:2 + length].decode("utf-8", errors="replace"), 2 + length
             if qos:
@@ -193,7 +194,8 @@ async def subscribe(broker: Broker, filters: list[str], on_message, *, client_id
                 await writer.drain()
                 offset += 2
             payload = body[offset:]
-            if len(payload) <= MAX_MESSAGE_BYTES:
+            # A retained message is a stored copy the broker replays on every connect, not something that just happened.
+            if len(payload) <= MAX_MESSAGE_BYTES and not retained:
                 await on_message(topic, payload)
     finally:
         if ping:
