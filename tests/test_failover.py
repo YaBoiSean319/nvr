@@ -56,6 +56,9 @@ class FailoverCase(GrantCase):
         patch = mock.patch.object(failover, "check_peer_url", lambda url, allow_private: url.rstrip("/"))
         patch.start()
         self.addCleanup(patch.stop)
+        from app.api import failover as api
+
+        api._failures.clear()
 
     def configure(self, role: str, **extra):
         body = {"role": role, "peer_url": "https://peer.example", "secret": SECRET, "silence_seconds": 12, "lease_seconds": 5, "sync_seconds": 60, **extra}
@@ -291,6 +294,20 @@ class PeerEndpointTests(FailoverCase):
         self.assertEqual(client.post("/api/inbound/failover/lease", content=b'{"altered":true}', headers=signed).status_code, 401)
         self.assertEqual(self.request("POST", "/api/inbound/failover/lease", b"{}", client=client).status_code, 200)
 
+    def test_an_oversized_body_is_refused_before_anything_else_and_a_guesser_is_shut_out(self):
+        from app.api import failover as api
+
+        self.configure("standby")
+        client = TestClient(self.app)
+        self.assertEqual(client.post("/api/inbound/failover/lease", content=b"x" * 10_000).status_code, 413)  # Unsigned and large: not read to the end
+        api._failures.clear()
+        for _ in range(api.MAX_FAILURES_PER_MINUTE):
+            self.assertEqual(client.post("/api/inbound/failover/lease", content=b"{}").status_code, 401)
+        self.assertEqual(client.post("/api/inbound/failover/lease", content=b"{}").status_code, 429)
+        self.assertEqual(self.request("POST", "/api/inbound/failover/lease", b"{}", client=client).status_code, 429)  # Even a good request, for a minute
+        api._failures.clear()
+        self.assertEqual(self.request("POST", "/api/inbound/failover/lease", b"{}", client=client).status_code, 200)
+
     def test_the_lease_footage_and_backup_endpoints_answer_for_their_role(self):
         self.configure("standby")
         answer = self.request("POST", "/api/inbound/failover/lease", b"{}").json()
@@ -401,6 +418,41 @@ class ConfigurationCopyTests(FailoverCase):
                         failover.apply_configuration(archive)
                 with connect() as db:
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM cameras").fetchone()[0], 0)  # Nothing was copied by a refused one
+
+
+class ImportTests(FailoverCase):
+    def test_footage_the_standby_no_longer_has_is_skipped_and_the_handback_still_completes(self):
+        self.configure("primary")
+        failover.learn_of_takeover({"epoch": 1, "takeover_started_at": datetime.now(timezone.utc).isoformat(), "silent_since": None, "segments": 2})
+        start = datetime.now(timezone.utc)
+        listing = [{"id": 11, "camera_id": self.d1, "starts_at": start.isoformat(), "ends_at": (start + timedelta(seconds=2)).isoformat(), "size_bytes": 5},
+                   {"id": 12, "camera_id": self.d1, "starts_at": (start + timedelta(seconds=2)).isoformat(), "ends_at": (start + timedelta(seconds=4)).isoformat(), "size_bytes": 5}]
+        body = b"hello"
+        completed: list[dict] = []
+
+        class Peer(failover.FailoverManager):
+            async def _call(self, settings, secret, method, path, payload=None, **options):
+                if path.startswith("/api/inbound/failover/footage?"):
+                    return httpx.Response(200, json={"segments": listing})
+                completed.append(payload)
+                return httpx.Response(200, json={"done": True})
+
+            async def _download(self, settings, secret, epoch, segment_id, target):
+                if segment_id == 11:
+                    raise failover.MissingFootage  # Removed by the standby's retention
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(body)
+                import hashlib
+
+                return hashlib.sha256(body).hexdigest()
+
+        asyncio.run(Peer()._import(failover.read_settings(connect().__enter__()) | {"peer_url": "https://peer.example"}, SECRET, 1))
+        self.assertEqual(completed, [{"epoch": 1, "imported": 1, "bytes": 5}])
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM failover_episodes WHERE role='primary'").fetchone()[0], "done")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM recording_segments WHERE source='failover'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM failover_imports WHERE segment_id IS NULL").fetchone()[0], 1)
+        self.assertEqual(self.incident()["state"], "recovered")
 
 
 class RestoreAsStandbyTests(FailoverCase):

@@ -123,8 +123,10 @@ def held_reason(db: sqlite3.Connection, now: datetime | None = None) -> str | No
     takeover. Read by the recorder on every pass, from the database, so it holds across processes."""
     try:
         row = db.execute("SELECT s.role,t.takeover_active,t.yield_until FROM failover_settings s,failover_state t WHERE s.singleton_id=1 AND t.singleton_id=1").fetchone()
-    except sqlite3.Error:
-        return None
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None  # A database from before failover
+        raise  # Any other failure is not a licence to record: the caller's pass is tried again
     if row is None or row["role"] == "off":
         return None
     if row["role"] == "standby":
@@ -355,6 +357,10 @@ class SyncError(RuntimeError):
     pass
 
 
+class MissingFootage(Exception):
+    """The standby no longer has a segment it listed (its retention removed it): it is skipped, not waited for."""
+
+
 def apply_configuration(archive: Path) -> dict[str, Any]:
     """Copy the configuration needed to record from an encrypted backup of the primary into this standby.
 
@@ -519,7 +525,7 @@ def store_imported(epoch: int, remote: dict[str, Any], path: Path, digest: str) 
         db.execute("BEGIN IMMEDIATE")
         try:
             db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes,source) VALUES(?,?,?,?,?,'failover') ON CONFLICT(relative_path) DO NOTHING",
-                       (remote["camera_id"], relative, remote["starts_at"], remote["ends_at"], int(remote["size_bytes"])))
+                       (remote["camera_id"], relative, remote["starts_at"], remote["ends_at"], path.stat().st_size))  # The size of the file that is here, not the one the standby said
             segment = db.execute("SELECT id FROM recording_segments WHERE relative_path=?", (relative,)).fetchone()
             db.execute("INSERT OR IGNORE INTO failover_imports(epoch,remote_segment_id,segment_id,camera_id,sha256) VALUES(?,?,?,?,?)", (epoch, remote["id"], segment["id"], remote["camera_id"], digest))
         except BaseException:
@@ -562,7 +568,7 @@ def status_view(db: sqlite3.Connection) -> dict[str, Any]:
         headline = {"ok": "Primary: the standby is watching", "unreachable": "Primary: the standby cannot be reached (recording continues)", "refused": "Primary: the standby refused the signature (the secrets differ)",
                     "starting": "Primary: starting, waiting to hear from the standby", "standby_stopping": "Primary: waiting for the standby to stop recording", "handback": "Primary: bringing back the standby's footage"
                     }.get(str(state["peer_state"]), "Primary")
-    return {"role": role, "headline": headline, "recording_held": held, "peer_state": state["peer_state"], "last_contact_at": state["last_contact_at"],
+    return {"role": role, "headline": headline, "lease_until": state["lease_until"], "recording_held": held, "peer_state": state["peer_state"], "last_contact_at": state["last_contact_at"],
             "takeover_active": bool(state["takeover_active"]), "takeover_started_at": state["takeover_started_at"], "epoch": state["epoch"], "last_error": state["last_error"],
             "last_sync_at": state["last_sync_at"], "last_sync_error": state["last_sync_error"], "config_created_at": state["config_created_at"]}
 
@@ -682,32 +688,48 @@ class FailoverManager:
             return
         with connect() as db:
             done = {row[0] for row in db.execute("SELECT remote_segment_id FROM failover_imports WHERE epoch=?", (epoch,))}
-        for item in remote:
-            if item["id"] in done:
-                continue
+        for raw in remote:
             try:
-                started, ended = _parse(item["starts_at"]), _parse(item["ends_at"])
+                started, ended = _parse(raw["starts_at"]), _parse(raw["ends_at"])
                 if started is None or ended is None or not 0 < (ended - started).total_seconds() <= MAX_SEGMENT_SECONDS:
                     continue
+                # What the standby says is cast and rewritten before it is used: the path is made from these, never from the text it sent.
+                item = {"id": int(raw["id"]), "camera_id": str(raw["camera_id"]), "starts_at": started.astimezone(timezone.utc).isoformat(), "ends_at": ended.astimezone(timezone.utc).isoformat(),
+                        "size_bytes": int(raw["size_bytes"])}
+                if item["id"] in done:
+                    continue
                 directory = camera_recordings_dir(item["camera_id"]) if await asyncio.to_thread(self._has_camera, item["camera_id"]) else None
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError):
                 continue
             if directory is None:
                 continue
             target = directory / f"failover-e{epoch}-{item['id']}-{started:%Y%m%dT%H%M%SZ}.mp4"
             try:
                 digest = await self._download(settings, secret, epoch, int(item["id"]), target)
+            except MissingFootage:
+                logger.warning("The standby no longer has footage %s of takeover %s: skipped", item["id"], epoch)
+                await asyncio.to_thread(self._skip, epoch, item)
+                continue
             except (httpx.HTTPError, OSError, ValueError):
                 return  # Tried again at the next pass
-            await asyncio.to_thread(store_imported, epoch, item, target, digest)
+            try:
+                await asyncio.to_thread(store_imported, epoch, item, target, digest)
+            except (OSError, ValueError):
+                target.unlink(missing_ok=True)  # Not indexable here: left out rather than retried for ever
+                await asyncio.to_thread(self._skip, epoch, item)
         with connect() as db:
-            totals = db.execute("SELECT COUNT(*),COALESCE(SUM(s.size_bytes),0) FROM failover_imports i LEFT JOIN recording_segments s ON s.id=i.segment_id WHERE i.epoch=?", (epoch,)).fetchone()
+            totals = db.execute("SELECT COUNT(i.segment_id),COALESCE(SUM(s.size_bytes),0) FROM failover_imports i LEFT JOIN recording_segments s ON s.id=i.segment_id WHERE i.epoch=?", (epoch,)).fetchone()
         try:
             confirmed = await self._call(settings, secret, "POST", "/api/inbound/failover/handback-complete", {"epoch": epoch, "imported": totals[0], "bytes": totals[1]})
         except (httpx.HTTPError, ValueError):
             return
         if confirmed.status_code == 200:
             await asyncio.to_thread(finish_handback, epoch, int(totals[0]), int(totals[1]))
+
+    @staticmethod
+    def _skip(epoch: int, item: dict[str, Any]) -> None:
+        with connect() as db:
+            db.execute("INSERT OR IGNORE INTO failover_imports(epoch,remote_segment_id,segment_id,camera_id,sha256) VALUES(?,?,NULL,?,'')", (epoch, item["id"], item["camera_id"]))
 
     @staticmethod
     def _has_camera(camera_id: str) -> bool:
@@ -724,6 +746,8 @@ class FailoverManager:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=4.0), follow_redirects=False) as client:
                 async with client.stream("GET", url, headers=headers) as response:
+                    if response.status_code == 404:
+                        raise MissingFootage
                     if response.status_code != 200:
                         raise httpx.HTTPError(f"The standby answered {response.status_code}")
                     expected = response.headers.get("X-Footage-Sha256", "")

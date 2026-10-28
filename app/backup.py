@@ -516,7 +516,9 @@ def _make_standby(database: Path) -> None:
     db = sqlite3.connect(database)
     try:
         db.execute("UPDATE failover_settings SET role='standby',peer_url=NULL,secret_ciphertext=NULL,instance_id=lower(hex(randomblob(16))) WHERE singleton_id=1")
-        db.execute("UPDATE failover_state SET lease_until=NULL,yield_until=NULL,peer_state=NULL,last_renewed_at=NULL,handback_requested_at=NULL,watching_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+        db.execute("DELETE FROM failover_episodes")
+        db.execute("DELETE FROM failover_imports")
+        db.execute("UPDATE failover_state SET epoch=0,config_created_at=NULL,lease_until=NULL,yield_until=NULL,peer_state=NULL,last_renewed_at=NULL,handback_requested_at=NULL,watching_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
                    "takeover_active=0,takeover_started_at=NULL,last_sync_at=NULL,last_sync_error=NULL,sync_requested=0,last_error=NULL WHERE singleton_id=1")
         db.commit()
     finally:

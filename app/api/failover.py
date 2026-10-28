@@ -1,6 +1,9 @@
 """Failover recorder (#143): the administrator's settings and status, the status for everyone, and the signed endpoints the two NVRs call on each other."""
 from __future__ import annotations
 
+import json
+import time
+from collections import deque
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -104,15 +107,45 @@ def get_status(_: CurrentUser) -> dict[str, Any]:
 
 # --- the signed endpoints the two NVRs call on each other (the signature is the credential, not a sign-in) ----------------------------------------
 
+MAX_BODY_BYTES = 4096
+MAX_FAILURES_PER_MINUTE = 20
+_failures: dict[str, deque[float]] = {}
+
+
+def _blocked(host: str) -> bool:
+    """A sender that has failed the signature too often in the last minute is refused (429) without being checked, so guessing the secret is not worth trying."""
+    now = time.monotonic()
+    window = _failures.setdefault(host, deque())
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(_failures) > 1000:
+        for key in [key for key, times in _failures.items() if not times or now - times[-1] > 60]:
+            del _failures[key]
+    return len(window) >= MAX_FAILURES_PER_MINUTE
+
+
 def _target(request: Request) -> str:
     return request.url.path + (f"?{request.url.query}" if request.url.query else "")
 
 
 async def _signed(request: Request) -> bytes:
-    body = await request.body()
-    if len(body) > 4096:
+    host = request.client.host if request.client else ""
+    if _blocked(host):
+        raise failover.PeerError(429, "Too many refused requests")
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
         raise failover.PeerError(413, "The request is too large")
-    await run_in_threadpool(failover.authenticate, request.method, _target(request), body, request.headers.get("x-failover-timestamp"), request.headers.get("x-failover-signature"))
+    body = bytearray()
+    async for chunk in request.stream():  # Capped as it is read: a chunked body declares no length, and nothing is checked yet
+        body.extend(chunk)
+        if len(body) > MAX_BODY_BYTES:
+            raise failover.PeerError(413, "The request is too large")
+    body = bytes(body)
+    try:
+        await run_in_threadpool(failover.authenticate, request.method, _target(request), body, request.headers.get("x-failover-timestamp"), request.headers.get("x-failover-signature"))
+    except failover.PeerError:
+        _failures.setdefault(host, deque()).append(time.monotonic())
+        raise
     return body
 
 
@@ -141,8 +174,6 @@ async def lease(request: Request) -> JSONResponse:
 async def handback_complete(request: Request) -> JSONResponse:
     try:
         body = await _signed(request)
-        import json
-
         try:
             payload = json.loads(body or b"{}")
             epoch, imported, size = int(payload["epoch"]), int(payload.get("imported", 0)), int(payload.get("bytes", 0))
