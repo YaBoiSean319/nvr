@@ -39,6 +39,8 @@ def save_settings(db: sqlite3.Connection, fields: dict[str, Any]) -> None:
         merged[field] = str(fields.get(field, current[field]) or "").strip()
         if len(merged[field]) > MAX_TEXT:
             raise NoticeError(f"Keep each detail to {MAX_TEXT} characters")
+    if merged["require_purpose"] and "default_purpose" in fields and not merged["default_purpose"]:
+        raise NoticeError("The site default policy needs a purpose while a purpose is required")
     if merged["contact_email"] and ("@" not in merged["contact_email"] or " " in merged["contact_email"]):
         raise NoticeError("Enter a contact email address such as privacy@example.com")
     db.execute("UPDATE privacy_settings SET require_purpose=?,default_purpose=?,default_legal_basis=?,organisation=?,contact_name=?,contact_email=?,contact_phone=?,updated_at=? WHERE singleton_id=1",
@@ -112,15 +114,16 @@ def notice(db: sqlite3.Connection) -> dict[str, Any]:
     purposes = list(dict.fromkeys(camera["purpose"] for camera in cameras if camera["purpose"]))
     recording = [camera for camera in cameras if camera["recording_mode"] != "disabled"]
     longest = max((camera["retention_days"] for camera in recording), default=None)
-    audio = [camera["name"] for camera in cameras if camera["audio_recorded"]]
+    audio = [camera["name"] for camera in recording if camera["audio_recorded"]]
     contact = ", ".join(item for item in (config["contact_name"], config["contact_email"], config["contact_phone"]) if item)
     lines = [f"Video surveillance (CCTV) is in operation{' at ' + config['organisation'] if config['organisation'] else ''}.",
              f"Purpose: {'; '.join(purposes) if purposes else 'not yet recorded'}.",
              f"Recordings are kept for up to {longest} days, then deleted automatically." if longest is not None else "No camera is recording.",
+             f"Cameras: {', '.join(camera['name'] for camera in cameras)}." if cameras else "No cameras are set up.",
              f"Sound is also recorded by: {', '.join(audio)}." if audio else "Sound is not recorded.",
              f"Questions or requests about your data: {contact}." if contact else "Contact details have not been entered."]
     return {"title": "CCTV in operation", "organisation": config["organisation"], "purposes": purposes, "retention_days": longest, "audio_cameras": audio, "contact": contact,
-            "lines": lines, "camera_count": len(cameras), "generated_at": _now().isoformat()}
+            "lines": lines, "camera_count": len(cameras), "cameras": [camera["name"] for camera in cameras], "generated_at": _now().isoformat()}
 
 
 def summary(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
@@ -135,11 +138,11 @@ def summary(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, An
         count = everyone if seen.unrestricted else len(seen.only(ids))
         people.append({"username": user["username"], "role": user["role"], "cameras": count, "all_cameras": seen.unrestricted or count == everyone})
     since = (now - timedelta(days=30)).date().isoformat()
-    removed = deletions(db, start=since)
+    removed = db.execute("SELECT COALESCE(SUM(segments),0) AS segments,COALESCE(SUM(bytes),0) AS bytes FROM retention_deletions WHERE day>=?", (since,)).fetchone()
     return {"organisation": config["organisation"], "contact": {"name": config["contact_name"], "email": config["contact_email"], "phone": config["contact_phone"]},
-            "require_purpose": config["require_purpose"], "cameras": cameras, "people": people, "audio_cameras": [camera["name"] for camera in cameras if camera["audio_recorded"]],
+            "require_purpose": config["require_purpose"], "cameras": cameras, "people": people, "audio_cameras": [camera["name"] for camera in cameras if camera["audio_recorded"] and camera["recording_mode"] != "disabled"],
             "missing_purpose": [camera["name"] for camera in cameras if not camera["purpose"]],
-            "deleted_last_30_days": {"segments": sum(item["segments"] for item in removed), "bytes": sum(item["bytes"] for item in removed), "since": since},
+            "deleted_last_30_days": {"segments": removed["segments"], "bytes": removed["bytes"], "since": since},
             "generated_at": now.isoformat()}
 
 

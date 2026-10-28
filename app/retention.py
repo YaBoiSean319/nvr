@@ -129,7 +129,8 @@ def effective_purpose(db, camera_id: str) -> tuple[str, str]:
     scopes = [("camera", camera_id)] + ([("group", camera["group_id"])] if camera is not None and camera["group_id"] else [])
     for scope_type, scope_id in scopes:
         row = db.execute("SELECT purpose,legal_basis FROM retention_policy_overrides WHERE scope_type=? AND scope_id=?", (scope_type, scope_id)).fetchone()
-        if row:
+        # A policy saved only to change the days has no purpose of its own: the next one up supplies it.
+        if row and row["purpose"].strip():
             return row["purpose"], row["legal_basis"]
     row = db.execute("SELECT default_purpose,default_legal_basis FROM privacy_settings WHERE singleton_id=1").fetchone()
     return (row["default_purpose"], row["default_legal_basis"]) if row else ("", "")

@@ -4,11 +4,11 @@ Settings → Privacy & notices.
 
 ## Purpose and legal basis
 
-Each retention policy (the site default of 30 days, a group's, a camera's) can carry a **purpose** ("site security") and a **legal basis** ("legitimate interests"). Turn on *Require a purpose for every retention policy* and saving a group or camera retention without one is refused (422). Policies that existed before keep an empty purpose and are listed as needing one; the policy list and the retention endpoints (`needs_purpose`) show the prompt. Saving a policy without sending a purpose keeps the one already saved.
+Each retention policy (the site default of 30 days, a group's, a camera's) can carry a **purpose** ("site security") and a **legal basis** ("legitimate interests"). Turn on *Require a purpose for every retention policy* and saving a group or camera retention without one is refused (422). The site default's purpose cannot be blanked while the option is on. Policies that existed before keep an empty purpose and are listed as needing one; the policy list and the retention endpoints (`needs_purpose`) show the prompt. Saving a policy without sending a purpose keeps the one already saved.
 
 ## Record of automatic deletions
 
-Each time the automatic clean-up deletes a recording, it is counted in that camera's record for the day: how many recordings and bytes, the retention period and the purpose in force. `GET /api/retention-deletions` (administrators; optional `camera_id`, `start`, `end`) returns it, newest day first, and the Privacy page shows it. Footage kept for an alarm, a hold or an export is not deleted and so not counted. The record keeps the camera's name, so it outlives a renamed or removed camera.
+Each time the automatic clean-up deletes a recording, it is counted in that camera's record for the day the deletion happened (not the day it was filmed); manual deletions are in the viewing audit instead: how many recordings and bytes, the retention period and the purpose in force. `GET /api/retention-deletions` (administrators; optional `camera_id`, `start`, `end`) returns it, newest day first, and the Privacy page shows it. Footage kept for an alarm, a hold or an export is not deleted and so not counted. The record keeps the camera's name, so it outlives a renamed or removed camera.
 
 ## Generated notices
 

@@ -31,6 +31,18 @@ class PurposeTests(GrantCase):
         self.assertEqual(self.admin.put(f"/api/cameras/{self.y1}/retention", json={"retention_days": 9}).status_code, 422)
         self.assertEqual(self.admin.put(f"/api/cameras/{self.y1}/retention", json={"retention_days": 9, "purpose": "Safety"}).status_code, 200)
 
+    def test_the_site_default_cannot_lose_its_purpose_while_one_is_required(self):
+        self.admin.put("/api/privacy/settings", json={"default_purpose": "Site security"})
+        self.require()
+        self.assertEqual(self.admin.put("/api/privacy/settings", json={"default_purpose": ""}).status_code, 422)
+        self.assertEqual(self.admin.put("/api/privacy/settings", json={"default_purpose": "Safety"}).status_code, 200)
+
+    def test_a_policy_without_a_purpose_of_its_own_uses_the_next_one_up(self):
+        self.admin.put(f"/api/camera-groups/{self.dock}/retention", json={"retention_days": 20, "purpose": "Safety of drivers"})
+        self.admin.put(f"/api/cameras/{self.d1}/retention", json={"retention_days": 5})
+        self.assertEqual(self.admin.get(f"/api/cameras/{self.d1}/retention").json()["purpose"], "Safety of drivers")
+        self.assertEqual(self.admin.get(f"/api/cameras/{self.d1}/retention").json()["retention_days"], 5)
+
     def test_saving_without_a_purpose_keeps_the_one_that_is_saved(self):
         self.admin.put(f"/api/camera-groups/{self.dock}/retention", json={"retention_days": 20, "purpose": "Site security"})
         self.require()
@@ -120,6 +132,7 @@ class NoticeTests(GrantCase):
         self.assertIn("Site security", text)
         self.assertIn("up to 30 days", text)
         self.assertIn("Sound is not recorded", text)
+        self.assertIn("Cameras: Dock 1, Dock 2, Loose, Yard 1.", text)
         self.assertIn("privacy@harbour.example", text)
         self.admin.put(f"/api/camera-groups/{self.dock}/retention", json={"retention_days": 90, "purpose": "Safety of drivers"})
         self.admin.put(f"/api/cameras/{self.y1}/retention", json={"retention_days": 7})
