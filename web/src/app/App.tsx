@@ -25,6 +25,10 @@ import { usePlaybackStore } from "@/features/playback/store";
 import { useUnmaskedStore } from "@/features/privacy/store";
 import { Shell } from "@/features/shell/Shell";
 import { applyTheme, reapplyBranding, storedTheme } from "@/lib/appearance";
+import { deviceLabel } from "@/features/alarms/pushDevice";
+import { isNativeApp } from "@/native/platform";
+import { refreshNativePush, watchNotificationTaps } from "@/native/push";
+import { rememberThisPhone } from "@/native/session";
 
 function AdminRoute({ me, children }: { me: Me; children: ReactNode }) {
   return me.role === "administrator" ? <>{children}</> : <AdministratorOnly />;
@@ -76,6 +80,16 @@ function SignedIn({ me }: { me: Me }) {
     usePlaybackStore.getState().reset();
     useCamerasStore.getState().reset();
     useUnmaskedStore.getState().reset();
+  }, [me.username]);
+  // In the native app: keep a device secret in secure storage, tell the NVR which push token is current, and open the alarm a tapped notification is about.
+  useEffect(() => {
+    if (!isNativeApp()) return;
+    void rememberThisPhone(me.username, deviceLabel()).catch(() => undefined);
+    void refreshNativePush();
+    let stop: () => void = () => undefined;
+    let gone = false;
+    void watchNotificationTaps(path => window.location.assign(path)).then(remove => (gone ? remove() : (stop = remove)));
+    return () => { gone = true; stop(); };
   }, [me.username]);
   // One router per signed-in identity, so a role change rebuilds the route table.
   const routes = useMemo(() => router(me), [me.username, me.role]); // eslint-disable-line react-hooks/exhaustive-deps

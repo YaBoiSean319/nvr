@@ -294,7 +294,7 @@ def _claim(db: sqlite3.Connection) -> sqlite3.Row | None:
     db.execute("BEGIN IMMEDIATE")
     try:
         row = db.execute(
-            "SELECT d.id,d.payload_json,d.attempt_count,s.id AS subscription_id,s.user_id,s.endpoint,s.p256dh,s.auth,a.camera_id FROM push_deliveries d "
+            "SELECT d.id,d.payload_json,d.attempt_count,s.id AS subscription_id,s.user_id,s.kind,s.endpoint,s.p256dh,s.auth,a.camera_id FROM push_deliveries d "
             "JOIN push_subscriptions s ON s.id=d.subscription_id JOIN alarms a ON a.id=d.alarm_id "
             "WHERE d.status='queued' AND d.next_attempt_at<=? ORDER BY d.next_attempt_at LIMIT 1",
             (_now().isoformat(),)).fetchone()
@@ -333,6 +333,7 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
     outcomes: list[str] = []
     owned = client is None
     client = client or httpx.Client(timeout=10, follow_redirects=False, trust_env=False)
+    native_client: httpx.Client | None = None if owned else client  # Apple's service speaks only HTTP/2
     try:
         with connect() as db:
             private, public = _keys(db)
@@ -348,6 +349,12 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
                 outcomes.append(_finish(delivery, None, "invalid: the recipient may no longer see this camera"))
                 continue
             try:
+                if delivery["kind"] != "web":
+                    from . import native_push
+                    native_client = native_client or httpx.Client(timeout=10, follow_redirects=False, trust_env=False, http2=True)
+                    status_code, error = native_push.send(native_client, delivery["kind"], delivery["endpoint"].split(":", 1)[1], json.loads(delivery["payload_json"]))
+                    outcomes.append(_finish(delivery, status_code, error))
+                    continue
                 validate_endpoint(delivery["endpoint"])
                 body = encrypt_payload(delivery["payload_json"].encode("utf-8"), delivery["p256dh"], delivery["auth"])
                 response = client.post(delivery["endpoint"], content=body, headers={
@@ -364,6 +371,8 @@ def deliver_due(client: httpx.Client | None = None, limit: int = 50) -> list[str
     finally:
         if owned:
             client.close()
+            if native_client is not None:
+                native_client.close()
     return outcomes
 
 

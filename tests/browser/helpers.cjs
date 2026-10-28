@@ -1,8 +1,12 @@
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const { test: base, expect } = require("playwright/test");
+const { test: plain, expect } = require("playwright/test");
+const { installBridge } = require("./native_bridge.cjs");
 const { loadFixtureEnvironment } = require("./fixture_environment.cjs");
+
+// NVR_APP_MODE=1 runs every journey as the native app does: its user agent (see playwright.config.cjs) and a stand-in for Capacitor's bridge.
+const base = process.env.NVR_APP_MODE ? plain.extend({ context: async ({ context }, use) => { await context.addInitScript(installBridge); await use(context); } }) : plain;
 
 const FIXTURE_ENVIRONMENT = loadFixtureEnvironment();
 const FIXTURE_PASSWORD = fs.readFileSync(FIXTURE_ENVIRONMENT.NVR_BROWSER_FIXTURE_PASSWORD_PATH, "utf8").trim();

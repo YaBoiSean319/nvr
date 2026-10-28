@@ -3,6 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import { useDisplaySettings } from "@/api/queries";
 import { failureText } from "@/features/admin/tabDraft";
+import { NativeDeviceSettings } from "@/native/NativeDeviceSettings";
+import { isNativeApp } from "@/native/platform";
+import { disableNativePush, enableNativePush, nativePushEnabled } from "@/native/push";
 import { currentSubscription, deviceLabel, forgetThisDevice, pushSupported } from "./pushDevice";
 
 interface QuietHours { start: string; end: string; timezone: string }
@@ -17,7 +20,7 @@ interface Preferences {
 type Choices = Pick<Preferences, "rule_ids" | "group_ids" | "quiet_hours">;
 
 const key = ["push", "preferences"] as const;
-const supported = pushSupported;
+const supported = () => isNativeApp() || pushSupported();
 
 function toKey(base64: string): Uint8Array {
   const padded = base64.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (base64.length % 4)) % 4);
@@ -36,13 +39,21 @@ export function NotificationSettings() {
   const [draft, setDraft] = useState<Choices | null>(null);
   const [message, setMessage] = useState<{ tone: "good" | "bad"; text: string } | null>(null);
 
-  useEffect(() => { void currentSubscription().then(found => setSubscribed(Boolean(found))).catch(() => setSubscribed(false)); }, []);
+  useEffect(() => {
+    const found = isNativeApp() ? nativePushEnabled() : currentSubscription().then(Boolean);
+    void found.then(setSubscribed).catch(() => setSubscribed(false));
+  }, []);
   useEffect(() => {
     if (preferences.data && !draft) setDraft({ rule_ids: preferences.data.rule_ids, group_ids: preferences.data.group_ids, quiet_hours: preferences.data.quiet_hours });
   }, [preferences.data, draft]);
 
   const device = useMutation({
     mutationFn: async (on: boolean) => {
+      if (isNativeApp()) {
+        if (on) await enableNativePush();
+        else await disableNativePush();
+        return on;
+      }
       const existing = await currentSubscription();
       if (!on) {
         await forgetThisDevice();
@@ -94,6 +105,7 @@ export function NotificationSettings() {
           </button>
         </div>
       )}
+      <NativeDeviceSettings />
       {data && draft ? (
         <form className="notification-form" aria-label="Notification choices" onSubmit={event => { event.preventDefault(); save.mutate(draft); }}>
           <fieldset className="plain">

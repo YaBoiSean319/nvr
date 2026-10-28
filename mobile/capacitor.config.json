@@ -1,0 +1,30 @@
+{
+  "appId": "app.nvr.mobile",
+  "appName": "NVR",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "allowNavigation": [
+      "*"
+    ],
+    "cleartext": true
+  },
+  "android": {
+    "appendUserAgent": "NVRApp/1.0",
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  },
+  "ios": {
+    "appendUserAgent": "NVRApp/1.0",
+    "contentInset": "always"
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": [
+        "badge",
+        "sound",
+        "alert"
+      ]
+    }
+  }
+}

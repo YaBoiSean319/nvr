@@ -730,3 +730,6 @@
 .digest-list { margin: 0; padding-left: var(--n-space-4); display: grid; gap: 2px; font-size: 13px; }
 .digest-summary { border-left: 3px solid var(--n-accent); padding-left: var(--n-space-3); }
 .digest-summary p { margin: 0 0 var(--n-space-1); }
+
+/* The native app's lock screen (#140): nothing of the interface is rendered behind it. */
+.app-lock { min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 1rem; padding: 2rem; text-align: center; background: var(--n-bg, #f4f6f8); }

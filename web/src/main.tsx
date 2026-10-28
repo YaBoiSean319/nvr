@@ -3,6 +3,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "@/app/App";
 import { WallApp } from "@/features/wall/WallApp";
+import { NativeShell } from "@/native/NativeShell";
+import { isNativeApp } from "@/native/platform";
 import "@/styles/tokens.css";
 import "@/styles/base.css";
 import "@/styles/app.css";
@@ -19,13 +21,16 @@ const isWall = window.location.pathname === `${base}/wall` || window.location.pa
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <QueryClientProvider client={client}>
-      {isWall ? <WallApp /> : <App />}
-    </QueryClientProvider>
+    <NativeShell>
+      <QueryClientProvider client={client}>
+        {isWall ? <WallApp /> : <App />}
+      </QueryClientProvider>
+    </NativeShell>
   </StrictMode>,
 );
 
 // Installable app: the worker serves the application shell only (see app/api/web_interface.py).
-if (import.meta.env.PROD && "serviceWorker" in navigator) {
+// The native app keeps nothing on the phone, so it has no worker and no cached shell.
+if (import.meta.env.PROD && "serviceWorker" in navigator && !isNativeApp()) {
   window.addEventListener("load", () => void navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => undefined));
 }
