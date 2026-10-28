@@ -171,7 +171,7 @@ class GapReasonTests(CoverageCase):
         start, end = now - timedelta(minutes=5), now + timedelta(minutes=5)
         timeline = self.client.post("/api/playback/timeline", json={"camera_ids": [self.camera_id], "start": start.isoformat(), "end": end.isoformat()}).json()
         camera = timeline["cameras"][0]
-        self.assertEqual(set(camera["gaps"][0]), {"starts_at", "ends_at", "state", "reason", "reason_code"})
+        self.assertEqual(set(camera["gaps"][0]), {"starts_at", "ends_at", "state", "reason", "reason_code", "backfill"})  # backfill: what is being done about it (#131)
         self.assertEqual(set(camera["coverage"][0]), {"coverage_kind", "reason", "reason_code", "starts_at", "ends_at"})
         self.assertEqual(camera["gaps"][-1]["reason_code"], "unknown")
         intervals = self.client.get(f"/api/cameras/{self.camera_id}/coverage").json()["intervals"]
@@ -239,8 +239,9 @@ class CoverageReportTests(CoverageCase):
         self.assertEqual(camera["expected_seconds"], 4 * 3600 - sum(seconds(gap) for gap in gaps if gap["reason_code"] in coverage.EXPECTED))
         self.assertEqual(camera["missed_by_reason"], {"camera_offline": 3600.0, "unknown": 2400.0, "disk_unavailable": 1800.0})
         self.assertEqual([gap["reason_code"] for gap in camera["largest_gaps"]][:2], ["camera_offline", "disk_unavailable"])
+        fields = ("starts_at", "ends_at", "state", "reason", "reason_code")
         for gap in camera["largest_gaps"]:
-            self.assertIn({key: gap[key] for key in ("starts_at", "ends_at", "state", "reason", "reason_code")}, gaps)
+            self.assertIn({key: gap[key] for key in fields}, [{key: other[key] for key in fields} for other in gaps])
         self.assertEqual(camera["coverage_percent"], round(100 * (camera["expected_seconds"] - camera["missed_seconds"]) / camera["expected_seconds"], 2))
 
     def test_a_report_counts_only_time_that_has_happened_since_the_camera_was_added(self):

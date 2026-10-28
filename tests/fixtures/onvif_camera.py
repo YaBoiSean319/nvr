@@ -57,13 +57,15 @@ def fault(code: str, subcode: str, reason: str) -> str:
 
 
 class OnvifCamera:
+    EXTRA_SERVICES: dict[str, tuple[str, str]] = {}  # A subclass's own services: name -> (path, namespace)
+
     def __init__(self, *, username: str = "operator", password: str = "S3cret!pass", auth: dict[str, str] | None = None, skew: timedelta = timedelta(),
                  profiles: list[dict] | None = None, media2_profiles: list[dict] | None = None, manufacturer: str = "Hanwha Techwin", model: str = "XNV-6120R",
                  firmware: str = "2.00.00", get_services: bool = True, pull_point: bool = True, services: tuple[str, ...] = ("media", "events", "ptz"),
                  behaviours: dict[str, str] | None = None, subscription_style: str = "path", strict_actions: bool = False,
                  event_topics: tuple[str, ...] = ("RuleEngine/CellMotionDetector/Motion", "VideoSource/MotionAlarm", "VideoAnalytics/MotionDetection", "Device/Temperature")) -> None:
         self.username, self.password = username, password
-        self.auth = {"device": "digest", "media": "digest", "media2": "digest", "events": "digest", **(auth or {})}
+        self.auth = {"device": "digest", "media": "digest", "media2": "digest", "events": "digest", **{name: "digest" for name in self.EXTRA_SERVICES}, **(auth or {})}
         self.skew = skew
         self.profiles = hanwha_profiles() if profiles is None else profiles
         self.media2_profiles = media2_profiles
@@ -86,6 +88,9 @@ class OnvifCamera:
             def do_POST(self):  # noqa: N802
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8")
                 camera.handle(self, body)
+
+            def do_GET(self):  # noqa: N802
+                camera.get(self)
 
             def log_message(self, *args):
                 pass
@@ -140,7 +145,7 @@ class OnvifCamera:
     def handle(self, handler: BaseHTTPRequestHandler, body: str) -> None:
         path = handler.path
         service = {"/onvif/device_service": "device", "/onvif/media": "media", "/onvif/media2": "media2", "/onvif/events": "events", "/onvif/events/subscription": "events",
-                   "/onvif/ptz": "ptz"}.get(path.split("?")[0])
+                   "/onvif/ptz": "ptz", **{where: name for name, (where, _) in self.EXTRA_SERVICES.items()}}.get(path.split("?")[0])
         match = re.search(r"<s:Body>\s*<(?:\w+:)?(\w+)", body)
         operation = match.group(1) if match else ""
         has_digest = handler.headers.get("Authorization", "").startswith("Digest ")
@@ -210,12 +215,13 @@ class OnvifCamera:
             return (f"<tds:GetDeviceInformationResponse><tds:Manufacturer>{self.manufacturer}</tds:Manufacturer><tds:Model>{self.model}</tds:Model>"
                     f"<tds:FirmwareVersion>{self.firmware}</tds:FirmwareVersion><tds:SerialNumber>FIXTURE-0001</tds:SerialNumber><tds:HardwareId>fixture</tds:HardwareId></tds:GetDeviceInformationResponse>")
         urls = {"media": f"http://{PLACEHOLDER_HOST}:{self.port}/onvif/media", "media2": f"http://{PLACEHOLDER_HOST}:{self.port}/onvif/media2",
-                "events": f"http://{PLACEHOLDER_HOST}:{self.port}/onvif/events", "ptz": f"http://{PLACEHOLDER_HOST}:{self.port}/onvif/ptz"}
+                "events": f"http://{PLACEHOLDER_HOST}:{self.port}/onvif/events", "ptz": f"http://{PLACEHOLDER_HOST}:{self.port}/onvif/ptz",
+                **{name: f"http://{PLACEHOLDER_HOST}:{self.port}{where}" for name, (where, _) in self.EXTRA_SERVICES.items()}}
         if operation == "GetServices":
             if not self.get_services:
                 return None
             spaces = {"media": "http://www.onvif.org/ver10/media/wsdl", "media2": "http://www.onvif.org/ver20/media/wsdl", "events": "http://www.onvif.org/ver10/events/wsdl",
-                      "ptz": "http://www.onvif.org/ver20/ptz/wsdl"}
+                      "ptz": "http://www.onvif.org/ver20/ptz/wsdl", **{name: space for name, (_, space) in self.EXTRA_SERVICES.items()}}
             items = [f"<tds:Service><tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace><tds:XAddr>{self.origin}/onvif/device_service</tds:XAddr></tds:Service>"]
             items += [f"<tds:Service><tds:Namespace>{spaces[name]}</tds:Namespace><tds:XAddr>{urls[name]}</tds:XAddr></tds:Service>" for name in self.services]
             return f"<tds:GetServicesResponse>{''.join(items)}</tds:GetServicesResponse>"
@@ -242,7 +248,15 @@ class OnvifCamera:
             if service == "media2":
                 return f"<tr2:GetStreamUriResponse><tr2:Uri>{uri}</tr2:Uri></tr2:GetStreamUriResponse>"
             return f"<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>{uri}</tt:Uri><tt:InvalidAfterConnect>false</tt:InvalidAfterConnect></trt:MediaUri></trt:GetStreamUriResponse>"
+        return self.answer_extra(service, operation, body)
+
+    def answer_extra(self, service: str, operation: str, body: str) -> str | None:
+        """A subclass's own services answer here."""
         return None
+
+    def get(self, handler: BaseHTTPRequestHandler) -> None:
+        """Plain GET requests (a subclass may serve files); the camera has nothing at any address by default."""
+        self.send(handler, 404, "")
 
     def motion(self, topic: str, active: bool, source: str | None = None, at: datetime | None = None, item: str = "IsMotion") -> None:
         """Queue a motion notification for the next PullMessages."""

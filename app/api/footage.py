@@ -279,7 +279,9 @@ def list_camera_coverage(
             "SELECT coverage_kind,reason,reason_code,starts_at,ends_at FROM coverage_intervals WHERE camera_id=? ORDER BY starts_at DESC LIMIT 200",
             (camera_id,),
         ).fetchall()
-    return {"camera_id": camera_id, "current": health, "intervals": [dict(row) for row in reversed(rows)]}
+        backfilled = [dict(row) for row in db.execute(
+            "SELECT id,starts_at,ends_at,size_bytes FROM recording_segments WHERE camera_id=? AND source='backfill' AND unavailable_at IS NULL ORDER BY starts_at DESC LIMIT 200", (camera_id,))]
+    return {"camera_id": camera_id, "current": health, "intervals": [dict(row) for row in reversed(rows)], "backfilled": list(reversed(backfilled))}
 
 
 @router.get("/api/cameras/{camera_id}/segments/{segment_id}/hold")
