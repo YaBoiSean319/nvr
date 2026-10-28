@@ -238,7 +238,7 @@ async def _forward(request: Request, link: console.SiteLink, path: str) -> Respo
                              background=BackgroundTask(upstream.aclose))
 
 
-@router.api_route("/api/cameras/{camera_id:consoleid}/{rest:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
+@router.api_route("/api/cameras/{camera_id:consoleid}/{rest:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
 async def camera_through_console(camera_id: str, rest: str, request: Request, user: CurrentUser) -> Response:
     """Live, snapshots, footage and the rest of what a camera offers, through the site that owns it (the site's own token decides what is allowed)."""
     await console.registry.load()
@@ -261,7 +261,7 @@ async def alarm_through_console(alarm_id: str, request: Request, user: CurrentUs
     return response
 
 
-@router.api_route("/api/alarms/{alarm_id:consoleid}/{rest:path}", methods=["POST", "PUT", "PATCH", "DELETE"])
+@router.api_route("/api/alarms/{alarm_id:consoleid}/{rest:path}", methods=["POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
 async def alarm_action_at_the_site(alarm_id: str, rest: str, user: CurrentUser) -> Response:
     await console.registry.load()
     link, _ = _link_for(alarm_id, user)

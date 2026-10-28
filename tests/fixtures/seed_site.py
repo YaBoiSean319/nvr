@@ -26,7 +26,7 @@ def main(spec: dict) -> dict:
         for index, name in enumerate(spec["cameras"]):
             camera = str(uuid.uuid4())
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,group_id,recording_mode,recording_enabled,camera_ip,device_service_url) VALUES(?,?,?,?,'continuous',1,?,?)",
-                       (camera, name, encrypt("rtsp://viewer:secret-pass@camera.invalid/main"), group, f"10.77.{index}.9", f"http://10.77.{index}.9/onvif/device_service"))
+                       (camera, name, encrypt(spec.get("stream", "rtsp://viewer:secret-pass@camera.invalid/main")), group, f"10.77.{index}.9", f"http://10.77.{index}.9/onvif/device_service"))
             made["cameras"][name] = camera
         first = next(iter(made["cameras"].values()))
         payload = bytes(range(256)) * 8

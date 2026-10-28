@@ -336,7 +336,10 @@ async def combine_cameras(local: dict[str, Any], context: Context) -> dict[str, 
     cameras = list(local["cameras"])
     for link, found in results:
         for camera in (found if isinstance(found, list) else link.cameras):
-            cameras.append({**camera, "site_unreachable": link.down})
+            view = {**camera, "site_unreachable": link.down}
+            if link.down:  # What the interface shows of a camera's health: it cannot be reached because its site cannot
+                view["recording_health"] = {**camera.get("recording_health", {}), "state": "camera_unreachable", "detail": f"The site {link.name} cannot be reached", "video_fresh": False}
+            cameras.append(view)
     return {**local, "cameras": cameras, "sites": [site_status(link) for link in context.links]}
 
 

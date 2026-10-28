@@ -5,14 +5,15 @@ import { Modal } from "@/components/Modal";
 import { failureText } from "@/features/admin/tabDraft";
 
 interface Grant {
-  id: number; subject_type: "user" | "role"; subject: string; subject_name: string; scope_type: "all" | "group";
-  group_id: string | null; group_name: string | null; expires_at: string | null; expired: boolean; default: boolean;
+  id: number; subject_type: "user" | "role"; subject: string; subject_name: string; scope_type: "all" | "group" | "site";
+  group_id: string | null; group_name: string | null; site_id?: string | null; site_name?: string | null; expires_at: string | null; expired: boolean; default: boolean;
 }
 interface Listing {
   grants: Grant[];
   operators: { id: number; username: string; local: boolean }[];
   roles: string[];
   groups: { id: string; name: string }[];
+  sites?: { id: string; name: string }[];
 }
 interface Subject { type: "user" | "role"; key: string; label: string }
 type Mode = "all" | "groups" | "none";
@@ -29,7 +30,8 @@ const when = (iso: string) => new Date(iso).toLocaleString();
 function describe(grants: Grant[]): string {
   if (!grants.length) return "No cameras";
   return grants.map(grant => {
-    const scope = grant.scope_type === "all" ? (grant.default ? "All cameras (default)" : "All cameras") : grant.group_name ?? "A removed group";
+    const scope = grant.scope_type === "all" ? (grant.default ? "All cameras (default)" : "All cameras")
+      : grant.scope_type === "site" ? `Site ${grant.site_name ?? "removed"}` : grant.group_name ?? "A removed group";
     return grant.expires_at ? `${scope} ${grant.expired ? `(expired ${when(grant.expires_at)})` : `until ${when(grant.expires_at)}`}` : scope;
   }).join(", ");
 }
@@ -124,26 +126,29 @@ function GrantForm({ subject, listing, grants: all, onSaved }: { subject: Subjec
   const [allExpiry, setAllExpiry] = useState(toLocalInput(grants.find(grant => grant.scope_type === "all")?.expires_at ?? null));
   const [groups, setGroups] = useState<Record<string, string | null>>(
     Object.fromEntries(grants.filter(grant => grant.scope_type === "group" && grant.group_id).map(grant => [grant.group_id as string, toLocalInput(grant.expires_at)])));
+  const [sites, setSites] = useState<Record<string, string | null>>(
+    Object.fromEntries(grants.filter(grant => grant.scope_type === "site" && grant.site_id).map(grant => [grant.site_id as string, toLocalInput(grant.expires_at)])));
   const [error, setError] = useState<string | null>(null);
 
   const save = useMutation({
     mutationFn: () => {
       const body = mode === "all" ? [{ scope_type: "all", expires_at: toIso(allExpiry) }]
-        : mode === "groups" ? Object.entries(groups).map(([group_id, expiry]) => ({ scope_type: "group", group_id, expires_at: toIso(expiry ?? "") }))
+        : mode === "groups" ? [...Object.entries(groups).map(([group_id, expiry]) => ({ scope_type: "group", group_id, expires_at: toIso(expiry ?? "") })),
+                               ...Object.entries(sites).map(([site_id, expiry]) => ({ scope_type: "site", site_id, expires_at: toIso(expiry ?? "") }))]
           : [];
       return api("/api/admin/access-grants", { method: "PUT", body: { subject_type: subject.type, subject: subject.key, grants: body } });
     },
     onSuccess: () => onSaved(`Camera access updated for ${subject.label}.`),
     onError: failure => setError(failureText(failure)),
   });
-  const none = mode === "groups" && Object.keys(groups).length === 0;
+  const none = mode === "groups" && Object.keys(groups).length === 0 && Object.keys(sites).length === 0;
 
   return (
     <form className="tab-form" aria-label={`Camera access for ${subject.label}`} onSubmit={event => { event.preventDefault(); setError(null); save.mutate(); }} noValidate>
       <fieldset className="plain">
         <legend className="field-heading">Cameras</legend>
         <label className="check"><input type="radio" name="access-mode" checked={mode === "all"} onChange={() => setMode("all")} /> Every camera</label>
-        <label className="check"><input type="radio" name="access-mode" checked={mode === "groups"} onChange={() => setMode("groups")} /> Only the cameras of chosen groups</label>
+        <label className="check"><input type="radio" name="access-mode" checked={mode === "groups"} onChange={() => setMode("groups")} /> Only the cameras of chosen groups{listing.sites?.length ? " and sites" : ""}</label>
         <label className="check"><input type="radio" name="access-mode" checked={mode === "none"} onChange={() => setMode("none")} /> No cameras</label>
       </fieldset>
       {mode === "all" ? (
@@ -167,7 +172,25 @@ function GrantForm({ subject, listing, grants: all, onSaved }: { subject: Subjec
               </li>
             ))}
           </ul>
-        ) : <p className="muted">There are no camera groups yet. Create groups under Cameras › Groups, then choose them here.</p>
+        ) : listing.sites?.length ? null : <p className="muted">There are no camera groups yet. Create groups under Cameras › Groups, then choose them here.</p>
+      ) : null}
+      {mode === "groups" && listing.sites?.length ? (
+        <ul className="plain-list" aria-label="Sites">
+          {listing.sites.map(site => (
+            <li key={site.id}>
+              <label className="check">
+                <input type="checkbox" checked={site.id in sites}
+                       onChange={event => setSites(current => { const next = { ...current }; if (event.target.checked) next[site.id] = ""; else delete next[site.id]; return next; })} />
+                {" "}Site {site.name}
+              </label>
+              {site.id in sites ? (
+                <label className="field"><span>{site.name} until (optional)</span>
+                  <input type="datetime-local" value={sites[site.id] ?? ""} onChange={event => setSites(current => ({ ...current, [site.id]: event.target.value }))} />
+                </label>
+              ) : null}
+            </li>
+          ))}
+        </ul>
       ) : null}
       {mode === "none" || none ? <p className="notice" role="note" data-tone="warn">With no cameras this person can sign in but sees nothing.</p> : null}
       {error ? <p className="notice" role="alert" data-tone="bad">{error}</p> : null}
