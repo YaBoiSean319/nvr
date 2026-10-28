@@ -8,7 +8,6 @@ import shutil
 import threading
 from datetime import datetime, timezone
 from typing import Annotated, Literal
-from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -17,7 +16,7 @@ from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_VIEWERS
 from app.live_hub import LiveHub, Viewer
 from app.principal import CurrentUser, current_user, requires_scope
 from app.store import connect
-from app import privacy, viewing_audit
+from app import network, privacy, viewing_audit
 from app.credentials import decrypt
 from app.recording import safe_stream_url, _manifest_bytes
 
@@ -273,12 +272,9 @@ CLOSE_UNSUPPORTED, CLOSE_BUSY, CLOSE_TOO_SLOW, CLOSE_STREAM_FAILED = 4415, 4429,
 
 
 def _same_origin(websocket: WebSocket) -> bool:
-    """Refuse cross-site WebSocket handshakes; non-browser clients send no Origin."""
+    """Refuse cross-site WebSocket handshakes; non-browser clients send no Origin. Behind a trusted proxy the host is the one the proxy reports."""
     origin = websocket.headers.get("origin")
-    if origin is None:
-        return True
-    host = websocket.headers.get("host", "")
-    return urlsplit(origin).netloc.lower() == host.lower()
+    return True if origin is None else network.origin_allowed(websocket, origin)
 
 
 def _client_message(message: dict[str, object]) -> dict[str, object]:

@@ -26,6 +26,7 @@ from fastapi import Depends, HTTPException, status
 from starlette.requests import HTTPConnection
 from fastapi.dependencies.models import Dependant
 
+from . import network
 from .access import EVERYTHING, Access, resolve as resolve_access
 from .api_tokens import TokenRejected, authenticate, grants, token_scopes, usable_token
 from .mfa import required_for
@@ -133,6 +134,7 @@ def current_user(request: HTTPConnection) -> Principal:
     with connect() as db:
         row = db.execute(
             "SELECT u.id, u.username, u.role, u.provider_issuer, (SELECT mfa_policy FROM security_settings WHERE singleton_id=1) AS mfa_policy, "
+            "(SELECT remote_mfa FROM security_settings WHERE singleton_id=1) AS remote_mfa, "
             "(SELECT COUNT(*) FROM user_totp t WHERE t.user_id=u.id AND t.confirmed_at IS NOT NULL) + "
             "(SELECT COUNT(*) FROM user_passkeys p WHERE p.user_id=u.id) AS factor_count "
             "FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
@@ -140,7 +142,7 @@ def current_user(request: HTTPConnection) -> Principal:
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
-    principal = _principal(row)
+    principal = _principal(row, remote=network.request_is_remote(request) if row["remote_mfa"] else False)
     if principal.mfa_enrolment_required and not _enrolment_route(request.scope.get("route")):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Set up a second factor to continue")
     return _within_access(request, principal)
@@ -213,8 +215,8 @@ def _enrolment_route(route: object) -> bool:
     return path in {"/api/auth/me", "/api/auth/logout", "/api/me/security"} or path.startswith("/api/me/security/")
 
 
-def _principal(row: sqlite3.Row) -> Principal:
-    owes = required_for(row["mfa_policy"], row["role"], local=row["provider_issuer"] is None) and row["factor_count"] == 0
+def _principal(row: sqlite3.Row, remote: bool = False) -> Principal:
+    owes = required_for(row["mfa_policy"], row["role"], local=row["provider_issuer"] is None, remote_policy=bool(row["remote_mfa"]), remote=remote) and row["factor_count"] == 0
     with connect() as db:
         access = resolve_access(db, int(row["id"]), row["role"])
     return Principal(id=row["id"], username=row["username"], role=row["role"], mfa_enrolment_required=owes, access=access)

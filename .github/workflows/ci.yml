@@ -169,6 +169,9 @@ jobs:
         run: |
           docker compose config -q
           docker compose -f compose.yaml -f compose.discovery.yaml config -q
+          TS_AUTHKEY=x TS_TAILNET=example docker compose -f compose.yaml -f compose.tailscale.yaml config -q
+          CLOUDFLARE_TUNNEL_TOKEN=x NVR_PUBLIC_HOST=nvr.example.com docker compose -f compose.yaml -f compose.cloudflared.yaml config -q
+          docker compose -f compose.yaml -f compose.wireguard.yaml config -q
       - name: Build container image
         run: docker build --tag ghcr.io/yaboisean319/nvr:edge .
       - name: Benchmark and validate bundled CPU detection model

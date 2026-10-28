@@ -20,7 +20,8 @@ def log_config() -> dict:
 
 def main() -> None:
     logforward.install("web")
-    uvicorn.run("app.main:app", host="0.0.0.0", port=listen_port(), timeout_graceful_shutdown=10, log_config=log_config())
+    # Forwarded headers are believed only from NVR_TRUSTED_PROXIES (app.network), never by uvicorn on its own: its default trusts any 127.0.0.1 sender.
+    uvicorn.run("app.main:app", host="0.0.0.0", port=listen_port(), timeout_graceful_shutdown=10, log_config=log_config(), proxy_headers=False)
 
 
 if __name__ == "__main__":

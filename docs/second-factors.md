@@ -51,7 +51,7 @@ After the allowance each further attempt must wait, twice as long each time: 2, 
 
 Refusing an unknown username takes as long as refusing a wrong password, so the two cannot be told apart by timing; the responses are identical.
 
-**Behind a reverse proxy** every connection comes from the proxy, so every person would share one address bucket. Set `NVR_TRUST_FORWARDED_FOR=true` only when the NVR is reachable solely through a proxy you control: the address is then the last `X-Forwarded-For` entry, which is the one your proxy added and a client cannot forge. Without a proxy, leave it unset, or clients could choose their own address.
+**Behind a reverse proxy** every connection comes from the proxy, so every person would share one address bucket. List the proxy in `NVR_TRUSTED_PROXIES` ([remote access](remote-access.md)) and the address it reports is used (and it cannot be forged by sending the header yourself). The older option below still works: Set `NVR_TRUST_FORWARDED_FOR=true` only when the NVR is reachable solely through a proxy you control: the address is then the last `X-Forwarded-For` entry, which is the one your proxy added and a client cannot forge. Without a proxy, leave it unset, or clients could choose their own address.
 
 ## Passkeys and web addresses
 

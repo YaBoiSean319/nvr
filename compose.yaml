@@ -16,6 +16,11 @@ services:
       NVR_SESSION_HOURS: ${NVR_SESSION_HOURS:-12}
       NVR_COOKIE_SECURE: ${NVR_COOKIE_SECURE:-false}
       NVR_PUBLIC_URL: ${NVR_PUBLIC_URL:-}
+      # Remote access (docs/remote-access.md). Forwarded headers (client address, HTTPS, host) are believed only from these proxies: addresses or networks, comma-separated.
+      NVR_TRUSTED_PROXIES: ${NVR_TRUSTED_PROXIES:-}
+      # Networks that count as "local" besides loopback, private, link-local and Tailscale addresses, and extra browser origins allowed to open the live video socket.
+      NVR_LOCAL_NETWORKS: ${NVR_LOCAL_NETWORKS:-}
+      NVR_ALLOWED_ORIGINS: ${NVR_ALLOWED_ORIGINS:-}
       NVR_OIDC_TENANT_ID: ${NVR_OIDC_TENANT_ID:-}
       NVR_OIDC_CLIENT_ID: ${NVR_OIDC_CLIENT_ID:-}
       NVR_OIDC_CLIENT_SECRET: ${NVR_OIDC_CLIENT_SECRET:-}

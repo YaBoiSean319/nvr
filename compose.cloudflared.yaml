@@ -1,0 +1,19 @@
+# Reach the NVR through a Cloudflare Tunnel, with HTTPS, and without opening any port (docs/remote-access.md, "Cloudflare Tunnel").
+#
+#   CLOUDFLARE_TUNNEL_TOKEN=... NVR_PUBLIC_HOST=nvr.example.com docker compose -f compose.yaml -f compose.cloudflared.yaml up -d
+#
+# In the Cloudflare dashboard, give the tunnel a public hostname that points at http://127.0.0.1:8280 (the NVR's port), and put a Cloudflare Access
+# policy in front of it. cloudflared runs on the host network, so the proxy the NVR sees is 127.0.0.1: the only address it believes forwarded headers from.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    network_mode: host
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN to the tunnel's token}
+  nvr:
+    environment:
+      NVR_TRUSTED_PROXIES: 127.0.0.1
+      NVR_PUBLIC_URL: https://${NVR_PUBLIC_HOST:?Set NVR_PUBLIC_HOST to the tunnel's public hostname}
+      NVR_COOKIE_SECURE: "true"

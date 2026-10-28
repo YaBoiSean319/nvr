@@ -1,0 +1,34 @@
+# Reach the NVR over your tailnet, with HTTPS, and without opening any port (docs/remote-access.md, "Tailscale").
+#
+#   TS_AUTHKEY=tskey-... TS_TAILNET=your-tailnet docker compose -f compose.yaml -f compose.tailscale.yaml up -d
+#
+# Tailscale runs beside the NVR on the host network and serves https://nvr.<tailnet>.ts.net, proxying to the NVR on the loopback address.
+# The proxy is therefore 127.0.0.1, which is the only thing the NVR is told to believe forwarded headers from. If you change NVR_PORT,
+# change the port in deploy/tailscale-serve.json too.
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?Set TS_AUTHKEY to a Tailscale auth key}
+      TS_HOSTNAME: ${TS_HOSTNAME:-nvr}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./deploy/tailscale-serve.json:/config/serve.json:ro
+  nvr:
+    environment:
+      NVR_TRUSTED_PROXIES: 127.0.0.1
+      NVR_PUBLIC_URL: https://${TS_HOSTNAME:-nvr}.${TS_TAILNET:?Set TS_TAILNET to your tailnet name}.ts.net
+      NVR_COOKIE_SECURE: "true"
+
+volumes:
+  tailscale-state:
