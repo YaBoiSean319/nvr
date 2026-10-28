@@ -11,6 +11,7 @@ import { GeneralSettings } from "./GeneralSettings";
 import { HardeningSettings } from "./HardeningSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
 import { NotificationsSettings } from "./NotificationsSettings";
+import { PlatesSettings } from "./PlatesSettings";
 import { PrivacySettings } from "./PrivacySettings";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { SitesSettings } from "./SitesSettings";
@@ -29,6 +30,7 @@ const CATEGORIES = {
   notifications: { label: "Notifications", page: NotificationsSettings },
   digests: { label: "Digests", page: DigestsSettings },
   events: { label: "Event sources", page: EventSourcesSettings },
+  plates: { label: "Licence plates", page: PlatesSettings },
   sites: { label: "Sites (console)", page: SitesSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },
   diagnostics: { label: "Diagnostics", page: DiagnosticsSettings },

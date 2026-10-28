@@ -26,6 +26,10 @@ A ``tamper`` rule is not about objects. It fires when camera tamper detection (s
 moved or defocused camera, once per detection and for the kinds the rule lists (all three if it lists none): its schedule,
 cooldown and scope apply as to any rule, and it raises an alarm labelled with the kind. Test mode replays the tamper
 incidents of the last day.
+
+A ``plate`` rule is not about object classes either. It names a watch list (see ``app.plates``): on a deny list it fires when a plate read on a camera it watches
+matches an entry that has not expired, on an allow list when the read matches no entry (a plate that is on the list does nothing). It fires once per
+track, with the usual schedule, cooldown and scope, and raises an alarm labelled with the plate. Test mode replays the reads kept.
 """
 from __future__ import annotations
 
@@ -378,12 +382,60 @@ def _replay_external(rule: Rule, start: datetime, end: datetime) -> list[dict[st
     return events
 
 
+def fire_plate(db: sqlite3.Connection, camera_id: str, track_id: str, plate: str, at: datetime, box: dict[str, float]) -> int:
+    """Raise an alarm for each ``plate`` rule that watches the camera and whose watch list this read is a case for, inside the caller's transaction."""
+    from .plates import rule_fires
+
+    groups = _camera_groups(db, camera_id)
+    fired = 0
+    for rule in load_rules(db):
+        if rule.condition_type != "plate" or not rule.watches_camera(camera_id, groups):
+            continue
+        if at < rule.active_from or not rule.scheduled(at) or not rule_fires(db, str(rule.condition.get("watch_list_id")), plate, at):
+            continue
+        if rule.cooldown and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                                        (rule.id, camera_id, (at - rule.cooldown).isoformat(), (at + rule.cooldown).isoformat())).fetchone():
+            continue
+        event_id = str(uuid.uuid4())
+        inserted = db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                              (event_id, rule.id, rule.name, camera_id, track_id, None, f"plate:{plate}", "plate", at.isoformat(), json.dumps(box, separators=(",", ":")))).rowcount
+        if inserted:
+            create_alarm(db, event_id)
+            fired += 1
+    return fired
+
+
+def _replay_plate(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """The plate reads of [start, end) the rule would have fired on, from those kept."""
+    from .plates import rule_fires
+
+    with connect() as db:
+        rows = db.execute(
+            "SELECT r.track_id,r.camera_id,r.plate,r.read_at,r.box_json,c.name AS camera_name FROM plate_reads r JOIN cameras c ON c.id=r.camera_id "
+            "WHERE r.read_at>=? AND r.read_at<? ORDER BY r.read_at,r.id", (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat())).fetchall()
+        groups = {row["camera_id"]: _camera_groups(db, row["camera_id"]) for row in rows}
+        wanted = [row for row in rows if rule.watches_camera(row["camera_id"], groups[row["camera_id"]]) and _parse(row["read_at"]) >= rule.active_from
+                  and rule.scheduled(_parse(row["read_at"])) and rule_fires(db, str(rule.condition.get("watch_list_id")), row["plate"], _parse(row["read_at"]))]
+    events, last, tracks = [], {}, set()
+    for row in wanted:
+        at = _parse(row["read_at"])
+        if row["track_id"] in tracks or (rule.cooldown and row["camera_id"] in last and abs(at - last[row["camera_id"]]) < rule.cooldown):
+            continue
+        tracks.add(row["track_id"])
+        last[row["camera_id"]] = at
+        events.append({"camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": row["track_id"], "label": f"plate:{row['plate']}", "occurred_at": at.isoformat(),
+                       "box": json.loads(row["box_json"])})
+    return events
+
+
 def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
     """What the rule would have fired over stored tracks in [start, end); writes nothing."""
     if rule.condition_type == "tamper":
         return _replay_tamper(rule, start, end)
     if rule.condition_type == "external_event":
         return _replay_external(rule, start, end)
+    if rule.condition_type == "plate":
+        return _replay_plate(rule, start, end)
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
         tracks = db.execute(

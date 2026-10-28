@@ -62,7 +62,9 @@ LABEL_TEXT = {"person": "Person", "vehicle": "Vehicle", "covered": "Camera cover
 
 
 def label_text(label: object) -> str:
-    """How an alarm's label reads in a notification: an object class, or what happened to the camera."""
+    """How an alarm's label reads in a notification: an object class, what happened to the camera, or a licence plate ("plate:AB12CDE")."""
+    if str(label).startswith("plate:"):
+        return f"Plate {str(label)[6:]}"
     return LABEL_TEXT.get(str(label), str(label or "object").capitalize())
 
 

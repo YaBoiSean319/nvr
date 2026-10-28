@@ -170,11 +170,17 @@ def _store_attributes(db: sqlite3.Connection, track_id: str, profile: TrackProfi
 
 def purge_expired_detections(db: sqlite3.Connection, camera_id: str, before: datetime) -> int:
     """Delete detections older than retention that no remaining footage covers."""
+    limit = before.astimezone(timezone.utc).isoformat()
+    # Plate reads follow their footage as detections do.
+    db.execute(
+        "DELETE FROM plate_reads WHERE camera_id=? AND read_at<? AND NOT EXISTS ("
+        "SELECT 1 FROM recording_segments s WHERE s.camera_id=plate_reads.camera_id "
+        "AND s.starts_at<=plate_reads.read_at AND s.ends_at>plate_reads.read_at)", (camera_id, limit))
     return db.execute(
         "DELETE FROM ai_detections WHERE camera_id=? AND detected_at<? AND NOT EXISTS ("
         "SELECT 1 FROM recording_segments s WHERE s.camera_id=ai_detections.camera_id "
         "AND s.starts_at<=ai_detections.detected_at AND s.ends_at>ai_detections.detected_at)",
-        (camera_id, before.astimezone(timezone.utc).isoformat()),
+        (camera_id, limit),
     ).rowcount
 
 

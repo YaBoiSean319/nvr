@@ -94,7 +94,13 @@ class ExternalEvent(BaseModel):
         return sorted({item.strip() for item in value if item.strip()})
 
 
-Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper, ExternalEvent], Field(discriminator="type")]
+class Plate(BaseModel):
+    """A plate read on the camera (see Licence plates): on a deny list when it matches an entry of the list, on an allow list when it matches none."""
+    type: Literal["plate"]
+    watch_list_id: str = Field(min_length=1, max_length=64)
+
+
+Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper, ExternalEvent, Plate], Field(discriminator="type")]
 
 
 class ScheduleInterval(BaseModel):
@@ -163,7 +169,7 @@ class RuleDefinition(BaseModel):
     def valid_definition(self) -> "RuleDefinition":
         if not self.camera_ids and not self.group_ids:
             raise ValueError("Choose at least one camera or group")
-        if self.condition.type in ("tamper", "external_event"):
+        if self.condition.type in ("tamper", "external_event", "plate"):
             self.classes = []
         elif not self.classes:
             raise ValueError("Choose at least one object class")
@@ -171,6 +177,8 @@ class RuleDefinition(BaseModel):
 
 
 def _check_scope(db, definition: RuleDefinition) -> None:
+    if definition.condition.type == "plate" and db.execute("SELECT 1 FROM plate_watch_lists WHERE id=?", (definition.condition.watch_list_id,)).fetchone() is None:
+        raise HTTPException(status_code=422, detail="Unknown watch list in the rule")
     for table, ids, noun in (("cameras", definition.camera_ids, "camera"), ("camera_groups", definition.group_ids, "group")):
         for item in set(ids):
             if db.execute(f"SELECT 1 FROM {table} WHERE id=?", (item,)).fetchone() is None:

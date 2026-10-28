@@ -12,6 +12,7 @@ import { guarded } from "../drafts";
 import { TabFooter } from "../TabFooter";
 import { failureText, useTabDraft } from "../tabDraft";
 import { ActionsEditor, DeliveryLog } from "./ActionsEditor";
+import { usePlateAdmin } from "@/features/plates/api";
 import {
   CONDITION_LABEL, TAMPER_KINDS, TAMPER_LABEL, TRAVEL_LABEL, createRule, definitionOf, definitionProblem, deleteRule, listRules, newRule, ruleKeys, switchCondition, testRule, updateRule,
   type Condition, type ObjectClass, type Rule, type RuleDefinition, type TamperKind, type TestResult, type TravelDirection,
@@ -26,6 +27,8 @@ function summary(rule: Rule): string {
     ? rule.condition.kinds.map(kind => TAMPER_LABEL[kind].toLowerCase()).join(", ")
     : rule.condition.type === "external_event"
     ? (rule.condition.types.join(", ") || "any event")
+    : rule.condition.type === "plate"
+    ? "plate reads"
     : rule.classes.map(item => CLASS_LABEL[item].toLowerCase()).join(" and ");
   return `${CONDITION_LABEL[rule.condition.type]} · ${subject}${rule.enabled ? "" : " · disabled"}`;
 }
@@ -88,6 +91,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
   const cameras = useCameras();
   const groups = useCameraGroups();
   const display = useDisplaySettings();
+  const plateLists = usePlateAdmin();
   const eventSources = useQuery({ queryKey: ["admin", "event-sources"], queryFn: ({ signal }) => api<{ sources: { id: string; name: string }[] }>("/api/event-sources", { signal }).then(result => result.sources) });
   const published = useMemo(() => (rule ? definitionOf(rule) : newRule()), [rule]);
   const [deleting, setDeleting] = useState(false);
@@ -180,7 +184,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
         <fieldset className="field-group">
           <legend>Condition</legend>
           <div className="field-row">
-            <label className="field"><span>{condition.type === "tamper" || condition.type === "external_event" ? "When" : "When an object"}</span>
+            <label className="field"><span>{condition.type === "tamper" || condition.type === "external_event" || condition.type === "plate" ? "When" : "When an object"}</span>
               <select value={condition.type} onChange={event => setCondition(switchCondition(condition, event.target.value as Condition["type"]))}>
                 {(Object.keys(CONDITION_LABEL) as Condition["type"][]).map(type => <option key={type} value={type}>{CONDITION_LABEL[type]}</option>)}
               </select>
@@ -206,7 +210,18 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
               </label>
             ) : null}
           </div>
-          {condition.type === "external_event" ? (
+          {condition.type === "plate" ? (
+            <fieldset className="plain">
+              <legend className="field-heading">Watch list</legend>
+              <p className="muted field-hint">On a deny list the rule fires when a plate on the list is read on one of its cameras; on an allow list it fires when a plate not on the list is read. Make lists under Settings, Licence plates; turn plate reading on for each camera there.</p>
+              <label className="field"><span>Watch list for the rule</span>
+                <select value={condition.watch_list_id} onChange={event => setCondition({ ...condition, watch_list_id: event.target.value })}>
+                  <option value="">Choose a list</option>
+                  {(plateLists.data?.watch_lists ?? []).map(list => <option key={list.id} value={list.id}>{list.name} ({list.kind})</option>)}
+                </select>
+              </label>
+            </fieldset>
+          ) : condition.type === "external_event" ? (
             <fieldset className="plain">
               <legend className="field-heading">Outside events</legend>
               <p className="muted field-hint">Fires when an event that an administrator mapped to one of this rule's cameras arrives. Leave a box empty to accept any. Set sources up under Settings, Event sources.</p>
