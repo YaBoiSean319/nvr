@@ -16,7 +16,7 @@ function Harness({ lens, initial, width, height, source, playing }: { lens: Lens
   latest = state;
   return (
     <div style={{ position: "relative", width, height }}>
-      <DewarpStage source={source} lens={lens} state={state} label="Dome" playing={playing} onChange={next => { latest = next; setState(next); }} onUnsupported={() => { unsupported = true; }} />
+      <DewarpStage getSource={() => source} lens={lens} state={state} label="Dome" playing={playing} onChange={next => { latest = next; setState(next); }} onUnsupported={() => { unsupported = true; }} />
     </div>
   );
 }

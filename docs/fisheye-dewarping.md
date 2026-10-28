@@ -45,6 +45,8 @@ One definition serves the browser (`web/src/features/dewarp/`) and the export (`
 
 ## Limits
 
+- An export renders one view for each camera (the first Live view's direction is offered as the start), not every view of a tile. A file is 16:9 (panorama 4:1), so a Live view in a cell of another shape (two or three views side by side) shows more or less above and below than the file does; the direction and horizontal field of view are the same. A retry renders with the lens of the original request.
+- Each dewarped tile uses a WebGL context and browsers allow about sixteen at once: a wall of many 360° tiles may lose the oldest, which then shows the raw picture with a notice.
 - Dewarping is Live and exports only: Playback shows the raw circle.
 - Lenses are modelled as equidistant. A camera whose lens follows another curve will show straight lines slightly curved near the rim; there is no per-lens calibration beyond centre, radius and field of view.
 - A tile of mixed cameras keeps each camera's own mode; low-data mode and the quality governor work on the stream as before.

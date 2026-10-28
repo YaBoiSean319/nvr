@@ -150,7 +150,7 @@ async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict
         int(user["id"]), original["camera_ids"],
         datetime.fromisoformat(original["start"]).astimezone(timezone.utc), datetime.fromisoformat(original["end"]).astimezone(timezone.utc),
         original["output_modes"], original["tile_camera_ids"], original["grid_resolution"], original["include_audio"],
-        original["audio_camera_id"], retry_of=job_id, redaction_review_id=original["redaction_review_id"], dewarp=original["dewarp"]))
+        original["audio_camera_id"], retry_of=job_id, redaction_review_id=original["redaction_review_id"], dewarp=original["dewarp"], dewarp_lenses=original["dewarp_lenses"]))
 
 
 @router.get("/api/exports/{job_id}")

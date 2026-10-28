@@ -5,7 +5,7 @@ import json
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Response, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from app import dewarp
 from app.audit import record
@@ -38,20 +38,15 @@ class DewarpState(BaseModel):
     pan: float = Field(default=0, ge=-180, le=180)  # Where a panorama starts
     views: list[DewarpView] = Field(default_factory=list, max_length=MAX_VIEWS)
 
-    @field_validator("views")
-    @classmethod
-    def views_for_mode(cls, value: list[DewarpView]) -> list[DewarpView]:
-        return value
-
 
 def clean_dewarp(states: dict[str, DewarpState] | None, camera_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """The dewarp states of the cameras a view holds, as plain data for storage; a state for a camera not in the view, or a views mode with no views, is refused."""
+    """The dewarp states of the cameras a view holds, as plain data for storage; a state for a camera not in the view, or a views mode with no views, is refused (a ValueError: 422)."""
     cleaned: dict[str, dict[str, Any]] = {}
     for camera_id, state in (states or {}).items():
         if camera_id not in camera_ids:
-            raise HTTPException(status_code=422, detail="A dewarped view names a camera that is not in the layout")
+            raise ValueError("A dewarped view names a camera that is not in the layout")
         if state.mode == "views" and not state.views:
-            raise HTTPException(status_code=422, detail="Choose at least one virtual view")
+            raise ValueError("Choose at least one virtual view")
         if state.mode != "raw":
             cleaned[camera_id] = state.model_dump()
     return cleaned

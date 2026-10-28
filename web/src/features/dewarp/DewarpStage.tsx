@@ -8,8 +8,8 @@ import { DewarpRenderer, drawingsFor, type Source } from "./renderer";
 const REGION_LABEL: Record<Region["kind"], string> = { view: "Virtual view", panorama: "Panorama", double_panorama: "Double panorama" };
 
 interface Props {
-  /** The picture to dewarp: the tile's video, or an image. */
-  source: Source | null;
+  /** The picture to dewarp (the tile's video, or an image), asked for each time it is drawn: a tile's video and fallback image are refs that fill in after the first render. */
+  getSource: () => Source | null;
   lens: Lens;
   state: DewarpState;
   onChange: (state: DewarpState) => void;
@@ -27,16 +27,16 @@ interface Pointer { x: number; y: number }
  * A fisheye picture drawn dewarped: a panorama, a double panorama, or one to four virtual views, each moved by dragging, the wheel, a pinch, or the keyboard.
  * The canvas only shows; each region is an element over it that takes the pointer and the keys, so every control is reachable without a mouse.
  */
-export function DewarpStage({ source, lens, state, onChange, label, onUnsupported, playing = true }: Props) {
+export function DewarpStage({ getSource, lens, state, onChange, label, onUnsupported, playing = true }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const renderer = useRef<DewarpRenderer | null>(null);
-  const latest = useRef({ source, lens, state, regionList: [] as Region[] });
+  const latest = useRef({ getSource, lens, state, regionList: [] as Region[] });
   const paintNow = useRef<() => void>(() => undefined);
   const [aspect, setAspect] = useState(16 / 9);
   const [focused, setFocused] = useState(0);
   const regionList = useMemo(() => regions(state, aspect), [state, aspect]);
-  latest.current = { source, lens, state, regionList };
+  latest.current = { getSource, lens, state, regionList };
 
   useEffect(() => {
     const element = canvas.current;
@@ -47,7 +47,14 @@ export function DewarpStage({ source, lens, state, onChange, label, onUnsupporte
       return;
     }
     renderer.current = created;
+    // The browser may take the drawing context back (it allows only so many at once): say so, and let the tile show the raw picture.
+    const lost = (event: Event) => {
+      event.preventDefault();
+      onUnsupported?.();
+    };
+    element.addEventListener("webglcontextlost", lost);
     return () => {
+      element.removeEventListener("webglcontextlost", lost);
       created.dispose();
       renderer.current = null;
     };
@@ -74,12 +81,14 @@ export function DewarpStage({ source, lens, state, onChange, label, onUnsupporte
     let frame = 0;
     let stopped = false;
     const paint = () => {
-      const { source: picture, lens: currentLens, state: currentState, regionList: list } = latest.current;
+      const { getSource: pictureOf, lens: currentLens, state: currentState, regionList: list } = latest.current;
+      const picture = pictureOf();
       if (picture && renderer.current) renderer.current.draw(picture, currentLens, drawingsFor(currentState, list));
       if (!stopped && playing) frame = requestAnimationFrame(paint);
     };
     paintNow.current = () => {
-      const { source: picture, lens: currentLens, state: currentState, regionList: list } = latest.current;
+      const { getSource: pictureOf, lens: currentLens, state: currentState, regionList: list } = latest.current;
+      const picture = pictureOf();
       if (picture && renderer.current) renderer.current.draw(picture, currentLens, drawingsFor(currentState, list));
     };
     paint();
@@ -87,7 +96,7 @@ export function DewarpStage({ source, lens, state, onChange, label, onUnsupporte
       stopped = true;
       cancelAnimationFrame(frame);
     };
-  }, [playing, source, lens, state, regionList]);
+  }, [playing, lens, state, regionList]);
 
   const mount = lens.mount;
   const setView = (index: number, view: VirtualView) => onChange({ ...state, views: state.views.map((existing, at) => (at === index ? clampView(mount, view) : existing)) });
@@ -110,12 +119,14 @@ function RegionControls({ region, state, mount, focused, label, count, onFocus, 
   const element = useRef<HTMLDivElement>(null);
   const pointers = useRef(new Map<number, Pointer>());
   const view = region.kind === "view" ? state.views[region.index] : undefined;
-  const current = useRef({ state, view });
-  current.current = { state, view };
+  const current = useRef({ state, view, setView, onChange });
+  current.current = { state, view, setView, onChange };
 
+  // Always the latest state and callbacks: the wheel listener below outlives a render.
   const apply = (next: { view?: VirtualView; pan?: number }) => {
-    if (next.view) setView(region.index, next.view);
-    else if (next.pan !== undefined) onChange({ ...current.current.state, pan: next.pan });
+    const { state: now, setView: setNowView, onChange: change } = current.current;
+    if (next.view) setNowView(region.index, next.view);
+    else if (next.pan !== undefined) change({ ...now, pan: next.pan });
   };
   const size = () => {
     const box = element.current?.getBoundingClientRect();
@@ -130,13 +141,15 @@ function RegionControls({ region, state, mount, focused, label, count, onFocus, 
       const { view: now } = current.current;
       if (!now) return;
       event.preventDefault();
-      apply({ view: zoom(mount, now, Math.max(-3, Math.min(3, -event.deltaY / 100))) });
+      const pixels = event.deltaMode === 1 ? event.deltaY * 33 : event.deltaY; // Some browsers report lines, not pixels
+      apply({ view: zoom(mount, now, Math.max(-3, Math.min(3, -pixels / 100))) });
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
   }, [region.kind, mount]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) return; // A right-click opens a menu and may never be followed by a pointer-up
     onFocus();
     element.current?.focus({ preventScroll: true });
     try {

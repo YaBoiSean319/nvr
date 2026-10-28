@@ -1,7 +1,6 @@
 """Fisheye dewarping (#146): the lens of a 360-degree camera, and the virtual views a person keeps in their saved Live views, and the dewarped view an export renders.
 
-A camera with a row in ``camera_lens`` is a fisheye camera: ``mount`` (ceiling, wall or floor), the lens centre and radius (fractions of the picture's width, height and
-height) and the angle across the circle. Recordings stay raw. ``dewarp_json`` on a saved layout, a shared layout and a person's Live workspace holds, for each
+A camera with a row in ``camera_lens`` is a fisheye camera: ``mount`` (ceiling, wall or floor), the lens centre and radius (the centre as fractions of the picture's width and height, the radius as a fraction of its height) and the angle across the circle. Recordings stay raw. ``dewarp_json`` on a saved layout, a shared layout and a person's Live workspace holds, for each
 camera in it, how it is shown: raw, a panorama, a double panorama or up to four virtual views with their pan, tilt and field of view.
 """
 from __future__ import annotations

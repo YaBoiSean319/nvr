@@ -558,6 +558,7 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
         "retry_of": row["retry_of"],
         "redaction_review_id": row["redaction_review_id"],
         "dewarp": {camera_id: entry["view"] for camera_id, entry in json.loads(row["dewarp_json"] or "{}").items()},
+        "dewarp_lenses": {camera_id: entry["lens"] for camera_id, entry in json.loads(row["dewarp_json"] or "{}").items()},
     }
 
 
@@ -1118,8 +1119,14 @@ class ExportManager:
 
 def _video_size(path: Path) -> tuple[int, int]:
     """The picture size of a recorded segment."""
-    result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
-                            capture_output=True, text=True, timeout=30, check=False)
+    executable = shutil.which("ffprobe")
+    if not executable:
+        raise RuntimeError("ffprobe is unavailable; the recorded picture's size cannot be read for dewarping")
+    try:
+        result = subprocess.run([executable, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+                                capture_output=True, text=True, timeout=30, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("The recorded picture's size could not be read for dewarping in time") from exc
     try:
         width, height = (int(value) for value in result.stdout.strip().split(",")[:2])
     except ValueError as exc:
@@ -1143,7 +1150,7 @@ def create_export_record(
     output_modes: list[str] | None = None,
     tile_camera_ids: list[str | None] | None = None, grid_resolution: str = "1080p",
     include_audio: bool = False, audio_camera_id: str | None = None, retry_of: str | None = None,
-    redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None,
+    redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None, dewarp_lenses: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     output_modes = output_modes or ["individual", "grid"]
     if not output_modes or len(set(output_modes)) != len(output_modes) or any(mode not in {"individual", "grid"} for mode in output_modes):
@@ -1193,7 +1200,9 @@ def create_export_record(
             raise OverflowError("Export source exceeds the supported size or segment limit")
         dewarp_plan: dict[str, Any] = {}
         for camera_id, view in (dewarp or {}).items():
-            lens = db.execute("SELECT * FROM camera_lens WHERE camera_id=?", (camera_id,)).fetchone()
+            kept = (dewarp_lenses or {}).get(camera_id)  # A retry renders with the lens of the original request, as its manifest says
+            lens = ({"mount": kept["mount"], "center_x": kept["cx"], "center_y": kept["cy"], "radius": kept["radius"], "fov": kept["fov"]} if kept
+                    else db.execute("SELECT * FROM camera_lens WHERE camera_id=?", (camera_id,)).fetchone())
             if lens is None:
                 raise ValueError("A dewarped view needs a fisheye camera: set the camera's lens first")
             if view.get("mode") not in dewarp_geometry.MODES:

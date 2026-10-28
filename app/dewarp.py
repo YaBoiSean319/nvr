@@ -20,7 +20,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -182,11 +181,11 @@ def write_pgm(path: Path, values: np.ndarray) -> None:
 def graph(xmap: Path, ymap: Path, size: tuple[int, int], supersample: int = SUPERSAMPLE) -> str:
     """A filter graph (one input, one output) that dewarps a fisheye picture with the maps ``remap_maps`` made, then reduces it to ``size`` by averaging."""
     def source(name: Path) -> str:
-        escaped = str(name).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        return f"movie='{escaped}',format=gray16le,loop=loop=-1:size=1"
+        text = str(name)
+        if any(character in text for character in "'\\[],;=\n"):
+            raise ValueError("The dewarp map path has a character a filter graph cannot carry")  # Export work directories are named for a UUID, so this is never met
+        return f"movie='{text.replace(':', chr(92) + ':')}',format=gray16le,loop=loop=-1:size=1"
     return (f"format=rgb24,pad=iw+2:ih+2:1:1:black[v];{source(xmap)}[xm];{source(ymap)}[ym];[v][xm][ym]remap,"
             f"scale={size[0]}:{size[1]}:flags=area,setsar=1")
 
 
-def lens_from_row(row: Any) -> Lens:
-    return Lens(row["mount"], float(row["center_x"]), float(row["center_y"]), float(row["radius"]), float(row["fov"]))

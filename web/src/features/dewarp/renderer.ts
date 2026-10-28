@@ -177,7 +177,7 @@ export class DewarpRenderer {
         gl.uniform1f(u.u_half!, Math.tan((fov * Math.PI) / 360));
       } else {
         gl.uniform1i(u.u_mode!, drawing.mode === "panorama" ? 1 : 2);
-        gl.uniform1f(u.u_pan!, drawing.pan);
+        gl.uniform1f(u.u_pan!, Math.min(Math.max(drawing.pan, PAN_RANGE[lens.mount][0]), PAN_RANGE[lens.mount][1]));
         gl.uniform1f(u.u_span!, AZIMUTH_SPAN[lens.mount]);
       }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -186,9 +186,9 @@ export class DewarpRenderer {
 
   dispose(): void {
     const { gl } = this;
+    // The context itself is left to go with its canvas: a context that was lost cannot be had again from the same canvas.
     gl.deleteTexture(this.texture);
     gl.deleteProgram(this.program);
-    gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 }
 

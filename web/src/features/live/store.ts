@@ -193,8 +193,13 @@ export function keptDewarp(dewarp: Record<string, DewarpState>, arrangement: Arr
   return Object.fromEntries(Object.entries(dewarp).filter(([id, state]) => ids.has(id) && state.mode !== "raw"));
 }
 
+/** JSON with its keys in a fixed order, so two states with the same content compare equal whatever order they were built in. */
+function stable(value: Record<string, DewarpState>): string {
+  return JSON.stringify(Object.keys(value).sort().map(id => [id, value[id]]));
+}
+
 export function useDirty(): boolean {
   return useLiveStore(state => state.view !== null && state.baseline !== null
     && (!arrange.sameArrangement(state.arrangement, state.baseline)
-      || JSON.stringify(keptDewarp(state.dewarp, state.arrangement)) !== JSON.stringify(keptDewarp(state.baselineDewarp ?? {}, state.baseline))));
+      || stable(keptDewarp(state.dewarp, state.arrangement)) !== stable(keptDewarp(state.baselineDewarp ?? {}, state.baseline))));
 }

@@ -56,7 +56,9 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
   const listeningId = useLiveStore(store => store.listeningId);
   const { setActive, enlarge, unenlarge: restore, remove, setQuality, setListening, move, setDewarp } = useLiveStore.getState();
   const lens = useLenses().data?.[camera.id];
-  const dewarpState = useLiveStore(store => store.dewarp[camera.id]) ?? RAW;
+  const savedDewarp = useLiveStore(store => store.dewarp[camera.id]) ?? RAW;
+  // A wall-mounted camera sees 180 degrees: a double panorama (which only an API call can save for it) is drawn as a panorama.
+  const dewarpState = lens?.mount === "wall" && savedDewarp.mode === "double_panorama" ? { ...savedDewarp, mode: "panorama" as const } : savedDewarp;
   const [noWebgl, setNoWebgl] = useState(false);
   const onNoWebgl = useCallback(() => setNoWebgl(true), []);
   const lowData = useLowData();
@@ -152,7 +154,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
 
   // A fisheye camera shown dewarped: the video keeps playing out of sight and the stage draws it. Without WebGL the raw picture stays, with a notice.
   const dewarped = Boolean(lens) && dewarpState.mode !== "raw" && !noWebgl;
-  if (dewarpState.mode !== "raw" && noWebgl && !qualityNote) qualityNote = "Dewarping needs WebGL, which this browser does not have: showing the raw picture";
+  if (dewarpState.mode !== "raw" && noWebgl) qualityNote = "Dewarping needs WebGL, which this browser does not have (or has lost): showing the raw picture";
   const phase = lowDataPaused ? "paused" : state?.phase ?? "connecting";
   const live = phase === "live";
   const audioAvailable = Boolean(state?.audioAvailable && camera.audio_enabled);
@@ -214,7 +216,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       <video ref={video} className="tile-video" data-dewarped={dewarped || undefined} muted playsInline hidden={Boolean(fallbackUrl)} />
       {fallbackUrl && !halted ? <img ref={image} className="tile-video" data-dewarped={dewarped || undefined} src={fallbackUrl} alt="" onError={() => player.current?.retry()} /> : null}
       {dewarped && lens && !halted ? (
-        <DewarpStage source={fallbackUrl ? image.current : video.current} lens={lens} state={dewarpState} label={camera.name} playing={live}
+        <DewarpStage getSource={() => (fallbackUrl ? image.current : video.current)} lens={lens} state={dewarpState} label={camera.name} playing={live}
                      onChange={next => setDewarp(camera.id, next)} onUnsupported={onNoWebgl} />
       ) : null}
       <div className="tile-top">
