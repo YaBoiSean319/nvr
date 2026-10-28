@@ -96,8 +96,12 @@ test("on a phone a Live tile's controls work by touch, including centring on the
   await page.setViewportSize({ width: 360, height: 740 });
   seedFixtures(1, { devices: { 1: device.url } });
   await signInNext(page, "camera-operator");
-  await page.getByRole("button", { name: /^Camera 001\b/ }).click();
   const tile = page.getByRole("group", { name: /^Camera 001:/ });
+  // The picker's drawer is still sliding in when the first click lands on a slow runner: pick again until the tile is there (never twice, which would remove it).
+  await expect(async () => {
+    if (!(await tile.isVisible())) await page.getByRole("button", { name: /^Camera 001\b/ }).click({ timeout: 3_000 });
+    await expect(tile).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
   await tile.tap();
   const pad = tile.getByRole("group", { name: "Camera movement" });
   const up = pad.getByRole("button", { name: "Tilt up" });
