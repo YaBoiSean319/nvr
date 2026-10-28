@@ -313,6 +313,9 @@ class RouteTests(GrantCase):
         ("POST", "/api/me/security/totp/begin"), ("POST", "/api/me/security/totp/confirm"), ("GET", "/api/push/preferences"),
         ("PUT", "/api/push/preferences"), ("GET", "/api/push/public-key"), ("POST", "/api/push/subscriptions"), ("POST", "/api/push/subscriptions/remove"),
         ("GET", "/api/settings/display"), ("GET", "/api/redaction/models"),
+        # The native app's own phone: its push token and device sessions
+        ("POST", "/api/native/devices"), ("POST", "/api/native/devices/remove"), ("GET", "/api/native/device-sessions"), ("POST", "/api/native/device-sessions"),
+        ("POST", "/api/native/device-sessions/revoke"), ("DELETE", "/api/native/device-sessions/{session_id}"),
     }
 
     def query_gated(self, route) -> bool:
