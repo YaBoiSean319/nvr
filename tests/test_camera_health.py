@@ -118,6 +118,23 @@ class ReportTests(HealthCase):
         self.assertGreater(len(camera.requests), asked)
 
 
+class ManagerTests(HealthCase):
+    def test_starting_the_app_does_not_call_every_camera_at_once(self):
+        camera = self.device(self.d1)
+
+        async def run() -> int:
+            manager = camera_health.HealthManager(poll_seconds=0.05, initial_delay=0.3)
+            await manager.start()
+            await asyncio.sleep(0.1)
+            early = len(camera.requests)
+            await asyncio.sleep(1.0)
+            await manager.stop()
+            self.assertGreater(len(camera.requests), early)  # It does sample, after its delay
+            return early
+
+        self.assertEqual(asyncio.run(run()), 0)
+
+
 class FirmwareTests(HealthCase):
     def test_a_camera_on_older_firmware_than_others_of_its_model_is_flagged(self):
         self.device(self.d1, model="XNV-6120R", firmware="2.10.0")

@@ -207,8 +207,8 @@ async def sample_once(now: datetime | None = None) -> int:
 class HealthManager:
     """Keeps the fleet view's values fresh in the background."""
 
-    def __init__(self, poll_seconds: float = 60.0) -> None:
-        self.poll_seconds = poll_seconds
+    def __init__(self, poll_seconds: float = 60.0, initial_delay: float = 30.0) -> None:
+        self.poll_seconds, self.initial_delay = poll_seconds, initial_delay  # The first pass waits: starting up is busy enough without a call to every camera
         self.task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -221,6 +221,7 @@ class HealthManager:
         self.task = None
 
     async def _run(self) -> None:
+        await asyncio.sleep(self.initial_delay)
         while True:
             try:
                 await sample_once()
