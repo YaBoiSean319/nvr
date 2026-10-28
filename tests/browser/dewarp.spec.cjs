@@ -297,7 +297,7 @@ test("a Live tile keeps each virtual view's pan and zoom in saved views and acro
   await setLens(page, manifest.camera_ids[0], { kind: "fisheye", mount: "ceiling", center_x: 0.5, center_y: 0.5, radius: 0.5, fov: 180 });
   await page.goto("/live");
   await page.getByRole("button", { name: /^Camera 001\b/ }).click();
-  const tile = page.getByRole("group", { name: /^Camera 001:/ });
+  const tile = page.locator(".tile[data-camera-id]"); // Not by role: a dewarped tile's regions are groups named "Camera 001: …" too
   await expect(tile).toBeVisible();
   await tile.getByLabel("Dewarp Camera 001").selectOption("2");
   const first = tile.getByRole("group", { name: /Virtual view 1 of 2/ });
@@ -344,7 +344,7 @@ test("without WebGL a fisheye tile says so and keeps the raw picture", async ({ 
   await setLens(page, manifest.camera_ids[0], { kind: "fisheye" });
   await page.goto("/live");
   await page.getByRole("button", { name: /^Camera 001\b/ }).click();
-  const tile = page.getByRole("group", { name: /^Camera 001:/ });
+  const tile = page.locator(".tile[data-camera-id]"); // Not by role: a dewarped tile's regions are groups named "Camera 001: …" too
   await tile.getByLabel("Dewarp Camera 001").selectOption("panorama");
   await expect(tile.getByTestId("tile-quality-note")).toContainText("Dewarping needs WebGL");
   await expect(tile.getByLabel("Dewarp Camera 001")).toHaveValue("raw");
