@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
 import type { Camera } from "@/api/types";
 import { autoGrid, fitTiles } from "@/lib/layout";
+import { LOW_DATA_MAX_TILES } from "./bandwidth";
 import { useLiveStore } from "./store";
 import { VideoTile } from "./VideoTile";
 
@@ -111,7 +112,7 @@ export function LiveGrid({ cameras, onReplaceRequest }: { cameras: Map<string, C
                 replace(id, incoming);
               }}
             >
-              <VideoTile camera={cameras.get(id)!} active={activeId === id} enlarged={enlargedId === id} suspended={hidden}
+              <VideoTile camera={cameras.get(id)!} active={activeId === id} enlarged={enlargedId === id} suspended={hidden} lowDataCapped={positions.get(id)! >= LOW_DATA_MAX_TILES}
                          onReplaceRequest={() => onReplaceRequest(id)} />
             </div>
           );

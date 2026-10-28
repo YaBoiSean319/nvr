@@ -29,6 +29,9 @@ interface Options {
   video: HTMLVideoElement;
   onChange: (snapshot: PlayerSnapshot) => void;
   onFallback: (url: string) => void;
+  /** Measures for Auto quality: a video fragment arrived, and playback stopped to wait for data. */
+  onFragment?: (at: number) => void;
+  onStall?: (at: number) => void;
 }
 
 const STALE_AFTER_MS = 4_000;
@@ -66,6 +69,7 @@ export class LivePlayer {
   /** Release the camera connection, keeping the last frame visible as a poster. */
   stop(): void {
     this.stopped = true;
+    this.options.video.onwaiting = null;
     this.keepLastFrame();
     if (this.retryTimer !== null) window.clearTimeout(this.retryTimer);
     if (this.healthTimer !== null) window.clearInterval(this.healthTimer);
@@ -108,6 +112,7 @@ export class LivePlayer {
         return;
       }
       received += 1;
+      this.options.onFragment?.(Date.now());
       if (received === 1) this.attempt = 0;
       this.enqueue(event.data as ArrayBuffer);
     };
@@ -179,6 +184,7 @@ export class LivePlayer {
     const { video } = this.options;
     video.muted = !this.snapshot.listening;
     video.src = this.objectUrl;
+    video.onwaiting = () => this.snapshot.phase === "live" && this.options.onStall?.(Date.now()); // buffering at connect is not a slow link
     source.addEventListener("sourceopen", () => {
       if (this.source !== source) return;
       const buffer = source.addSourceBuffer(mime);
