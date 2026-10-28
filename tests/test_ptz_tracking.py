@@ -166,6 +166,8 @@ class TrackingTests(SceneTestCase):
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertIn("driver", refused.json()["detail"])
         self.assertIsNone(self.tracking())
+        self.assertEqual(self.lease()["purpose"], "manual")  # The refused start left the driver's lease as it was, and took none for itself
+        self.assertNotEqual(self.lease()["user_id"], 1)
         self.clock.advance(0.5)
         self.tick()
         self.assertEqual(len(self.device.commands), before)  # Nothing was sent: there is no tracking and the lease is the driver's
@@ -343,6 +345,35 @@ class TrackingTests(SceneTestCase):
         self.assertIsNone(self.tracking())
         self.assertIsNone(self.lease())
         self.assertIn("camera_unreachable", [details.get("reason") for _, details in self.audit()])
+
+    def test_a_home_move_the_camera_did_not_get_is_not_reported_as_done(self):
+        home = self.preset("Home")
+        self.assertEqual(self.client.put(f"{self.base}/tracking", json={"home_preset_id": home["id"], "lost_seconds": 1, "home_timeout_seconds": 5, "target_size": 0.4, "zoom_enabled": True}).status_code, 200)
+        track_id = self.track()
+        self.see(track_id)
+        self.assertEqual(self.start(track_id).status_code, 200)
+        self.clock.advance(2)
+        self.assertEqual(self.tick(), {"stop": 1})
+        self.clock.advance(6)
+        self.device.close()
+        self.assertEqual(self.tick(), {"failed": 1})
+        self.assertIsNotNone(self.tracking())  # Not ended: the camera never moved home, so it is tried again
+        for _ in range(ptz_tracking.FAILURES_BEFORE_GIVING_UP - 1):
+            self.clock.advance(0.5)
+            self.tick()
+        self.assertIsNone(self.tracking())
+        reasons = [details.get("reason") for _, details in self.audit() if details.get("reason")]
+        self.assertEqual(reasons, ["camera_unreachable"])  # Never "returned home"
+        self.assertEqual(ptz_tracking._failures, {})
+
+    def test_replacing_a_target_is_recorded(self):
+        first, second = self.track(), self.track()
+        self.see(first)
+        self.see(second)
+        self.assertEqual(self.start(first).status_code, 200)
+        self.assertEqual(self.start(second).status_code, 200)
+        self.assertEqual([(action, details.get("reason")) for action, details in self.audit()],
+                         [("ptz_tracking_started", None), ("ptz_tracking_ended", "replaced"), ("ptz_tracking_started", None)])
 
     # --- what can be chosen ---------------------------------------------------------------------------------------------------------------------
 

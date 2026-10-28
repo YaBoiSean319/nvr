@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .audit import record
 from .credentials import decrypt
 from .onvif_ptz import Capabilities, PtzClient, PtzUnsupported
 from .scheduling import mode_at
@@ -116,8 +117,7 @@ def acquire(camera_id: str, user_id: int, *, take_over: bool = False, purpose: s
                 # Whoever drives, tracking stops at once: the tracker finds its row gone and its lease replaced.
                 ended = db.execute("DELETE FROM ptz_tracking WHERE camera_id=?", (camera_id,)).rowcount
                 if ended:
-                    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                               (user_id, "ptz_tracking_interrupted", "camera", camera_id, json.dumps({"by": "manual control"})))
+                    record(db, user_id, "ptz_tracking_interrupted", "camera", camera_id, by="manual control")
             if take_over and current is not None and int(current["user_id"]) != user_id and current["purpose"] != "tracking":
                 db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                            (user_id, "ptz_lease_taken_over", "camera", camera_id, json.dumps({"from": current["username"]})))
@@ -131,7 +131,8 @@ def acquire(camera_id: str, user_id: int, *, take_over: bool = False, purpose: s
 def release(camera_id: str, user_id: int) -> None:
     with connect() as db:
         if db.execute("DELETE FROM ptz_leases WHERE camera_id=? AND user_id=?", (camera_id, user_id)).rowcount:
-            db.execute("DELETE FROM ptz_tracking WHERE camera_id=?", (camera_id,))  # Letting go of the lease ends any tracking it carried
+            if db.execute("DELETE FROM ptz_tracking WHERE camera_id=?", (camera_id,)).rowcount:  # Letting go of the lease ends any tracking it carried
+                record(db, user_id, "ptz_tracking_ended", "camera", camera_id, reason="lease_released")
 
 
 def lease_held(db: sqlite3.Connection, camera_id: str) -> bool:

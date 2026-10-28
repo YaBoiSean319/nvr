@@ -5,6 +5,7 @@ may move cameras; presets and tours are for administrators.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
@@ -13,8 +14,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from app import ptz, ptz_tracking
 from app.api.detections import recent_objects
-from app.audit import record
 from app.api.rules import RuleSchedule
+from app.audit import record
 from app.onvif_ptz import PtzUnsupported
 from app.principal import Administrator, CurrentUser, Principal
 from app.store import connect
@@ -113,15 +114,13 @@ async def _command(camera_id: str, user: Principal, action) -> dict[str, object]
 
 @router.get("/api/cameras/{camera_id}/ptz")
 async def get_ptz(camera_id: str, user: CurrentUser) -> dict[str, object]:
-    with connect() as db:
-        if db.execute("SELECT 1 FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Camera not found")
+    await _visible_camera(camera_id, user)
     found, reason = await ptz.capabilities(camera_id)
     with connect() as db:
         return {"supported": found is not None, "reason": reason, "capabilities": ptz.capability_view(found),
                 "lease": ptz.lease_view(db, camera_id, int(user["id"])), "lease_seconds": ptz.LEASE_SECONDS,
                 "presets": ptz.presets(db, camera_id), "tours": ptz.tours(db, camera_id),
-                "tracking": ptz_tracking.view(db.execute("SELECT * FROM ptz_tracking WHERE camera_id=?", (camera_id,)).fetchone()),
+                "tracking": ptz_tracking.current(db, camera_id),
                 "tracking_settings": ptz_tracking.settings_for(db, camera_id)}
 
 
@@ -160,25 +159,32 @@ async def centre(camera_id: str, payload: CentreRequest, user: CurrentUser) -> d
     return await _command(camera_id, user, lambda client: client.centre(payload.x, payload.y))
 
 
-def _visible_camera(camera_id: str, user: Principal) -> None:
+def _tracking_now(camera_id: str) -> dict[str, object] | None:
+    with connect() as db:
+        return ptz_tracking.current(db, camera_id)
+
+
+def _check_visible(camera_id: str, user: Principal) -> None:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone() is None or not user.access.can_see(camera_id):
             raise HTTPException(status_code=404, detail="Camera not found")
+
+
+async def _visible_camera(camera_id: str, user: Principal) -> None:
+    await asyncio.to_thread(_check_visible, camera_id, user)
 
 
 @router.get("/api/cameras/{camera_id}/ptz/targets")
 def tracking_targets(camera_id: str, user: CurrentUser) -> dict[str, object]:
     """The objects in view now that the camera could follow, and the one it is following."""
     objects = recent_objects(user, camera_id)
-    with connect() as db:
-        tracking = ptz_tracking.view(db.execute("SELECT * FROM ptz_tracking WHERE camera_id=?", (camera_id,)).fetchone())
-    return {"objects": objects, "tracking": tracking}
+    return {"objects": objects, "tracking": _tracking_now(camera_id)}
 
 
 @router.post("/api/cameras/{camera_id}/ptz/track")
 async def start_tracking(camera_id: str, payload: TrackRequest, user: CurrentUser) -> dict[str, object]:
     """Have the camera follow an object: it keeps it centred and sized, holding the control lease while it does."""
-    _visible_camera(camera_id, user)
+    await _visible_camera(camera_id, user)
     try:
         tracking = await ptz_tracking.start(camera_id, payload.track_id, int(user["id"]), source="operator")
     except ptz_tracking.TrackingRefused as exc:
@@ -189,10 +195,9 @@ async def start_tracking(camera_id: str, payload: TrackRequest, user: CurrentUse
 @router.delete("/api/cameras/{camera_id}/ptz/track", status_code=status.HTTP_204_NO_CONTENT)
 async def stop_tracking(camera_id: str, user: CurrentUser) -> Response:
     """Stop following: the camera stops and the lease is let go. Anyone who may move the camera can."""
-    _visible_camera(camera_id, user)
-    with connect() as db:
-        if db.execute("SELECT 1 FROM ptz_tracking WHERE camera_id=?", (camera_id,)).fetchone() is None:
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
+    await _visible_camera(camera_id, user)
+    if await asyncio.to_thread(_tracking_now, camera_id) is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     await _command(camera_id, user, lambda client: client.stop())  # A manual command: it ends the tracking and stops the camera
     ptz.release(camera_id, int(user["id"]))
     return Response(status_code=status.HTTP_204_NO_CONTENT)

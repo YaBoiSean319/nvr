@@ -295,11 +295,14 @@ async def _ptz_track(payload: dict[str, Any]) -> tuple[int | None, str | None, b
     already follows something, it is left alone."""
     from . import ptz_tracking
 
-    with connect() as db:
-        event = db.execute("SELECT camera_id,track_id,rule_id FROM rule_events WHERE id=?", (payload["event_id"],)).fetchone()
-        if event is None:
-            return None, "ptz_event_gone", False
-        user_id = ptz_tracking.lease_user_for_rule(db, event["rule_id"])
+    def lookup() -> tuple[Any, int | None]:
+        with connect() as db:
+            event = db.execute("SELECT camera_id,track_id,rule_id FROM rule_events WHERE id=?", (payload["event_id"],)).fetchone()
+            return event, (ptz_tracking.lease_user_for_rule(db, event["rule_id"]) if event is not None else None)
+
+    event, user_id = await asyncio.to_thread(lookup)
+    if event is None:
+        return None, "ptz_event_gone", False
     if user_id is None:
         return None, "ptz_no_user", False
     try:
