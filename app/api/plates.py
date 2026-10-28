@@ -98,6 +98,10 @@ def set_camera(camera_id: str, body: CameraPlates, user: Administrator) -> dict[
     return {"id": camera_id, "enabled": body.enabled, "min_confidence": body.min_confidence}
 
 
+def _used_by_rules(db, list_id: str) -> bool:
+    return db.execute("SELECT 1 FROM rules WHERE condition_type='plate' AND json_extract(condition_json,'$.watch_list_id')=?", (list_id,)).fetchone() is not None
+
+
 def _clean_pattern(text: str) -> str:
     pattern = plates.normalise_pattern(text)
     if len([character for character in pattern if character not in "*?"]) < 2:
@@ -132,13 +136,13 @@ def update_list(list_id: str, body: WatchListInput, user: Administrator) -> dict
             row = db.execute("SELECT * FROM plate_watch_lists WHERE id=?", (list_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Watch list not found")
-            if row["kind"] != body.kind and db.execute("SELECT 1 FROM rules WHERE condition_type='plate' AND json_extract(condition_json,'$.watch_list_id')=?", (list_id,)).fetchone():
+            if row["kind"] != body.kind and _used_by_rules(db, list_id):
                 # A rule means something different on an allow list than on a deny list
                 raise HTTPException(status_code=409, detail="Rules use this list; change them before changing its kind")
             if db.execute("SELECT 1 FROM plate_watch_lists WHERE name=? AND id<>?", (body.name, list_id)).fetchone():
                 raise HTTPException(status_code=409, detail="A watch list with this name already exists")
             db.execute("UPDATE plate_watch_lists SET name=?,kind=?,lookalikes=? WHERE id=?", (body.name, body.kind, int(body.lookalikes), list_id))
-            record(db, int(user["id"]), "watch_list_updated", "watch_list", list_id, name=body.name, kind=body.kind)
+            record(db, int(user["id"]), "watch_list_updated", "watch_list", list_id, name=body.name, kind=body.kind, lookalikes=body.lookalikes)
         except BaseException:
             db.execute("ROLLBACK")
             raise
@@ -154,7 +158,7 @@ def delete_list(list_id: str, user: Administrator) -> Response:
             row = db.execute("SELECT name FROM plate_watch_lists WHERE id=?", (list_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Watch list not found")
-            if db.execute("SELECT 1 FROM rules WHERE condition_type='plate' AND json_extract(condition_json,'$.watch_list_id')=?", (list_id,)).fetchone():
+            if _used_by_rules(db, list_id):
                 raise HTTPException(status_code=409, detail="Rules use this list; remove them first")
             db.execute("DELETE FROM plate_watch_lists WHERE id=?", (list_id,))
             record(db, int(user["id"]), "watch_list_deleted", "watch_list", list_id, name=row["name"])

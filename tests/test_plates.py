@@ -113,6 +113,32 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(found[0].crop.shape, (72, 256, 3))  # 0.1 high by 0.2 wide of the frame
         self.assertEqual(found[0].confidence, 0.9)  # The index form carries none of its own: the detector's stands
 
+    def test_a_recogniser_that_also_takes_a_sequence_indicator_is_given_one(self):
+        seen = {}
+
+        class TwoInputs(FakeCore):
+            def compile_model(self, model, provider):
+                inner = super().compile_model(model, provider)
+                if "detection" in model:
+                    return inner
+
+                class Wrapped:
+                    inputs = [type("P", (), {"shape": [1, 3, 24, 94]})(), type("P", (), {"shape": [88, 1]})()]
+
+                    def input(self, index):
+                        return inner.input(index)
+
+                    def __call__(self, feed):
+                        seen["feed"] = feed
+                        return inner(feed[0])
+
+                return Wrapped()
+
+        reader = plates.PlateReader(Path("/m/vehicle-license-plate-detection-barrier-0106.xml"), Path("/m/recogniser.xml"), core=TwoInputs([(0.1, 0.5, 0.3, 0.6)], ["AB12CDE"]))
+        self.assertEqual([plate.text for plate in reader.read(np.zeros((720, 1280, 3), dtype=np.uint8))], ["AB12CDE"])
+        indicator = seen["feed"][1]
+        self.assertEqual((indicator.shape, indicator[0, 0], indicator[1, 0]), ((88, 1), 0.0, 1.0))
+
     def test_a_charset_file_beside_the_recogniser_replaces_the_default(self):
         with TemporaryDirectory() as directory:
             model = Path(directory) / "recogniser.xml"
@@ -221,6 +247,25 @@ class ScannerTests(PlateCase):
         self.assertEqual(reader.calls, 3)
         scanner.forget(set())
         self.assertEqual(scanner.vehicles, {})
+
+    def test_a_weak_read_is_tried_again_and_the_better_read_is_kept(self):
+        track = self.vehicle(self.d1)
+        reads = [[plate("AB12CDE", 0.7)], [plate("AB12CDE", 0.95)], [plate("AB12CDE", 0.99)]]
+
+        class Sequence:
+            def read(self, frame):
+                return reads.pop(0)
+
+        async def snapshot():
+            return np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        scanner = plates.PlateScanner(Sequence(), snapshot, lambda track_id, found: plates.keep_plate(self.d1, track_id, found, NOW, "stand-in"), interval=0.0)
+        scanner.seen(track, "vehicle", VEHICLE_BOX)
+        for _ in range(3):
+            asyncio.run(scanner.scan())
+        self.assertEqual(len(reads), 1)  # The 95% read ended the attempts
+        self.assertEqual([item["confidence"] for item in self.search("AB12CDE")], [0.95])
+        self.assertAlmostEqual(datetime.fromisoformat(self.search("AB12CDE")[0]["read_at"]).timestamp(), datetime.now(timezone.utc).timestamp(), delta=60)  # Stamped when the picture was taken
 
     def test_a_failed_snapshot_or_reader_costs_an_attempt_and_nothing_else(self):
         track = self.vehicle(self.d1)

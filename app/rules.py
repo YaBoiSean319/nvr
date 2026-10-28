@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
-from .alarms import create_alarm
+from .alarms import PLATE_LABEL_PREFIX, create_alarm
 from .scheduling import mode_at
 from .store import connect
 
@@ -398,7 +398,7 @@ def fire_plate(db: sqlite3.Connection, camera_id: str, track_id: str, plate: str
             continue
         event_id = str(uuid.uuid4())
         inserted = db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                              (event_id, rule.id, rule.name, camera_id, track_id, None, f"plate:{plate}", "plate", at.isoformat(), json.dumps(box, separators=(",", ":")))).rowcount
+                              (event_id, rule.id, rule.name, camera_id, track_id, None, f"{PLATE_LABEL_PREFIX}{plate}", "plate", at.isoformat(), json.dumps(box, separators=(",", ":")))).rowcount
         if inserted:
             create_alarm(db, event_id)
             fired += 1
@@ -423,7 +423,7 @@ def _replay_plate(rule: Rule, start: datetime, end: datetime) -> list[dict[str, 
             continue
         tracks.add(row["track_id"])
         last[row["camera_id"]] = at
-        events.append({"camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": row["track_id"], "label": f"plate:{row['plate']}", "occurred_at": at.isoformat(),
+        events.append({"camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": row["track_id"], "label": f"{PLATE_LABEL_PREFIX}{row['plate']}", "occurred_at": at.isoformat(),
                        "box": json.loads(row["box_json"])})
     return events
 

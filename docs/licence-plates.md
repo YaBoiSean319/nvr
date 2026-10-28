@@ -43,7 +43,7 @@ A **deny list** is plates of interest; an **allow list** is plates that belong (
 A **rule** (Cameras, Rules: condition **A licence plate is read (watch list)**) names one list and the cameras or groups it watches:
 
 - on a **deny list** it fires when a plate on the camera matches an entry that has not expired;
-- on an **allow list** it fires when a plate matches *no* entry. A plate that is on the list does nothing.
+- on an **allow list** it fires when a plate matches *no* entry. A plate that is on the list does nothing. Note that an empty list, or one whose entries have all expired, raises an alarm for every plate read, and that a one-character misread of an allowed plate counts as a plate that is not on the list unless the list treats look-alike characters as the same.
 
 It fires once for each vehicle (track), with the rule's usual schedule, cooldown and scope, raises an alarm labelled **Plate AB12CDE** (alarm inbox, push notifications, Live pop-in), and carries the vehicle's picture and clip like any alarm. Test mode replays the reads kept over the last 24 hours without raising anything. A list used by a rule cannot be deleted or changed between allow and deny until the rule is changed.
 
@@ -72,6 +72,8 @@ prints the share of plates read, right as a whole, right ignoring look-alikes, a
 
 ## Limits
 
+- A privacy mask added after plates were read does not remove the reads already kept (it applies from then on).
+- A recogniser that takes a second `seq_ind` input is given one (0 for the first position, 1 after), as the Open Model Zoo recognisers expect; like the rest of the real-model contract, this was written from the model documentation and not run against the real files.
 - Recognition depends on the camera: resolution on the plate, angle, shutter speed, infrared glare, dirt and the plate style. Fast vehicles and plates under about 100 pixels wide read poorly. Place plate cameras for it (low angle, tight view, fast shutter).
 - A plate is looked for a few times as a vehicle appears, not continuously: a vehicle whose plate was never in view in those attempts has no read.
 - Only plates on a tracked vehicle are kept; a motorcycle's plate is read only if the vehicle detector tracks it as a vehicle.

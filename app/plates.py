@@ -55,6 +55,7 @@ SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT = 1280, 720
 ATTEMPT_INTERVAL = 3.0  # Seconds between snapshots for the same camera.
 MAX_ATTEMPTS = 4  # Snapshots tried for one vehicle before giving up on it.
 SETTINGS_REFRESH = 30.0
+CONFIDENT = 0.85  # A read at least this sure ends the attempts on a vehicle; a weaker one is tried again (and the better read kept)
 VEHICLE_MARGIN = 0.15  # A plate counts as on a vehicle when its centre is in the vehicle's box grown by this fraction.
 
 _FOLD = str.maketrans({"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"})
@@ -113,6 +114,7 @@ class Plate:
     confidence: float
     box: dict[str, float]  # x, y, width, height as fractions of the frame
     crop: np.ndarray | None = field(default=None, repr=False)
+    taken_at: datetime | None = None  # When the picture was taken, set by the scanner
 
 
 def models_available(detector: Path = DETECTOR_PATH, recogniser: Path = RECOGNISER_PATH) -> bool:
@@ -174,7 +176,7 @@ class PlateReader:
     """OpenVINO plate detector and recogniser. ``read`` takes a BGR frame (rows x columns x 3) and returns the plates found, with their text.
 
     Detector contract: input ``[1,3,300,300]`` BGR; output ``[1,1,N,7]`` rows ``image_id, label, confidence, x1, y1, x2, y2`` (fractions), label 2 a plate.
-    Recogniser contract: input ``[1,3,H,W]`` BGR (the size is read from the model); output as ``decode_plate`` describes."""
+    Recogniser contract: input ``[1,3,H,W]`` BGR (the size is read from the model), and optionally a second ``seq_ind`` input; output as ``decode_plate`` describes."""
 
     reader_id = f"{DETECTOR_ID}+{RECOGNISER_ID}"
 
@@ -197,6 +199,15 @@ class PlateReader:
                 found.append((float(confidence), (min(max(float(x1), 0.0), 1.0), min(max(float(y1), 0.0), 1.0), min(max(float(x2), 0.0), 1.0), min(max(float(y2), 0.0), 1.0))))
         return found
 
+    def _feed(self, tensor: np.ndarray) -> Any:
+        """The recogniser's inputs: the crop, and for the Open Model Zoo recognisers the sequence indicator they also take (``seq_ind``: 0 for the first position, 1 after)."""
+        inputs = list(getattr(self.recogniser, "inputs", []) or [])
+        if len(inputs) < 2:
+            return tensor
+        indicator = np.ones(list(inputs[1].shape), dtype=np.float32)
+        indicator.reshape(-1)[0] = 0.0
+        return {0: tensor, 1: indicator}
+
     def read(self, frame: np.ndarray) -> list[Plate]:
         height, width = frame.shape[:2]
         plates: list[Plate] = []
@@ -207,7 +218,7 @@ class PlateReader:
                 continue
             tensor = _resize(crop, self.input_height, self.input_width).transpose(2, 0, 1)[None].astype(np.float32)
             try:
-                text, confidence = decode_plate(np.asarray(next(iter(self.recogniser(tensor).values()))), self.symbols, self.blank)
+                text, confidence = decode_plate(np.asarray(next(iter(self.recogniser(self._feed(tensor)).values()))), self.symbols, self.blank)
             except ValueError:
                 continue
             text = normalise(text)
@@ -294,22 +305,28 @@ def _live(entry: sqlite3.Row, now: datetime) -> bool:
     return (expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)) > now
 
 
-def list_matches(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool | None:
-    """Whether a plate is on the watch list (an entry that has not expired matches it); None when there is no such list."""
+def _on_list(db: sqlite3.Connection, list_id: str, plate: str, now: datetime) -> tuple[str, bool] | None:
+    """The list's kind and whether the plate is on it (an entry that has not expired matches it); None when there is no such list."""
     watch = db.execute("SELECT kind,lookalikes FROM plate_watch_lists WHERE id=?", (list_id,)).fetchone()
     if watch is None:
         return None
-    moment = now or datetime.now(timezone.utc)
-    return any(_live(entry, moment) and matches(entry["pattern"], plate, bool(watch["lookalikes"]))
-               for entry in db.execute("SELECT pattern,expires_at FROM plate_watch_entries WHERE list_id=?", (list_id,)))
+    on_list = any(_live(entry, now) and matches(entry["pattern"], plate, bool(watch["lookalikes"]))
+                  for entry in db.execute("SELECT pattern,expires_at FROM plate_watch_entries WHERE list_id=?", (list_id,)))
+    return watch["kind"], on_list
+
+
+def list_matches(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool | None:
+    """Whether a plate is on the watch list; None when there is no such list."""
+    found = _on_list(db, list_id, plate, now or datetime.now(timezone.utc))
+    return None if found is None else found[1]
 
 
 def rule_fires(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool:
     """Whether a read of this plate raises a rule on the list: a deny list's plate is on it, an allow list's plate is not."""
-    on_list = list_matches(db, list_id, plate, now)
-    if on_list is None:
+    found = _on_list(db, list_id, plate, now or datetime.now(timezone.utc))
+    if found is None:
         return False
-    kind = db.execute("SELECT kind FROM plate_watch_lists WHERE id=?", (list_id,)).fetchone()["kind"]
+    kind, on_list = found
     return on_list if kind == "deny" else not on_list
 
 
@@ -355,7 +372,8 @@ def overlaps_privacy_zone(box: dict[str, float], zones: Iterable[dict[str, float
 
 
 def keep_plate(camera_id: str, track_id: str, plate: Plate, at: datetime, reader_id: str) -> bool:
-    """Store one read in its own transaction (and raise its rules); False when it was not kept because it lies in a privacy mask."""
+    """Store one read in its own transaction (and raise its rules), stamped with when its picture was taken; False when it was not kept because it lies in a privacy mask."""
+    at = plate.taken_at or at
     from . import privacy
     from .store import connect
 
@@ -420,14 +438,17 @@ class PlateScanner:
             frame = await self.snapshot()
             if frame is None:
                 return 0
+            taken = datetime.now(timezone.utc)
             for plate in await asyncio.to_thread(self.reader.read, frame):
+                plate.taken_at = taken
                 if plate.confidence < self.min_confidence:
                     continue
                 track_id = associate(plate.box, wanted.items())
                 if track_id is None:
                     continue
                 await asyncio.to_thread(self.store, track_id, plate)
-                self.done.add(track_id)
+                if plate.confidence >= CONFIDENT:
+                    self.done.add(track_id)
                 kept += 1
         except Exception:  # noqa: BLE001 - a snapshot or read that fails costs this attempt, never the camera's analysis
             logger.exception("A plate attempt failed")

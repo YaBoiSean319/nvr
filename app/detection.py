@@ -373,6 +373,7 @@ class DetectionManager:
         self.clock = clock
         self.detector: Any | None = None
         self._detectors: dict[tuple[str, str, str], Any] = {}
+        self._plate_readers: dict[str, Any] = {}
         self._model_lock = asyncio.Lock()
         self._inference_slots = asyncio.Semaphore(1)
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -500,8 +501,6 @@ class DetectionManager:
     async def _plate_reader(self, provider: str) -> Any:
         """The plate detector and recogniser, loaded once for every plate camera that uses this provider (None when they are not installed)."""
         from . import plates
-        if not hasattr(self, "_plate_readers"):
-            self._plate_readers: dict[str, Any] = {}
         if provider not in self._plate_readers:
             self._plate_readers[provider] = await asyncio.to_thread(plates.load_reader, provider)
         return self._plate_readers[provider]
