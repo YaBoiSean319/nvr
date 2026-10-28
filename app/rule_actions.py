@@ -2,7 +2,7 @@
 
 Each rule event queues one delivery per enabled action: a signed webhook (the NVR's
 webhook signing scheme), an MQTT publish, a Slack or Microsoft Teams incoming-webhook
-message, or an ONVIF relay pulse on a camera. Deliveries run in the background worker
+message, an ONVIF relay pulse on a camera, or a PTZ camera starting to follow the object that triggered the rule. Deliveries run in the background worker
 with retries and are logged per rule. Destination URLs, MQTT credentials and signing
 keys are encrypted with the credential key, never returned, and never logged: errors
 are recorded as short codes.
@@ -290,6 +290,25 @@ async def _post(url: str, body: bytes, headers: dict[str, str], allow_private: b
     return int(response.status_code)
 
 
+async def _ptz_track(payload: dict[str, Any]) -> tuple[int | None, str | None, bool]:
+    """Start the camera the rule fired on following the object that made it fire. Nobody is steered away from: if a person is driving, or the camera
+    already follows something, it is left alone."""
+    from . import ptz_tracking
+
+    with connect() as db:
+        event = db.execute("SELECT camera_id,track_id,rule_id FROM rule_events WHERE id=?", (payload["event_id"],)).fetchone()
+        if event is None:
+            return None, "ptz_event_gone", False
+        user_id = ptz_tracking.lease_user_for_rule(db, event["rule_id"])
+    if user_id is None:
+        return None, "ptz_no_user", False
+    try:
+        await ptz_tracking.start(event["camera_id"], event["track_id"], user_id, source="rule", rule_id=event["rule_id"])
+    except ptz_tracking.TrackingRefused as exc:
+        return None, f"ptz_{exc.code}", False
+    return None, None, False
+
+
 async def _perform(delivery: dict[str, Any]) -> tuple[int | None, str | None, bool]:
     """(response status, error code, retryable). Error codes never carry a secret or a URL."""
     kind = delivery["action_type"]
@@ -319,6 +338,8 @@ async def _perform(delivery: dict[str, Any]) -> tuple[int | None, str | None, bo
             await mqtt.publish(broker, settings["topic"], json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
                                qos=1, retain=bool(settings.get("retain")))
             return None, None, False
+        if kind == "ptz_track":
+            return await _ptz_track(payload)
         if kind == "relay":
             from .onvif_relay import pulse
 

@@ -21,7 +21,7 @@ export type Condition =
 export interface RuleScheduleInterval { days: number[]; start: string; end: string }
 export interface RuleSchedule { timezone: string; intervals: RuleScheduleInterval[] }
 
-export type ActionType = "webhook" | "mqtt" | "slack" | "teams" | "relay";
+export type ActionType = "webhook" | "mqtt" | "slack" | "teams" | "relay" | "ptz_track";
 
 /** One rule action as the form edits it. `url` and `signing_secret` are write-only: left empty on a saved action, the saved ones are kept. */
 export interface ActionDraft {
@@ -85,7 +85,7 @@ export const listDeliveries = (id: string, signal?: AbortSignal) =>
   api<{ deliveries: ActionDelivery[] }>(`${at(id)}/deliveries`, { signal }).then(body => body.deliveries);
 
 export const ACTION_LABEL: Record<ActionType, string> = {
-  webhook: "Signed webhook", mqtt: "MQTT message", slack: "Slack message", teams: "Microsoft Teams message", relay: "Camera relay output",
+  webhook: "Signed webhook", mqtt: "MQTT message", slack: "Slack message", teams: "Microsoft Teams message", relay: "Camera relay output", ptz_track: "PTZ camera follows the object",
 };
 
 export function newAction(type: ActionType): ActionDraft {

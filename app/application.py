@@ -28,6 +28,7 @@ from .capabilities import CapabilityManager
 from .hardening import HardeningManager
 from .self_test import SelfTestManager
 from .ptz import PtzTourManager
+from .ptz_tracking import PtzTrackingManager
 from .camera_health import HealthManager
 from .external_events import ExternalEventManager
 from .console import ConsoleManager
@@ -56,6 +57,7 @@ STARTUP_ORDER = (
     ("home_assistant", HomeAssistantManager),
     ("console", ConsoleManager),
     ("ptz_tours", PtzTourManager),
+    ("ptz_tracking", PtzTrackingManager),
     ("footage_chain", FootageChainManager),
     ("self_test", SelfTestManager),
     ("hardening", HardeningManager),
@@ -69,7 +71,7 @@ STARTUP_ORDER = (
     ("backups", BackupManager),
 )
 # Detection reads recorder state, and recording should outlive everything else.
-SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "capabilities", "hardening", "self_test", "footage_chain", "ptz_tours", "console", "home_assistant", "external_events", "camera_health", "digests", "rule_actions", "push", "webhooks", "failover", "tiering", "heartbeat", "recorders")
+SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "capabilities", "hardening", "self_test", "footage_chain", "ptz_tracking", "ptz_tours", "console", "home_assistant", "external_events", "camera_health", "digests", "rule_actions", "push", "webhooks", "failover", "tiering", "heartbeat", "recorders")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:

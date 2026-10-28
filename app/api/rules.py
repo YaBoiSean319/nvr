@@ -123,7 +123,7 @@ class ActionDefinition(BaseModel):
     """One rule action. Secrets (url, signing_secret) are write-only: send them to set or
     change them, leave them out (with the action's id) to keep what is saved."""
     id: str | None = Field(default=None, max_length=64)
-    type: Literal["webhook", "mqtt", "slack", "teams", "relay"]
+    type: Literal["webhook", "mqtt", "slack", "teams", "relay", "ptz_track"]
     name: str = Field(min_length=1, max_length=80)
     enabled: bool = True
     url: str | None = Field(default=None, max_length=2048)

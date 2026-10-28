@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useDisplaySettings } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { Modal } from "@/components/Modal";
-import { createPreset, deletePreset, deleteTour, getPtz, goToPreset, ptzKey, renamePreset, saveTour, type PtzPreset, type PtzTour, type TourDefinition } from "@/features/ptz/api";
+import { createPreset, deletePreset, deleteTour, getPtz, goToPreset, ptzKey, renamePreset, saveTour, saveTrackingSettings, type PtzPreset, type PtzTour, type TourDefinition, type TrackingSettings } from "@/features/ptz/api";
 import { PtzPad } from "@/features/ptz/PtzPad";
 import { failureText } from "../tabDraft";
 import type { ScheduleInterval } from "./api";
@@ -94,6 +94,35 @@ function TourDialog({ camera, tour, presets, onClose, onSaved }: { camera: Camer
   );
 }
 
+function TrackingSection({ camera, settings, presets, onSaved, onError }: { camera: Camera; settings: TrackingSettings; presets: PtzPreset[]; onSaved: () => void; onError: (text: string) => void }) {
+  const [draft, setDraft] = useState<TrackingSettings>(settings);
+  const number = (value: string) => (value === "" ? Number.NaN : Number(value));
+  const valid = draft.lost_seconds >= 1 && draft.lost_seconds <= 60 && draft.home_timeout_seconds >= 5 && draft.home_timeout_seconds <= 3600 && draft.target_size >= 0.1 && draft.target_size <= 0.9;
+  return (
+    <form className="field-group" aria-label="Auto-tracking" onSubmit={event => { event.preventDefault(); void saveTrackingSettings(camera.id, draft).then(onSaved).catch(error => onError(failureText(error))); }}>
+      <h3 className="field-heading">Auto-tracking</h3>
+      <p className="muted field-hint">From Live, an operator picks a person or vehicle and the camera follows it, holding the control lease while it does. Moving the camera by hand stops it at once. When the object is lost the camera stops; if it stays lost for the time below, the camera returns to its home preset and lets go of the lease.</p>
+      <label className="field"><span>Home preset</span>
+        <select value={draft.home_preset_id ?? ""} onChange={event => setDraft({ ...draft, home_preset_id: event.target.value || null })}>
+          <option value="">None (stay where it is)</option>
+          {presets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+        </select>
+      </label>
+      <label className="field"><span>Object counts as lost after (seconds)</span>
+        <input type="number" min={1} max={60} value={Number.isNaN(draft.lost_seconds) ? "" : draft.lost_seconds} onChange={event => setDraft({ ...draft, lost_seconds: number(event.target.value) })} />
+      </label>
+      <label className="field"><span>Return home after being lost for (seconds)</span>
+        <input type="number" min={5} max={3600} value={Number.isNaN(draft.home_timeout_seconds) ? "" : draft.home_timeout_seconds} onChange={event => setDraft({ ...draft, home_timeout_seconds: number(event.target.value) })} />
+      </label>
+      <label className="field"><span>Size to keep the object (share of the picture's height)</span>
+        <input type="number" min={0.1} max={0.9} step={0.05} value={Number.isNaN(draft.target_size) ? "" : draft.target_size} onChange={event => setDraft({ ...draft, target_size: number(event.target.value) })} />
+      </label>
+      <label className="check"><input type="checkbox" checked={draft.zoom_enabled} onChange={event => setDraft({ ...draft, zoom_enabled: event.target.checked })} /> Zoom to keep the object that size</label>
+      <div className="field-actions"><button type="submit" className="button" disabled={!valid}>Save auto-tracking</button></div>
+    </form>
+  );
+}
+
 /** Move the camera, save and manage its presets, and set up patrol tours. Operators may move and recall presets. */
 export function PtzTab({ camera, admin }: { camera: Camera; admin: boolean }) {
   const client = useQueryClient();
@@ -157,6 +186,8 @@ export function PtzTab({ camera, admin }: { camera: Camera; admin: boolean }) {
         ) : <p className="muted field-hint">No tours. A tour patrols presets on a schedule.</p>}
         {admin ? <button type="button" className="button" disabled={!data.presets.length} onClick={() => setEditing("new")}>New tour</button> : null}
       </section>
+      {admin ? <TrackingSection key={JSON.stringify(data.tracking_settings)} camera={camera} settings={data.tracking_settings} presets={data.presets}
+                                onSaved={() => { setMessage({ tone: "good", text: "Auto-tracking saved." }); refresh(); }} onError={failed} /> : null}
       {message ? <p className="notice" data-tone={message.tone} role={message.tone === "good" ? "status" : "alert"}>{message.text}</p> : null}
       {editing ? (
         <TourDialog camera={camera} tour={editing === "new" ? null : editing} presets={data.presets} onClose={() => setEditing(null)}

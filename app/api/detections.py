@@ -1,7 +1,7 @@
 """Structured detections and tracks for a camera and time range."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -173,3 +173,27 @@ def playback_overlay_track(track_id: str, user: CurrentUser, unmasked: Annotated
             continue
         points.append({"at": row["detected_at"], "box": _point(row)["box"], "run": run})
     return {"track_id": track_id, "camera_id": track["camera_id"], "label": track["label"], "points": points, "truncated": len(rows) == OVERLAY_LIMIT}
+
+
+LIVE_OBJECT_SECONDS = 3
+
+
+def recent_objects(user: Any, camera_id: str, seconds: int = LIVE_OBJECT_SECONDS) -> list[dict[str, Any]]:
+    """The objects the AI worker has seen on a camera in the last few seconds, each at its newest box, for picking one in Live. Boxes touching a
+    privacy-masked area are left out, as in Playback's overlay."""
+    now = datetime.now(timezone.utc)
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone() is None or not user.access.can_see(camera_id):
+            raise HTTPException(status_code=404, detail="Camera not found")
+        zones = _overlay_zones(user, camera_id, now, False)
+        rows = db.execute("SELECT * FROM ai_detections WHERE camera_id=? AND detected_at>=? ORDER BY detected_at DESC,id DESC LIMIT 500",
+                          (camera_id, (now - timedelta(seconds=seconds)).isoformat())).fetchall()
+    objects: list[dict[str, Any]] = []
+    decided: set[str] = set()
+    for row in rows:
+        if row["track_id"] in decided:
+            continue
+        decided.add(row["track_id"])  # An object's newest box decides: if that is in a mask, an older box is not shown in its place
+        if not (zones and _hidden_by_mask(row, zones)):
+            objects.append({**_point(row), "seen_at": row["detected_at"]})
+    return objects
