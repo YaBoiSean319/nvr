@@ -455,7 +455,7 @@ def restore_marker() -> Path:
     return control_directory() / "restore-reconcile.json"
 
 
-def restore(archive: Path, *, force: bool = False) -> dict[str, object]:
+def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dict[str, object]:
     secret = passphrase()
     if secret is None:
         raise BackupError("Set NVR_BACKUP_PASSPHRASE to the passphrase used when the backup was made")
@@ -498,10 +498,29 @@ def restore(archive: Path, *, force: bool = False) -> dict[str, object]:
         for member, target in (("nvr.sqlite3", database), ("credentials.key", keyfile)):
             os.replace(work_dir / member, target)
             os.chmod(target, 0o600)
+    if standby:
+        _make_standby(database)
     marker = restore_marker()
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({"restored_at": datetime.now(timezone.utc).isoformat(), "backup_created_at": manifest["created_at"]}))
     return {"restored": str(archive), "backup_created_at": manifest["created_at"], "schema_version": manifest["schema_version"], "previous_files": preserved}
+
+
+def _make_standby(database: Path) -> None:
+    """The restored installation is a failover standby: it holds its recording until it takes over, and it knows nobody until its peer and secret are entered.
+
+    Without this a copy of a primary would wake up as a primary and record beside the real one."""
+    from .store import initialize
+
+    initialize()  # The backup may predate failover: bring the restored database up to date first
+    db = sqlite3.connect(database)
+    try:
+        db.execute("UPDATE failover_settings SET role='standby',peer_url=NULL,secret_ciphertext=NULL,instance_id=lower(hex(randomblob(16))) WHERE singleton_id=1")
+        db.execute("UPDATE failover_state SET lease_until=NULL,yield_until=NULL,peer_state=NULL,last_renewed_at=NULL,handback_requested_at=NULL,watching_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                   "takeover_active=0,takeover_started_at=NULL,last_sync_at=NULL,last_sync_error=NULL,sync_requested=0,last_error=NULL WHERE singleton_id=1")
+        db.commit()
+    finally:
+        db.close()
 
 
 def reconcile_after_restore() -> dict[str, int] | None:
@@ -563,13 +582,14 @@ def main(argv: list[str] | None = None) -> int:
     restoring = commands.add_parser("restore", help="restore a configuration backup (stop the NVR first)")
     restoring.add_argument("archive", type=Path)
     restoring.add_argument("--force", action="store_true", help="restore even if workers reported liveness recently")
+    restoring.add_argument("--standby", action="store_true", help="make the restored NVR a failover standby (it does not record until it takes over; enter its peer and secret afterwards)")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         if arguments.command == "create":
             print(json.dumps(create_backup("manual"), indent=2))
         else:
-            print(json.dumps(restore(arguments.archive, force=arguments.force), indent=2))
+            print(json.dumps(restore(arguments.archive, force=arguments.force, standby=arguments.standby), indent=2))
     except BackupError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

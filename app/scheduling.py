@@ -119,4 +119,11 @@ def effective_policy(db, camera_id: str, instant: datetime) -> dict[str, object]
         scheduled = False
     if not row["enabled"] or not row["recording_enabled"]:
         mode = "disabled"
-    return {"mode": mode, "source": source, "timezone": timezone_name, "intervals": intervals, "scheduled": scheduled}
+    held = None
+    if mode != "disabled":
+        from .failover import held_reason
+
+        held = held_reason(db)  # A standby that has not taken over, or a primary waiting for the standby, does not record
+        if held:
+            mode = "disabled"
+    return {"mode": mode, "source": source, "timezone": timezone_name, "intervals": intervals, "scheduled": scheduled, **({"held": held} if held else {})}

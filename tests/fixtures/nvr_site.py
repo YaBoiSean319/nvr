@@ -20,13 +20,15 @@ PASSWORD = "site-admin-password-1234"
 class NvrSite:
     """One NVR (a site): its own database and recordings, an administrator, and a port. ``seed`` gives it cameras, an alarm and a track."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, app: str = "tests.fixtures.site_app:app", env: dict[str, str] | None = None) -> None:
         self.name = name
+        self.app = app
         self.directory = tempfile.TemporaryDirectory()
         base = Path(self.directory.name)
         (base / "recordings").mkdir()
+        self.base = base
         self.env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(ROOT), "NVR_DB_PATH": str(base / "state.sqlite3"), "NVR_RECORDINGS_PATH": str(base / "recordings"),
-                    "NVR_CREDENTIAL_KEY_PATH": str(base / "credentials.key"), "NVR_COOKIE_SECURE": "false"}
+                    "NVR_CREDENTIAL_KEY_PATH": str(base / "credentials.key"), "NVR_COOKIE_SECURE": "false", **(env or {})}
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]
@@ -37,17 +39,28 @@ class NvrSite:
         self._admin: httpx.Client | None = None
 
     def start(self) -> "NvrSite":
-        self.process = subprocess.Popen([sys.executable, "-m", "uvicorn", "tests.fixtures.site_app:app", "--host", "127.0.0.1", "--port", str(self.port), "--log-level", "warning"],
+        self.start_process()
+        return self
+
+    def start_process(self) -> None:
+        """Start (or start again, with the same files and port) the server process and wait until it answers."""
+        self.log.flush()
+        self.process = subprocess.Popen([sys.executable, "-m", "uvicorn", self.app, "--host", "127.0.0.1", "--port", str(self.port), "--log-level", "warning"],
                                         cwd=ROOT, env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
         for _ in range(150):
             try:
                 if httpx.get(f"{self.url}/healthz", timeout=1).status_code == 200:
-                    break
+                    return
             except httpx.HTTPError:
                 time.sleep(0.2)
-        else:
-            raise RuntimeError(f"The site {self.name} did not start: {Path(self.directory.name, 'server.log').read_text()[-800:]}")
-        return self
+        raise RuntimeError(f"The site {self.name} did not start: {Path(self.directory.name, 'server.log').read_text()[-800:]}")
+
+    def stop_process(self) -> None:
+        """The server goes away (its files stay), as a crashed or powered-off machine's does."""
+        if self.process is not None and self.process.poll() is None:
+            self.process.send_signal(signal.SIGCONT)
+            self.process.kill()
+            self.process.wait(timeout=10)
 
     def admin(self) -> httpx.Client:
         if self._admin is None:

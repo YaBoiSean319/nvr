@@ -305,6 +305,7 @@
 .timeline-cursor, .timeline-cursor-head { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--n-accent); pointer-events: none; z-index: 1; }
 .timeline-cursor[hidden], .timeline-cursor-head[hidden] { display: none; }
 [data-mark="recording"] { background: color-mix(in srgb, var(--n-good) 70%, transparent); }
+[data-mark="failover"] { background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--n-accent, #3b82f6) 70%, transparent) 0 3px, color-mix(in srgb, var(--n-accent, #3b82f6) 28%, transparent) 3px 6px); }
 [data-mark="backfilled"] { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--n-good) 70%, transparent) 0 3px, color-mix(in srgb, var(--n-good) 28%, transparent) 3px 6px); }
 [data-mark="missing"] { background: transparent; }
 .timeline-legend [data-mark="missing"] { border: 1px solid var(--n-line); background: var(--n-raised); }

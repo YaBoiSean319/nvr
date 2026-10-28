@@ -50,3 +50,14 @@ Measured here (not a post-merge check): the plate pipeline, on a labelled sample
   - Steps: designate the cameras under Settings, Licence plates; drive known plates past each camera at day and at night at the speeds in use (at least 100 passes per camera); record a labelled sample (a CSV of `image,plate` and the frames) and run `python -m app.plates evaluate labels.csv frames/` inside the AI worker's environment; record the whole-plate, look-alike-tolerant and character accuracy and the share not read; search each plate in full, in part and with wildcards; add a deny-list plate and an allow-list plate to lists, make a rule for each, and confirm only the deny-list plate and a plate not on the allow list raise alarms; confirm plates read in a privacy-masked area never appear; confirm reads disappear when their footage is deleted.
   - Owner:
   - Evidence:
+
+### Failover recorder (#143)
+
+- [ ] **Unchecked.** A takeover and handback with real cameras and hosts.
+  - Version:
+  - Environment: the primary and standby hosts (storage, clocks, network), the cameras (models, how many simultaneous RTSP sessions each allows), the lease and silence chosen.
+  - Steps: set the standby up as `docs/failover-recorder.md` describes; power off the primary host (not only the application) and time how long the standby takes to start recording every camera (the silence plus a few seconds), and whether any camera refused the standby's session; confirm the standby shows the takeover and an incident; power the primary on and confirm it does not record until the standby has stopped, that the standby's footage appears in its timeline marked as recorded by the standby and verifies (Playback's footage verification), and that both incidents recover; cut the network between the two (leave both running) and confirm what happens to recording on both sides, and that the footage comes back when it is restored.
+  - Owner:
+  - Evidence:
+
+Tested here with two real NVR processes and a stand-in recorder that writes a small footage file per camera each second (the real decision whether to record is the production one; the ffmpeg pull from a camera is not exercised on takeover): the standby takes over within the silence, records every camera, stops when the primary returns before the primary records, and hands its footage back into the primary's index, where it verifies.

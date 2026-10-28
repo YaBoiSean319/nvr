@@ -7,6 +7,7 @@ import { CoverageSettings } from "./CoverageSettings";
 import { DigestsSettings } from "./DigestsSettings";
 import { DiagnosticsSettings } from "./DiagnosticsSettings";
 import { EventSourcesSettings } from "./EventSourcesSettings";
+import { FailoverSettings } from "./FailoverSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { HardeningSettings } from "./HardeningSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
@@ -30,6 +31,7 @@ const CATEGORIES = {
   notifications: { label: "Notifications", page: NotificationsSettings },
   digests: { label: "Digests", page: DigestsSettings },
   events: { label: "Event sources", page: EventSourcesSettings },
+  failover: { label: "Failover", page: FailoverSettings },
   plates: { label: "Licence plates", page: PlatesSettings },
   sites: { label: "Sites (console)", page: SitesSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },

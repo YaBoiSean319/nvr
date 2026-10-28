@@ -319,7 +319,7 @@ class RouteTests(GrantCase):
         ("DELETE", "/api/me/security/passkeys/{passkey_id}"), ("POST", "/api/me/security/recovery-codes"), ("DELETE", "/api/me/security/totp"),
         ("POST", "/api/me/security/totp/begin"), ("POST", "/api/me/security/totp/confirm"), ("GET", "/api/push/preferences"),
         ("PUT", "/api/push/preferences"), ("GET", "/api/push/public-key"), ("POST", "/api/push/subscriptions"), ("POST", "/api/push/subscriptions/remove"),
-        ("GET", "/api/settings/display"), ("GET", "/api/redaction/models"),
+        ("GET", "/api/settings/display"), ("GET", "/api/redaction/models"), ("GET", "/api/failover/status"),
         # The native app's own phone: its push token and device sessions
         ("POST", "/api/native/devices"), ("POST", "/api/native/devices/remove"), ("GET", "/api/native/device-sessions"), ("POST", "/api/native/device-sessions"),
         ("POST", "/api/native/device-sessions/revoke"), ("DELETE", "/api/native/device-sessions/{session_id}"),
