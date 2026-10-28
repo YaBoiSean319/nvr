@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import acceleration, footage_chain, privacy, redaction, viewing_audit
+from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
@@ -556,6 +557,7 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
         "cancel_requested": bool(row["cancel_requested"]),
         "retry_of": row["retry_of"],
         "redaction_review_id": row["redaction_review_id"],
+        "dewarp": {camera_id: entry["view"] for camera_id, entry in json.loads(row["dewarp_json"] or "{}").items()},
     }
 
 
@@ -710,6 +712,7 @@ class ExportManager:
             include_audio = bool(row["include_audio"])
             audio_camera_id = row["audio_camera_id"]
             redaction_review_id = row["redaction_review_id"]
+            dewarp_plan = json.loads(row["dewarp_json"] or "{}")
             requester = row["requested_by"]
             start, end = _parse_time(row["requested_start"]), _parse_time(row["requested_end"])
 
@@ -859,6 +862,14 @@ class ExportManager:
                     manifest.write_text("".join(lines), encoding="utf-8")
                     first_overlay_samples = _write_source_time_subtitles(subtitle_path, camera["name"], spans, display_settings)
                     chain = privacy.with_mask(f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}", camera["privacy_zones"])
+                    camera_dewarp = dewarp_plan.get(camera["camera_id"])
+                    if camera_dewarp:
+                        # The mask covers the raw picture first; then the fisheye circle is dewarped to the view the person chose, with the geometry Live uses.
+                        first_file = recording_file_path(spans[0]["segment"]["relative_path"])
+                        source_width, source_height = await asyncio.to_thread(_video_size, first_file)
+                        graph, output_size = await asyncio.to_thread(_dewarp_graph, work_dir, camera["index"], camera_dewarp, source_width, source_height)
+                        chain = privacy.with_mask(f"fps=15,scale={source_width}:{source_height},{graph},{_subtitle_filter_path(subtitle_path, output_size[0], output_size[1])}", camera["privacy_zones"])
+                        entry["dewarp"] = {**camera_dewarp["view"], "lens": camera_dewarp["lens"], "output_size": list(output_size), "source_size": [source_width, source_height]}
                     await self._render(job_id, lambda encoder, hardware: [
                         "-hide_banner", "-loglevel", "error", *encoder.pre, *(acceleration.decode_args() if hardware else []), "-f", "concat", "-safe", "0", "-i", str(manifest),
                         "-map", "0:v:0", "-an", "-vf", encoder.filters(chain),
@@ -1105,12 +1116,34 @@ class ExportManager:
             raise RuntimeError("Evidence output reached its bounded size limit")
 
 
+def _video_size(path: Path) -> tuple[int, int]:
+    """The picture size of a recorded segment."""
+    result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+                            capture_output=True, text=True, timeout=30, check=False)
+    try:
+        width, height = (int(value) for value in result.stdout.strip().split(",")[:2])
+    except ValueError as exc:
+        raise RuntimeError("The recorded picture's size could not be read for dewarping") from exc
+    return width, height
+
+
+def _dewarp_graph(work_dir: Path, index: int, plan: dict[str, Any], source_width: int, source_height: int) -> tuple[str, tuple[int, int]]:
+    """Write the pixel maps for a camera's dewarped view and return the filter graph that applies them, and the size of the picture it makes."""
+    lens = dewarp_geometry.Lens(**plan["lens"])
+    view = dewarp_geometry.View(**plan["view"])
+    xmap, ymap, size = dewarp_geometry.remap_maps(lens, view, source_width, source_height)
+    x_path, y_path = work_dir / f"dewarp-{index}-x.pgm", work_dir / f"dewarp-{index}-y.pgm"
+    dewarp_geometry.write_pgm(x_path, xmap)
+    dewarp_geometry.write_pgm(y_path, ymap)
+    return dewarp_geometry.graph(x_path, y_path, size), size
+
+
 def create_export_record(
     requested_by: int, camera_ids: list[str], start: datetime, end: datetime,
     output_modes: list[str] | None = None,
     tile_camera_ids: list[str | None] | None = None, grid_resolution: str = "1080p",
     include_audio: bool = False, audio_camera_id: str | None = None, retry_of: str | None = None,
-    redaction_review_id: str | None = None,
+    redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     output_modes = output_modes or ["individual", "grid"]
     if not output_modes or len(set(output_modes)) != len(output_modes) or any(mode not in {"individual", "grid"} for mode in output_modes):
@@ -1158,11 +1191,24 @@ def create_export_record(
             raise LookupError("No indexed footage is available in the requested interval")
         if count > MAX_EXPORT_SEGMENTS or size > MAX_EXPORT_SOURCE_BYTES:
             raise OverflowError("Export source exceeds the supported size or segment limit")
+        dewarp_plan: dict[str, Any] = {}
+        for camera_id, view in (dewarp or {}).items():
+            lens = db.execute("SELECT * FROM camera_lens WHERE camera_id=?", (camera_id,)).fetchone()
+            if lens is None:
+                raise ValueError("A dewarped view needs a fisheye camera: set the camera's lens first")
+            if view.get("mode") not in dewarp_geometry.MODES:
+                raise ValueError("Choose a view, a panorama or a double panorama")
+            if lens["mount"] == "wall" and view["mode"] == "double_panorama":
+                raise ValueError("A wall-mounted camera sees 180 degrees: use a panorama")
+            dewarp_plan[camera_id] = {"lens": {"mount": lens["mount"], "cx": lens["center_x"], "cy": lens["center_y"], "radius": lens["radius"], "fov": lens["fov"]},
+                                      "view": {"mode": view["mode"], "pan": float(view.get("pan", 0)), "tilt": float(view.get("tilt", -90)), "fov": float(view.get("fov", 90))}}
         display_row = db.execute("SELECT time_zone,date_format,clock_format FROM site_display_settings WHERE singleton_id=1").fetchone()
         display_settings = {"time_zone": display_row["time_zone"], "date_format": display_row["date_format"], "clock_format": display_row["clock_format"]}
         db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,output_modes_json,display_settings_json,tile_camera_ids_json,grid_resolution,requested_start,requested_end,status,include_audio,audio_camera_id,created_at,updated_at,retry_of) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                    (job_id, requested_by, json.dumps(camera_ids), json.dumps(output_modes), json.dumps(display_settings), json.dumps(tile_camera_ids), grid_resolution, start.isoformat(), end.isoformat(), int(include_audio), audio_camera_id, now, now, retry_of))
         db.executemany("INSERT INTO export_sources(export_id,segment_id) VALUES(?,?)", ((job_id, segment["id"]) for segment in segments))
+        if dewarp_plan:
+            db.execute("UPDATE exports SET dewarp_json=? WHERE id=?", (json.dumps(dewarp_plan, sort_keys=True), job_id))
         if redaction_review_id:
             redaction.claim_for_export(db, redaction_review_id, requested_by, job_id, camera_ids, start, end, output_modes, retry_of)
             db.execute("UPDATE exports SET redaction_review_id=? WHERE id=?", (redaction_review_id, job_id))

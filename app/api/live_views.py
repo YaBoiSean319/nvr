@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 from app.access import Access
+from app.api.lens import DewarpState, clean_dewarp, decode_dewarp
 from app.viewing import MAX_LIVE_VIEWERS
 from app.principal import Administrator, CurrentUser
 from app.store import connect
@@ -23,6 +24,7 @@ class ViewerLayoutRequest(BaseModel):
     grid_size: int = Field(default=4)
     tile_camera_ids: list[str | None] | None = Field(default=None, max_length=MAX_LIVE_VIEWERS)
     layout_mode: Literal["auto", "manual"] = "auto"
+    dewarp: dict[str, DewarpState] = Field(default_factory=dict, max_length=MAX_LIVE_VIEWERS)
 
     @model_validator(mode="after")
     def validate_layout(self) -> "ViewerLayoutRequest":
@@ -31,6 +33,7 @@ class ViewerLayoutRequest(BaseModel):
             allow_empty=False, empty_tiles_are_unset=False, duplicate_context="layout",
             overflow_error="Tile positions must match the selected grid size",
         )
+        self.dewarp = clean_dewarp(self.dewarp, self.camera_ids)  # type: ignore[assignment]
         return self
 
 
@@ -40,6 +43,7 @@ class LiveWorkspaceRequest(BaseModel):
     tile_camera_ids: list[str | None] = Field(default_factory=list, max_length=MAX_LIVE_VIEWERS)
     sidebar_collapsed: bool = False
     layout_mode: Literal["auto", "manual"] = "auto"
+    dewarp: dict[str, DewarpState] = Field(default_factory=dict, max_length=MAX_LIVE_VIEWERS)
 
     @model_validator(mode="after")
     def validate_workspace(self) -> "LiveWorkspaceRequest":
@@ -48,6 +52,7 @@ class LiveWorkspaceRequest(BaseModel):
             allow_empty=True, empty_tiles_are_unset=True, duplicate_context="workspace",
             overflow_error="Workspace cameras must fit the selected grid size",
         )
+        self.dewarp = clean_dewarp(self.dewarp, self.camera_ids)  # type: ignore[assignment]
         return self
 
 
@@ -58,17 +63,18 @@ def _permitted_layout(layout: dict[str, object], access: Access) -> dict[str, ob
     camera_ids = access.only(layout["camera_ids"])
     if not camera_ids:
         return None
-    return {**layout, "camera_ids": camera_ids, "tile_camera_ids": [camera_id if camera_id is None or access.can_see(camera_id) else None for camera_id in layout["tile_camera_ids"]]}
+    return {**layout, "camera_ids": camera_ids, "dewarp": {key: state for key, state in layout.get("dewarp", {}).items() if key in camera_ids},
+            "tile_camera_ids": [camera_id if camera_id is None or access.can_see(camera_id) else None for camera_id in layout["tile_camera_ids"]]}
 
 
 def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
     with connect() as db:
         rows = db.execute(
-            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode FROM viewer_layouts WHERE user_id=? ORDER BY name COLLATE NOCASE",
+            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode,dewarp_json FROM viewer_layouts WHERE user_id=? ORDER BY name COLLATE NOCASE",
             (int(user["id"]),),
         ).fetchall()
         shared_rows = db.execute(
-            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode FROM shared_viewer_layouts ORDER BY name COLLATE NOCASE"
+            "SELECT name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode,dewarp_json FROM shared_viewer_layouts ORDER BY name COLLATE NOCASE"
         ).fetchall()
     def decode_layout(row: sqlite3.Row, scope: str) -> dict[str, object] | None:
         try:
@@ -79,7 +85,8 @@ def _load_live_views(user: sqlite3.Row) -> dict[str, object]:
             if not isinstance(tile_camera_ids, list):
                 tile_camera_ids = [*camera_ids, *([None] * max(0, int(row["grid_size"]) - len(camera_ids)))]
             return {"name": row["name"], "camera_ids": camera_ids, "grid_size": int(row["grid_size"]),
-                    "tile_camera_ids": tile_camera_ids, "layout_mode": row["layout_mode"], "scope": scope}
+                    "tile_camera_ids": tile_camera_ids, "layout_mode": row["layout_mode"], "scope": scope,
+                    "dewarp": decode_dewarp(row["dewarp_json"], camera_ids)}
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
     layouts = []
@@ -121,13 +128,13 @@ def save_viewer_layout(
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
         db.execute(
-            "INSERT INTO viewer_layouts(user_id,name,camera_ids_json,updated_at,grid_size,tile_camera_ids_json,layout_mode) VALUES(?,?,?,?,?,?,?) "
+            "INSERT INTO viewer_layouts(user_id,name,camera_ids_json,updated_at,grid_size,tile_camera_ids_json,layout_mode,dewarp_json) VALUES(?,?,?,?,?,?,?,?) "
             "ON CONFLICT(user_id,name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,updated_at=excluded.updated_at,"
-            "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json,layout_mode=excluded.layout_mode",
+            "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json,layout_mode=excluded.layout_mode,dewarp_json=excluded.dewarp_json",
             (int(user["id"]), name, json.dumps(payload.camera_ids), datetime.now(timezone.utc).isoformat(),
-             payload.grid_size, json.dumps(payload.tile_camera_ids), payload.layout_mode),
+             payload.grid_size, json.dumps(payload.tile_camera_ids), payload.layout_mode, json.dumps(payload.dewarp)),
         )
-    return {"name": name, "camera_ids": payload.camera_ids}
+    return {"name": name, "camera_ids": payload.camera_ids, "dewarp": payload.dewarp}
 
 
 @router.put("/api/live/shared-layouts/{name}")
@@ -142,16 +149,16 @@ def save_shared_viewer_layout(
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Layout contains an unknown camera")
         db.execute(
-            "INSERT INTO shared_viewer_layouts(name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode,created_by,updated_at) "
-            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
+            "INSERT INTO shared_viewer_layouts(name,camera_ids_json,grid_size,tile_camera_ids_json,layout_mode,created_by,updated_at,dewarp_json) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
             "grid_size=excluded.grid_size,tile_camera_ids_json=excluded.tile_camera_ids_json,created_by=excluded.created_by,"
             "layout_mode=excluded.layout_mode,"
-            "updated_at=excluded.updated_at",
+            "updated_at=excluded.updated_at,dewarp_json=excluded.dewarp_json",
             (name, json.dumps(payload.camera_ids), payload.grid_size, json.dumps(payload.tile_camera_ids), payload.layout_mode,
-             int(user["id"]), datetime.now(timezone.utc).isoformat()),
+             int(user["id"]), datetime.now(timezone.utc).isoformat(), json.dumps(payload.dewarp)),
         )
     return {"name": name, "camera_ids": payload.camera_ids, "grid_size": payload.grid_size,
-            "tile_camera_ids": payload.tile_camera_ids, "layout_mode": payload.layout_mode, "scope": "shared"}
+            "tile_camera_ids": payload.tile_camera_ids, "layout_mode": payload.layout_mode, "scope": "shared", "dewarp": payload.dewarp}
 
 
 @router.delete("/api/live/shared-layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -166,7 +173,7 @@ def get_live_workspace(user: CurrentUser) -> dict[str, object]:
     with connect() as db:
         row = db.execute("SELECT * FROM live_workspace_states WHERE user_id=?", (int(user["id"]),)).fetchone()
     if row is None:
-        return {"camera_ids": None, "tile_camera_ids": [], "grid_size": 4, "layout_mode": "auto", "sidebar_collapsed": False}
+        return {"camera_ids": None, "tile_camera_ids": [], "grid_size": 4, "layout_mode": "auto", "sidebar_collapsed": False, "dewarp": {}}
     try:
         camera_ids = json.loads(row["camera_ids_json"])
         tile_camera_ids = json.loads(row["tile_camera_ids_json"])
@@ -176,7 +183,7 @@ def get_live_workspace(user: CurrentUser) -> dict[str, object]:
         camera_ids = user.access.only(camera_ids)
         tile_camera_ids = [camera_id if camera_id is None or user.access.can_see(camera_id) else None for camera_id in tile_camera_ids]
     return {"camera_ids": camera_ids, "tile_camera_ids": tile_camera_ids, "grid_size": row["grid_size"],
-            "layout_mode": row["layout_mode"], "sidebar_collapsed": bool(row["sidebar_collapsed"])}
+            "layout_mode": row["layout_mode"], "sidebar_collapsed": bool(row["sidebar_collapsed"]), "dewarp": decode_dewarp(row["dewarp_json"], camera_ids)}
 
 
 @router.put("/api/live/workspace")
@@ -186,15 +193,15 @@ def save_live_workspace(payload: LiveWorkspaceRequest, user: CurrentUser) -> dic
         if not set(payload.camera_ids) <= present:
             raise HTTPException(status_code=422, detail="Workspace contains an unknown camera")
         db.execute(
-            "INSERT INTO live_workspace_states(user_id,camera_ids_json,tile_camera_ids_json,grid_size,sidebar_collapsed,updated_at,layout_mode) "
-            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
+            "INSERT INTO live_workspace_states(user_id,camera_ids_json,tile_camera_ids_json,grid_size,sidebar_collapsed,updated_at,layout_mode,dewarp_json) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET camera_ids_json=excluded.camera_ids_json,"
             "tile_camera_ids_json=excluded.tile_camera_ids_json,grid_size=excluded.grid_size,"
-            "sidebar_collapsed=excluded.sidebar_collapsed,updated_at=excluded.updated_at,layout_mode=excluded.layout_mode",
+            "sidebar_collapsed=excluded.sidebar_collapsed,updated_at=excluded.updated_at,layout_mode=excluded.layout_mode,dewarp_json=excluded.dewarp_json",
             (int(user["id"]), json.dumps(payload.camera_ids), json.dumps(payload.tile_camera_ids), payload.grid_size,
-             int(payload.sidebar_collapsed), datetime.now(timezone.utc).isoformat(), payload.layout_mode),
+             int(payload.sidebar_collapsed), datetime.now(timezone.utc).isoformat(), payload.layout_mode, json.dumps(payload.dewarp)),
         )
     return {"camera_ids": payload.camera_ids, "tile_camera_ids": payload.tile_camera_ids,
-            "grid_size": payload.grid_size, "layout_mode": payload.layout_mode, "sidebar_collapsed": payload.sidebar_collapsed}
+            "grid_size": payload.grid_size, "layout_mode": payload.layout_mode, "sidebar_collapsed": payload.sidebar_collapsed, "dewarp": payload.dewarp}
 
 
 @router.delete("/api/live/layouts/{name}", status_code=status.HTTP_204_NO_CONTENT)
