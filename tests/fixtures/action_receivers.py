@@ -64,6 +64,9 @@ class MqttBroker:
         self.hang_up = False  # Close the connection instead of acknowledging it.
         self.messages: list[dict] = []
         self.connections: list[dict] = []
+        self.subscriptions: list[tuple] = []
+        self.retained: dict[str, dict] = {}
+        self.lock = threading.Lock()
         broker = self
 
         class Handler(socketserver.StreamRequestHandler):
@@ -100,8 +103,28 @@ class MqttBroker:
                                 packet_id = struct.unpack("!H", data[offset:offset + 2])[0]
                                 offset += 2
                             broker.messages.append({"topic": topic, "payload": data[offset:], "qos": qos, "retain": bool(flags & 0x01)})
+                            if flags & 0x01:
+                                with broker.lock:
+                                    broker.retained[topic] = broker.messages[-1]
                             if qos == 1:
                                 self.wfile.write(bytes([0x40, 2]) + struct.pack("!H", packet_id))
+                        elif kind == 8:  # SUBSCRIBE: remember the filters, grant QoS 0, and send the retained messages that match
+                            packet_id = data[:2]
+                            offset, granted, filters = 2, b"", []
+                            while offset < len(data):
+                                topic_filter, offset = _string(data, offset)
+                                offset += 1
+                                filters.append(topic_filter)
+                                granted += b"\x00"
+                            with broker.lock:
+                                broker.subscriptions.append((self.wfile, filters))
+                            self.wfile.write(bytes([0x90, 2 + len(granted)]) + packet_id + granted)
+                            with broker.lock:
+                                retained = [message for message in broker.retained.values() if any(broker.matches(item, message["topic"]) for item in filters)]
+                            for message in retained:
+                                broker.send(self.wfile, message["topic"], message["payload"])
+                        elif kind == 12:  # PINGREQ
+                            self.wfile.write(bytes([0xD0, 0]))
                         elif kind == 14:  # DISCONNECT
                             return
                 except (ConnectionError, OSError):
@@ -112,6 +135,37 @@ class MqttBroker:
         self.server.daemon_threads = True
         self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @staticmethod
+    def matches(topic_filter: str, topic: str) -> bool:
+        from app.mqtt import topic_matches
+        return topic_matches(topic_filter, topic)
+
+    @staticmethod
+    def send(stream, topic: str, payload: bytes) -> None:
+        body = struct.pack("!H", len(topic.encode())) + topic.encode() + payload
+        length, encoded = len(body), bytearray()
+        while True:
+            byte, length = length % 128, length // 128
+            encoded.append(byte | (0x80 if length else 0))
+            if not length:
+                break
+        stream.write(bytes([0x30]) + bytes(encoded) + body)
+        stream.flush()
+
+    def deliver(self, topic: str, payload: bytes) -> int:
+        """Publish as if another client had: to every connection whose filter matches. Returns how many received it."""
+        delivered = 0
+        with self.lock:
+            targets = list(self.subscriptions)
+        for stream, filters in targets:
+            if any(self.matches(item, topic) for item in filters):
+                try:
+                    self.send(stream, topic, payload)
+                    delivered += 1
+                except (OSError, ValueError):
+                    pass
+        return delivered
 
     def close(self) -> None:
         self.server.shutdown()

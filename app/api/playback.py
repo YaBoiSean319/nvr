@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
-from app import privacy, viewing_audit
+from app import external_events, privacy, viewing_audit
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -74,10 +74,14 @@ def synchronized_playback_timeline(
                 "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
                 "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
                 (camera_id, end_text, start_text))]
+            building_events = [{"id": row["id"], "type": row["type"], "label": external_events.label(row["type"]), "subject": row["subject"], "message": row["message"],
+                                "occurred_at": row["occurred_at"], "source_name": row["source_name"]} for row in db.execute(
+                "SELECT e.id,e.type,e.subject,e.message,e.occurred_at,e.source_name FROM external_events e JOIN external_event_cameras k ON k.event_id=e.id "
+                "WHERE k.camera_id=? AND e.occurred_at>=? AND e.occurred_at<? ORDER BY e.occurred_at LIMIT 1000", (camera_id, start_text, end_text))]
             cameras.append({"camera_id": camera_id, "name": camera["name"], "recording_status": camera["recording_status"], "video_codec": camera["video_codec"],
                             "audio_supported": None if camera["audio_supported"] is None else bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
                             "segments": segments, "coverage": coverage, "motion_events": events, "gaps": gaps,
-                            "ai_detections": ai_detections, "ai_unanalyzed": ai_unanalyzed})
+                            "ai_detections": ai_detections, "ai_unanalyzed": ai_unanalyzed, "external_events": building_events})
     return {"start": start_text, "end": end_text, "cameras": cameras}
 
 
