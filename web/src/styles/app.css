@@ -301,6 +301,7 @@
 .timeline-cursor, .timeline-cursor-head { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--n-accent); pointer-events: none; z-index: 1; }
 .timeline-cursor[hidden], .timeline-cursor-head[hidden] { display: none; }
 [data-mark="recording"] { background: color-mix(in srgb, var(--n-good) 70%, transparent); }
+[data-mark="backfilled"] { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--n-good) 70%, transparent) 0 3px, color-mix(in srgb, var(--n-good) 28%, transparent) 3px 6px); }
 [data-mark="missing"] { background: transparent; }
 .timeline-legend [data-mark="missing"] { border: 1px solid var(--n-line); background: var(--n-raised); }
 [data-mark="expected_idle"] { background: color-mix(in srgb, var(--n-muted) 22%, transparent); }
@@ -689,3 +690,5 @@
 .redaction-field { display: grid !important; grid-template-columns: minmax(0, 1fr) 84px; }
 .redaction-field select { grid-column: 2; min-width: 0; }
 .redaction-field input, .redaction-field select { height: 28px; padding: 0 6px; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); }
+.backfill-jobs { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.backfill-jobs li { display: grid; gap: 1px; }

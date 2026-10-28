@@ -1,6 +1,6 @@
 /** Camera administration requests. Credentials travel only in request bodies, never in URLs. */
 import { api } from "@/api/client";
-import type { Camera, CameraBrand, OnvifProfile, StreamProbe } from "@/api/types";
+import type { BackfillStatus, Camera, CameraBrand, OnvifProfile, StreamProbe } from "@/api/types";
 
 export interface SourceDraft {
   camera_ip: string | null;
@@ -128,3 +128,7 @@ export interface RetentionForecast {
   warn_days: number;
 }
 export const getRetentionForecast = (id: string, signal?: AbortSignal) => api<RetentionForecast>(`${at(id)}/retention-forecast`, { signal });
+
+export const getBackfill = (id: string, signal?: AbortSignal) => api<BackfillStatus>(`${at(id)}/backfill`, { signal });
+export const saveBackfill = (id: string, body: { enabled: boolean; limit_kbps: number | null }) => api<BackfillStatus>(`${at(id)}/backfill`, { method: "PUT", body });
+export const checkBackfill = (id: string) => api<BackfillStatus>(`${at(id)}/backfill/check`, { method: "POST" });

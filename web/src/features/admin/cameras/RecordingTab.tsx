@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { keys, useCameraGroups } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { TabFooter } from "../TabFooter";
+import { BackfillSection } from "./BackfillSection";
 import { failureText, useTabDraft } from "../tabDraft";
 import { assignGroup, getRetentionForecast, probeAudio, updateRecording, type ScheduleMode } from "./api";
 import { MODE_LABEL } from "./inventory";
@@ -145,6 +146,7 @@ export function RecordingTab({ camera, admin }: { camera: Camera; admin: boolean
           </div>
         ) : null}
       </fieldset>
+      {admin ? <BackfillSection cameraId={camera.id} /> : null}
       <fieldset className="field-group" disabled={readOnly}>
         <legend>Policy group</legend>
         <label className="field"><span>Group</span>

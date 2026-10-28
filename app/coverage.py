@@ -58,7 +58,7 @@ def timeline(db: sqlite3.Connection, camera_id: str, start: datetime, end: datet
     start_text, end_text = start.isoformat(), end.isoformat()
     bound = limit if limit is not None else -1  # SQLite: a negative LIMIT is no limit.
     segments = db.execute(
-        "SELECT id,starts_at,ends_at,size_bytes FROM recording_segments "
+        "SELECT id,starts_at,ends_at,size_bytes,source FROM recording_segments "
         "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at LIMIT ?",
         (camera_id, end_text, start_text, bound)).fetchall()
     coverage = [dict(row) for row in db.execute(
@@ -73,7 +73,10 @@ def timeline(db: sqlite3.Connection, camera_id: str, start: datetime, end: datet
                      "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NOT NULL ORDER BY starts_at LIMIT ?",
                      (camera_id, end_text, start_text, bound))]
     spans = sorted((max(start, _parse(row["starts_at"])), min(end, _parse(row["ends_at"]))) for row in segments)
-    return {"segments": [dict(row) for row in segments], "coverage": coverage, "gaps": gaps(coverage, spans, start, end)}
+    found = gaps(coverage, spans, start, end)
+    from . import backfill
+    backfill.annotate(db, camera_id, found)  # What is being done about each outage: filled from the camera's own recording, waiting, or why not
+    return {"segments": [dict(row) for row in segments], "coverage": coverage, "gaps": found}
 
 
 def gaps(coverage: list[dict[str, Any]], spans: Iterable[tuple[datetime, datetime]], start: datetime, end: datetime) -> list[dict[str, Any]]:
@@ -118,6 +121,7 @@ def _seconds(items: Iterable[dict[str, Any]]) -> float:
 
 def report(start: datetime, end: datetime) -> dict[str, Any]:
     """Coverage per camera against its policy for [start, end), with its largest outages and their reasons."""
+    from . import backfill
     from .scheduling import effective_policy
 
     # Only time that has happened counts, and only since each camera was added.
@@ -142,6 +146,7 @@ def report(start: datetime, end: datetime) -> dict[str, Any]:
                 "camera_id": camera["id"], "name": camera["name"],
                 "policy": {"mode": camera["recording_mode"], "source": policy["source"], "scheduled": policy["scheduled"]},
                 "expected_seconds": round(expected, 1), "covered_seconds": round(expected - missed, 1), "missed_seconds": round(missed, 1),
+                "backfilled_seconds": backfill.seconds_backfilled(db, camera["id"], since, end),
                 "coverage_percent": None if expected <= 0 else round(100 * (expected - missed) / expected, 2),
                 "missed_by_reason": {code: round(value, 1) for code, value in sorted(by_reason.items(), key=lambda item: -item[1])},
                 "largest_gaps": sorted(({**gap, "seconds": round(_seconds([gap]), 1)} for gap in outages), key=lambda gap: -gap["seconds"])[:REPORT_GAPS],

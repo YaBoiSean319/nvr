@@ -247,8 +247,8 @@ export interface TimelineCamera {
   camera_id: string;
   name: string;
   recording_status: string;
-  segments: { id: number; starts_at: string; ends_at: string; size_bytes: number; media_url: string }[];
-  gaps: { starts_at: string; ends_at: string; state: GapState; reason: string; reason_code: GapReason }[];
+  segments: { id: number; starts_at: string; ends_at: string; size_bytes: number; media_url: string; source: "live" | "backfill" }[];
+  gaps: { starts_at: string; ends_at: string; state: GapState; reason: string; reason_code: GapReason; backfill: { state: string; message: string } | null }[];
   motion_events: { id: string; source_event_at: string; status: string }[];
   ai_detections: { id: string; label: "person" | "vehicle"; confidence: number; first_seen_at: string; last_seen_at: string }[];
   ai_unanalyzed: { state: string; starts_at: string; ends_at: string | null; detail: string }[];
@@ -258,4 +258,24 @@ export interface PlaybackTimeline {
   start: string;
   end: string;
   cameras: TimelineCamera[];
+}
+
+export interface BackfillJob {
+  id: string;
+  starts_at: string;
+  ends_at: string;
+  state: "pending" | "running" | "done" | "partial" | "failed" | "unsupported";
+  message: string;
+  attempts: number;
+  filled_seconds: number;
+  bytes_fetched: number;
+  observed_kbps: number | null;
+}
+
+export interface BackfillStatus {
+  enabled: boolean;
+  limit_kbps: number | null;
+  default_limit_kbps: number;
+  support: { state: "supported" | "unsupported" | "unknown"; message: string; checked_at: string | null };
+  jobs: BackfillJob[];
 }

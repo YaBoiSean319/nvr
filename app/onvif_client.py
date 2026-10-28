@@ -37,6 +37,8 @@ MEDIA = "http://www.onvif.org/ver10/media/wsdl"
 MEDIA2 = "http://www.onvif.org/ver20/media/wsdl"
 EVENTS = "http://www.onvif.org/ver10/events/wsdl"
 SCHEMA = "http://www.onvif.org/ver10/schema"
+SEARCH = "http://www.onvif.org/ver10/search/wsdl"
+REPLAY = "http://www.onvif.org/ver10/replay/wsdl"
 WSSE = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
 WSU = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 PASSWORD_DIGEST = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest"
@@ -82,9 +84,22 @@ class DeviceInfo:
 
 
 @dataclass
+class Recording:
+    """One recording on the camera's own storage (ONVIF Profile G) and the span of time it holds."""
+    token: str
+    earliest: datetime
+    latest: datetime
+
+
+@dataclass
 class Services:
     urls: dict[str, str] = field(default_factory=dict)
     source: str = ""
+
+
+def _utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _local(tag: str) -> str:
@@ -434,6 +449,68 @@ class OnvifClient:
             raise OnvifError("unsupported", "The camera returned an invalid RTSP port") from None
         if any(char.isspace() or char in "'\\\x00" for char in parts.path + parts.query):
             raise OnvifError("unsupported", "The camera returned an invalid RTSP address")
+        login = f"{quote(self._username, safe='')}:{quote(self._password, safe='')}@" if self._username else ""
+        return urlunsplit((parts.scheme, f"{login}{_netloc(self.host, port)}", parts.path, parts.query, ""))
+
+    # ----------------------------------------------------------------------------------------------------- Profile G (search and replay)
+
+    async def recordings(self, services: Services) -> list[Recording]:
+        """The recordings on the camera's own storage with the time each covers (Search service: FindRecordings, then its results)."""
+        url = services.urls.get("search")
+        if not url:
+            raise OnvifError("service_unavailable", "The camera has no ONVIF recording search service")
+        found = await self.call(url, "FindRecordings", SEARCH, f'<tse:FindRecordings xmlns:tse="{SEARCH}"><tse:Scope/><tse:KeepAliveTime>PT30S</tse:KeepAliveTime></tse:FindRecordings>', service="search")
+        token = next((node.text.strip() for node in found.iter() if _local(node.tag) == "SearchToken" and node.text), "")
+        if not token:
+            raise OnvifError("malformed", "The camera did not start a recording search")
+        recordings: list[Recording] = []
+        try:
+            for _ in range(20):
+                root = await self.call(url, "GetRecordingSearchResults", SEARCH,
+                                       f'<tse:GetRecordingSearchResults xmlns:tse="{SEARCH}"><tse:SearchToken>{escape(token)}</tse:SearchToken><tse:MinResults>1</tse:MinResults>'
+                                       "<tse:MaxResults>50</tse:MaxResults><tse:WaitTime>PT2S</tse:WaitTime></tse:GetRecordingSearchResults>", service="search")
+                for info in (node for node in root.iter() if _local(node.tag) == "RecordingInformation"):
+                    text = {_local(child.tag): (child.text or "").strip() for child in info}
+                    try:
+                        earliest, latest = _utc(text["EarliestRecording"]), _utc(text["LatestRecording"])
+                    except (KeyError, ValueError):
+                        continue
+                    if text.get("RecordingToken") and latest > earliest:
+                        recordings.append(Recording(text["RecordingToken"], earliest, latest))
+                state = next((node.text.strip() for node in root.iter() if _local(node.tag) == "SearchState" and node.text), "Completed")
+                if state == "Completed":
+                    break
+        finally:
+            try:
+                await self.call(url, "EndSearch", SEARCH, f'<tse:EndSearch xmlns:tse="{SEARCH}"><tse:SearchToken>{escape(token)}</tse:SearchToken></tse:EndSearch>', service="search")
+            except OnvifError:
+                pass  # The camera forgets a search by itself
+        return recordings
+
+    async def replay_uri(self, services: Services, recording_token: str) -> str:
+        """The address the camera replays a recording from (no credentials in it)."""
+        url = services.urls.get("replay")
+        if not url:
+            raise OnvifError("service_unavailable", "The camera has no ONVIF replay service")
+        body = (f'<trp:GetReplayUri xmlns:trp="{REPLAY}"><trp:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trp:StreamSetup>'
+                f"<trp:RecordingToken>{escape(recording_token)}</trp:RecordingToken></trp:GetReplayUri>")
+        root = await self.call(url, "GetReplayUri", REPLAY, body, service="replay")
+        uri = next((node.text.strip() for node in root.iter() if _local(node.tag) == "Uri" and node.text), "")
+        if not uri:
+            raise OnvifError("malformed", "The camera did not return a replay address")
+        return uri
+
+    def replay_url_with_login(self, uri: str) -> str:
+        """The replay address for FFmpeg: the camera's path and port, the host the administrator entered, and the login encoded into it."""
+        parts = urlsplit(uri.strip())
+        if parts.scheme not in {"rtsp", "rtsps", "http", "https"} or not parts.hostname:
+            raise OnvifError("unsupported", "The camera did not return a valid replay address")
+        try:
+            port = parts.port
+        except ValueError:
+            raise OnvifError("unsupported", "The camera returned an invalid replay port") from None
+        if any(char.isspace() or char in "'\\\x00" for char in parts.path + parts.query):
+            raise OnvifError("unsupported", "The camera returned an invalid replay address")
         login = f"{quote(self._username, safe='')}:{quote(self._password, safe='')}@" if self._username else ""
         return urlunsplit((parts.scheme, f"{login}{_netloc(self.host, port)}", parts.path, parts.query, ""))
 
