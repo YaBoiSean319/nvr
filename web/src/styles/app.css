@@ -179,6 +179,10 @@
   background: linear-gradient(rgb(0 0 0 / 0.6), transparent);
 }
 .tile-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 2px #000; }
+.tile-note {
+  position: absolute; left: var(--n-space-2); top: 26px; max-width: calc(100% - 16px); padding: 1px 6px; border-radius: var(--n-radius-small);
+  background: rgb(0 0 0 / 0.55); color: #fff; font-size: 11px; pointer-events: none; text-shadow: 0 1px 2px #000;
+}
 .tile-state { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; text-shadow: 0 1px 2px #000; }
 .tile-overlay {
   position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: var(--n-space-2);

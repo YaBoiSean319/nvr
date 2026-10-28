@@ -4,6 +4,7 @@ import { ApiError } from "@/api/client";
 import { useDeleteView, useLiveViews, useSaveView } from "@/api/queries";
 import type { Role } from "@/api/types";
 import { toSaved, type ManualSize } from "./arrangement";
+import { QUALITY_INTERVALS, lowDataActive, useViewingPrefs, type LowDataSetting } from "./bandwidth";
 import { SaveAsDialog } from "./dialogs";
 import { useCameraIds, useDirty, useLiveStore } from "./store";
 
@@ -24,6 +25,7 @@ export function ViewBar({ role }: { role: Role }) {
   const save = useSaveView();
   const remove = useDeleteView();
   const [saveAs, setSaveAs] = useState(false);
+  const prefs = useViewingPrefs();
   const canSave = view !== null && (view.scope === "personal" || role === "administrator");
   const error = save.error ?? remove.error;
 
@@ -58,6 +60,28 @@ export function ViewBar({ role }: { role: Role }) {
               {LAYOUTS.map(layout => (
                 <Menu.RadioItem key={layout.size} className="menu-item" value={String(layout.size)}>
                   <Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>{layout.label}
+                </Menu.RadioItem>
+              ))}
+            </Menu.RadioGroup>
+          </Menu.Content>
+        </Menu.Portal>
+      </Menu.Root>
+      <Menu.Root>
+        <Menu.Trigger className="button" aria-label="Data use">Data: {lowDataActive(prefs.lowData) ? "Low" : "Normal"}</Menu.Trigger>
+        <Menu.Portal>
+          <Menu.Content className="menu" align="end" sideOffset={4}>
+            <Menu.Label className="menu-label">Data use</Menu.Label>
+            <Menu.RadioGroup value={prefs.lowData} onValueChange={value => prefs.set({ lowData: value as LowDataSetting })}>
+              <Menu.RadioItem className="menu-item" value="auto"><Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Automatic (low on a cellular installed app)</Menu.RadioItem>
+              <Menu.RadioItem className="menu-item" value="on"><Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Low-data mode</Menu.RadioItem>
+              <Menu.RadioItem className="menu-item" value="off"><Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Normal</Menu.RadioItem>
+            </Menu.RadioGroup>
+            <Menu.Separator className="menu-separator" />
+            <Menu.Label className="menu-label">Auto quality changes at most every</Menu.Label>
+            <Menu.RadioGroup value={String(prefs.intervalSeconds)} onValueChange={value => prefs.set({ intervalSeconds: Number(value) })}>
+              {QUALITY_INTERVALS.map(seconds => (
+                <Menu.RadioItem key={seconds} className="menu-item" value={String(seconds)}>
+                  <Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>{seconds < 60 ? `${seconds} seconds` : `${seconds / 60} minute${seconds > 60 ? "s" : ""}`}
                 </Menu.RadioItem>
               ))}
             </Menu.RadioGroup>

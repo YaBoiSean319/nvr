@@ -3,6 +3,7 @@ import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router";
 import type { Camera } from "@/api/types";
 import { LivePlayer, type PlayerSnapshot } from "./LivePlayer";
+import { LOW_DATA_MAX_TILES, QualityGovernor, useLowData, useViewingPrefs, type QualityChange } from "./bandwidth";
 import { CAMERA_DRAG_TYPE } from "@/features/cameras/CameraBrowser";
 import { usePlaybackStore } from "@/features/playback/store";
 import { PtzPad } from "@/features/ptz/PtzPad";
@@ -14,6 +15,8 @@ interface TileProps {
   enlarged: boolean;
   /** Hidden behind an enlarged tile: release the stream but keep membership. */
   suspended: boolean;
+  /** Low-data mode plays only the first few tiles; this one waits until it is tapped. */
+  lowDataCapped: boolean;
   onReplaceRequest: () => void;
 }
 
@@ -31,13 +34,14 @@ function clock(timestamp: number | null): string {
   return timestamp ? new Date(timestamp).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "";
 }
 
-function resolveQuality(override: Quality | undefined, enlarged: boolean, substream: boolean): "low" | "high" {
+function resolveQuality(override: Quality | undefined, enlarged: boolean, substream: boolean, lowData: boolean): "low" | "high" {
   if (override === "main") return "high";
   if (override === "sub") return "low";
+  if (lowData && substream) return "low";
   return enlarged || !substream ? "high" : "low";
 }
 
-export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, onReplaceRequest }: TileProps) {
+export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, lowDataCapped, onReplaceRequest }: TileProps) {
   const navigate = useNavigate();
   const video = useRef<HTMLVideoElement>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -48,14 +52,69 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
   const override = useLiveStore(store => store.quality[camera.id]);
   const listeningId = useLiveStore(store => store.listeningId);
   const { setActive, enlarge, unenlarge: restore, remove, setQuality, setListening, move } = useLiveStore.getState();
-  const quality = resolveQuality(override, enlarged, Boolean(camera.live_substream_available));
+  const lowData = useLowData();
+  const intervalSeconds = useViewingPrefs(prefs => prefs.intervalSeconds);
+  const hasSub = Boolean(camera.live_substream_available);
+  const manual = override === "main" || override === "sub";
+  const base = resolveQuality(override, enlarged, hasSub, lowData);
+  // Auto steps a main-stream tile down to the substream when video arrives late, and back up when it recovers; a Main or Sub choice is never touched.
+  const adaptive = !manual && !lowData && hasSub && base === "high";
+  const governor = useRef<QualityGovernor | null>(null);
+  const [adapted, setAdapted] = useState<QualityChange | null>(null);
+  const quality = adaptive && adapted?.quality === "low" ? "low" : base;
 
   useEffect(() => {
-    if (suspended || !video.current) return;
+    setAdapted(null);
+    if (!adaptive) return;
+    const instance = new QualityGovernor("high", { intervalMs: intervalSeconds * 1_000 }, Date.now());
+    governor.current = instance;
+    const timer = window.setInterval(() => {
+      const change = instance.check(Date.now());
+      if (change) setAdapted(change);
+    }, 500);
+    return () => {
+      window.clearInterval(timer);
+      if (governor.current === instance) governor.current = null;
+    };
+  }, [camera.id, adaptive, intervalSeconds]);
+
+  // Low-data mode lets go of tiles nobody can see (scrolled away, or the page in the background) and of tiles over the cap.
+  const [onScreen, setOnScreen] = useState(true);
+  const [pageVisible, setPageVisible] = useState(() => !document.hidden);
+  const [tapped, setTapped] = useState(false);
+  useEffect(() => {
+    const element = root.current;
+    if (!element || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => entry && setOnScreen(entry.isIntersecting), { threshold: 0.05 });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const onChange = () => setPageVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+  const overCap = lowData && lowDataCapped && !tapped;
+  const lowDataPaused = !suspended && lowData && (overCap || !onScreen || !pageVisible);
+  const halted = suspended || lowDataPaused;
+
+  let qualityNote: string | null = null;
+  if (!manual && lowData) {
+    qualityNote = overCap ? `Low-data mode: only ${LOW_DATA_MAX_TILES} tiles play; tap to play this one`
+      : !onScreen || !pageVisible ? "Low-data mode: paused while out of sight"
+      : hasSub ? "Low-data mode: Sub stream" : "Low-data mode: no substream, so Main stream";
+  } else if (adaptive && adapted) {
+    qualityNote = `Auto: ${adapted.reason}, ${adapted.quality === "low" ? "using Sub" : "back on Main"}`;
+  }
+
+  useEffect(() => {
+    if (halted || !video.current) return;
     setFallbackUrl(null);
     const instance = new LivePlayer({
       cameraId: camera.id, quality, video: video.current,
       onChange: setState, onFallback: setFallbackUrl,
+      onFragment: at => governor.current?.fragment(at),
+      onStall: at => governor.current?.stall(at),
     });
     player.current = instance;
     instance.start();
@@ -63,25 +122,25 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       instance.stop();
       player.current = null;
     };
-  }, [camera.id, quality, suspended]);
+  }, [camera.id, quality, halted]);
 
   // The MJPEG fallback cannot report decoded frames, so ask the server when it last delivered one.
   useEffect(() => {
-    if (!fallbackUrl || suspended) return;
+    if (!fallbackUrl || halted) return;
     const timer = window.setInterval(async () => {
       const response = await fetch(`/api/cameras/${encodeURIComponent(camera.id)}/live/status`, { credentials: "same-origin" }).catch(() => null);
       const status = response?.ok ? ((await response.json()) as { state: string }) : null;
       if (status?.state === "live") player.current?.fallbackFrame();
     }, 2_000);
     return () => window.clearInterval(timer);
-  }, [fallbackUrl, camera.id, suspended]);
+  }, [fallbackUrl, camera.id, halted]);
 
   const listening = listeningId === camera.id;
   useEffect(() => {
     player.current?.setListening(listening);
   }, [listening]);
 
-  const phase = state?.phase ?? "connecting";
+  const phase = lowDataPaused ? "paused" : state?.phase ?? "connecting";
   const live = phase === "live";
   const audioAvailable = Boolean(state?.audioAvailable && camera.audio_enabled);
 
@@ -123,6 +182,8 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       data-phase={phase}
       data-camera-id={camera.id}
       data-transport={state?.transport ?? undefined}
+      data-quality={quality === "low" ? "sub" : "main"}
+      data-quality-mode={manual ? "manual" : lowData ? "low-data" : "auto"}
       tabIndex={0}
       role="group"
       aria-label={`${camera.name}: ${PHASE_LABEL[phase]}`}
@@ -137,7 +198,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       }}
     >
       <video ref={video} className="tile-video" muted playsInline hidden={Boolean(fallbackUrl)} />
-      {fallbackUrl && !suspended ? <img ref={image} className="tile-video" src={fallbackUrl} alt="" onError={() => player.current?.retry()} /> : null}
+      {fallbackUrl && !halted ? <img ref={image} className="tile-video" src={fallbackUrl} alt="" onError={() => player.current?.retry()} /> : null}
       <div className="tile-top">
         <span className="tile-name" title={camera.name}>{camera.name}</span>
         <span className="tile-state" data-phase={phase}>
@@ -146,10 +207,12 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
           {state?.transport === "mjpeg" ? " · compatibility" : state?.converted ? " · converted" : state?.profile === "sub" ? " · sub" : ""}
         </span>
       </div>
+      {qualityNote && !lowDataPaused ? <span className="tile-note" data-testid="tile-quality-note">{qualityNote}</span> : null}
       {!live ? (
         <div className="tile-overlay" role="status">
           {phase === "connecting" ? <span className="spinner" aria-hidden="true" /> : null}
-          <span>{phase === "connecting" ? "Connecting to camera…" : state?.detail ?? PHASE_LABEL[phase]}</span>
+          <span data-testid={lowDataPaused ? "tile-quality-note" : undefined}>{lowDataPaused ? qualityNote : phase === "connecting" ? "Connecting to camera…" : state?.detail ?? PHASE_LABEL[phase]}</span>
+          {overCap ? <button type="button" className="button" onClick={() => setTapped(true)}>Play this tile</button> : null}
           {state?.lastFrameAt && phase !== "connecting" ? <span className="tile-last">Last frame {clock(state.lastFrameAt)}</span> : null}
           {phase === "offline" || phase === "error" ? (
             <button type="button" className="button" onClick={() => player.current?.retry()}>Retry now</button>
@@ -157,7 +220,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
         </div>
       ) : null}
       {/* The focused tile carries PTZ controls when its camera speaks ONVIF; the server says whether it can move. */}
-      {active && camera.device_service_url && !suspended ? <PtzPad cameraId={camera.id} keyTarget={root} compact /> : null}
+      {active && camera.device_service_url && !halted ? <PtzPad cameraId={camera.id} keyTarget={root} compact /> : null}
       <div className="tile-actions" aria-label={`${camera.name} actions`}>
         <button type="button" className="button icon-button tile-action" onClick={() => (enlarged ? restore() : enlarge(camera.id))} aria-label={enlarged ? `Restore grid` : `Enlarge ${camera.name}`} title={enlarged ? "Restore grid (Esc)" : "Enlarge"}>
           {enlarged ? "⤡" : "⤢"}
