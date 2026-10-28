@@ -196,6 +196,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("DELETE FROM access_grants")
         db.execute("INSERT INTO access_grants(subject_type,subject,scope_type) SELECT 'user', CAST(id AS TEXT), 'all' FROM users WHERE role='operator'")
         db.execute("DELETE FROM viewing_audit")
+        db.execute("DELETE FROM console_sites")  # With their grants; console mode is off until a journey turns it on
+        db.execute("UPDATE console_settings SET enabled=0")
         db.execute("DELETE FROM cases")  # With its members, items, audit and packages
         db.execute("DELETE FROM tamper_settings")
         db.execute("DELETE FROM disk_health")
