@@ -152,6 +152,25 @@ jobs:
           done
           cat /tmp/nvr-rtsp-publisher.log
           exit 1
+      - name: Start MinIO for the cold storage tier tests
+        # Best effort: without it the tests that need a real S3-compatible store are skipped (the rest use a stand-in that checks signatures).
+        continue-on-error: true
+        run: |
+          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=nvrminio -e MINIO_ROOT_PASSWORD=nvrminio-secret-0123 \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for attempt in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-04-16T18-13-26Z \
+            -c "mc alias set local http://127.0.0.1:9000 nvrminio nvrminio-secret-0123 && mc mb --ignore-existing local/nvr-test"
+          {
+            echo "NVR_TEST_S3_ENDPOINT=http://127.0.0.1:9000"
+            echo "NVR_TEST_S3_BUCKET=nvr-test"
+            echo "NVR_TEST_S3_ACCESS_KEY=nvrminio"
+            echo "NVR_TEST_S3_SECRET_KEY=nvrminio-secret-0123"
+          } >> "$GITHUB_ENV"
       - name: Run API and media tests
         env:
           NVR_RTSP_TEST_URL: rtsp://127.0.0.1:8554/nvr-test

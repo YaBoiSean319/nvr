@@ -223,7 +223,7 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
         try:
             with connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                current=db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments WHERE id=?",(row["id"],)).fetchone()
+                current=db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE id=?",(row["id"],)).fetchone()
                 if current is None:
                     continue
                 active=db.execute("SELECT 1 FROM recording_holds WHERE segment_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(row["id"],now.astimezone(timezone.utc).isoformat())).fetchone()
@@ -245,13 +245,14 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                 if current_end.tzinfo is None: current_end=current_end.replace(tzinfo=timezone.utc)
                 if current_end>now-timedelta(days=days):
                     continue
-                from .storage import recording_file_path
-                path=recording_file_path(current["relative_path"])
-                if not unlink_if_unleased(path):
+                from .storage import remove_segment_files
+                if not remove_segment_files([current]):
                     skipped_leased+=1
                     continue
                 db.execute("DELETE FROM recording_segments WHERE id=?", (row["id"],))
                 record_deletion(db,current["camera_id"],int(current["size_bytes"]),current["starts_at"],current["ends_at"],now)
+            from .tiering import discard_objects
+            discard_objects([current])  # A copy in an object store goes once the row is gone (outside the write lock)
             removed_segments += 1
             removed_bytes += int(current["size_bytes"])
         except (OSError,sqlite3.Error):

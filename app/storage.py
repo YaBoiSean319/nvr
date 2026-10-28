@@ -65,7 +65,8 @@ def camera_recordings_dir(camera_id: str) -> Path:
     return path / camera_id
 
 
-def recording_file_path(relative_path: str) -> Path:
+def _hot_file_path(relative_path: str) -> Path:
+    """Where a segment's file is on the hot storage: the path, checked to be inside a configured and available volume."""
     root=recordings_path()
     candidate=(root/relative_path).resolve()
     if root not in candidate.parents:
@@ -82,6 +83,52 @@ def recording_file_path(relative_path: str) -> Path:
     if name!="default" and (not base.is_dir() or not os.path.ismount(base)):
         raise OSError("Recorded file storage volume is unavailable")
     return candidate
+
+
+def recording_file_path(relative_path: str) -> Path:
+    """The file to read for a segment, wherever the segment is: on the hot storage, on a local cold tier, or fetched from an object store into the read-through cache."""
+    from . import tiering
+
+    try:
+        hot=_hot_file_path(relative_path)
+    except OSError as error:
+        cold=tiering.cold_path(relative_path)  # Footage that has moved does not need its hot volume
+        if cold is None:
+            raise error
+        return cold
+    if hot.is_file():
+        return hot
+    cold=tiering.cold_path(relative_path)
+    return cold if cold is not None else hot
+
+
+def segment_available(relative_path: str) -> bool:
+    """Whether a segment's footage exists, without fetching it from an object store to find out."""
+    from . import tiering
+
+    try:
+        if _hot_file_path(relative_path).is_file():
+            return True
+    except OSError:
+        pass
+    return tiering.segment_present(relative_path)
+
+
+def remove_segment_files(rows) -> bool:
+    """Delete the files of segments wherever they are on this machine (hot file, local cold file, cached copy): False, and nothing deleted, while any is being played.
+
+    A segment's copy in an object store is not here: once its row is gone the caller passes the rows to ``tiering.discard_objects``."""
+    from . import tiering
+    from .retention import unlink_many_if_unleased
+
+    paths: list[Path] = []
+    for row in rows:
+        try:
+            hot=_hot_file_path(row["relative_path"])
+        except OSError:
+            hot=None
+        paths.extend(tiering.local_files(row, hot))
+    return unlink_many_if_unleased(paths)
 
 
 def _probe_writable(path: Path) -> tuple[bool, float | None]:

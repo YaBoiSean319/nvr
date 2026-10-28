@@ -202,6 +202,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         db.execute("UPDATE failover_state SET lease_until=NULL,yield_until=NULL,last_contact_at=NULL,peer_state=NULL,last_renewed_at=NULL,handback_requested_at=NULL,watching_since=NULL,takeover_active=0,"
                    "takeover_started_at=NULL,epoch=0,last_sync_at=NULL,last_sync_error=NULL,sync_requested=0,config_created_at=NULL,last_error=NULL")
         db.execute("DELETE FROM failover_episodes")
+        for table in ("tier_orphans", "tier_moves", "tier_policies", "cold_tiers"):
+            db.execute(f"DELETE FROM {table}")  # Footage that moved goes with its camera's segments below
         db.execute("DELETE FROM failover_imports")
         db.execute("DELETE FROM plate_watch_lists")  # With their entries; plate reads and settings go with their cameras and tracks
         db.execute("DELETE FROM cases")  # With its members, items, audit and packages

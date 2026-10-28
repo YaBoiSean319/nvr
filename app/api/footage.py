@@ -177,8 +177,8 @@ def delete_archived_camera_footage(
     payload: CameraFootageDeleteRequest,
     user: Administrator,
 ) -> Response:
-    from app.retention import unlink_many_if_unleased
-    from app.storage import recording_file_path
+    from app import tiering
+    from app.storage import recording_file_path, remove_segment_files
 
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -202,12 +202,13 @@ def delete_archived_camera_footage(
         ).fetchone()
         if active_export:
             raise HTTPException(status_code=409, detail="Archived camera footage is in an active export")
-        segments = db.execute("SELECT id,relative_path FROM recording_segments WHERE camera_id=?", (camera_id,)).fetchall()
+        segments = db.execute("SELECT id,relative_path,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE camera_id=?", (camera_id,)).fetchall()
         try:
-            paths = [recording_file_path(row["relative_path"]) for row in segments]
+            for row in segments:
+                recording_file_path(row["relative_path"]) if not row["tier_id"] else None  # Hot storage that is not there is refused here, as before
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=503, detail="Assigned recording storage is unavailable") from exc
-        if not unlink_many_if_unleased(paths):
+        if not remove_segment_files(segments):
             raise HTTPException(status_code=409, detail="Archived camera footage is currently being played")
         db.execute("DELETE FROM recording_segments WHERE camera_id=?", (camera_id,))
         # Including detections between motion clips: nothing of this camera's recorded activity remains.
@@ -215,6 +216,7 @@ def delete_archived_camera_footage(
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "delete_camera_footage", "camera", camera_id,
                     json.dumps({"segments_deleted": len(segments)}, separators=(",", ":"))))
+    tiering.discard_objects(segments)  # Copies in object stores go once the rows are gone, outside the write lock
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

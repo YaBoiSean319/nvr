@@ -61,3 +61,14 @@ Measured here (not a post-merge check): the plate pipeline, on a labelled sample
   - Evidence:
 
 Tested here with two real NVR processes and a stand-in recorder that writes a small footage file per camera each second (the real decision whether to record is the production one; the ffmpeg pull from a camera is not exercised on takeover): the standby takes over within the silence, records every camera, stops when the primary returns before the primary records, and hands its footage back into the primary's index, where it verifies.
+
+### Storage tiering (#144)
+
+- [ ] **Unchecked.** Your object store, and real volumes.
+  - Version:
+  - Environment: the object store (AWS S3, MinIO, B2, Wasabi...: endpoint, region, whether it needs path-style addressing and TLS), the recorder's volumes, the cold folder (disk or share).
+  - Steps: add the tier and confirm the check passes; set a policy for a volume with an age under the retention days and confirm footage moves (rate and bandwidth as set); play a moved segment from a bucket and from a folder in Playback, export across hot and cold footage, and verify a range (Playback's footage verification) across both; hold a moved segment and a hot one and confirm holds work; stop the store mid-move (or cut the network) and confirm the hot copies stay and the tier raises an incident, then confirm moving resumes; let retention delete a moved segment and confirm the object is gone from the bucket.
+  - Owner:
+  - Evidence:
+
+Tested here: a local folder tier and an S3-compatible stand-in that checks AWS Signature Version 4 and upload hashes (the signing code reproduces two examples AWS publishes); moves, playback with ranges, holds, exports, interrupted moves, the chain across tiers, retention and deletion. The CI workflow runs the same against MinIO when it can start it; that leg could not be run where this was built.

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.concurrency import run_in_threadpool
 
 from app import insights, privacy, search
 from app.api.playback import _segment_zones
@@ -116,7 +117,7 @@ async def reference_frame(camera_id: str, user: CurrentUser, at: str | None = Qu
     if not ffmpeg:
         raise HTTPException(status_code=503, detail="A still cannot be extracted without FFmpeg")
     try:
-        path = recording_file_path(row["relative_path"])
+        path = await run_in_threadpool(recording_file_path, row["relative_path"])
     except (OSError, ValueError):
         raise HTTPException(status_code=410, detail="The recording is unavailable") from None
     if not path.is_file():

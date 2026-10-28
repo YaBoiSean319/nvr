@@ -1,4 +1,4 @@
-"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat, configuration backups, event digests, camera health, building-system events and Home Assistant, and the multi-site console's site health, and the failover recorder's lease, configuration copy and takeover."""
+"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat, configuration backups, event digests, camera health, building-system events and Home Assistant, and the multi-site console's site health, and the failover recorder's lease, configuration copy and takeover, and the move of older footage to cold storage tiers."""
 from __future__ import annotations
 
 from app.backup import BackupManager
@@ -16,6 +16,7 @@ from app.footage_chain import FootageChainManager
 from app.ptz import PtzTourManager
 from app.rule_actions import RuleActionManager
 from app.self_test import SelfTestManager
+from app.tiering import TieringManager
 from app.webhooks import WebhookManager
 from app.workers import runtime
 
@@ -38,6 +39,7 @@ class BackgroundService:
         self.home_assistant = HomeAssistantManager()
         self.console = ConsoleManager()
         self.failover = FailoverManager()
+        self.tiering = TieringManager()
 
     async def start(self) -> None:
         await self.webhooks.start()
@@ -56,8 +58,10 @@ class BackgroundService:
         await self.home_assistant.start()
         await self.console.start()
         await self.failover.start()
+        await self.tiering.start()
 
     async def stop(self) -> None:
+        await self.tiering.stop()
         await self.failover.stop()
         await self.console.stop()
         await self.home_assistant.stop()

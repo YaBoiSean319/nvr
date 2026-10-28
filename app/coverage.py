@@ -62,7 +62,7 @@ def timeline(db: sqlite3.Connection, camera_id: str, start: datetime, end: datet
     start_text, end_text = start.isoformat(), end.isoformat()
     bound = limit if limit is not None else -1  # SQLite: a negative LIMIT is no limit.
     segments = db.execute(
-        "SELECT id,starts_at,ends_at,size_bytes,source FROM recording_segments "
+        "SELECT id,starts_at,ends_at,size_bytes,source,tier_id IS NOT NULL AS archived FROM recording_segments "
         "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at LIMIT ?",
         (camera_id, end_text, start_text, bound)).fetchall()
     coverage = [dict(row) for row in db.execute(

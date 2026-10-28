@@ -4,8 +4,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from .retention import unlink_if_unleased
-from .storage import recording_file_path
+from .storage import remove_segment_files, segment_available
 from .store import connect
 
 
@@ -26,8 +25,7 @@ def preserve_segment(camera_id: str, segment_id: int, actor_id: int, expires_in_
         if segment is None: raise LookupError("Recorded interval not found")
         existing=active_hold(db,segment_id)
         if existing: raise FileExistsError("Recorded interval is already preserved (by a hold or a case)")
-        path=recording_file_path(segment["relative_path"])
-        if not path.is_file(): raise FileNotFoundError("Recorded interval is unavailable")
+        if not segment_available(segment["relative_path"]): raise FileNotFoundError("Recorded interval is unavailable")
         db.execute("INSERT INTO recording_holds(id,segment_id,camera_id,created_by,expires_at) VALUES(?,?,?,?,?)",(hold_id,segment_id,camera_id,actor_id,expires))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (actor_id,"preserve","recording_segment",str(segment_id),json.dumps({"camera_id":camera_id,"expires_at":expires},separators=(",",":"))))
@@ -50,14 +48,15 @@ def release_segment_hold(camera_id: str, segment_id: int, actor_id: int) -> None
 def delete_segment(camera_id: str, segment_id: int, actor_id: int) -> None:
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        segment=db.execute("SELECT id,relative_path FROM recording_segments WHERE id=? AND camera_id=?",(segment_id,camera_id)).fetchone()
+        segment=db.execute("SELECT id,relative_path,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE id=? AND camera_id=?",(segment_id,camera_id)).fetchone()
         if segment is None: raise LookupError("Recorded interval not found")
         if active_hold(db,segment_id): raise PermissionError("Preserved footage cannot be deleted")
-        path=recording_file_path(segment["relative_path"])
-        if not unlink_if_unleased(path): raise BlockingIOError("Recorded interval is currently being played")
+        if not remove_segment_files([segment]): raise BlockingIOError("Recorded interval is currently being played")
         db.execute("DELETE FROM recording_segments WHERE id=?",(segment_id,))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (actor_id,"delete","recording_segment",str(segment_id),json.dumps({"camera_id":camera_id},separators=(",",":"))))
+    from .tiering import discard_objects
+    discard_objects([segment])  # A copy in an object store goes once the row is gone
 
 
 def get_segment_hold(camera_id: str, segment_id: int) -> dict[str, object]:

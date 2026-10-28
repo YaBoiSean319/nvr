@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
@@ -115,7 +116,7 @@ async def play_segment(
     zones = _segment_zones(user, camera_id, row["starts_at"], unmasked)
     from app.storage import recording_file_path
     try:
-        path = recording_file_path(row["relative_path"])
+        path = await run_in_threadpool(recording_file_path, row["relative_path"])  # Footage on a cold tier may have to be fetched: not on the event loop
     except (OSError, ValueError):
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
     acquire_playback(path)
@@ -161,7 +162,7 @@ async def snapshot_segment(
         raise HTTPException(status_code=503, detail="Snapshot extraction is unavailable")
     from app.storage import recording_file_path
     try:
-        path = recording_file_path(row["relative_path"])
+        path = await run_in_threadpool(recording_file_path, row["relative_path"])
     except (OSError, ValueError):
         raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
     if not path.is_file():

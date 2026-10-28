@@ -215,7 +215,7 @@ def check_links(links: list[dict[str, Any]], first_prev: str | None = None) -> s
 
 def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
     """Check a camera's footage in [start, end) against its signed chain."""
-    from .storage import recording_file_path
+    from .storage import recording_file_path, segment_available
 
     # Stored times are UTC ISO text, so compare in UTC.
     start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
@@ -251,7 +251,7 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
         elif link is None:
             # Not hashed yet. Footage long closed whose file is gone was lost before it could be hashed.
             try:
-                lost = segment["ends_at"] < overdue and not recording_file_path(segment["relative_path"]).is_file()
+                lost = segment["ends_at"] < overdue and not segment_available(segment["relative_path"])
             except (OSError, ValueError):
                 lost = True
             entry["status"] = "missing" if lost else "pending"
