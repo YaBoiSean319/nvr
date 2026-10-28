@@ -159,7 +159,7 @@ class FillTests(BackfillCase):
         self.assertEqual(gap_note(), {"state": "unsupported", "message": backfill.NOT_SUPPORTED})
         with connect() as db:
             db.execute("UPDATE cameras SET backfill_support=NULL")
-            backfill.plan(db, self.camera_id, NOW)
+            backfill.plan_jobs(db, self.camera_id, NOW)
         self.assertEqual(gap_note()["state"], "waiting")
         with connect() as db:
             db.execute("UPDATE backfill_jobs SET state='failed',message='Gave up'")
@@ -310,10 +310,8 @@ class UnsupportedTests(BackfillCase):
         url = f"/api/cameras/{self.plain_id}/backfill"
         self.client.put(url, json={"enabled": False})
         self.client.put(url, json={"enabled": True})
-        self.assertEqual(self.jobs(self.plain_id)[0]["state"], "pending")
-        self.run_backfill()
-        self.assertGreater(len(self.plain.requests), asked)
-        self.assertEqual(self.jobs(self.plain_id)[0]["state"], "unsupported")
+        self.assertGreater(len(self.plain.requests), asked, "switching it on asks the camera at once, without waiting for an outage")
+        self.assertEqual((backfill.support_view(self.plain_id)["state"], self.jobs(self.plain_id)[0]["state"]), ("unsupported", "unsupported"))
 
     def test_a_check_on_request_records_what_the_camera_offers(self):
         shown = self.client.post(f"/api/cameras/{self.plain_id}/backfill/check").json()
@@ -399,6 +397,84 @@ class FailureTests(BackfillCase):
         text = json.dumps(self.jobs()) + json.dumps(backfill.status(self.camera_id))
         self.assertNotIn(self.camera.password, text)
         self.assertNotIn(self.camera.username, text)
+
+
+class RobustnessTests(BackfillCase):
+    def test_live_footage_indexed_after_the_gap_was_found_is_not_fetched_over(self):
+        with connect() as db:
+            backfill.plan_jobs(db, self.camera_id, NOW)
+        self.live_segment(self.camera_id, START + timedelta(seconds=4), 4)  # Late-indexed live footage inside the gap
+        self.run_backfill()
+        live_from, live_to = (START + timedelta(seconds=4)).isoformat(), (START + timedelta(seconds=8)).isoformat()
+        for segment in self.backfilled():
+            self.assertTrue(segment["ends_at"] <= live_from or segment["starts_at"] >= live_to, segment)
+        self.assertEqual(self.jobs()[0]["state"], "done")
+        self.assertAlmostEqual(self.jobs()[0]["filled_seconds"], OUTAGE - 4, delta=1.5)
+
+    def test_an_unexpected_error_leaves_the_job_waiting_to_try_again_not_stuck_running(self):
+        async def broken(*args, **kwargs):
+            raise ValueError("something unexpected")
+        with mock.patch.object(backfill, "fetch_chunk", broken):
+            self.run_backfill()
+        job = self.jobs()[0]
+        self.assertEqual((job["state"], job["attempts"]), ("pending", 1))
+        self.assertIn("something unexpected", job["message"])
+
+    def test_the_camera_login_is_never_in_the_arguments_of_the_process_that_fetches(self):
+        seen: list[tuple] = []
+        original = asyncio.create_subprocess_exec
+
+        async def watch(*args, **kwargs):
+            seen.append(args)
+            return await original(*args, **kwargs)
+        with mock.patch.object(asyncio, "create_subprocess_exec", watch):
+            self.run_backfill(max_chunks=1)
+        fetches = [args for args in seen if "-readrate" in args]
+        self.assertTrue(fetches)
+        text = " ".join(str(item) for args in fetches for item in args)
+        self.assertNotIn(self.camera.password, text)
+        self.assertNotIn(self.camera.username, text)
+        self.assertNotIn("replay", text)
+
+    def test_a_chunk_fetched_again_after_an_interruption_replaces_its_row_instead_of_leaving_stale_figures(self):
+        path = Path(self.temporary.name) / "recordings" / self.camera_id / "backfill-x.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * 300)
+        backfill.BackfillManager._store(self.camera_id, path, START, START + timedelta(seconds=3), 300)
+        path.write_bytes(b"x" * 500)
+        backfill.BackfillManager._store(self.camera_id, path, START, START + timedelta(seconds=4), 500)
+        rows = self.backfilled()
+        self.assertEqual([(row["size_bytes"], row["ends_at"]) for row in rows], [(500, (START + timedelta(seconds=4)).isoformat())])
+
+    def test_a_chunk_that_comes_out_short_leaves_no_hole(self):
+        original = backfill._probe_seconds
+        calls = []
+
+        async def short_first(path):
+            calls.append(1)
+            return min(await original(path), 1.0) if len(calls) == 1 else await original(path)
+        with mock.patch.object(backfill, "_probe_seconds", short_first):
+            self.run_backfill()
+        segments = self.backfilled()
+        self.assertEqual(self.jobs()[0]["state"], "done")
+        self.assertEqual(segments[0]["ends_at"], (START + timedelta(seconds=1)).isoformat())
+        self.assertEqual(segments[1]["starts_at"], segments[0]["ends_at"])  # The next chunk starts where the short one ended
+
+    def test_a_gap_whose_backfilled_footage_retention_removed_says_so_and_a_failed_job_is_retried_when_switched_on_again(self):
+        self.run_backfill()
+        with connect() as db:
+            db.execute("DELETE FROM recording_segments WHERE source='backfill'")
+        gap = self.timeline()["gaps"][0]["backfill"]
+        self.assertEqual(gap["state"], "removed")
+        with connect() as db:
+            db.execute("UPDATE backfill_jobs SET state='failed',attempts=6,message='Gave up'")
+        url = f"/api/cameras/{self.camera_id}/backfill"
+        self.client.put(url, json={"enabled": False})
+        self.client.put(url, json={"enabled": True})
+        job = self.jobs()[0]
+        self.assertEqual((job["state"], job["attempts"]), ("pending", 0))
+        self.run_backfill()
+        self.assertEqual(self.jobs()[0]["state"], "done")
 
 
 class ApiTests(BackfillCase):

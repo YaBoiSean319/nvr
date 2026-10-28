@@ -49,10 +49,13 @@ MIN_LIMIT_KBPS, MAX_LIMIT_KBPS = 64, 1_000_000
 MAX_ATTEMPTS = 6
 BACKOFF_FIRST, BACKOFF_MAX = timedelta(minutes=1), timedelta(minutes=30)
 FETCH_SLACK_SECONDS = 90
+PROTOCOLS = "concat,pipe,file,http,https,rtsp,rtsps,tcp,udp,rtp,tls,crypto"
 # Gaps the camera's own recording can fill: it was running; the NVR was not getting its video (or not running).
 OUTAGES = frozenset({"camera_offline", "stream_error", "worker_restart", "unknown"})
 STATE_WORDS = {"pending": "waiting", "running": "running", "done": "filled", "partial": "partly filled", "failed": "failed", "unsupported": "unsupported"}
 NOT_SUPPORTED = "Backfill not supported: this camera offers no ONVIF Profile G recording search and replay"
+NO_ADDRESS = "Backfill not supported: the camera has no ONVIF address"
+SUPPORTED = "The camera offers ONVIF recording search and replay"
 
 
 def _now() -> datetime:
@@ -102,7 +105,7 @@ async def _connect(row: sqlite3.Row) -> tuple[OnvifClient, Services]:
         device = await client.locate_device(url)
         return client, await client.services(device)
     except BaseException:
-        await client._http.aclose()
+        await client.close()
         raise
 
 
@@ -116,14 +119,25 @@ async def check_support(camera_id: str) -> dict[str, Any]:
         client, services = await _connect(row)
     except OnvifError as exc:
         if exc.code == "unsupported":
-            _remember_support(camera_id, "unsupported", "Backfill not supported: the camera has no ONVIF address")
+            mark_unsupported(camera_id, NO_ADDRESS)
         else:
             _remember_support(camera_id, None, f"Not checked yet: {exc.message}")
         return support_view(camera_id)
     async with client:
         have = {"search", "replay"} <= set(services.urls)
-    _remember_support(camera_id, "supported" if have else "unsupported", "The camera offers ONVIF recording search and replay" if have else NOT_SUPPORTED)
+    if have:
+        _remember_support(camera_id, "supported", SUPPORTED)
+    else:
+        mark_unsupported(camera_id, NOT_SUPPORTED)
     return support_view(camera_id)
+
+
+def mark_unsupported(camera_id: str, message: str) -> None:
+    """Recorded once, for the camera and its waiting jobs; nothing asks the camera again until an administrator asks for a new check."""
+    _remember_support(camera_id, "unsupported", message)
+    with connect() as db:
+        db.execute("UPDATE backfill_jobs SET state='unsupported',message=?,next_attempt_at=NULL,updated_at=? WHERE camera_id=? AND state IN ('pending','running')",
+                   (message, _now().isoformat(), camera_id))
 
 
 def support_view(camera_id: str) -> dict[str, Any]:
@@ -134,7 +148,7 @@ def support_view(camera_id: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------------------------------------------------------------------ planning
 
-def plan(db: sqlite3.Connection, camera_id: str, now: datetime) -> int:
+def plan_jobs(db: sqlite3.Connection, camera_id: str, now: datetime) -> int:
     """Start a job for each outage in the lookback that has none yet. Returns how many were started."""
     end = now - SETTLE
     camera = db.execute("SELECT created_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
@@ -164,7 +178,7 @@ def plan(db: sqlite3.Connection, camera_id: str, now: datetime) -> int:
     return started
 
 
-def annotate(db: sqlite3.Connection, camera_id: str, gaps: list[dict[str, Any]]) -> None:
+def annotate_gaps(db: sqlite3.Connection, camera_id: str, gaps: list[dict[str, Any]]) -> None:
     """Add ``backfill`` to each gap of a timeline: what is being done about it, or why nothing is."""
     if not gaps:
         return
@@ -178,7 +192,10 @@ def annotate(db: sqlite3.Connection, camera_id: str, gaps: list[dict[str, Any]])
             gap["backfill"] = None
             continue
         job = next((item for item in jobs if item["starts_at"] < gap["ends_at"] and item["ends_at"] > gap["starts_at"]), None)
-        if job is not None:
+        if job is not None and job["state"] == "done":
+            # The job filled this span, yet it is a gap again: retention has since deleted the backfilled footage.
+            gap["backfill"] = {"state": "removed", "message": "The footage backfilled for this time is no longer stored"}
+        elif job is not None:
             gap["backfill"] = {"state": STATE_WORDS[job["state"]], "message": job["message"]}
         elif not camera["backfill_enabled"]:
             gap["backfill"] = {"state": "off", "message": "Backfill is not turned on for this camera"}
@@ -212,18 +229,18 @@ async def _probe_seconds(path: Path) -> float:
 
 
 async def fetch_chunk(url: str, offset: float, duration: float, target: Path, readrate: float) -> None:
-    """Copy ``duration`` seconds of a replay, ``offset`` seconds into it, to ``target`` without re-encoding, no faster than ``readrate`` times real time."""
+    """Copy ``duration`` seconds of a replay, ``offset`` seconds into it, to ``target`` without re-encoding, no faster than ``readrate`` times real time.
+    The address, which carries the login, goes to FFmpeg over stdin as the live recorder's does, so it is never in a process listing."""
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("FFmpeg is unavailable")
-    args = [executable, "-nostdin", "-hide_banner", "-loglevel", "error"]
-    if url.startswith("rtsp"):
-        args += ["-rtsp_transport", "tcp"]
-    args += ["-readrate", f"{readrate:.3f}", "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}", "-i", url, "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
-             "-movflags", "+faststart", "-y", str(target)]
-    process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    manifest = (f"ffconcat version 1.0\nfile {url}\n" + ("option rtsp_transport tcp\n" if url.startswith("rtsp") else "") +
+                f"inpoint {offset:.3f}\noutpoint {offset + duration:.3f}\n").encode()
+    args = [executable, "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-protocol_whitelist", PROTOCOLS, "-readrate", f"{readrate:.3f}",
+            "-i", "pipe:0", "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-t", f"{duration:.3f}", "-movflags", "+faststart", "-y", str(target)]
+    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     try:
-        await asyncio.wait_for(process.wait(), timeout=duration / readrate + FETCH_SLACK_SECONDS)
+        await asyncio.wait_for(process.communicate(manifest), timeout=duration / readrate + FETCH_SLACK_SECONDS)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         if process.returncode is None:
             process.kill()
@@ -281,7 +298,7 @@ class BackfillManager:
         with connect() as db:
             cameras = db.execute("SELECT id FROM cameras WHERE backfill_enabled=1 AND enabled=1 AND archived_at IS NULL AND (backfill_support IS NULL OR backfill_support='supported')").fetchall()
             for camera in cameras:
-                plan(db, camera["id"], now)
+                plan_jobs(db, camera["id"], now)
         fetched = 0
         while not self._stopping:
             with connect() as db:
@@ -318,7 +335,7 @@ class BackfillManager:
             client, services = await _connect(row)
         except OnvifError as exc:
             if exc.code == "unsupported":
-                self._unsupported(camera_id, "Backfill not supported: the camera has no ONVIF address")
+                mark_unsupported(camera_id, NO_ADDRESS)
             else:
                 self._fail(job, now, exc.message)
             return 0
@@ -326,10 +343,10 @@ class BackfillManager:
         try:
             async with client:
                 if not {"search", "replay"} <= set(services.urls):
-                    self._unsupported(camera_id, NOT_SUPPORTED)
+                    mark_unsupported(camera_id, NOT_SUPPORTED)
                     return 0
                 if row["backfill_support"] != "supported":
-                    _remember_support(camera_id, "supported", "The camera offers ONVIF recording search and replay")
+                    _remember_support(camera_id, "supported", SUPPORTED)
                 recordings = await client.recordings(services)
                 fetched = await self._fill(job, row, client, services, recordings, now, budget)
         except OnvifError as exc:
@@ -337,21 +354,15 @@ class BackfillManager:
         except asyncio.CancelledError:
             self._update(job_id, state="pending")
             raise
-        except (RuntimeError, OSError, asyncio.TimeoutError) as exc:
-            self._fail(self._fresh(job_id), now, str(exc) or "The camera's replay failed")
+        except Exception as exc:  # noqa: BLE001 - whatever went wrong, the job must not stay "running": it waits and tries again, then gives up
+            log.exception("Backfill job %s failed", job_id)
+            self._fail(self._fresh(job_id), now, str(exc)[:200] or "The camera's replay failed")
         return fetched
 
     @staticmethod
     def _fresh(job_id: str) -> sqlite3.Row:
         with connect() as db:
             return db.execute("SELECT * FROM backfill_jobs WHERE id=?", (job_id,)).fetchone()
-
-    def _unsupported(self, camera_id: str, message: str) -> None:
-        """Recorded once, for the camera and its waiting jobs; nothing asks the camera again until an administrator asks for a new check."""
-        _remember_support(camera_id, "unsupported", message)
-        with connect() as db:
-            db.execute("UPDATE backfill_jobs SET state='unsupported',message=?,next_attempt_at=NULL,updated_at=? WHERE camera_id=? AND state IN ('pending','running')",
-                       (message, _now().isoformat(), camera_id))
 
     async def _fill(self, job: sqlite3.Row, row: sqlite3.Row, client: OnvifClient, services: Services, recordings: list[Recording], now: datetime, budget: int | None) -> int:
         job_id, camera_id = job["id"], job["camera_id"]
@@ -366,6 +377,14 @@ class BackfillManager:
                 if not db.execute("SELECT 1 FROM cameras WHERE id=? AND backfill_enabled=1", (camera_id,)).fetchone():
                     self._update(job_id, state="pending", message="Backfill was turned off")
                     return fetched
+            with connect() as db:
+                # Live footage may have been indexed here since the gap was found: never fetch over it.
+                live_until = db.execute("SELECT MAX(ends_at) FROM recording_segments WHERE camera_id=? AND starts_at<=? AND ends_at>? AND unavailable_at IS NULL",
+                                        (camera_id, cursor.isoformat(), cursor.isoformat())).fetchone()[0]
+                next_live = db.execute("SELECT MIN(starts_at) FROM recording_segments WHERE camera_id=? AND starts_at>? AND unavailable_at IS NULL", (camera_id, cursor.isoformat())).fetchone()[0]
+            if live_until:
+                cursor = max(cursor, _parse(live_until))
+                continue
             recording = next((item for item in sorted(recordings, key=lambda item: item.earliest) if item.latest > cursor and item.earliest < end), None)
             if recording is None:
                 gone = True
@@ -374,7 +393,7 @@ class BackfillManager:
                 skipped += 1
                 cursor = recording.earliest  # The camera has nothing before this
             length = FIRST_CHUNK if bitrate is None else CHUNK
-            chunk_end = min(cursor + length, end, recording.latest)
+            chunk_end = min(cursor + length, end, recording.latest, _parse(next_live) if next_live else end)
             seconds = (chunk_end - cursor).total_seconds()
             if seconds <= 0.5:
                 cursor = chunk_end
@@ -385,14 +404,18 @@ class BackfillManager:
             started = asyncio.get_running_loop().time()
             await fetch_chunk(uri, (cursor - recording.earliest).total_seconds(), seconds, target, readrate_for(limit, bitrate))
             elapsed = max(0.001, asyncio.get_running_loop().time() - started)
-            actual = min(seconds, await _probe_seconds(target)) or seconds
+            actual = min(seconds, await _probe_seconds(target))
+            if actual < 0.5:
+                target.unlink(missing_ok=True)
+                raise RuntimeError("The camera's replay held no footage for that time")
+            advance = seconds if actual >= seconds - 1.0 else actual  # A chunk that came out short leaves no hole: the next one starts where it ended
             size = target.stat().st_size
-            bitrate = size * 8 / 1000 / max(actual, 0.1)
-            self._store(camera_id, target, cursor, cursor + timedelta(seconds=actual), size)
-            cursor = chunk_end
+            bitrate = size * 8 / 1000 / actual
+            self._store(camera_id, target, cursor, cursor + timedelta(seconds=advance), size)
+            cursor += timedelta(seconds=advance)
             fetched += 1
             progress = self._fresh(job_id)
-            self._update(job_id, cursor_at=cursor.isoformat(), filled_seconds=float(progress["filled_seconds"]) + actual, bytes_fetched=int(progress["bytes_fetched"]) + size,
+            self._update(job_id, cursor_at=cursor.isoformat(), filled_seconds=float(progress["filled_seconds"]) + advance, bytes_fetched=int(progress["bytes_fetched"]) + size,
                          observed_kbps=int(size * 8 / 1000 / elapsed), state="running", attempts=0, next_attempt_at=None)
         if self._stopping or (budget is not None and fetched >= budget and cursor < end):
             self._update(job_id, state="pending")
@@ -410,7 +433,9 @@ class BackfillManager:
     def _store(camera_id: str, path: Path, starts: datetime, ends: datetime, size: int) -> None:
         relative = path.resolve().relative_to(recordings_path().resolve()).as_posix()
         with connect() as db:
-            db.execute("INSERT OR IGNORE INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes,source) VALUES(?,?,?,?,?,'backfill')",
+            # A chunk fetched again after an interruption between its file and its cursor replaces the earlier row's figures.
+            db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes,source) VALUES(?,?,?,?,?,'backfill') "
+                       "ON CONFLICT(relative_path) DO UPDATE SET ends_at=excluded.ends_at,size_bytes=excluded.size_bytes",
                        (camera_id, relative, starts.isoformat(), ends.isoformat(), size))
 
 

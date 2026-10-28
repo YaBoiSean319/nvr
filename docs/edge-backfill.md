@@ -13,7 +13,8 @@ Turn it on per camera: **Settings > Cameras > a camera > Recording > Backfill fr
 
 1. The camera's **Search** service lists its recordings and the time each covers (`FindRecordings`, `GetRecordingSearchResults`), and its **Replay** service gives the address to play one from (`GetReplayUri`). The address is used on the host entered for the camera, and never logged.
 2. The span is copied in chunks (the first 10 seconds, then 60 at a time) by FFmpeg with `-c copy`: **no re-encoding**. Each chunk becomes a segment in the index (`source: backfill`, file `backfill-<time>.mp4`) that plays, exports, is held and is deleted by retention like any other.
-3. The camera's own recording may not cover the whole gap (its card was removed, or recorded over). What it has is filled and the job is *partly filled*; a gap it has nothing for is *failed* and not retried.
+3. Live footage that was indexed in the gap meanwhile is never fetched over; a chunk that comes out shorter than asked is followed by one that starts where it ended; the camera's replay address, which carries the login, reaches FFmpeg over stdin and is not in its arguments.
+4. The camera's own recording may not cover the whole gap (its card was removed, or recorded over). What it has is filled and the job is *partly filled*; a gap it has nothing for is *failed* and not retried.
 
 Chunk boundaries follow the nominal times of the request; copying without re-encoding starts at the camera's key frame at or before the time asked, so a backfilled segment can be off by up to one key-frame interval (typically 1-2 seconds).
 
@@ -25,10 +26,11 @@ Chunk boundaries follow the nominal times of the request; copying without re-enc
 
 ## Cameras without Profile G
 
-A camera that offers no Search or Replay service, or has no ONVIF address, is recorded once as **"Backfill not supported"** (the message is on the camera's backfill settings and on its gaps) and is **not asked again**: no retries. **Check the camera** asks now; switching backfill off and on again does too. A camera that cannot be reached at the time is not called unsupported: it is retried as above.
+A camera that offers no Search or Replay service, or has no ONVIF address, is found out as soon as backfill is switched on for it (or at its first outage, or by **Check the camera**) and recorded once as **"Backfill not supported"** (the message is on the camera's backfill settings and on its gaps) and is **not asked again**: no retries. **Check the camera** asks now; switching backfill off and on again does too, and also gives jobs that gave up another go. A camera that cannot be reached at the time is not called unsupported: it is retried as above.
 
 ## Where it shows
 
+- If retention later deletes backfilled footage the gap comes back, marked *removed*, and is not fetched again.
 - The timeline marks backfilled footage with a hatched green bar (legend: *Backfilled from the camera*); its tooltip says it came from the camera's own recording. A gap's tooltip says what backfill is doing about it (*waiting*, *running*, *partly filled*, *failed*, *unsupported*, or *off*).
 - `POST /api/playback/timeline` segments carry `source` (`live` or `backfill`) and gaps carry `backfill` (`{state, message}` or null). `GET /api/cameras/{id}/coverage` lists `backfilled` segments; the coverage report has `backfilled_seconds` per camera (the time counted as covered that came from the camera).
 - `GET /api/cameras/{id}/backfill` shows the setting, support and recent jobs; `PUT` (administrator) sets `enabled` and `limit_kbps`; `POST .../backfill/check` checks support. Changes are in the audit log (`backfill_settings_changed`).

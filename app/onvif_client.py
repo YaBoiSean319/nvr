@@ -164,6 +164,9 @@ class OnvifClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        await self.close()
+
+    async def close(self) -> None:
         await self._http.aclose()
 
     # ----------------------------------------------------------------------------------------------------------------- transport
@@ -438,19 +441,24 @@ class OnvifClient:
             raise OnvifError("malformed", "The camera did not return a stream address for that profile")
         return uri
 
-    def stream_url_with_login(self, uri: str) -> str:
-        """The RTSP address for FFmpeg: the camera's path and port, the host the administrator entered, and the login encoded into it."""
+    def _login_url(self, uri: str, schemes: set[str], words: tuple[str, str, str]) -> str:
+        """An address a camera gave, for FFmpeg: its path and port, the host the administrator entered, and the login encoded into it."""
+        valid, port_noun, address_noun = words
         parts = urlsplit(uri.strip())
-        if parts.scheme not in {"rtsp", "rtsps"} or not parts.hostname:
-            raise OnvifError("unsupported", "The camera did not return a valid RTSP stream address")
+        if parts.scheme not in schemes or not parts.hostname:
+            raise OnvifError("unsupported", f"The camera did not return {valid}")
         try:
             port = parts.port
         except ValueError:
-            raise OnvifError("unsupported", "The camera returned an invalid RTSP port") from None
+            raise OnvifError("unsupported", f"The camera returned an invalid {port_noun}") from None
         if any(char.isspace() or char in "'\\\x00" for char in parts.path + parts.query):
-            raise OnvifError("unsupported", "The camera returned an invalid RTSP address")
+            raise OnvifError("unsupported", f"The camera returned an invalid {address_noun}")
         login = f"{quote(self._username, safe='')}:{quote(self._password, safe='')}@" if self._username else ""
         return urlunsplit((parts.scheme, f"{login}{_netloc(self.host, port)}", parts.path, parts.query, ""))
+
+    def stream_url_with_login(self, uri: str) -> str:
+        """The RTSP address for FFmpeg: the camera's path and port, the host the administrator entered, and the login encoded into it."""
+        return self._login_url(uri, {"rtsp", "rtsps"}, ("a valid RTSP stream address", "RTSP port", "RTSP address"))
 
     # ----------------------------------------------------------------------------------------------------- Profile G (search and replay)
 
@@ -501,18 +509,8 @@ class OnvifClient:
         return uri
 
     def replay_url_with_login(self, uri: str) -> str:
-        """The replay address for FFmpeg: the camera's path and port, the host the administrator entered, and the login encoded into it."""
-        parts = urlsplit(uri.strip())
-        if parts.scheme not in {"rtsp", "rtsps", "http", "https"} or not parts.hostname:
-            raise OnvifError("unsupported", "The camera did not return a valid replay address")
-        try:
-            port = parts.port
-        except ValueError:
-            raise OnvifError("unsupported", "The camera returned an invalid replay port") from None
-        if any(char.isspace() or char in "'\\\x00" for char in parts.path + parts.query):
-            raise OnvifError("unsupported", "The camera returned an invalid replay address")
-        login = f"{quote(self._username, safe='')}:{quote(self._password, safe='')}@" if self._username else ""
-        return urlunsplit((parts.scheme, f"{login}{_netloc(self.host, port)}", parts.path, parts.query, ""))
+        """The replay address for FFmpeg, as ``stream_url_with_login`` makes a stream's (a replay may be RTSP or HTTP)."""
+        return self._login_url(uri, {"rtsp", "rtsps", "http", "https"}, ("a valid replay address", "replay port", "replay address"))
 
     async def service_capabilities(self, services: Services, name: str) -> dict[str, str]:
         """A service's own capability attributes (for example whether Events offers a pull point), or {} when it will not say."""

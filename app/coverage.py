@@ -75,7 +75,7 @@ def timeline(db: sqlite3.Connection, camera_id: str, start: datetime, end: datet
     spans = sorted((max(start, _parse(row["starts_at"])), min(end, _parse(row["ends_at"]))) for row in segments)
     found = gaps(coverage, spans, start, end)
     from . import backfill
-    backfill.annotate(db, camera_id, found)  # What is being done about each outage: filled from the camera's own recording, waiting, or why not
+    backfill.annotate_gaps(db, camera_id, found)  # What is being done about each outage: filled from the camera's own recording, waiting, or why not
     return {"segments": [dict(row) for row in segments], "coverage": coverage, "gaps": found}
 
 

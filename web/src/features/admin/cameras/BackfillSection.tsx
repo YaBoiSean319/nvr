@@ -13,7 +13,7 @@ const JOB_WORD: Record<BackfillJob["state"], string> = {
   unsupported: "Not supported",
 };
 
-const shortTime = (iso: string) => new Date(iso).toLocaleString();
+const dateAndTime = (iso: string) => new Date(iso).toLocaleString();
 
 /**
  * Backfill from the camera's own recording (ONVIF Profile G): switched on per camera, with a bandwidth limit.
@@ -71,7 +71,7 @@ export function BackfillSection({ cameraId }: { cameraId: string }) {
         <ul className="backfill-jobs" aria-label="Recent backfills">
           {data.jobs.slice(0, 5).map(job => (
             <li key={job.id}>
-              <span><strong>{JOB_WORD[job.state]}</strong> · {shortTime(job.starts_at)} – {shortTime(job.ends_at)}{job.filled_seconds ? ` · ${Math.round(job.filled_seconds)} s fetched` : ""}</span>
+              <span><strong>{JOB_WORD[job.state]}</strong> · {dateAndTime(job.starts_at)} – {dateAndTime(job.ends_at)}{job.filled_seconds ? ` · ${Math.round(job.filled_seconds)} s fetched` : ""}</span>
               {job.message ? <span className="muted">{job.message}</span> : null}
             </li>
           ))}
