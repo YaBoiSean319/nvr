@@ -394,7 +394,8 @@ class ReviewTests(RedactionCase):
         stopped, used, old = self.review(), self.analysed(), self.analysed(self.review())
         with connect() as db:
             db.execute("UPDATE redaction_reviews SET state='analysing' WHERE id=?", (stopped["id"],))
-            db.execute("UPDATE redaction_reviews SET state='used' WHERE id=?", (used["id"],))
+            db.execute("INSERT INTO exports(id,camera_ids_json,requested_start,requested_end,status,created_at,updated_at) VALUES('live',?,?,?,'running','x','x')", (json.dumps([self.camera]), START, END))
+            db.execute("UPDATE redaction_reviews SET state='used',export_id='live' WHERE id=?", (used["id"],))
         redaction.recover()
         failed = self.client.get(f"/api/redaction/reviews/{stopped['id']}").json()
         self.assertEqual((failed["state"], failed["error"]), ("failed", "Interrupted by application restart"))
@@ -582,6 +583,25 @@ class ExportTests(RedactionCase):
             self.assertEqual(self.client.post(f"/api/exports/{job_id}/cancel").status_code, 200)
             self.assertEqual(self.wait(job_id)["status"], "cancelled")
         self.assertEqual([item.name for item in (self.root / "exports").iterdir()], [])
+
+    def test_an_export_fails_when_the_footage_changed_since_the_review_and_a_retry_does_not_get_around_it(self):
+        review = self.confirmed()
+        with connect() as db:
+            regions = json.loads(db.execute("SELECT regions_json FROM redaction_reviews WHERE id=?", (review["id"],)).fetchone()[0])
+            self.assertEqual(len(regions["fingerprint"]), 64)
+            db.execute("UPDATE redaction_reviews SET regions_json=? WHERE id=?", (json.dumps({**regions, "fingerprint": "other"}), review["id"]))
+        failed = self.export(review["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("review the range again", failed["error"])
+        self.assertEqual([item.name for item in (self.root / "exports").iterdir()], [])
+
+    def test_the_manifest_says_audio_is_not_redacted_and_a_used_review_is_forgotten_with_its_export(self):
+        review = self.confirmed()
+        archive = self.package(self.export(review["id"]))
+        self.assertIn("not redacted", json.loads(archive.read("metadata.json"))["redaction"]["audio"])
+        later = datetime.now(timezone.utc) + timedelta(days=30)
+        redaction.expire_reviews(later)  # The export has expired by then
+        self.assertEqual(self.client.get(f"/api/redaction/reviews/{review['id']}").status_code, 404)
 
     def test_an_export_without_redaction_is_as_before(self):
         response = self.client.post("/api/exports", json={"camera_ids": [self.camera], "start": START, "end": END})

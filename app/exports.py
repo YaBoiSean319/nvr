@@ -791,6 +791,9 @@ class ExportManager:
             if redaction_review_id:
                 with connect() as db:
                     redaction_regions, metadata["redaction"] = redaction.manifest_entry(db, redaction_review_id)
+                # The review's boxes are keyed to the footage it analysed: if that, or a privacy mask, has changed since, they would land on the wrong frames.
+                if redaction_regions.get("fingerprint") != redaction.fingerprint((camera["camera_id"], camera) for camera in per_camera if camera["spans"]):
+                    raise RuntimeError("The footage or privacy masks changed since the redaction review; review the range again")
             self._progress(job_id, 10)
             union = _union_intervals(per_camera, start, end) if "grid" in output_modes else []
             if union:
@@ -870,10 +873,7 @@ class ExportManager:
                             raise ExportCancelled() from exc
                         finally:
                             render_path.unlink(missing_ok=True)
-                        camera_tracks = [track for track in redaction_regions["tracks"] if track["camera_id"] == camera["camera_id"]]
-                        entry["redaction"] = {"frames": counts["frames"], "blurred_boxes": counts["boxes"],
-                                              "tracks_blurred": sum(1 for track in camera_tracks if track["blur"]), "tracks_kept": sum(1 for track in camera_tracks if not track["blur"]),
-                                              "manual_regions": sum(1 for region in redaction_regions["manual"] if region["camera_id"] == camera["camera_id"])}
+                        entry["redaction"] = redaction.camera_summary(redaction_regions, camera["camera_id"], counts)
                     if camera_audio_enabled:
                         audio_path = work_dir / f"camera-{camera['index']}.m4a"
                         duration = sum((span["source_end"] - span["source_start"]).total_seconds() for span in spans)

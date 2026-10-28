@@ -399,6 +399,14 @@ def _lease(spans: list[dict[str, Any]]) -> list[Path]:
     return held
 
 
+def fingerprint(plans: Iterable[tuple[str, dict[str, Any]]]) -> str:
+    """Which footage (and which privacy zones) a review's boxes belong to. Boxes are keyed to the clip's timeline, so any change to either makes them wrong."""
+    import hashlib
+    return hashlib.sha256(json.dumps(
+        [[camera_id, [[int(span["segment"]["id"]), span["source_start"].isoformat(), span["source_end"].isoformat()] for span in plan["spans"]], plan.get("zones", plan.get("privacy_zones", []))]
+         for camera_id, plan in sorted(plans, key=lambda item: item[0])], sort_keys=True).encode()).hexdigest()
+
+
 def _set(review_id: str, **values: Any) -> None:
     values["updated_at"] = _now().isoformat()
     with connect() as db:
@@ -462,7 +470,7 @@ async def analyse(review_id: str, detector: RedactionDetector | None = None) -> 
                 if number % 25 == 0:
                     _set(review_id, progress=min(95, 1 + int(94 * (index + min(1.0, number / SAMPLE_FPS / max(durations[camera_id], 1))) / len(plans))))
             tracks.extend(link(samples, camera_id))
-        _set(review_id, state="ready", progress=100, error=None, regions_json=json.dumps({"tracks": tracks, "manual": [], "durations": durations}, separators=(",", ":")),
+        _set(review_id, state="ready", progress=100, error=None, regions_json=json.dumps({"tracks": tracks, "manual": [], "durations": durations, "fingerprint": fingerprint(plans)}, separators=(",", ":")),
              models_json=json.dumps({"model": detector.model_id, "kinds": sorted(detector.kinds()), "threshold": THRESHOLD, "sample_fps": SAMPLE_FPS}))
     except asyncio.CancelledError:
         _set(review_id, state="failed", error="Interrupted by application shutdown")
@@ -494,6 +502,10 @@ def expire_reviews(now: datetime | None = None) -> None:
     cutoff = ((now or _now()) - REVIEW_TTL).isoformat()
     with connect() as db:
         db.execute("DELETE FROM redaction_reviews WHERE state NOT IN ('used','queued','analysing') AND updated_at<?", (cutoff,))
+        # A used review stays for a retry only while its export can still be used; its boxes are not kept longer than that.
+        db.execute("DELETE FROM redaction_reviews WHERE state='used' AND updated_at<? AND NOT EXISTS ("
+                   "SELECT 1 FROM exports WHERE exports.id=redaction_reviews.export_id AND ("
+                   "exports.status IN ('queued','running') OR (exports.status='completed' AND exports.expires_at>?)))", (cutoff, (now or _now()).isoformat()))
 
 
 # --------------------------------------------------------------------------------------------------------------------- edits
@@ -590,6 +602,13 @@ def claim_for_export(db: sqlite3.Connection, review_id: str, requester_id: int, 
     db.execute("UPDATE redaction_reviews SET state='used',export_id=?,updated_at=? WHERE id=?", (export_id, _now().isoformat(), review_id))
 
 
+def camera_summary(regions: dict[str, Any], camera_id: str, counts: dict[str, int]) -> dict[str, int]:
+    """What was blurred in one camera's clip, for the manifest."""
+    tracks = [track for track in regions["tracks"] if track["camera_id"] == camera_id]
+    return {"frames": counts["frames"], "blurred_boxes": counts["boxes"], "tracks_blurred": sum(1 for track in tracks if track["blur"]),
+            "tracks_kept": sum(1 for track in tracks if not track["blur"]), "manual_regions": sum(1 for region in regions["manual"] if region["camera_id"] == camera_id)}
+
+
 def manifest_entry(db: sqlite3.Connection, review_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     """The review's regions and the part of an export's manifest that records it."""
     row = db.execute("SELECT * FROM redaction_reviews WHERE id=?", (review_id,)).fetchone()
@@ -600,6 +619,7 @@ def manifest_entry(db: sqlite3.Connection, review_id: str) -> tuple[dict[str, An
     models = json.loads(row["models_json"])
     return regions, {
         "applied": True, "review_id": review_id, "method": "pixelate", "unredacted_copy_included": False, "original_footage_unchanged": True,
+        "audio": "Audio, when included, is the recording's own and is not redacted",
         "kinds": json.loads(row["kinds_json"]),
         "reviewer": {"user_id": row["confirmed_by"], "username": name(row["confirmed_by"]), "confirmed_at": row["confirmed_at"],
                      "last_edited_by": row["edited_by"], "last_edited_at": row["edited_at"]},
