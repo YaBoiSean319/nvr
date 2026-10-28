@@ -8,7 +8,7 @@ Cameras with an ONVIF PTZ service can be moved from Live and from the camera edi
   - **Buttons:** press and hold an arrow to pan or tilt, and **+** or **−** to zoom. Letting go stops the camera.
   - **Keyboard:** with the tile focused, hold the arrow keys and **+** / **−**. Enter or Space also hold a focused button.
   - **Touch:** press and hold works on phones too. Every control is at least 40 px.
-- **Centre on click**, on a Live tile: turn it on, then click a point in the picture to centre the camera there. It is offered for cameras that support relative moves in field-of-view space (`TranslationSpaceFov`). Absolute and generic relative moves give no way to know how far a point in the picture is, so those cameras get the arrows only.
+- **Centre** (Centre on click), on a Live tile: turn it on, then click a point in the picture to centre the camera there. It is offered for cameras that support relative moves in field-of-view space (`TranslationSpaceFov`). Absolute and generic relative moves give no way to know how far a point in the picture is, so those cameras get the arrows only.
 - **Go to preset** recalls a saved position.
 - A move lasts at most 1.5 seconds unless renewed, so a camera stops by itself if the connection drops mid-move. Leaving the window or tab also stops it. Commands reach the camera in the order given.
 
@@ -43,3 +43,18 @@ Open a camera's **PTZ** tab in **Cameras**:
 | `POST` / `PUT` / `DELETE` | `/api/cameras/{id}/ptz/tours[/{tour}]` | administrator | `{name, enabled, steps: [{preset_id, dwell_seconds}], schedule}` |
 
 Commands from someone else while the lease is held answer `409` with the holder's name. A camera that refuses a command answers `502`, without echoing the camera's reply.
+
+## Auto-tracking
+
+A PTZ camera can follow a person or vehicle. The server steers it from the AI worker's detections, to keep the object centred and a set size.
+
+- **Start from Live:** on the focused tile of a camera that can pan and tilt, press **Follow**, then click the box of the person or vehicle in the picture. (On the camera's PTZ tab, **Follow** lists the objects in view instead.) Only objects seen in the last few seconds can be chosen. **Stop following** ends it.
+- **Start from a rule:** add the action **PTZ camera follows the object** to a rule. When the rule fires, the camera it fired on, if it can pan and tilt, follows the object that triggered it. A rule never takes a camera from a person who is driving it, nor from other tracking: it is left alone and the delivery log says why (`ptz_lease_held`, `ptz_already_tracking`).
+- **The lease:** tracking holds the camera's control lease (shown as the person who started it, or the rule's author) and renews it every pass. Each pass, and each command, first checks the lease is still the tracking's own; without it the tracking ends and nothing is sent. (The check cannot be atomic with the camera: a manual command that lands just after it is followed by that one move, under a second long, and then nothing more from the tracker.) Tours wait while a camera is tracking.
+- **Manual control wins:** a manual command from anyone who may move the camera, or **Take over**, takes the lease and ends the tracking at once. Choosing another object in Live switches the target.
+- **Losing the object:** an object not seen for the lost time (default 5 seconds) stops the camera. If it comes back within the home timeout (default 30 seconds, counted from when it was counted lost) it is followed again; otherwise the camera goes to its home preset, if one is set, the tracking ends and the lease is let go.
+- **Privacy masks:** an object in a privacy-masked area counts as not seen, so the camera never follows what a mask hides, and such objects are not offered for choosing.
+- **Settings** (administrators, the camera's **PTZ** tab): the home preset, the lost time (1 to 60 seconds), the home timeout (5 seconds to an hour), the size to keep the object (share of the picture's height) and whether to zoom. A camera that stops answering ends the tracking after three failed commands.
+- Starting, ending and interrupting are in the audit log (`ptz_tracking_started`, `ptz_tracking_ended` with the reason, `ptz_tracking_interrupted`, `ptz_tracking_settings_changed`). Tracking runs in the background worker; each command moves the camera for under a second, so a stalled NVR leaves it still.
+
+How it steers: the object's newest box is compared with the centre of the picture, and pan and tilt speeds are proportional to the error, with a dead zone so a centred object gets no command; zoom follows the object's size once it is near the centre. Detections come from the AI worker, so how smoothly a camera follows depends on how often it analyses that camera.

@@ -1,4 +1,4 @@
-"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat, configuration backups, event digests, camera health, building-system events and Home Assistant, and the multi-site console's site health, and the failover recorder's lease, configuration copy and takeover, and the move of older footage to cold storage tiers."""
+"""The background worker: signed webhook delivery, push notifications, rule actions, PTZ tours and auto-tracking, footage signing, the nightly self-test and weekly coverage report, the weekly camera hardening checks, the recheck of failed camera capabilities, the external heartbeat, configuration backups, event digests, camera health, building-system events and Home Assistant, and the multi-site console's site health, and the failover recorder's lease, configuration copy and takeover, and the move of older footage to cold storage tiers."""
 from __future__ import annotations
 
 from app.backup import BackupManager
@@ -14,6 +14,7 @@ from app.home_assistant import HomeAssistantManager
 from app.push import PushManager
 from app.footage_chain import FootageChainManager
 from app.ptz import PtzTourManager
+from app.ptz_tracking import PtzTrackingManager
 from app.rule_actions import RuleActionManager
 from app.self_test import SelfTestManager
 from app.tiering import TieringManager
@@ -27,6 +28,7 @@ class BackgroundService:
         self.push = PushManager()
         self.rule_actions = RuleActionManager()
         self.ptz_tours = PtzTourManager()
+        self.ptz_tracking = PtzTrackingManager()
         self.footage_chain = FootageChainManager()
         self.self_test = SelfTestManager()
         self.hardening = HardeningManager()
@@ -46,6 +48,7 @@ class BackgroundService:
         await self.push.start()
         await self.rule_actions.start()
         await self.ptz_tours.start()
+        await self.ptz_tracking.start()
         await self.footage_chain.start()
         await self.self_test.start()
         await self.hardening.start()
@@ -74,6 +77,7 @@ class BackgroundService:
         await self.hardening.stop()
         await self.self_test.stop()
         await self.footage_chain.stop()
+        await self.ptz_tracking.stop()
         await self.ptz_tours.stop()
         await self.rule_actions.stop()
         await self.push.stop()

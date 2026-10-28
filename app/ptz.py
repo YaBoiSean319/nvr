@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .audit import record
 from .credentials import decrypt
 from .onvif_ptz import Capabilities, PtzClient, PtzUnsupported
 from .scheduling import mode_at
@@ -89,24 +90,35 @@ def lease_view(db: sqlite3.Connection, camera_id: str, user_id: int) -> dict[str
                      (camera_id, _now().isoformat())).fetchone()
     if row is None:
         return None
-    return {"holder": row["username"], "mine": int(row["user_id"]) == user_id, "acquired_at": row["acquired_at"], "expires_at": row["expires_at"]}
+    return {"holder": row["username"], "mine": int(row["user_id"]) == user_id, "acquired_at": row["acquired_at"], "expires_at": row["expires_at"],
+            "tracking": row["purpose"] == "tracking"}
 
 
-def acquire(camera_id: str, user_id: int, *, take_over: bool = False) -> dict[str, Any]:
-    """Take or renew the lease. Someone else's live lease refuses, unless an administrator takes over."""
+def acquire(camera_id: str, user_id: int, *, take_over: bool = False, purpose: str = "manual") -> dict[str, Any]:
+    """Take or renew the lease. Someone else's live lease refuses, unless an administrator takes over.
+
+    Manual control always wins over auto-tracking: a manual command, from anyone who may move the camera, takes the lease from a tracking lease
+    and ends the tracking. Tracking itself never takes a lease somebody else holds."""
     now = _now()
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            current = db.execute("SELECT l.user_id,l.acquired_at,u.username FROM ptz_leases l JOIN users u ON u.id=l.user_id WHERE l.camera_id=? AND l.expires_at>?",
+            current = db.execute("SELECT l.user_id,l.acquired_at,l.purpose,u.username FROM ptz_leases l JOIN users u ON u.id=l.user_id WHERE l.camera_id=? AND l.expires_at>?",
                                  (camera_id, now.isoformat())).fetchone()
-            if current is not None and int(current["user_id"]) != user_id and not take_over:
+            interrupts = current is not None and current["purpose"] == "tracking" and purpose == "manual"
+            if current is not None and int(current["user_id"]) != user_id and not take_over and not interrupts:
                 raise LeaseHeld(current["username"])
-            acquired = current["acquired_at"] if current is not None and int(current["user_id"]) == user_id else now.isoformat()
-            db.execute("INSERT INTO ptz_leases(camera_id,user_id,acquired_at,expires_at) VALUES(?,?,?,?) "
-                       "ON CONFLICT(camera_id) DO UPDATE SET user_id=excluded.user_id,acquired_at=excluded.acquired_at,expires_at=excluded.expires_at",
-                       (camera_id, user_id, acquired, (now + timedelta(seconds=LEASE_SECONDS)).isoformat()))
-            if take_over and current is not None and int(current["user_id"]) != user_id:
+            same = current is not None and int(current["user_id"]) == user_id and current["purpose"] == purpose
+            acquired = current["acquired_at"] if same else now.isoformat()
+            db.execute("INSERT INTO ptz_leases(camera_id,user_id,acquired_at,expires_at,purpose) VALUES(?,?,?,?,?) "
+                       "ON CONFLICT(camera_id) DO UPDATE SET user_id=excluded.user_id,acquired_at=excluded.acquired_at,expires_at=excluded.expires_at,purpose=excluded.purpose",
+                       (camera_id, user_id, acquired, (now + timedelta(seconds=LEASE_SECONDS)).isoformat(), purpose))
+            if purpose == "manual":
+                # Whoever drives, tracking stops at once: the tracker finds its row gone and its lease replaced.
+                ended = db.execute("DELETE FROM ptz_tracking WHERE camera_id=?", (camera_id,)).rowcount
+                if ended:
+                    record(db, user_id, "ptz_tracking_interrupted", "camera", camera_id, by="manual control")
+            if take_over and current is not None and int(current["user_id"]) != user_id and current["purpose"] != "tracking":
                 db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                            (user_id, "ptz_lease_taken_over", "camera", camera_id, json.dumps({"from": current["username"]})))
         except BaseException:
@@ -118,7 +130,9 @@ def acquire(camera_id: str, user_id: int, *, take_over: bool = False) -> dict[st
 
 def release(camera_id: str, user_id: int) -> None:
     with connect() as db:
-        db.execute("DELETE FROM ptz_leases WHERE camera_id=? AND user_id=?", (camera_id, user_id))
+        if db.execute("DELETE FROM ptz_leases WHERE camera_id=? AND user_id=?", (camera_id, user_id)).rowcount:
+            if db.execute("DELETE FROM ptz_tracking WHERE camera_id=?", (camera_id,)).rowcount:  # Letting go of the lease ends any tracking it carried
+                record(db, user_id, "ptz_tracking_ended", "camera", camera_id, reason="lease_released")
 
 
 def lease_held(db: sqlite3.Connection, camera_id: str) -> bool:

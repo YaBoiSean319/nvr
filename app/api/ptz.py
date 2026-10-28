@@ -5,14 +5,17 @@ may move cameras; presets and tours are for administrators.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field, field_validator
 
-from app import ptz
+from app import ptz, ptz_tracking
+from app.api.detections import recent_objects
 from app.api.rules import RuleSchedule
+from app.audit import record
 from app.onvif_ptz import PtzUnsupported
 from app.principal import Administrator, CurrentUser, Principal
 from app.store import connect
@@ -37,6 +40,18 @@ class CentreRequest(BaseModel):
 
 class LeaseRequest(BaseModel):
     take_over: bool = False
+
+
+class TrackRequest(BaseModel):
+    track_id: str = Field(min_length=1, max_length=64)
+
+
+class TrackingSettingsRequest(BaseModel):
+    home_preset_id: str | None = Field(default=None, max_length=64)
+    lost_seconds: float = Field(default=5, ge=1, le=60)
+    home_timeout_seconds: int = Field(default=30, ge=5, le=3600)
+    target_size: float = Field(default=0.4, ge=0.1, le=0.9)
+    zoom_enabled: bool = True
 
 
 class PresetRequest(BaseModel):
@@ -99,14 +114,14 @@ async def _command(camera_id: str, user: Principal, action) -> dict[str, object]
 
 @router.get("/api/cameras/{camera_id}/ptz")
 async def get_ptz(camera_id: str, user: CurrentUser) -> dict[str, object]:
-    with connect() as db:
-        if db.execute("SELECT 1 FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Camera not found")
+    await _visible_camera(camera_id, user)
     found, reason = await ptz.capabilities(camera_id)
     with connect() as db:
         return {"supported": found is not None, "reason": reason, "capabilities": ptz.capability_view(found),
                 "lease": ptz.lease_view(db, camera_id, int(user["id"])), "lease_seconds": ptz.LEASE_SECONDS,
-                "presets": ptz.presets(db, camera_id), "tours": ptz.tours(db, camera_id)}
+                "presets": ptz.presets(db, camera_id), "tours": ptz.tours(db, camera_id),
+                "tracking": ptz_tracking.current(db, camera_id),
+                "tracking_settings": ptz_tracking.settings_for(db, camera_id)}
 
 
 @router.post("/api/cameras/{camera_id}/ptz/lease")
@@ -142,6 +157,72 @@ async def centre(camera_id: str, payload: CentreRequest, user: CurrentUser) -> d
     if found is None or not found.centre:
         raise HTTPException(status_code=409, detail="This camera cannot centre on a point.")
     return await _command(camera_id, user, lambda client: client.centre(payload.x, payload.y))
+
+
+def _tracking_now(camera_id: str) -> dict[str, object] | None:
+    with connect() as db:
+        return ptz_tracking.current(db, camera_id)
+
+
+def _check_visible(camera_id: str, user: Principal) -> None:
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone() is None or not user.access.can_see(camera_id):
+            raise HTTPException(status_code=404, detail="Camera not found")
+
+
+async def _visible_camera(camera_id: str, user: Principal) -> None:
+    await asyncio.to_thread(_check_visible, camera_id, user)
+
+
+@router.get("/api/cameras/{camera_id}/ptz/targets")
+def tracking_targets(camera_id: str, user: CurrentUser) -> dict[str, object]:
+    """The objects in view now that the camera could follow, and the one it is following."""
+    objects = recent_objects(user, camera_id)
+    return {"objects": objects, "tracking": _tracking_now(camera_id)}
+
+
+@router.post("/api/cameras/{camera_id}/ptz/track")
+async def start_tracking(camera_id: str, payload: TrackRequest, user: CurrentUser) -> dict[str, object]:
+    """Have the camera follow an object: it keeps it centred and sized, holding the control lease while it does."""
+    await _visible_camera(camera_id, user)
+    try:
+        tracking = await ptz_tracking.start(camera_id, payload.track_id, int(user["id"]), source="operator")
+    except ptz_tracking.TrackingRefused as exc:
+        raise HTTPException(status_code=409 if exc.code in {"lease_held", "already_tracking", "track_gone"} else 422, detail=str(exc)) from exc
+    return {"tracking": tracking}
+
+
+@router.delete("/api/cameras/{camera_id}/ptz/track", status_code=status.HTTP_204_NO_CONTENT)
+async def stop_tracking(camera_id: str, user: CurrentUser) -> Response:
+    """Stop following: the camera stops and the lease is let go. Anyone who may move the camera can."""
+    await _visible_camera(camera_id, user)
+    if await asyncio.to_thread(_tracking_now, camera_id) is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    await _command(camera_id, user, lambda client: client.stop())  # A manual command: it ends the tracking and stops the camera
+    ptz.release(camera_id, int(user["id"]))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/api/cameras/{camera_id}/ptz/tracking")
+def save_tracking_settings(camera_id: str, payload: TrackingSettingsRequest, user: Administrator) -> dict[str, object]:
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM cameras WHERE id=? AND archived_at IS NULL", (camera_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Camera not found")
+            if payload.home_preset_id and db.execute("SELECT 1 FROM ptz_presets WHERE id=? AND camera_id=?", (payload.home_preset_id, camera_id)).fetchone() is None:
+                raise HTTPException(status_code=422, detail="The home preset is not one of this camera's presets")
+            db.execute("INSERT INTO ptz_tracking_settings(camera_id,home_preset_id,lost_seconds,home_timeout_seconds,target_size,zoom_enabled) VALUES(?,?,?,?,?,?) "
+                       "ON CONFLICT(camera_id) DO UPDATE SET home_preset_id=excluded.home_preset_id,lost_seconds=excluded.lost_seconds,"
+                       "home_timeout_seconds=excluded.home_timeout_seconds,target_size=excluded.target_size,zoom_enabled=excluded.zoom_enabled,"
+                       "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                       (camera_id, payload.home_preset_id, payload.lost_seconds, payload.home_timeout_seconds, payload.target_size, int(payload.zoom_enabled)))
+            record(db, int(user["id"]), "ptz_tracking_settings_changed", "camera", camera_id, **payload.model_dump())
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+        return ptz_tracking.settings_for(db, camera_id)
 
 
 @router.post("/api/cameras/{camera_id}/ptz/presets/{preset_id}/go")

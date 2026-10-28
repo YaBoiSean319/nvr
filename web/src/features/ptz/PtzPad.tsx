@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { ApiError } from "@/api/client";
 import { useMe } from "@/api/queries";
-import { centre, getPtz, goToPreset, move, ptzKey, releaseLease, stop, takeOver } from "./api";
+import { centre, getPtz, getTargets, goToPreset, move, ptzKey, releaseLease, startTracking, stop, stopTracking, takeOver, targetsKey } from "./api";
 
 type Direction = { pan: number; tilt: number; zoom: number };
 
@@ -37,6 +37,7 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
   const state = useQuery({ queryKey: ptzKey(cameraId), queryFn: ({ signal }) => getPtz(cameraId, signal), refetchInterval: 5_000 });
   const [error, setError] = useState<string | null>(null);
   const [centring, setCentring] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const held = useRef<{ timer: number; direction: Direction } | null>(null);
   // Commands reach the camera in the order given: a quick tap's stop must never overtake its move.
   const queue = useRef<Promise<unknown>>(Promise.resolve());
@@ -114,10 +115,15 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const data = state.data;
+  // The objects in view, while choosing one to follow (they are read from what the AI worker has just stored).
+  const targets = useQuery({ queryKey: targetsKey(cameraId), queryFn: ({ signal }) => getTargets(cameraId, signal), enabled: choosing, refetchInterval: 1_000 });
   if (!data) return null;
   if (!data.supported) return compact ? null : <p className="muted field-hint">{data.reason ?? "This camera cannot be moved."}</p>;
   const lease = data.lease;
-  const blocked = Boolean(lease && !lease.mine);
+  // Anyone may take the controls from tracking: manual control always wins, and ends it.
+  const blocked = Boolean(lease && !lease.mine && !lease.tracking);
+  const tracking = data.tracking;
+  const follow = (trackId: string) => void startTracking(cameraId, trackId).then(() => { setError(null); setChoosing(false); refresh(); }).catch(failure => { setError(problem(failure)); setChoosing(false); });
   const holdProps = (direction: Direction, label: string) => ({
     type: "button" as const, className: "button icon-button ptz-button", "aria-label": label, title: label, disabled: blocked,
     onPointerDown: (event: React.PointerEvent) => { event.preventDefault(); event.currentTarget.setPointerCapture?.(event.pointerId); press(direction); },
@@ -128,6 +134,26 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
 
   return (
     <>
+      {choosing && !blocked && !compact ? (
+        <ul className="choice-list ptz-target-list" aria-label="Objects in view">
+          {(targets.data?.objects ?? []).map(object => (
+            <li key={object.track_id}><button type="button" className="button" onClick={() => follow(object.track_id)}>Follow {object.label} ({Math.round(object.confidence * 100)}%)</button></li>
+          ))}
+          {targets.data && !targets.data.objects.length ? <li className="muted field-hint" role="status">No person or vehicle in view.</li> : null}
+        </ul>
+      ) : null}
+      {choosing && !blocked && compact ? (
+        <div className="ptz-target-layer" role="group" aria-label="Choose an object to follow">
+          {(targets.data?.objects ?? []).map(object => (
+            <button key={object.track_id} type="button" className="ptz-target" aria-label={`Follow ${object.label}`} data-label={object.label}
+                    style={{ left: `${object.box.x * 100}%`, top: `${object.box.y * 100}%`, width: `${object.box.width * 100}%`, height: `${object.box.height * 100}%` }}
+                    onClick={event => { event.stopPropagation(); follow(object.track_id); }}>
+              <span>{object.label}</span>
+            </button>
+          ))}
+          {targets.data && !targets.data.objects.length ? <p className="ptz-target-empty" role="status">No person or vehicle in view.</p> : null}
+        </div>
+      ) : null}
       {centring && !blocked ? (
         <div className="ptz-centre-layer" role="button" tabIndex={-1} aria-label="Centre the camera on a point"
              onClick={event => {
@@ -146,6 +172,12 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
             ) : null}
           </p>
         ) : null}
+        {tracking ? (
+          <p className="ptz-lease ptz-following" role="status" data-state={tracking.state}>
+            {tracking.state === "lost" ? `Lost the ${tracking.label}` : `Following the ${tracking.label}`}
+            <button type="button" className="button" onClick={() => void stopTracking(cameraId).then(refresh).catch(failure => setError(problem(failure)))}>Stop following</button>
+          </p>
+        ) : null}
         {data.capabilities?.pan_tilt ? (
           <div className="ptz-arrows">
             {DIRECTIONS.map(item => <button key={item.key} {...holdProps(item.direction, item.label)} data-direction={item.key}>{item.symbol}</button>)}
@@ -154,8 +186,12 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
         <div className="ptz-row">
           {data.capabilities?.zoom ? ZOOM.map(item => <button key={item.label} {...holdProps(item.direction, item.label)}>{item.symbol}</button>) : null}
           {compact && data.capabilities?.centre ? (
-            <button type="button" className="button ptz-button" aria-pressed={centring} disabled={blocked} onClick={() => setCentring(!centring)}
-                    title="Click the picture to centre the camera there">Centre on click</button>
+            <button type="button" className="button ptz-button" aria-label="Centre on click" aria-pressed={centring} disabled={blocked} onClick={() => setCentring(!centring)}
+                    title="Click the picture to centre the camera there">Centre</button>
+          ) : null}
+          {data.capabilities?.pan_tilt && !tracking ? (
+            <button type="button" className="button ptz-button" aria-pressed={choosing} disabled={blocked} onClick={() => { setChoosing(!choosing); setCentring(false); }}
+                    title="Pick a person or vehicle for the camera to follow">Follow</button>
           ) : null}
           {data.presets.length ? (
             <select className="ptz-presets" aria-label="Go to preset" value="" disabled={blocked}

@@ -1,6 +1,9 @@
 import { api } from "@/api/client";
 
-export interface PtzLease { holder: string; mine: boolean; acquired_at: string; expires_at: string }
+export interface PtzLease { holder: string; mine: boolean; acquired_at: string; expires_at: string; tracking: boolean }
+export interface PtzTracking { track_id: string; label: string; source: "operator" | "rule"; state: "tracking" | "lost"; started_at: string; last_seen_at: string; lost_since: string | null }
+export interface PtzTarget { track_id: string; label: string; confidence: number; seen_at: string; box: { x: number; y: number; width: number; height: number } }
+export interface TrackingSettings { home_preset_id: string | null; lost_seconds: number; home_timeout_seconds: number; target_size: number; zoom_enabled: boolean }
 export interface PtzPreset { id: string; name: string; token: string }
 export interface TourStep { preset_id: string; dwell_seconds: number }
 export interface TourSchedule { timezone: string; intervals: { days: number[]; start: string; end: string }[] }
@@ -13,6 +16,8 @@ export interface PtzState {
   lease_seconds: number;
   presets: PtzPreset[];
   tours: PtzTour[];
+  tracking: PtzTracking | null;
+  tracking_settings: TrackingSettings;
 }
 export type TourDefinition = Pick<PtzTour, "name" | "enabled" | "steps" | "schedule">;
 
@@ -33,3 +38,8 @@ export const deletePreset = (cameraId: string, id: string) => api<void>(at(camer
 export const saveTour = (cameraId: string, tour: TourDefinition, id?: string) =>
   api<PtzTour>(at(cameraId, id ? `/tours/${id}` : "/tours"), { method: id ? "PUT" : "POST", body: tour });
 export const deleteTour = (cameraId: string, id: string) => api<void>(at(cameraId, `/tours/${id}`), { method: "DELETE" });
+export const targetsKey = (cameraId: string) => ["ptz", cameraId, "targets"] as const;
+export const getTargets = (cameraId: string, signal?: AbortSignal) => api<{ objects: PtzTarget[]; tracking: PtzTracking | null }>(at(cameraId, "/targets"), { signal });
+export const startTracking = (cameraId: string, trackId: string) => api<{ tracking: PtzTracking }>(at(cameraId, "/track"), { method: "POST", body: { track_id: trackId } });
+export const stopTracking = (cameraId: string) => api<void>(at(cameraId, "/track"), { method: "DELETE" });
+export const saveTrackingSettings = (cameraId: string, settings: TrackingSettings) => api<TrackingSettings>(at(cameraId, "/tracking"), { method: "PUT", body: settings });

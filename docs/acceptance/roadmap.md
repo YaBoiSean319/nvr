@@ -72,3 +72,15 @@ Tested here with two real NVR processes and a stand-in recorder that writes a sm
   - Evidence:
 
 Tested here: a local folder tier and an S3-compatible stand-in that checks AWS Signature Version 4 and upload hashes (the signing code reproduces two examples AWS publishes); moves, playback with ranges, holds, exports, interrupted moves, the chain across tiers, retention and deletion. The CI workflow runs the same against MinIO when it can start it; that leg could not be run where this was built.
+
+### PTZ auto-tracking (#145)
+
+- [ ] **Unchecked.** A real PTZ camera.
+  - Version:
+  - Environment: the camera (model, firmware, whether it supports continuous move and zoom), its AI analysis rate, the picture size and lighting.
+  - Steps: set a home preset and timeouts on the camera's PTZ tab; walk through the scene, choose yourself from Live with **Follow**, and confirm the camera keeps you centred without hunting or overshooting (note the speeds if it does, as the gains are fixed), that it zooms to the size set, and that it keeps up as you leave the picture; hide so the camera loses you and confirm it stops, then returns to the home preset after the timeout; press an arrow in Live while it follows and confirm tracking ends at once; start tracking from a rule that watches a zone; confirm a person driving the camera is never taken over by a rule.
+  - Owner:
+  - Evidence:
+
+Tested here: a camera stand-in that records the ONVIF commands it gets, with a simulated scene whose object walks out of the picture unless the camera follows (the commands keep it within a few percent of the centre), the lease rules, interruption, the lost timeout and home preset, privacy masks, a camera that stops answering, rule starts, and browser journeys. How well a real camera's motors, latency and the AI worker's rate work with the fixed gains is not tested.
+
