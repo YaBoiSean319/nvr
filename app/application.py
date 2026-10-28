@@ -28,6 +28,7 @@ from .capabilities import CapabilityManager
 from .hardening import HardeningManager
 from .self_test import SelfTestManager
 from .ptz import PtzTourManager
+from .digests import DigestManager
 from .rule_actions import RuleActionManager
 from .rules import RulesManager
 from .principal import COOKIE_NAME, current_user, depends_on, scope_for, secure_cookie
@@ -43,6 +44,7 @@ STARTUP_ORDER = (
     ("webhooks", WebhookManager),
     ("push", PushManager),
     ("rule_actions", RuleActionManager),
+    ("digests", DigestManager),
     ("ptz_tours", PtzTourManager),
     ("footage_chain", FootageChainManager),
     ("self_test", SelfTestManager),
@@ -55,7 +57,7 @@ STARTUP_ORDER = (
     ("backups", BackupManager),
 )
 # Detection reads recorder state, and recording should outlive everything else.
-SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "capabilities", "hardening", "self_test", "footage_chain", "ptz_tours", "rule_actions", "push", "webhooks", "heartbeat", "recorders")
+SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "capabilities", "hardening", "self_test", "footage_chain", "ptz_tours", "digests", "rule_actions", "push", "webhooks", "heartbeat", "recorders")
 
 
 def create_app(*, start_workers: bool = True) -> FastAPI:

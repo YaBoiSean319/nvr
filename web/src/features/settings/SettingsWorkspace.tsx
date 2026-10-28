@@ -4,6 +4,7 @@ import { AccessSettings } from "./AccessSettings";
 import { AuditSettings } from "./AuditSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { CoverageSettings } from "./CoverageSettings";
+import { DigestsSettings } from "./DigestsSettings";
 import { DiagnosticsSettings } from "./DiagnosticsSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { HardeningSettings } from "./HardeningSettings";
@@ -22,6 +23,7 @@ const CATEGORIES = {
   audit: { label: "Viewing audit", page: AuditSettings },
   hardening: { label: "Camera hardening", page: HardeningSettings },
   notifications: { label: "Notifications", page: NotificationsSettings },
+  digests: { label: "Digests", page: DigestsSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },
   diagnostics: { label: "Diagnostics", page: DiagnosticsSettings },
 } as const;

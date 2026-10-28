@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useNavigate } from "react-router";
 import { create } from "zustand";
 import { ApiError } from "@/api/client";
 import { useAcknowledgeIncident, useCameras, useExportJobs, useOpenIncidents } from "@/api/queries";
@@ -7,6 +8,7 @@ import { Drawer } from "@/components/Drawer";
 import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
 import { useAlarms } from "@/features/alarms/api";
 import { ExportJobs } from "@/features/exports/ExportJobs";
+import { usePlaybackStore } from "@/features/playback/store";
 import { formatRelative } from "@/lib/time";
 import { summarize, type StatusSummary, type Tone } from "./summary";
 
@@ -26,16 +28,28 @@ export const useAlarmInbox = create<{ open: boolean; alarmId: string | null; set
   openAlarm: id => set({ open: true, alarmId: id }),
 }));
 
-/** A notification opens the app at /?alarm=<id>: show that alarm, and tidy the address. */
-function useAlarmFromAddress() {
+/**
+ * A notification or digest opens the app at /?alarm=<id> (show that alarm), /playback?playback=<camera>&at=<time> (open Playback there) or
+ * /?incident=<id> (open the incidents): do it, and tidy the address.
+ */
+function useLinkFromAddress() {
+  const navigate = useNavigate();
   useEffect(() => {
     const url = new URL(window.location.href);
-    const id = url.searchParams.get("alarm");
-    if (!id) return;
-    useAlarmInbox.getState().openAlarm(id);
-    url.searchParams.delete("alarm");
+    const alarm = url.searchParams.get("alarm");
+    const camera = url.searchParams.get("playback");
+    const at = Date.parse(url.searchParams.get("at") ?? "");
+    const incident = url.searchParams.get("incident");
+    if (!alarm && !camera && !incident) return;
+    if (alarm) useAlarmInbox.getState().openAlarm(alarm);
+    if (camera) {
+      usePlaybackStore.getState().openInPlayback(camera, Number.isNaN(at) ? undefined : at);
+      navigate("/playback");
+    }
+    if (incident) useStatusPanel.getState().show("incidents");
+    for (const key of ["alarm", "playback", "at", "incident"]) url.searchParams.delete(key);
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
-  }, []);
+  }, [navigate]);
 }
 
 function Chip({ tone, label, onClick }: { tone: Tone; label: string; onClick: () => void }) {
@@ -58,7 +72,7 @@ export function StatusArea() {
   const unreachable = cameras.isError || incidents.isError;
   const alarms = useAlarms({ state: "open", camera_id: "", rule_id: "" });
   const inbox = useAlarmInbox();
-  useAlarmFromAddress();
+  useLinkFromAddress();
   const counts = alarms.data?.counts;
   const openAlarms = counts ? counts.new + counts.acknowledged + counts.assigned : 0;
   const alarmLabel = !counts ? "Alarms" : counts.new ? `${counts.new} new alarm${counts.new === 1 ? "" : "s"}` : openAlarms ? `${openAlarms} open alarm${openAlarms === 1 ? "" : "s"}` : "No open alarms";
