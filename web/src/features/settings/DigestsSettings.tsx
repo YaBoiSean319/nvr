@@ -13,18 +13,21 @@ interface Schedule {
 interface Delivery { id: string; action_name: string; status: string; attempt_count: number; last_error: string | null; created_at: string }
 interface ModelSettings { summary_enabled: boolean; configured: boolean; summary_model: string; allow_private: boolean }
 interface ActionDraft { id?: string; type: Kind; name: string; enabled: boolean; url: string; signing_secret: string; allow_private: boolean; topic: string; retain: boolean; saved: boolean }
-interface Draft { id: string | null; name: string; enabled: boolean; group: string; recipient: number | ""; days: number[]; start: string; end: string; afterStart: string; afterEnd: string; summarise: boolean; actions: ActionDraft[] }
+interface Draft { kept: Schedule["scope"] | null; id: string | null; name: string; enabled: boolean; group: string; recipient: number | ""; days: number[]; start: string; end: string; afterStart: string; afterEnd: string; summarise: boolean; actions: ActionDraft[] }
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const KEY = ["admin", "digest-schedules"] as const;
 
 function blank(): Draft {
-  return { id: null, name: "", enabled: true, group: "", recipient: "", days: [0, 1, 2, 3, 4], start: "08:00", end: "16:00", afterStart: "22:00", afterEnd: "06:00", summarise: false, actions: [] };
+  return { kept: null, id: null, name: "", enabled: true, group: "", recipient: "", days: [0, 1, 2, 3, 4], start: "08:00", end: "16:00", afterStart: "22:00", afterEnd: "06:00", summarise: false, actions: [] };
 }
 
 function draftOf(schedule: Schedule): Draft {
   return {
-    id: schedule.id, name: schedule.name, enabled: schedule.enabled, group: schedule.scope.group_ids?.[0] ?? "", recipient: schedule.recipient_user_id, days: schedule.shift.days,
+    // A scope the form cannot show (several groups, or cameras) is kept as saved until a different cover is chosen.
+    kept: !schedule.scope.site && !((schedule.scope.group_ids?.length ?? 0) === 1 && !(schedule.scope.camera_ids?.length ?? 0)) ? schedule.scope : null,
+    id: schedule.id, name: schedule.name, enabled: schedule.enabled, group: schedule.scope.group_ids?.length === 1 && !(schedule.scope.camera_ids?.length ?? 0) ? schedule.scope.group_ids[0]! : "",
+    recipient: schedule.recipient_user_id, days: schedule.shift.days,
     start: schedule.shift.start, end: schedule.shift.end, afterStart: schedule.after_hours.start, afterEnd: schedule.after_hours.end, summarise: schedule.summarise,
     actions: schedule.actions.map(action => ({ id: action.id, type: action.type, name: action.name, enabled: action.enabled, url: "", signing_secret: "", allow_private: Boolean(action.allow_private),
                                               topic: action.topic ?? "", retain: Boolean(action.retain), saved: true })),
@@ -33,7 +36,7 @@ function draftOf(schedule: Schedule): Draft {
 
 function bodyOf(draft: Draft) {
   return {
-    name: draft.name, enabled: draft.enabled, scope: draft.group ? { site: false, group_ids: [draft.group] } : { site: true }, recipient_user_id: draft.recipient,
+    name: draft.name, enabled: draft.enabled, scope: draft.kept ? draft.kept : draft.group ? { site: false, group_ids: [draft.group] } : { site: true }, recipient_user_id: draft.recipient,
     shift: { days: draft.days, start: draft.start, end: draft.end }, after_hours: { start: draft.afterStart, end: draft.afterEnd }, summarise: draft.summarise,
     actions: draft.actions.map(action => ({
       id: action.id, type: action.type, name: action.name, enabled: action.enabled, allow_private: action.allow_private, retain: action.retain,
@@ -154,7 +157,8 @@ export function DigestsSettings() {
               </select>
             </label>
             <label className="field"><span>Cover</span>
-              <select value={draft.group} onChange={event => patch({ group: event.target.value })}>
+              <select value={draft.kept ? "__kept__" : draft.group} onChange={event => patch(event.target.value === "__kept__" ? {} : { kept: null, group: event.target.value })}>
+                {draft.kept ? <option value="__kept__">The groups and cameras it covers now</option> : null}
                 <option value="">The whole site</option>{(groups.data ?? []).map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
               </select>
             </label>

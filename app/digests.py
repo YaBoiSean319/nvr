@@ -134,9 +134,10 @@ def latest_shift(shift: dict[str, Any], zone: ZoneInfo, now: datetime) -> tuple[
         day = (local_now - timedelta(days=back)).date()
         if day.weekday() not in shift["days"]:
             continue
-        end = datetime(day.year, day.month, day.day, end_hour, end_minute, tzinfo=zone).astimezone(timezone.utc)
+        wall_end = datetime(day.year, day.month, day.day, end_hour, end_minute)
+        end = wall_end.replace(tzinfo=zone).astimezone(timezone.utc)
         if end <= now:
-            return end - length, end
+            return (wall_end - length).replace(tzinfo=zone).astimezone(timezone.utc), end  # The start is worked out on the clock, so a clock change inside the shift does not shift it
     raise DigestError("The shift never ends")
 
 
@@ -151,13 +152,17 @@ def _after_hours(moment: datetime, window: dict[str, str], zone: ZoneInfo) -> bo
     return start_minutes <= now_minutes or now_minutes < end_minutes if start_minutes > end_minutes else start_minutes <= now_minutes < end_minutes
 
 
-def build(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: datetime, *, unrestricted: bool, public_url: str = "",
+def build(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: datetime, *, unrestricted: bool, include_system: bool | None = None, public_url: str = "",
           after_hours: dict[str, str] | None = None, now: datetime | None = None) -> dict[str, Any]:
-    """The digest of [start, end) for these cameras. ``unrestricted`` is whether the reader may see every camera (system-wide incidents are theirs only then)."""
+    """The digest of [start, end) for these cameras. System-wide incidents (those naming no camera) are included when ``include_system`` is true,
+    which by default is when the reader may see every camera; a digest of one camera or group does not carry them."""
+    include_system = unrestricted if include_system is None else include_system
     now = now or _now()
     window = after_hours or DEFAULT_AFTER_HOURS
     zone = site_zone(db)
-    names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras")}
+    names, added = {}, {}
+    for row in db.execute("SELECT id,name,created_at FROM cameras"):
+        names[row["id"]], added[row["id"]] = row["name"], row["created_at"]
     camera_ids = [camera_id for camera_id in camera_ids if camera_id in names]
     marks = ",".join("?" * len(camera_ids)) or "NULL"
     start_text, end_text = _iso(start), _iso(end)
@@ -196,7 +201,7 @@ def build(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: d
 
     gap_items, gap_total, by_camera = [], 0.0, []
     for camera_id in camera_ids:
-        since = max(start, _parse(db.execute("SELECT created_at FROM cameras WHERE id=?", (camera_id,)).fetchone()[0]))
+        since = max(start, _parse(added[camera_id]))
         until = min(end, now)
         if since >= until:
             continue
@@ -214,7 +219,7 @@ def build(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: d
     gaps = {"total_seconds": round(gap_total, 1), "cameras": by_camera, "items": gap_items}
 
     incident_rows = [row for row in db.execute("SELECT * FROM incidents WHERE first_seen_at<? AND last_seen_at>=? ORDER BY first_seen_at,id", (end_text, start_text))
-                     if (row["camera_id"] in names and row["camera_id"] in camera_ids) or (row["camera_id"] is None and unrestricted)]
+                     if (row["camera_id"] in names and row["camera_id"] in camera_ids) or (row["camera_id"] is None and include_system)]
     incidents = {"total": len(incident_rows), "items": [{
         "id": row["id"], "camera_id": row["camera_id"], "camera_name": names.get(row["camera_id"]) if row["camera_id"] else None, "fault_type": row["fault_type"],
         "summary": row["summary"], "state": row["state"], "first_seen_at": row["first_seen_at"], "last_seen_at": row["last_seen_at"], "recovered_at": row["recovered_at"],
@@ -269,14 +274,30 @@ def render_text(name: str, body: dict[str, Any], summary: str | None = None) -> 
     window = tracks["after_hours_window"]
     lines += ["", f"PEOPLE AFTER HOURS ({window['start']} to {window['end']})"]
     lines += [f"  - {_when(item['first_seen_at'], zone)} on {item['camera_name']} {item['link']}" for item in tracks["after_hours_people"]["items"]] or ["  None"]
+    if tracks["after_hours_people"]["total"] > len(tracks["after_hours_people"]["items"]):
+        lines.append(f"  ... and {tracks['after_hours_people']['total'] - len(tracks['after_hours_people']['items'])} more")
     lines += ["", "VEHICLES AT GATES"]
     lines += [f"  - {_when(item['occurred_at'], zone)} {item['rule_name']} on {item['camera_name']} {item['link']}" for item in tracks["vehicles_at_gates"]["items"]] or ["  None"]
+    if tracks["vehicles_at_gates"]["total"] > len(tracks["vehicles_at_gates"]["items"]):
+        lines.append(f"  ... and {tracks['vehicles_at_gates']['total'] - len(tracks['vehicles_at_gates']['items'])} more")
     gaps = body["gaps"]
     lines += ["", "RECORDING GAPS"]
     lines += [f"  - {item['camera_name']} {_when(item['starts_at'], zone)} for {_duration(item['seconds'])}: {item['reason']} {item['link']}" for item in gaps["items"]] or ["  None"]
+    if sum(item["gaps"] for item in gaps["cameras"]) > len(gaps["items"]):
+        lines.append(f"  ... and {sum(item['gaps'] for item in gaps['cameras']) - len(gaps['items'])} more (the longest per camera are not selected: the first {GAP_ITEMS} of each camera are listed)")
     lines += ["", "SYSTEM INCIDENTS"]
     lines += [f"  - {_when(item['first_seen_at'], zone)} {item['summary']}{' on ' + item['camera_name'] if item['camera_name'] else ''} [{item['state']}] {item['link']}" for item in body["incidents"]["items"]] or ["  None"]
+    if body["incidents"]["total"] > len(body["incidents"]["items"]):
+        lines.append(f"  ... and {body['incidents']['total'] - len(body['incidents']['items'])} more")
     return "\n".join(lines) + "\n"
+
+
+def narrowed(body: dict[str, Any], restricted: dict[str, Any]) -> bool:
+    """Whether restricting a digest took anything out of it."""
+    def sizes(digest: dict[str, Any]) -> list[int]:
+        return [len(digest["cameras"]), len(digest["alarms"]["items"]), len(digest["tracks"]["after_hours_people"]["items"]), len(digest["tracks"]["vehicles_at_gates"]["items"]),
+                len(digest["gaps"]["items"]), len(digest["incidents"]["items"])]
+    return sizes(body) != sizes(restricted)
 
 
 def restrict(body: dict[str, Any], visible: set[str] | None, unrestricted: bool) -> dict[str, Any]:
@@ -310,7 +331,11 @@ def restrict(body: dict[str, Any], visible: set[str] | None, unrestricted: bool)
     gaps["total_seconds"] = round(sum(item["seconds"] for item in gaps["cameras"]), 1)
     result["incidents"]["items"] = [item for item in result["incidents"]["items"] if keep(item)]
     result["incidents"]["total"] = len(result["incidents"]["items"])
-    result["analysis"]["cameras"] = [item for item in result["analysis"]["cameras"] if keep(item)]
+    analysis = result["analysis"]
+    analysis["cameras"] = [item for item in analysis["cameras"] if keep(item)]
+    analysis["analysed_percent"] = None  # Across the cameras made for, which this reader may not all see
+    analysis["fully_analysed"] = not analysis["cameras"]
+    alarms["truncated"] = False if len(alarms["items"]) < ALARM_ITEMS else alarms["truncated"]
     return result
 
 
@@ -377,28 +402,42 @@ def _public_url() -> str:
     return rule_actions._public_url()
 
 
-def generate(db: sqlite3.Connection, schedule: sqlite3.Row, start: datetime, end: datetime, *, now: datetime | None = None) -> str | None:
-    """Make, keep and queue the digest of a schedule for [start, end); None if that period already has one. Inside the caller's transaction."""
-    if db.execute("SELECT 1 FROM digests WHERE schedule_id=? AND period_end=?", (schedule["id"], _iso(end))).fetchone():
-        return None
+def compose(db: sqlite3.Connection, schedule: sqlite3.Row, start: datetime, end: datetime, *, now: datetime | None = None) -> dict[str, Any]:
+    """The digest of a schedule for [start, end): what it found, its text and, if asked and configured, the model's summary. Reads only, so the model's
+    answer is waited for without holding the database's write lock."""
     visible, unrestricted = _reader(db, schedule["recipient_user_id"])
-    cameras = scope_cameras(db, json.loads(schedule["scope_json"]))
+    scope = json.loads(schedule["scope_json"])
+    cameras = scope_cameras(db, scope)
     if visible is not None:
         cameras = [camera_id for camera_id in cameras if camera_id in visible]
-    public = _public_url()
-    body = build(db, cameras, start, end, unrestricted=unrestricted, public_url=public, after_hours=json.loads(schedule["after_hours_json"]), now=now)
-    digest_id = str(uuid.uuid4())
-    summary = summary_error = None
+    body = build(db, cameras, start, end, unrestricted=unrestricted, include_system=unrestricted and bool(scope.get("site")), public_url=_public_url(),
+                 after_hours=json.loads(schedule["after_hours_json"]), now=now)
     text = render_text(schedule["name"], body)
+    summary = summary_error = None
     if schedule["summarise"]:
         summary, summary_error = summarise_now(db, text)
         if summary:
             text = render_text(schedule["name"], body, summary)
+    return {"body": body, "text": text, "summary": summary, "summary_error": summary_error}
+
+
+def store(db: sqlite3.Connection, schedule: sqlite3.Row, start: datetime, end: datetime, composed: dict[str, Any], *, now: datetime | None = None) -> str | None:
+    """Keep a composed digest and queue its deliveries, inside the caller's transaction; None if that period already has one."""
+    if db.execute("SELECT 1 FROM digests WHERE schedule_id=? AND period_end=?", (schedule["id"], _iso(end))).fetchone():
+        return None
+    digest_id = str(uuid.uuid4())
     db.execute("INSERT INTO digests(id,schedule_id,name,recipient_user_id,period_start,period_end,body_json,text,summary,summary_error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-               (digest_id, schedule["id"], schedule["name"], schedule["recipient_user_id"], _iso(start), _iso(end), json.dumps(body, separators=(",", ":")), text, summary, summary_error,
-                _iso(now or _now())))
-    queue_deliveries(db, digest_id, schedule["id"], schedule["name"], body, text)
+               (digest_id, schedule["id"], schedule["name"], schedule["recipient_user_id"], _iso(start), _iso(end), json.dumps(composed["body"], separators=(",", ":")), composed["text"],
+                composed["summary"], composed["summary_error"], _iso(now or _now())))
+    queue_deliveries(db, digest_id, schedule["id"], schedule["name"], composed["body"], composed["text"])
     return digest_id
+
+
+def generate(db: sqlite3.Connection, schedule: sqlite3.Row, start: datetime, end: datetime, *, now: datetime | None = None) -> str | None:
+    """Compose and store the digest of a schedule for [start, end) in one go; None if that period already has one."""
+    if db.execute("SELECT 1 FROM digests WHERE schedule_id=? AND period_end=?", (schedule["id"], _iso(end))).fetchone():
+        return None
+    return store(db, schedule, start, end, compose(db, schedule, start, end, now=now), now=now)
 
 
 def queue_deliveries(db: sqlite3.Connection, digest_id: str, schedule_id: str, name: str, body: dict[str, Any], text: str) -> int:
@@ -422,6 +461,9 @@ def last_finished_shift_end(db: sqlite3.Connection, shift: dict[str, Any], now: 
     return _iso(latest_shift(shift, site_zone(db), now or _now())[1])
 
 
+_failures: dict[str, tuple[int, datetime]] = {}  # schedule id -> (failures in a row, not before): a schedule that cannot be made is not retried every pass
+
+
 def generate_due(now: datetime | None = None) -> list[str]:
     """Make the digest of the latest finished shift for each enabled schedule that has not made it yet (a long outage skips shifts rather than flooding)."""
     now = now or _now()
@@ -434,23 +476,31 @@ def generate_due(now: datetime | None = None) -> list[str]:
             start, end = latest_shift(json.loads(schedule["shift_json"]), zone, now)
         except DigestError:
             continue
-        if _iso(end) <= schedule["last_period_end"]:
+        if _iso(end) <= schedule["last_period_end"] or (schedule["id"] in _failures and now < _failures[schedule["id"]][1]):
             continue
-        with connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                fresh = db.execute("SELECT * FROM digest_schedules WHERE id=? AND enabled=1", (schedule["id"],)).fetchone()
-                if fresh is None or _iso(end) <= fresh["last_period_end"]:
+        try:
+            with connect() as db:
+                composed = compose(db, schedule, start, end, now=now)  # Outside the write lock: this may wait for the model
+            with connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    fresh = db.execute("SELECT * FROM digest_schedules WHERE id=? AND enabled=1", (schedule["id"],)).fetchone()
+                    if fresh is None or _iso(end) <= fresh["last_period_end"]:
+                        db.execute("ROLLBACK")
+                        continue
+                    digest_id = store(db, fresh, start, end, composed, now=now)
+                    db.execute("UPDATE digest_schedules SET last_period_end=? WHERE id=?", (_iso(end), schedule["id"]))
+                    db.execute("DELETE FROM digests WHERE created_at<?", (_iso(now - KEEP_DIGESTS),))
+                except BaseException:
                     db.execute("ROLLBACK")
-                    continue
-                digest_id = generate(db, fresh, start, end, now=now)
-                db.execute("UPDATE digest_schedules SET last_period_end=? WHERE id=?", (_iso(end), schedule["id"]))
-                db.execute("DELETE FROM digests WHERE created_at<?", (_iso(now - KEEP_DIGESTS),))
-            except BaseException:
-                db.execute("ROLLBACK")
-                logger.exception("The digest of schedule %s could not be made", schedule["id"])
-                continue
-            db.execute("COMMIT")
+                    raise
+                db.execute("COMMIT")
+        except Exception:  # noqa: BLE001 - one schedule that cannot be made must not stop the others
+            count = _failures.get(schedule["id"], (0, now))[0] + 1
+            _failures[schedule["id"]] = (count, now + timedelta(seconds=min(60 * 2 ** (count - 1), 3600)))
+            logger.exception("The digest of schedule %s could not be made (attempt %d)", schedule["id"], count)
+            continue
+        _failures.pop(schedule["id"], None)
         if digest_id:
             made.append(digest_id)
     return made

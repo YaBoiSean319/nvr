@@ -75,11 +75,14 @@ def _viewer(user) -> tuple[set[str] | None, bool]:
 def _view(row, body: dict[str, Any], user, *, with_text: bool) -> dict[str, Any]:
     visible, unrestricted = _viewer(user)
     restricted = digests.restrict(body, visible, unrestricted)
+    # The summary was written from everything the recipient could see when it was made. For a reader whose view is now narrower than that, it may
+    # mention what they cannot see, so it is left out.
+    summary = None if digests.narrowed(body, restricted) else row["summary"]
     result = {"id": row["id"], "name": row["name"], "schedule_id": row["schedule_id"], "period_start": row["period_start"], "period_end": row["period_end"], "created_at": row["created_at"],
-              "headline": digests.headline(restricted), "summary": row["summary"], "summary_note": digests.SUMMARY_NOTE if row["summary"] else None,
+              "headline": digests.headline(restricted), "summary": summary, "summary_note": digests.SUMMARY_NOTE if summary else None,
               "summary_error": row["summary_error"], "digest": restricted}
     if with_text:
-        result["text"] = digests.render_text(row["name"], restricted, row["summary"])
+        result["text"] = digests.render_text(row["name"], restricted, summary)
     return result
 
 
@@ -113,10 +116,17 @@ def preview(
     try:
         digests._clock(after_hours_start), digests._clock(after_hours_end)
         with connect() as db:
-            scope = digests.validate_scope(db, {"site": site or not (group_ids or camera_ids), "group_ids": group_ids or [], "camera_ids": camera_ids or []})
-            wanted = digests.scope_cameras(db, scope)
+            groups, picked = list(group_ids or []), list(camera_ids or [])
+            if not user.access.unrestricted:
+                # What this person may not see is dropped before anything is checked, so an unknown id and a hidden one are told apart by nothing.
+                groups = [group for group in groups if group in (user.access.groups or ())]
+                picked = user.access.only(picked)
+            whole_site = site or not (group_ids or camera_ids)
+            scope = digests.validate_scope(db, {"site": whole_site, "group_ids": groups, "camera_ids": picked}) if (whole_site or groups or picked) else {"site": False, "group_ids": [], "camera_ids": []}
+            wanted = digests.scope_cameras(db, scope) if (scope["site"] or scope["group_ids"] or scope["camera_ids"]) else []
             cameras = user.access.only(wanted)  # A camera that may not be seen is left out, as if it did not exist
-            body = digests.build(db, cameras, start_time, end_time, unrestricted=user.access.unrestricted, public_url="", after_hours=window)
+            body = digests.build(db, cameras, start_time, end_time, unrestricted=user.access.unrestricted, include_system=user.access.unrestricted and bool(scope["site"]),
+                                 public_url="", after_hours=window)
     except digests.DigestError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     name = "Digest"
@@ -220,9 +230,11 @@ def run_schedule(schedule_id: str, user: Administrator) -> dict[str, object]:
         if schedule is None:
             raise HTTPException(status_code=404, detail="Digest schedule not found")
         start, end = digests.latest_shift(json.loads(schedule["shift_json"]), digests.site_zone(db), _now())
+        already = db.execute("SELECT 1 FROM digests WHERE schedule_id=? AND period_end=?", (schedule_id, end.isoformat())).fetchone() is not None
+        composed = None if already else digests.compose(db, schedule, start, end)  # Outside the write lock: this may wait for the model
         db.execute("BEGIN IMMEDIATE")
         try:
-            digest_id = digests.generate(db, schedule, start, end)
+            digest_id = None if composed is None else digests.store(db, schedule, start, end, composed)
             existing = digest_id is None
             if existing:
                 digest_id = db.execute("SELECT id FROM digests WHERE schedule_id=? AND period_end=?", (schedule_id, end.isoformat())).fetchone()["id"]

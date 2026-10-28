@@ -203,6 +203,72 @@ class AccessTests(DigestCase):
         self.assertEqual(self.limited.post("/api/digests/schedules", json={}).status_code, 403)
 
 
+class ReviewTests(DigestCase):
+    def test_a_restricted_reader_cannot_tell_a_hidden_group_or_camera_from_one_that_does_not_exist(self):
+        hidden = self.limited.get("/api/digests/preview", params={**RANGE, "camera_ids": [self.y1]})
+        unknown = self.limited.get("/api/digests/preview", params={**RANGE, "camera_ids": [str(uuid.uuid4())]})
+        self.assertEqual((hidden.status_code, hidden.json()["digest"]["cameras"]), (unknown.status_code, unknown.json()["digest"]["cameras"]))
+        self.assertEqual(hidden.json()["digest"]["cameras"], [])
+        self.assertEqual(self.limited.get("/api/digests/preview", params={**RANGE, "group_ids": [self.yard]}).json()["digest"]["cameras"], [])
+
+    def test_system_wide_incidents_belong_to_the_whole_site_not_to_a_digest_of_one_camera(self):
+        self.fixture()
+        self.assertEqual({item["id"] for item in self.preview(self.admin)["digest"]["incidents"]["items"]}, {self.camera_incident, self.system_incident})
+        self.assertEqual({item["id"] for item in self.preview(self.admin, camera_ids=[self.d1])["digest"]["incidents"]["items"]}, {self.camera_incident})
+
+    def test_a_summary_is_not_shown_to_a_reader_whose_view_is_narrower_than_it_was_written_from(self):
+        self.fixture()
+        self.shift_alarms()
+        with connect() as db:
+            made = digests.generate(db, self.plain_schedule(self.limited_id), at(8), at(16), now=at(17))
+            db.execute("UPDATE digests SET summary='Two alarms, one at the yard.'")
+        self.assertEqual(self.limited.get(f"/api/digests/{made}").json()["summary"], "Two alarms, one at the yard.")  # Their view is what it was
+        self.grant(self.limited_id, [{"scope_type": "group", "group_id": self.dock}])  # unchanged: still Dock only
+        with connect() as db:
+            db.execute("UPDATE digests SET body_json=? WHERE id=?", (json.dumps(self.with_extra_camera_alarm(made)), made))  # As if the stored digest had covered more than they may see now
+        narrowed = self.limited.get(f"/api/digests/{made}").json()
+        self.assertIsNone(narrowed["summary"])
+        self.assertNotIn("one at the yard", narrowed["text"])
+
+    def with_extra_camera_alarm(self, digest_id: str) -> dict:
+        with connect() as db:
+            body = json.loads(db.execute("SELECT body_json FROM digests WHERE id=?", (digest_id,)).fetchone()[0])
+        body["alarms"]["items"].append({"id": "x", "rule_name": "Yard", "camera_id": self.y1, "camera_name": "Yard 1", "label": "person", "state": "new", "occurred_at": at(11).isoformat(), "link": "/?alarm=x"})
+        body["alarms"]["total"] += 1
+        return body
+
+    def plain_schedule(self, recipient: int):
+        schedule_id = str(uuid.uuid4())
+        with connect() as db:
+            db.execute("INSERT INTO digest_schedules(id,name,scope_json,recipient_user_id,shift_json,after_hours_json,last_period_end) VALUES(?,?,?,?,?,?,?)",
+                       (schedule_id, "Plain", json.dumps({"site": True}), recipient, json.dumps({"days": [0, 1, 2, 3, 4, 5, 6], "start": "08:00", "end": "16:00"}),
+                        json.dumps({"start": "22:00", "end": "06:00"}), at(-8).isoformat()))
+            return db.execute("SELECT * FROM digest_schedules WHERE id=?", (schedule_id,)).fetchone()
+
+    def test_a_shift_across_a_clock_change_starts_where_the_clock_says(self):
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo("America/New_York")  # Clocks go forward at 02:00 on 8 March 2026
+        start, end = digests.latest_shift({"days": [6], "start": "22:00", "end": "06:00"}, zone, datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(start.astimezone(zone).strftime("%a %H:%M"), "Sat 22:00")
+        self.assertEqual(end.astimezone(zone).strftime("%a %H:%M"), "Sun 06:00")
+
+    def test_a_schedule_that_cannot_be_made_is_not_retried_on_every_pass(self):
+        self.fixture()
+        created = self.admin.post("/api/digests/schedules", json={"name": "Broken", "scope": {"site": True}, "recipient_user_id": self.full_id,
+                                                                   "shift": {"days": [0, 1, 2, 3, 4, 5, 6], "start": "08:00", "end": "16:00"}, "actions": []}).json()
+        with connect() as db:
+            db.execute("UPDATE digest_schedules SET last_period_end=? WHERE id=?", (at(-8).isoformat(), created["id"]))
+        digests._failures.clear()
+        self.addCleanup(digests._failures.clear)
+        with patch("app.digests.compose", side_effect=RuntimeError("boom")) as compose:
+            digests.generate_due(now=at(17))
+            digests.generate_due(now=at(17) + timedelta(seconds=20))
+            self.assertEqual(compose.call_count, 1)  # The second pass waited out the backoff
+            digests.generate_due(now=at(17) + timedelta(minutes=2))
+            self.assertEqual(compose.call_count, 2)
+        self.assertEqual(len(digests.generate_due(now=at(17) + timedelta(hours=2))), 1)  # And it is made once it can be
+
+
 class ScheduleTests(DigestCase):
     def schedule(self, recipient: int, *, actions=None, **extra):
         body = {"name": "Day shift", "scope": {"site": True}, "recipient_user_id": recipient, "shift": {"days": [0, 1, 2, 3, 4, 5, 6], "start": "08:00", "end": "16:00"},
