@@ -168,35 +168,82 @@ class UpdateApiTests(unittest.TestCase):
         plan = self.client.get("/api/admin/updates/plan").json()
         self.assertEqual((plan["without_backup"], plan["backup"]), (True, None))
 
-    def test_rollback_names_the_pre_migration_copy_that_is_there(self):
-        self.client.post("/api/admin/updates/check")
+    def test_rollback_names_the_pre_migration_copy_made_for_the_upgrade_that_happened(self):
+        schema = latest_version()
         database = Path(os.environ["NVR_DB_PATH"])
-        older = database.with_name(f"{database.name}.pre-migration-v41-to-v42-20261001T100000000000Z")
-        newer = database.with_name(f"{database.name}.pre-migration-v42-to-v43-20261020T100000000000Z")
-        older.write_bytes(b"old")
-        os.utime(older, (1_790_000_000, 1_790_000_000))
-        newer.write_bytes(b"newer copy")
-        os.utime(newer, (1_790_900_000, 1_790_900_000))
-        run = self.client.post("/api/admin/updates/prepare", json={}).json()["run"]
-        backup.execute_run(run["id"])
-        plan = self.client.get("/api/admin/updates/plan").json()
-        rollback = plan["rollback"]
+        earlier = database.with_name(f"{database.name}.pre-migration-v{schema - 2}-to-v{schema - 1}-20261001T100000000000Z")
+        this_upgrade = database.with_name(f"{database.name}.pre-migration-v{schema - 1}-to-v{schema}-20261020T100000000000Z")
+        earlier.write_bytes(b"older upgrade")
+        this_upgrade.write_bytes(b"the copy for this upgrade")
+        os.utime(earlier, (1_790_900_000, 1_790_900_000))  # Newer on disk than the one that matters: the choice is by schema, not by age
+        os.utime(this_upgrade, (1_790_000_000, 1_790_000_000))
+        self.assertIsNone(self.client.get("/api/admin/updates").json()["rollback"])  # Nothing has been upgraded yet
+        with connect() as db:
+            db.execute("UPDATE update_settings SET seen_version='0.0.9',seen_schema=? WHERE singleton_id=1", (schema - 1,))
+        updates.note_start()
+        rollback = self.client.get("/api/admin/updates").json()["rollback"]
         self.assertTrue(rollback["has_copy"])
-        self.assertEqual(rollback["copy"], newer.name)
+        self.assertEqual(rollback["copy"], this_upgrade.name)
         text = "\n".join(rollback["steps"])
-        self.assertIn(newer.name, text)
-        self.assertNotIn(older.name, text)
-        self.assertIn(f"image: ghcr.io/example/nvr:{updates.APP_VERSION}", text)
+        self.assertIn(this_upgrade.name, text)
+        self.assertNotIn(earlier.name, text)
+        self.assertIn("image: ghcr.io/example/nvr:0.0.9", text)  # The version it came from
         self.assertIn("docker compose stop nvr", text)
-        self.assertEqual([copy["file"] for copy in plan["pre_migration_copies"]], [newer.name, older.name])
-        self.assertEqual((plan["pre_migration_copies"][0]["from_schema"], plan["pre_migration_copies"][0]["to_schema"]), (42, 43))
 
-    def test_rollback_without_a_copy_says_none_exists_yet(self):
+    def test_the_plan_before_an_upgrade_says_its_copy_does_not_exist_yet(self):
         self.client.post("/api/admin/updates/check")
         backup.execute_run(self.client.post("/api/admin/updates/prepare", json={}).json()["run"]["id"])
         rollback = self.client.get("/api/admin/updates/plan").json()["rollback"]
         self.assertFalse(rollback["has_copy"])
-        self.assertIn("No pre-migration copy exists yet", "\n".join(rollback["steps"]))
+        self.assertIn("does not exist yet", "\n".join(rollback["steps"]))
+        self.assertIn(f"image: ghcr.io/example/nvr:{updates.APP_VERSION}", "\n".join(rollback["steps"]))
+        # A release that does not touch the database needs only the image put back.
+        self.feed.releases = [release("v0.2.0", "Fixes.", schema=latest_version())]
+        self.client.post("/api/admin/updates/check")
+        with connect() as db:
+            db.execute("UPDATE update_settings SET prepared_version='0.2.0' WHERE singleton_id=1")
+        self.assertNotIn("does not exist yet", "\n".join(self.client.get("/api/admin/updates/plan").json()["rollback"]["steps"]))
+
+    def test_the_steps_are_for_the_release_the_backup_was_taken_for(self):
+        self.assertEqual(self.client.post("/api/admin/updates/prepare", json={}).status_code, 409)  # Nothing found yet
+        self.client.post("/api/admin/updates/check")
+        backup.execute_run(self.client.post("/api/admin/updates/prepare", json={}).json()["run"]["id"])
+        self.assertEqual(self.client.get("/api/admin/updates/plan").status_code, 200)
+        self.feed.releases = [release("v0.3.0", "Newer still.")]  # A newer release appears after the backup
+        self.client.post("/api/admin/updates/check")
+        stale = self.client.get("/api/admin/updates/plan")
+        self.assertEqual(stale.status_code, 409)
+        self.assertIn("0.3.0", stale.json()["detail"])
+
+    def test_a_missing_backup_file_withholds_the_steps(self):
+        self.client.post("/api/admin/updates/check")
+        run = self.client.post("/api/admin/updates/prepare", json={}).json()["run"]
+        backup.execute_run(run["id"])
+        for file in Path(os.environ["NVR_BACKUP_PATH"]).glob("*.nvrbackup"):
+            file.unlink()
+        self.assertEqual(self.client.get("/api/admin/updates/plan").status_code, 409)
+
+    def test_after_the_upgrade_the_release_is_no_longer_offered_and_the_update_is_done(self):
+        self.client.post("/api/admin/updates/check")
+        backup.execute_run(self.client.post("/api/admin/updates/prepare", json={}).json()["run"]["id"])
+        with patch("app.updates.APP_VERSION", "0.2.0"):
+            updates.note_start()  # First start of the new version after one that saw 0.1.0 and wrote seen_version below
+        with connect() as db:
+            db.execute("UPDATE update_settings SET seen_version='0.1.0' WHERE singleton_id=1")
+        with patch("app.updates.APP_VERSION", "0.2.0"), patch("app.updates.current_version", lambda: (0, 2, 0)):
+            updates.note_start()
+            state = self.client.get("/api/admin/updates").json()
+        self.assertIsNone(state["available"])
+        self.assertIsNone(state["prepared"])
+
+    def test_paths_and_names_in_the_commands_are_quoted_for_a_shell(self):
+        import shlex
+        copy = {"file": "x", "path": "/data/it's here/$(boom)/nvr.sqlite3.pre-migration-v1-to-v2-20261001T100000000000Z", "from_schema": 1, "to_schema": 2}
+        steps = updates.rollback_steps("0.1.0", copy, True)["steps"]
+        script = shlex.split([line for line in steps if line.startswith("docker compose run")][0])[-1]
+        self.assertEqual(shlex.split(script)[-2], copy["path"])  # One argument, whatever it holds
+        os.environ["NVR_UPDATE_IMAGE"] = "ghcr.io/x/y; rm -rf /"
+        self.assertEqual(updates.image_repository(), updates.DEFAULT_IMAGE)
 
     def test_an_upgrade_seen_at_startup_is_listed_with_its_migrations(self):
         with connect() as db:
@@ -209,13 +256,15 @@ class UpdateApiTests(unittest.TestCase):
         self.assertEqual(state["applied_migrations"][0]["version"], latest_version())
         updates.note_start()  # A start that changes nothing adds nothing
         self.assertEqual(len(self.client.get("/api/admin/updates").json()["history"]), 1)
-        self.assertEqual(len(self.audit("upgrade_detected")), 1)
+        self.assertEqual(len(self.audit("version_changed")), 1)
 
 
 class NoDockerTests(unittest.TestCase):
     def test_no_route_can_pull_an_image_or_restart_a_container(self):
         app = create_app(start_workers=False)
         paths = {(route.path, tuple(sorted(route.methods or ()))) for route in app.routes if getattr(route, "path", "").startswith("/api/admin/updates")}
+        for route in app.routes:  # No route anywhere is named for pulling or restarting
+            self.assertNotRegex(getattr(route, "path", ""), r"(?i)docker|restart|/pull\b|/upgrade/run")
         self.assertEqual({path for path, _ in paths}, {"/api/admin/updates", "/api/admin/updates/settings", "/api/admin/updates/check", "/api/admin/updates/prepare", "/api/admin/updates/plan"})
         for source in ("app/updates.py", "app/api/updates.py"):
             text = (Path(__file__).resolve().parent.parent / source).read_text(encoding="utf-8")

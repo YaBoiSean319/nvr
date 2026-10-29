@@ -23,8 +23,8 @@ ROUTERS: tuple[APIRouter, ...] = (
     plates.router,
     failover.router,
     tiering.router,
-    lens.router,
-    updates.router,  # Before the camera routes: /api/cameras/lenses must not be read as a camera id
+    lens.router,  # Before the camera routes: /api/cameras/lenses must not be read as a camera id
+    updates.router,
     insights.router,
     digests.router,
     camera_health.router,

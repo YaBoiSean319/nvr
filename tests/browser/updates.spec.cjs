@@ -8,18 +8,17 @@ const RELEASE = {
 };
 const STATE = {
   version: "0.1.0", schema_version: 43, image: "ghcr.io/yaboisean319/nvr:0.1.0", check_enabled: true, disabled_by_environment: false, checking: true,
-  last_checked_at: "2026-10-28T10:00:00Z", last_error: null, available: RELEASE, prepared: null, history: [], applied_migrations: [{ version: 43, name: "updates", applied_at: "2026-10-20T10:00:00Z" }],
+  last_checked_at: "2026-10-28T10:00:00Z", last_error: null, stale: false, rollback: null, available: RELEASE, prepared: null, history: [], applied_migrations: [{ version: 43, name: "updates", applied_at: "2026-10-20T10:00:00Z" }],
 };
 const PLAN = {
   target: RELEASE, backup: { id: "run-1", status: "succeeded", file_name: "nvr-config-20261028T100500Z.nvrbackup", size_bytes: 20480, finished_at: "2026-10-28T10:05:00Z" }, backup_destination: "/backups",
   without_backup: false, upgrade: ["docker compose images nvr", "# In compose.yaml set:   image: ghcr.io/yaboisean319/nvr:0.2.0", "docker compose pull nvr", "docker compose up -d nvr"],
-  pre_migration_copies: [{ file: "nvr.sqlite3.pre-migration-v42-to-v43-20261020T100000000000Z", from_schema: 42, to_schema: 43, size_bytes: 4096 }],
-  rollback: { steps: ["docker compose stop nvr", "docker compose run --rm --no-deps --entrypoint sh nvr -c 'cp /data/nvr.sqlite3.pre-migration-v42-to-v43-20261020T100000000000Z /data/nvr.sqlite3'", "docker compose up -d nvr"],
-    copy: "nvr.sqlite3.pre-migration-v42-to-v43-20261020T100000000000Z", previous_image: "ghcr.io/yaboisean319/nvr:0.1.0", has_copy: true },
+  pre_migration_copies: [],
+  rollback: { steps: ["docker compose stop nvr", "# The copy does not exist yet", "docker compose up -d nvr"], copy: null, previous_image: "ghcr.io/yaboisean319/nvr:0.1.0", has_copy: false, will_migrate: true },
   will_migrate: true, note: "These commands are for you to run on the machine that runs the NVR. The NVR cannot run them and has no access to Docker.",
 };
 
-test("a newer release is shown, the backup is listed before the commands, and the rollback names the database copy", async ({ page }) => {
+test("a newer release is shown, the backup is listed before the commands", async ({ page }) => {
   seedFixtures(1);
   let state = STATE;
   let planReady = false;
@@ -53,8 +52,8 @@ test("a newer release is shown, the backup is listed before the commands, and th
   const backupBox = await steps.getByText("nvr-config-20261028T100500Z.nvrbackup").boundingBox();
   const commandsBox = await steps.getByLabel("Upgrade commands").boundingBox();
   expect(backupBox.y).toBeLessThan(commandsBox.y);
-  await expect(steps.getByText("nvr.sqlite3.pre-migration-v42-to-v43-20261020T100000000000Z").first()).toBeVisible();
-  await expect(steps.getByLabel("Rollback commands")).toContainText("pre-migration-v42-to-v43");
+  await expect(steps.getByText(/created when the new version first starts/)).toBeVisible();
+  await expect(steps.getByLabel("Rollback commands")).toContainText("docker compose stop nvr");
   await expect(steps.getByText(/cannot run them and has no access to Docker/)).toBeVisible();
   expect(calls).toEqual(["prepare"]);
 });
@@ -70,4 +69,22 @@ test("with the check off nothing can be checked, and a page with no newer releas
   await expect(page.getByLabel(/Check for new releases/)).not.toBeChecked();
   expect(checked).toBe(0);
   await expect(page.getByRole("region", { name: "Available release" })).toHaveCount(0);
+});
+
+test("after an upgrade the page lists the migrations applied and names the database copy to go back to", async ({ page }) => {
+  seedFixtures(1);
+  const copy = "nvr.sqlite3.pre-migration-v43-to-v44-20261029T100000000000Z";
+  await page.route("**/api/admin/updates", route => route.fulfill({ json: {
+    ...STATE, version: "0.2.0", schema_version: 44, available: null, stale: false,
+    history: [{ at: "2026-10-29T10:00:00Z", from_version: "0.1.0", to_version: "0.2.0", from_schema: 43, to_schema: 44, migrations: [{ version: 44, name: "talk" }] }],
+    rollback: { steps: ["docker compose stop nvr", `cp /data/${copy} /data/nvr.sqlite3`, "docker compose up -d nvr"], copy, previous_image: "ghcr.io/yaboisean319/nvr:0.1.0", has_copy: true, will_migrate: true },
+    applied_migrations: [{ version: 44, name: "talk", applied_at: "2026-10-29T10:00:00Z" }],
+  } }));
+  await signInNext(page);
+  await page.goto("/settings/updates");
+  await expect(page.getByText("Running version 0.2.0")).toBeVisible();
+  await expect(page.getByText("0.1.0 to 0.2.0")).toBeVisible();
+  await expect(page.getByText(/migrations applied: 44 talk/)).toBeVisible();
+  await expect(page.getByText(copy).first()).toBeVisible();
+  await expect(page.getByLabel("Undo commands")).toContainText(copy);
 });

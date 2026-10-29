@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import { failureText } from "@/features/admin/tabDraft";
 
@@ -7,7 +7,7 @@ interface Release { version: string; tag: string; notes: string; url: string; pu
 interface Migration { version: number; name: string }
 interface Updates {
   version: string; schema_version: number; image: string; check_enabled: boolean; disabled_by_environment: boolean; checking: boolean;
-  last_checked_at: string | null; last_error: string | null; available: Release | null;
+  last_checked_at: string | null; last_error: string | null; stale: boolean; available: Release | null; rollback: { steps: string[]; copy: string | null; previous_image: string; has_copy: boolean; will_migrate: boolean } | null;
   prepared: { at: string; run_id: string | null; without_backup: boolean } | null;
   history: { at: string; from_version: string; to_version: string; from_schema: number | null; to_schema: number; migrations: Migration[] }[];
   applied_migrations: { version: number; name: string; applied_at: string }[];
@@ -15,7 +15,7 @@ interface Updates {
 interface BackupRun { id: string; status: string; file_name: string | null; size_bytes: number | null; finished_at: string | null }
 interface Plan {
   target: Release; backup: BackupRun | null; backup_destination: string | null; without_backup: boolean; upgrade: string[]; pre_migration_copies: { file: string; from_schema: number | null; to_schema: number | null; size_bytes: number }[];
-  rollback: { steps: string[]; copy: string; previous_image: string; has_copy: boolean }; will_migrate: boolean | null; note: string;
+  rollback: { steps: string[]; copy: string | null; previous_image: string; has_copy: boolean; will_migrate: boolean }; will_migrate: boolean | null; note: string;
 }
 
 const KEY = ["admin", "updates"] as const;
@@ -45,6 +45,7 @@ export function UpdatesSettings() {
     refetchInterval: query => (query.state.error ? 3_000 : false),
   });
   const refresh = () => client.invalidateQueries({ queryKey: KEY });
+  const asked = useRef(false);
   const fail = (problem: unknown, fallback: string) => { setMessage(null); setError(failureText(problem, fallback)); };
   const setting = useMutation({
     mutationFn: (check_enabled: boolean) => api("/api/admin/updates/settings", { method: "PUT", body: { check_enabled } }),
@@ -61,6 +62,10 @@ export function UpdatesSettings() {
   });
 
   const data = state.data;
+  useEffect(() => {
+    // Opening the page with an old (or no) check asks once, so a new release is shown without anyone pressing a button. Never when the check is off.
+    if (data && data.checking && data.stale && !asked.current) { asked.current = true; check.mutate(); }
+  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
   if (state.isPending) return <p className="muted">Loading…</p>;
   if (state.error || !data) return <p className="notice" data-tone="bad" role="alert">{failureText(state.error, "The update status could not be loaded.")}</p>;
   const available = data.available;
@@ -113,7 +118,7 @@ export function UpdatesSettings() {
               <h3 className="field-heading">2. Upgrade, on the host</h3>
               <Commands lines={plan.data.upgrade} label="Upgrade commands" />
               <h3 className="field-heading">3. If you need to go back</h3>
-              <p className="muted">{plan.data.rollback.has_copy ? <>The database copy made before the last migrations is <strong>{plan.data.rollback.copy}</strong>.</> : "No database copy from a migration exists yet."}</p>
+              <p className="muted">{plan.data.rollback.will_migrate ? "The database copy made just before this upgrade's migrations is created when the new version first starts; after the upgrade this page names it." : "This release does not change the database, so only the image goes back."}</p>
               <Commands lines={plan.data.rollback.steps} label="Rollback commands" />
               <p className="muted field-hint">{plan.data.note}</p>
             </>
@@ -135,6 +140,13 @@ export function UpdatesSettings() {
             ))}
           </ul>
         )}
+        {data.rollback ? (
+          <>
+            <h3 className="field-heading">To undo the last upgrade</h3>
+            <p className="muted">{data.rollback.has_copy ? <>The database copy made just before its migrations is <strong>{data.rollback.copy}</strong>.</> : data.rollback.will_migrate ? "The database copy made before its migrations is no longer on disk; use the pre-update backup." : "That upgrade did not change the database, so only the image goes back."}</p>
+            <Commands lines={data.rollback.steps} label="Undo commands" />
+          </>
+        ) : null}
         <h3 className="field-heading">Most recent migrations</h3>
         <ul className="status-list" aria-label="Applied migrations">
           {data.applied_migrations.map(item => <li key={item.version}><strong>{item.version} {item.name}</strong><span className="muted">{when(item.applied_at)}</span></li>)}

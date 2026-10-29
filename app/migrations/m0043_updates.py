@@ -20,6 +20,7 @@ _STATEMENTS = (
         latest_json TEXT,
         prepared_at TEXT,
         prepared_run_id TEXT,
+        prepared_version TEXT,
         prepared_without_backup INTEGER NOT NULL DEFAULT 0 CHECK (prepared_without_backup IN (0,1)),
         seen_version TEXT,
         seen_schema INTEGER

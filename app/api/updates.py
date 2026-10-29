@@ -49,7 +49,7 @@ async def post_prepare(request: Request, payload: PrepareRequest, user: Administ
     # Async so the wake-up runs on the event loop that owns the backup manager.
     try:
         result = updates.prepare(user.id, without_backup=payload.without_backup)
-    except BackupError as exc:
+    except (BackupError, updates.PlanNotReady) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     backups = getattr(request.app.state, "backups", None)
     if backups is not None and result["run"] is not None:

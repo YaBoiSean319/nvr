@@ -10,7 +10,7 @@ Settings, **Updates** (administrators) tells you when a newer release is out, wh
 
 ## The check is opt-out
 
-The check asks one address: the repository's published releases (`https://api.github.com/repos/yaboisean319/nvr/releases`). Nothing about the installation is sent. Turn it off with the switch on the page, or for the whole installation with `NVR_UPDATE_CHECK=false`, and then **no request is made at all**: Check now is refused. Looking at the page never makes a request; only Check now does (there is no background checking).
+The check asks one address: the repository's published releases (`https://api.github.com/repos/yaboisean319/nvr/releases`). Nothing about the installation is sent. Turn it off with the switch on the page, or for the whole installation with `NVR_UPDATE_CHECK=false`, and then **no request is made at all**: Check now is refused. Opening the page asks once when the last check is more than a day old (or there has been none); Check now asks whenever you like. There is no background checking while nobody has the page open.
 
 | Setting | What it does |
 |---|---|
@@ -22,7 +22,9 @@ The check asks one address: the repository's published releases (`https://api.gi
 
 1. **Back up, then show the upgrade steps.** The configuration backup runs first and is listed (file name and where it is) *before* any command is shown. If it fails, the steps are not shown. If backups are not set up (`NVR_BACKUP_PASSPHRASE`), you have to choose **Show the steps without a backup**.
 2. **Upgrade, on the host**: set the new image in `compose.yaml`, `docker compose pull nvr`, `docker compose up -d nvr`.
-3. **If you need to go back**: stop the container, put back the database copy made just before the migrations (named on the page, the newest one that is there), set the previous image, and start it. Before the first upgrade with migrations there is no such copy yet: it is made when the new version first starts, and then named on the page.
+3. **If you need to go back**: stop the container, put back the database copy made just before that upgrade's migrations, set the previous image, and start it. That copy is made when the new version first starts, so before the upgrade the steps say it does not exist yet (the pre-update backup is the way back until then). After the upgrade, **After an upgrade** names the actual copy (the one for that upgrade's schema change, not an older upgrade's) and shows the undo commands with its path. A release that does not change the database needs only the image put back.
+
+Every path and name placed in a command is quoted for a shell.
 
 Footage is not part of the backup. A rollback restores the database and configuration as they were before the upgrade; footage recorded while the new version ran is still on disk, but anything the new version changed in the database (cases, settings) is lost.
 

@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import re
+import shlex
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import httpx
@@ -33,7 +34,9 @@ DEFAULT_IMAGE = "ghcr.io/yaboisean319/nvr"
 MAX_FEED_BYTES = 2 * 1024 * 1024
 MAX_NOTES_CHARS = 20_000
 CHECK_TIMEOUT = httpx.Timeout(10, connect=5)
-STALE_AFTER_HOURS = 24
+STALE_AFTER = timedelta(hours=24)  # A check older than this is out of date: the page asks again when it is opened
+IMAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9._/:-]{0,200}$")
+logger = logging.getLogger(__name__)
 MARKER = re.compile(r"<!--\s*nvr-release:\s*(\{.*?\})\s*-->", re.DOTALL)
 VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
@@ -65,7 +68,9 @@ class Release:
 
 
 def image_repository() -> str:
-    return os.environ.get("NVR_UPDATE_IMAGE", DEFAULT_IMAGE).strip() or DEFAULT_IMAGE
+    """The image the commands name: the setting if it is a plain image name (it ends up in commands people paste into a shell), else the default."""
+    name = os.environ.get("NVR_UPDATE_IMAGE", DEFAULT_IMAGE).strip()
+    return name if IMAGE_NAME.match(name) else DEFAULT_IMAGE
 
 
 def feed_url() -> str:
@@ -133,16 +138,18 @@ def fetch_feed(url: str | None = None) -> object:
         with httpx.Client(timeout=CHECK_TIMEOUT, trust_env=False, follow_redirects=False, headers={"Accept": "application/vnd.github+json", "User-Agent": f"NVR/{APP_VERSION}"}) as client:
             with client.stream("GET", address) as response:
                 if response.status_code != 200:
-                    raise CheckFailed(f"The release feed answered {response.status_code}")
-                body = b""
+                    raise CheckFailed(f"The release feed answered {response.status_code}" + (" (a redirect: use the final address)" if 300 <= response.status_code < 400 else ""))
+                chunks: list[bytes] = []
+                size = 0
                 for chunk in response.iter_bytes():
-                    body += chunk
-                    if len(body) > MAX_FEED_BYTES:
+                    size += len(chunk)
+                    if size > MAX_FEED_BYTES:
                         raise CheckFailed("The release feed is too large")
-        return json.loads(body)
+                    chunks.append(chunk)
+        return json.loads(b"".join(chunks))
     except httpx.HTTPError as exc:
         raise CheckFailed("The release feed could not be reached") from exc
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise CheckFailed("The release feed is not valid JSON") from exc
 
 
@@ -157,13 +164,29 @@ def checking_allowed(db: sqlite3.Connection) -> bool:
     return not disabled_by_environment() and bool(_settings(db)["check_enabled"])
 
 
-def _release_view(release: Release, schema_now: int) -> dict[str, object]:
-    return {
-        "version": release.number, "tag": release.tag, "notes": release.notes, "url": release.url, "published_at": release.published_at,
-        "image": f"{image_repository()}:{release.number}", "schema_version": release.schema_version,
-        # None when the release does not say: the page says "not stated" rather than guessing
-        "has_migrations": None if release.schema_version is None else release.schema_version > schema_now,
-    }
+def _has_migrations(schema_version: int | None) -> bool | None:
+    """Whether a release changes the database: None when the release does not say (the page says so, it does not guess)."""
+    return None if schema_version is None else schema_version > latest_version()
+
+
+def _release_view(release: Release) -> dict[str, object]:
+    return {"version": release.number, "tag": release.tag, "notes": release.notes, "url": release.url, "published_at": release.published_at,
+            "image": f"{image_repository()}:{release.number}", "schema_version": release.schema_version}
+
+
+def _latest(row: sqlite3.Row) -> dict[str, object] | None:
+    """The release the last check found, if it is still newer than this one (an upgrade makes it old news) and well formed."""
+    try:
+        found = json.loads(row["latest_json"]) if row["latest_json"] else None
+        version = parse_version(found["version"]) if found else None
+        if found is None or version is None or version <= current_version():
+            return None
+        schema = found.get("schema_version")
+        found["schema_version"] = schema if isinstance(schema, int) and not isinstance(schema, bool) else None
+        found["has_migrations"] = _has_migrations(found["schema_version"])  # Against today's schema: it may have changed since the check
+        return found
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def set_check_enabled(db: sqlite3.Connection, actor_id: int, enabled: bool) -> None:
@@ -183,15 +206,20 @@ def check(actor_id: int | None = None) -> dict[str, object]:
         found = newest_release(fetch_feed())
     except CheckFailed as exc:
         error = str(exc)
-    now = _now()
     with connect() as db:
-        _settings(db)
-        if error is None:
-            db.execute("UPDATE update_settings SET last_checked_at=?,last_error=NULL,latest_json=? WHERE singleton_id=1",
-                       (now, json.dumps(_release_view(found, latest_version())) if found else None))
-        else:
-            db.execute("UPDATE update_settings SET last_checked_at=?,last_error=? WHERE singleton_id=1", (now, error))
-        record(db, actor_id, "update_checked", "settings", "updates", found=found.number if found else None, error=error)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if not checking_allowed(db):  # Switched off while the feed was being read: nothing is kept
+                raise UpdatesDisabled("The update check is turned off")
+            if error is None:
+                db.execute("UPDATE update_settings SET last_checked_at=?,last_error=NULL,latest_json=? WHERE singleton_id=1", (_now(), json.dumps(_release_view(found)) if found else None))
+            else:
+                db.execute("UPDATE update_settings SET last_checked_at=?,last_error=? WHERE singleton_id=1", (_now(), error))
+            record(db, actor_id, "update_checked", "settings", "updates", found=found.number if found else None, error=error)
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
     return state()
 
 
@@ -204,14 +232,13 @@ def state() -> dict[str, object]:
         applied = [{"version": item["version"], "name": item["name"], "applied_at": item["applied_at"]}
                    for item in db.execute("SELECT version,name,applied_at FROM schema_migrations ORDER BY version DESC LIMIT 10")]
         allowed = checking_allowed(db)
-    latest = json.loads(row["latest_json"]) if row["latest_json"] else None
-    if latest is not None:  # Recomputed against today's schema: it may have changed since the check
-        latest["has_migrations"] = None if latest["schema_version"] is None else latest["schema_version"] > latest_version()
+    checked = _parse_time(row["last_checked_at"])
     return {
         "version": APP_VERSION, "schema_version": latest_version(), "image": f"{image_repository()}:{APP_VERSION}",
         "check_enabled": bool(row["check_enabled"]), "disabled_by_environment": disabled_by_environment(), "checking": allowed,
-        "last_checked_at": row["last_checked_at"], "last_error": row["last_error"], "available": latest,
-        "prepared": prepared_view(row), "history": history, "applied_migrations": applied,
+        "last_checked_at": row["last_checked_at"], "last_error": row["last_error"], "stale": checked is None or datetime.now(timezone.utc) - checked > STALE_AFTER,
+        "available": _latest(row), "prepared": prepared_view(row), "history": history, "applied_migrations": applied,
+        "rollback": last_upgrade_rollback(history),
     }
 
 
@@ -219,21 +246,43 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _parse_time(value: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+    except ValueError:
+        return None
+
+
 # --- what changed at the last start ---------------------------------------------------------------------------------------------------
 
 def note_start() -> None:
-    """At startup: when the version or schema is not what the last start saw, write what happened to the history (so Settings can say what the upgrade applied)."""
+    """At startup: when the version or schema is not what the last start saw, write what changed to the history, so Settings can say what the upgrade applied.
+    Never stops the application from starting."""
+    try:
+        _note_start()
+    except sqlite3.Error:
+        logger.exception("Could not record the version this start is running")
+
+
+def _note_start() -> None:
     schema = latest_version()
     with connect() as db:
-        row = _settings(db)
-        before_version, before_schema = row["seen_version"], row["seen_schema"]
-        if before_version is not None and (before_version != APP_VERSION or before_schema != schema):
-            applied = [{"version": item["version"], "name": item["name"]} for item in
-                       db.execute("SELECT version,name FROM schema_migrations WHERE version>? ORDER BY version", (before_schema or 0,))]
-            db.execute("INSERT INTO update_history(at,from_version,to_version,from_schema,to_schema,migrations_json) VALUES(?,?,?,?,?,?)",
-                       (_now(), before_version, APP_VERSION, before_schema, schema, json.dumps(applied)))
-            record(db, None, "upgrade_detected", "settings", "updates", from_version=before_version, to_version=APP_VERSION, migrations=[item["version"] for item in applied])
-        db.execute("UPDATE update_settings SET seen_version=?,seen_schema=? WHERE singleton_id=1", (APP_VERSION, schema))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            row = _settings(db)
+            before_version, before_schema = row["seen_version"], row["seen_schema"]
+            if before_version is not None and (before_version != APP_VERSION or before_schema != schema):
+                applied = [{"version": item["version"], "name": item["name"]} for item in
+                           db.execute("SELECT version,name FROM schema_migrations WHERE version>? ORDER BY version", (before_schema or 0,))]
+                db.execute("INSERT INTO update_history(at,from_version,to_version,from_schema,to_schema,migrations_json) VALUES(?,?,?,?,?,?)",
+                           (_now(), before_version, APP_VERSION, before_schema, schema, json.dumps(applied)))
+                record(db, None, "version_changed", "settings", "updates", from_version=before_version, to_version=APP_VERSION, migrations=[item["version"] for item in applied])
+                db.execute("UPDATE update_settings SET prepared_at=NULL,prepared_run_id=NULL,prepared_version=NULL,prepared_without_backup=0 WHERE singleton_id=1")  # That update is done
+            db.execute("UPDATE update_settings SET seen_version=?,seen_schema=? WHERE singleton_id=1", (APP_VERSION, schema))
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
 
 
 # --- the guided steps ----------------------------------------------------------------------------------------------------------------
@@ -241,13 +290,15 @@ def note_start() -> None:
 def prepared_view(row: sqlite3.Row) -> dict[str, object] | None:
     if row["prepared_at"] is None:
         return None
-    return {"at": row["prepared_at"], "run_id": row["prepared_run_id"], "without_backup": bool(row["prepared_without_backup"])}
+    return {"at": row["prepared_at"], "run_id": row["prepared_run_id"], "without_backup": bool(row["prepared_without_backup"]), "version": row["prepared_version"]}
 
 
 def prepare(actor_id: int, *, without_backup: bool = False) -> dict[str, object]:
-    """Start the pre-update backup (or, when backups are not set up and the administrator says so, go on without one)."""
+    """Start the pre-update backup (or, when backups are not set up and the administrator says so, go on without one) for the release found by the last check."""
     with connect() as db:
-        _settings(db)
+        target = _latest(_settings(db))
+    if target is None:
+        raise PlanNotReady("There is no newer release to update to")
     reason = backup.disabled_reason()
     run: dict[str, object] | None = None
     if reason:
@@ -256,9 +307,9 @@ def prepare(actor_id: int, *, without_backup: bool = False) -> dict[str, object]
     else:
         run = backup.queue_backup(actor_id)
     with connect() as db:
-        db.execute("UPDATE update_settings SET prepared_at=?,prepared_run_id=?,prepared_without_backup=? WHERE singleton_id=1",
-                   (_now(), run["id"] if run else None, int(run is None)))
-        record(db, actor_id, "update_prepared", "settings", "updates", backup_run=run["id"] if run else None, without_backup=run is None)
+        db.execute("UPDATE update_settings SET prepared_at=?,prepared_run_id=?,prepared_version=?,prepared_without_backup=? WHERE singleton_id=1",
+                   (_now(), run["id"] if run else None, target["version"], int(run is None)))
+        record(db, actor_id, "update_prepared", "settings", "updates", version=target["version"], backup_run=run["id"] if run else None, without_backup=run is None)
     return {"run": run}
 
 
@@ -281,26 +332,32 @@ def plan() -> dict[str, object]:
     """The backup that was just taken and the exact host commands, once the backup is done. Raises PlanNotReady until then."""
     with connect() as db:
         row = _settings(db)
-        latest = json.loads(row["latest_json"]) if row["latest_json"] else None
+        target = _latest(row)
         run = db.execute("SELECT * FROM backup_runs WHERE id=?", (row["prepared_run_id"],)).fetchone() if row["prepared_run_id"] else None
     if row["prepared_at"] is None:
         raise PlanNotReady("Start the update first: the backup comes before the steps")
-    if latest is None:
+    if target is None:
         raise PlanNotReady("There is no newer release to update to")
+    if target["version"] != row["prepared_version"]:
+        raise PlanNotReady(f"Version {target['version']} was found after the backup was started; start again so the backup is taken for it")
     if run is None and not row["prepared_without_backup"]:
         raise PlanNotReady("The pre-update backup is missing; start again")
-    if run is not None and run["status"] != "succeeded":
-        raise PlanNotReady(f"The pre-update backup failed: {run['error'] or 'see Backups'}" if run["status"] == "failed" else "The pre-update backup is still running")
-    copies = pre_migration_copies()
+    if run is not None:
+        if run["status"] == "failed":
+            raise PlanNotReady(f"The pre-update backup failed: {run['error'] or 'see Backups'}")
+        if run["status"] != "succeeded":
+            raise PlanNotReady("The pre-update backup is still running")
+        if not (backup.destination() / str(run["file_name"])).is_file():
+            raise PlanNotReady("The pre-update backup file is not where it was written; start again")
     return {
-        "target": latest,
-        "backup": backup._run_view(run) if run is not None else None,
+        "target": target,
+        "backup": backup.run_view(run) if run is not None else None,
         "backup_destination": str(backup.destination()) if run is not None else None,
         "without_backup": run is None,
-        "upgrade": upgrade_commands(str(latest["version"])),
-        "rollback": rollback_steps(APP_VERSION, copies),
-        "pre_migration_copies": copies,
-        "will_migrate": latest["has_migrations"],
+        "upgrade": upgrade_commands(str(target["version"])),
+        "rollback": rollback_steps(APP_VERSION, None, target["has_migrations"] is not False),
+        "pre_migration_copies": pre_migration_copies(),
+        "will_migrate": target["has_migrations"],
         "note": "These commands are for you to run on the machine that runs the NVR. The NVR cannot run them and has no access to Docker.",
     }
 
@@ -317,28 +374,27 @@ def upgrade_commands(version: str) -> list[str]:
     ]
 
 
-def rollback_steps(previous_version: str, copies: list[dict[str, object]]) -> dict[str, object]:
-    """How to go back: the previous image, and the database as it was before the migrations."""
+def last_upgrade_rollback(history: list[dict[str, object]]) -> dict[str, object] | None:
+    """How to undo the upgrade this installation last went through: the previous image and the database copy made just before that upgrade's migrations."""
+    if not history:
+        return None
+    last = history[0]
+    wanted = [copy for copy in pre_migration_copies() if copy["to_schema"] == last["to_schema"] and (last["from_schema"] is None or copy["from_schema"] == last["from_schema"])]
+    return rollback_steps(str(last["from_version"]), wanted[0] if wanted else None, bool(last["migrations"]))
+
+
+def rollback_steps(previous_version: str, copy: dict[str, object] | None, migrates: bool) -> dict[str, object]:
+    """How to go back: the previous image, and when the upgrade changed the database, the database as it was before (``copy``, the one made for that upgrade)."""
     repository = image_repository()
-    newest = copies[0] if copies else None
-    copy_name = newest["file"] if newest else "<the pre-migration copy listed in Settings, Updates after the upgrade>"
     database = database_path()
-    steps = [
-        "# Run these in the same folder, on the host.",
-        "docker compose stop nvr",
-    ]
-    if newest:
-        steps += [
-            f"# Put back the database copy made just before the migrations ({newest['file']}, schema v{newest['from_schema']} to v{newest['to_schema']}):",
-            f"docker compose run --rm --no-deps --entrypoint sh nvr -c 'rm -f {database}-wal {database}-shm && cp {newest['path']} {database}'",
-        ]
-    else:
-        steps += [
-            "# No pre-migration copy exists yet: one is made automatically when the new version first starts and applies migrations, and then named here.",
-            "# Until then, the pre-update backup above is the way back (see the restore steps in the backup documentation).",
-        ]
-    steps += [
-        f"# In compose.yaml set the previous image back:   image: {repository}:{previous_version}",
-        "docker compose up -d nvr",
-    ]
-    return {"steps": steps, "copy": copy_name, "previous_image": f"{repository}:{previous_version}", "has_copy": newest is not None}
+    quote = shlex.quote
+    steps = ["# Run these in the same folder, on the host.", "docker compose stop nvr"]
+    if copy:
+        script = f"rm -f {quote(f'{database}-wal')} {quote(f'{database}-shm')} && cp {quote(str(copy['path']))} {quote(str(database))}"
+        steps += [f"# Put back the database copy made just before that upgrade's migrations ({copy['file']}, schema v{copy['from_schema']} to v{copy['to_schema']}):",
+                  f"docker compose run --rm --no-deps --entrypoint sh nvr -c {quote(script)}"]
+    elif migrates:
+        steps += ["# This upgrade changes the database. The copy of the database made just before its migrations does not exist yet: the new version makes it when it first starts,",
+                  "# and Settings, Updates then names it here. Until then the pre-update backup above is the way back."]
+    steps += [f"# In compose.yaml set the previous image back:   image: {repository}:{previous_version}", "docker compose up -d nvr"]
+    return {"steps": steps, "copy": copy["file"] if copy else None, "has_copy": copy is not None, "previous_image": f"{repository}:{previous_version}", "will_migrate": migrates}
