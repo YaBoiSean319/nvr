@@ -96,6 +96,18 @@ Tested here: a camera stand-in that records the ONVIF commands it gets, with a s
 Tested here: a synthetic fisheye picture of a room with straight lines (an equidistant lens model, ceiling, wall and floor mounts) rendered by the WebGL stage and by the export, straight to within about a pixel, and the two agreeing with a numpy reference; the same picture as a playing video; controls by keyboard, mouse and touch events; saved views and the workspace keeping views; exports through FFmpeg. Not tested here: a real fisheye lens (whose projection is not exactly equidistant), a stream from a real camera, or phones' WebGL.
 
 
+### Two-way audio (#147)
+
+- [ ] **Unchecked.** Real cameras with a speaker, and a real microphone.
+  - Version:
+  - Environment: the camera (make, model, firmware), whether it has a speaker or line out, its audio backchannel codec (G.711 is needed), the browser and microphone.
+  - Steps: Settings, Cameras, the camera, Talk: allow talking for administrators and operators. Open the camera in Live, hold Talk, speak, and confirm the sound comes out of the camera's speaker and is clear (note the delay). Let go and confirm the sound stops at once. Hold Talk as one person and try as another: the second is told who is talking. Confirm the browser asked for the microphone only on the first talk. Confirm the talks are in the audit log and the camera's Recent talks. Turn on Keep the audio, talk, and download the audio. Try a camera with no speaker and confirm the message says so.
+  - Owner:
+  - Evidence:
+
+Tested here: the G.711 encoders (round trip within quantisation), an RTSP stand-in that implements the backchannel with digest sign-in, the one-talker rule, release, the audit log, the optional recording and a browser journey with a made-up microphone. No real camera speaker was available.
+
+
 ### Guided updates (#148)
 
 - [ ] **Unchecked.** A real release and a real host.

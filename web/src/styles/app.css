@@ -754,6 +754,15 @@
 .export-dewarp-view label { display: grid; gap: 2px; font-size: 12px; }
 .export-dewarp-view input { width: 6rem; }
 
+/* Two-way audio (#147) */
+.tile-talk { width: auto; padding: 0 8px; gap: 4px; white-space: nowrap; }
+.tile-talk[data-phase="talking"] { background: #b3261e; border-color: #b3261e; }
+.tile-talk[data-phase="connecting"] { opacity: 0.8; }
+.tile-talk[data-busy] { opacity: 0.6; }
+.tile-talk-status { position: absolute; right: 0; bottom: 100%; margin-bottom: 2px; padding: 1px 6px; border-radius: var(--n-radius-small); background: rgb(0 0 0 / 0.65); color: #fff; font-size: 11px; white-space: nowrap; pointer-events: none; }
+.tile-talk-status:empty { display: none; }
+@media (max-width: 520px) { .tile-talk-label { display: none; } .tile-talk { padding: 0; min-width: 40px; } }
+
 /* Guided updates (#148) */
 .command-block { display: grid; gap: var(--n-space-1); justify-items: start; max-width: 100%; }
 .command-block pre, .release-notes { margin: 0; padding: var(--n-space-2); max-width: 100%; overflow: auto; border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-surface-sunken, rgb(0 0 0 / 0.04)); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
