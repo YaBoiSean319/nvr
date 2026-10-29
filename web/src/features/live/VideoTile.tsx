@@ -10,6 +10,7 @@ import { LOW_DATA_MAX_TILES, QualityGovernor, useLowData, useViewingPrefs, type 
 import { CAMERA_DRAG_TYPE } from "@/features/cameras/CameraBrowser";
 import { usePlaybackStore } from "@/features/playback/store";
 import { PtzPad } from "@/features/ptz/PtzPad";
+import { TalkButton } from "@/features/talk/TalkButton";
 import { useLiveStore, type Quality } from "./store";
 
 interface TileProps {
@@ -252,6 +253,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
             {listening ? "🔊" : "🔈"}
           </button>
         ) : null}
+        {!halted ? <TalkButton cameraId={camera.id} name={camera.name} keyTarget={root} /> : null}
         {lens ? (
           <select className="tile-quality" aria-label={`Dewarp ${camera.name}`} value={noWebgl ? "raw" : choiceOf(dewarpState)}
                   onChange={event => {
