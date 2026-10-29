@@ -30,3 +30,23 @@ test("opening Live with nothing clicked restores the saved workspace as it was",
   await page.reload();
   await expect(page.locator(".tile[data-camera-id]")).toHaveCount(1);
 });
+
+test.describe("on a phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  test("a camera chosen before the workspace arrives is not hidden under the camera browser", async ({ page }) => {
+    seedFixtures(2);
+    await signInNext(page);
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.route("**/api/live/workspace", async route => {
+      if (route.request().method() !== "GET") return route.continue();
+      await held;
+      await route.continue();
+    });
+    await page.goto("/live");
+    await page.getByRole("button", { name: /^Camera 001\b/ }).tap();
+    release();
+    await expect(page.locator(".tile[data-camera-id]")).toHaveCount(1);
+    await expect(page.getByRole("complementary", { name: "Camera browser" })).toBeHidden();
+  });
+});

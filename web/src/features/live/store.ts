@@ -151,10 +151,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   markSaved: view => set(state => ({ view, baseline: state.arrangement, baselineDewarp: state.dewarp })),
   restore: (saved, sidebarOpen, dewarp) =>
     set(state => {
-      // Cameras clicked while the saved workspace was still on its way are kept, added to what came back (and the last one is the active tile).
+      // Cameras clicked while the saved workspace was still on its way are kept, added to what came back (and the last one is the active tile), and the camera browser stays as that
+      // click left it (on a phone a click closes it), rather than being put back the way it was saved.
       const early = arrange.members(state.arrangement).filter(id => !arrange.members(saved).includes(id));
       const arrangement = early.reduce((current, id) => arrange.add(current, id).arrangement, saved);
-      return { arrangement, sidebarOpen, restored: true, dewarp: dewarp ?? {}, activeId: early.length ? (early[early.length - 1] ?? null) : (arrange.members(arrangement)[0] ?? null) };
+      return { arrangement, sidebarOpen: early.length ? state.sidebarOpen : sidebarOpen, restored: true, dewarp: dewarp ?? {}, activeId: early.length ? (early[early.length - 1] ?? null) : (arrange.members(arrangement)[0] ?? null) };
     }),
   setActive: id => set({ activeId: id }),
   enlarge: id => set({ enlargedId: id, activeId: id }),
