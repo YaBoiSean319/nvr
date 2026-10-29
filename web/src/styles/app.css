@@ -172,7 +172,8 @@
 .tile[data-active="true"] { outline: 2px solid var(--n-accent); outline-offset: -2px; }
 .tile:focus-visible { outline: 2px solid var(--n-focus); outline-offset: -2px; }
 .tile-video { width: 100%; height: 100%; object-fit: contain; display: block; background: var(--n-video); }
-.tile:not([data-phase="live"]) .tile-video { opacity: 0.45; filter: grayscale(0.6); }
+/* A Live tile that is not live (connecting, stalled) is dimmed; Playback tiles have their own states, below. */
+.tile:not(.playback-tile):not([data-phase="live"]) .tile-video { opacity: 0.45; filter: grayscale(0.6); }
 .tile-top {
   position: absolute; inset: 0 0 auto 0; display: flex; justify-content: space-between; gap: var(--n-space-2);
   padding: 6px var(--n-space-2); color: #fff; font-size: 12px; pointer-events: none;
