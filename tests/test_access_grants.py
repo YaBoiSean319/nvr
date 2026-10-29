@@ -312,6 +312,7 @@ class RouteTests(GrantCase):
     # Licence plates (#142): reads are searched only on cameras the person may see, and a crop is hidden (404) like its camera.
     FILTERED |= {("GET", "/api/plates/search"), ("GET", "/api/plates/reads/{read_id}/crop")}
     FILTERED |= {("GET", "/api/cameras/lenses")}  # Only the lenses of cameras this person may see
+    FILTERED |= {("GET", "/api/talk")}  # Only the cameras this person may see and may talk through
     # Routes that name no camera and return none: the person's own settings, sign-in and public information.
     NO_CAMERA_DATA = {
         ("GET", "/api/ai/settings"), ("GET", "/api/alarm-settings"), ("GET", "/api/alarms/assignees"), ("GET", "/api/auth/me"),
