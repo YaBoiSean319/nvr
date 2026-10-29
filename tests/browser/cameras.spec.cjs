@@ -397,6 +397,8 @@ test("200-camera filtering and selection record browser measurements without row
     details.push(`request failed ${pathname}: ${reason}`);
   });
   page.on("response", response => { if (response.status() >= 400) { errors.http_errors += 1; details.push(`HTTP ${response.status()} ${new URL(response.url()).pathname}`); } });
+  // Live's own reads (camera groups, views, ...) can still be in flight here, and leaving Live cancels them: let them finish so that is not counted as a failure of Cameras.
+  await page.waitForLoadState("networkidle");
   await openCameras(page);
   await expect(inventory(page).locator("tbody tr")).toHaveCount(200);
   await expect(page.getByText("Select a camera to view settings.")).toBeVisible();
