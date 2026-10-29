@@ -107,3 +107,14 @@ Tested here: a synthetic fisheye picture of a room with straight lines (an equid
 
 Tested here: the G.711 encoders (round trip within quantisation), an RTSP stand-in that implements the backchannel with digest sign-in, the one-talker rule, release, the audit log, the optional recording and a browser journey with a made-up microphone. No real camera speaker was available.
 
+
+### Capacity planner (#149)
+
+- [ ] **Unchecked.** Real cameras and real hardware.
+  - Version:
+  - Environment: the cameras (make, resolution, codec, frame rate, bitrate), the NVR host (cores, accelerator, disks, network), and how long it has recorded.
+  - Steps: in Settings, Capacity planner choose Start from current cameras; compare each camera's bitrate with what the camera is set to send, and the disk estimate with what the recordings volume actually grows by in a day. Enter a plan you can hand-check and confirm the figures. Compare the processing estimate with the host's real load while the cameras record and some people watch Live. Download the CSV and JSON and open them.
+  - Owner:
+  - Evidence:
+
+Tested here: estimates against hand-worked values (disk, write speed, network, cores for copying, conversion and AI), measured bitrates and recorded share taken from segments and assumed values labelled, the assumptions listed with every result, validation, and a browser journey including the export. The defaults are not measurements of any real camera or host.

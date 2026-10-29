@@ -16,6 +16,7 @@ import { PlatesSettings } from "./PlatesSettings";
 import { PrivacySettings } from "./PrivacySettings";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { SitesSettings } from "./SitesSettings";
+import { CapacitySettings } from "./CapacitySettings";
 import { StorageSettings } from "./StorageSettings";
 import { TieringSettings } from "./TieringSettings";
 
@@ -27,6 +28,7 @@ const CATEGORIES = {
   privacy: { label: "Privacy & notices", page: PrivacySettings },
   recording: { label: "Recording & storage", page: StorageSettings },
   tiering: { label: "Storage tiering", page: TieringSettings },
+  capacity: { label: "Capacity planner", page: CapacitySettings },
   coverage: { label: "Coverage & self-test", page: CoverageSettings },
   audit: { label: "Viewing audit", page: AuditSettings },
   hardening: { label: "Camera hardening", page: HardeningSettings },
