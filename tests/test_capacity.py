@@ -78,6 +78,11 @@ class EstimateTests(unittest.TestCase):
         faster = capacity.estimate([row(count=1, ai=True, analysis_fps=2)], 0, 4)
         self.assertAlmostEqual(faster["metrics"]["cores_ai_processor"]["value"], 2 * (0.0018 + 0.040), places=4)
 
+    def test_no_more_tiles_are_watched_than_there_are_cameras(self):
+        # Two cameras at 4096 kbps, three viewers who would each watch 64: each can watch only the two.
+        result = capacity.estimate([row(count=2)], viewers=3, tiles_per_viewer=64)
+        self.assertEqual(result["metrics"]["network_out"]["value"], round(3 * 2 * 4096 * 0.25 / 1000, 4))
+
     def test_entered_assumptions_change_the_result_and_are_marked(self):
         result = capacity.estimate([row()], 0, 4, {"headroom": 1.5, "overhead": 1.0})
         self.assertAlmostEqual(result["metrics"]["disk_recommended"]["value"], 13_271_040_000_000 * 1.5, delta=1)
@@ -91,8 +96,17 @@ class EstimateTests(unittest.TestCase):
         for name, item in result["metrics"].items():
             self.assertTrue(item["basis"], name)
             self.assertLessEqual(set(item["assumes"]), keys, name)
-        self.assertEqual(set(result["metrics"]["disk_recommended"]["assumes"]), {"overhead", "headroom"})
+        self.assertEqual(set(result["metrics"]["disk_recommended"]["assumes"]), {"motion_share", "overhead", "headroom"})
         self.assertIn("motion_share", result["metrics"]["write_average"]["assumes"])
+        # Only what applied is listed: a continuous plan with no AI and no H.265 rests on neither the motion share, the AI costs nor the conversion costs.
+        plain = capacity.estimate([row()], viewers=3, tiles_per_viewer=4)["metrics"]
+        self.assertEqual(plain["disk_recommended"]["assumes"], ["overhead", "headroom"])
+        self.assertEqual(plain["write_average"]["assumes"], [])
+        self.assertEqual(plain["cores_ai_processor"]["assumes"], [])
+        self.assertEqual(plain["cores_conversion"]["assumes"], [])
+        self.assertEqual(plain["network_out"]["assumes"], ["live_share"])
+        self.assertFalse(plain["disk_footage"]["inputs_assumed"])  # Everything was entered
+        self.assertTrue(capacity.estimate([capacity.Row(name="A")], 0, 4)["metrics"]["disk_footage"]["inputs_assumed"])  # Picture, codec, frame rate and bitrate were not
         self.assertIn("not a certification", result["disclaimer"])
         self.assertTrue(all(item["used"] for item in result["assumptions"] if item["key"] in {"overhead", "headroom", "motion_share", "inference_ms_cpu", "transcode_cores_1080p15"}))
 
@@ -121,7 +135,7 @@ class CapacityApiTests(unittest.TestCase):
     def add_camera(self, name: str, mode: str = "continuous", width: int | None = 1920, height: int | None = 1080, codec: str | None = "h264", footage_seconds: int = 0) -> str:
         camera = str(uuid.uuid4())
         with connect() as db:
-            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode,video_codec,video_width,video_height) VALUES(?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode,video_codec,video_width,video_height,recording_enabled) VALUES(?,?,?,?,?,?,?,1)",
                        (camera, name, encrypt("rtsp://camera.invalid/main"), mode, codec, width, height))
             start = datetime.now(timezone.utc) - timedelta(hours=10)
             for index in range(footage_seconds // 1200):
@@ -156,6 +170,22 @@ class CapacityApiTests(unittest.TestCase):
         line = self.client.post("/api/admin/capacity/estimate", json={"rows": [row_]}).json()["lines"][0]
         self.assertEqual(line["duty"], round(3600 / (48 * 3600), 4))
         self.assertFalse(any("share of the day" in text for text in line["assumed"]))  # Measured, not assumed
+
+    def test_the_inventory_follows_what_the_cameras_are_set_to_do_and_stays_plannable(self):
+        stopped = self.add_camera("Stopped", mode="continuous")
+        with connect() as db:
+            db.execute("UPDATE cameras SET recording_enabled=0 WHERE id=?", (stopped,))
+            off = str(uuid.uuid4())
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,enabled) VALUES(?,?,?,0)", (off, "Switched off", encrypt("rtsp://camera.invalid/main")))
+        tiny = self.add_camera("Tiny", width=50, height=40, footage_seconds=3600)
+        with connect() as db:
+            db.execute("UPDATE recording_segments SET size_bytes=100 WHERE camera_id=?", (tiny,))  # A stalled stream: a few bits a second
+        rows = {item["name"]: item for item in self.client.get("/api/admin/capacity/inventory").json()["rows"]}
+        self.assertEqual(rows["Stopped"]["recording"], "disabled")  # recording_enabled is off: it is planned as not recording
+        self.assertNotIn("Switched off", rows)  # A camera that is switched off is not part of the plan
+        self.assertEqual((rows["Tiny"]["width"], rows["Tiny"]["bitrate_kbps"], rows["Tiny"]["bitrate_source"]), (None, None, "assumed"))
+        everything = self.client.post("/api/admin/capacity/estimate", json={"rows": list(rows.values())})
+        self.assertEqual(everything.status_code, 200, everything.text)  # Whatever the inventory holds can be estimated
 
     def test_the_estimate_is_validated(self):
         base = {"name": "A", "count": 1}

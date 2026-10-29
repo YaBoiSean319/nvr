@@ -9,11 +9,12 @@ interface PlanRow {
   name: string; count: number; width: number | null; height: number | null; codec: Codec | null; fps: number | null; bitrate_kbps: number | null; bitrate_source: "entered" | "measured" | "assumed";
   recording: Recording; recorded_share: number | null; retention_days: number; ai: boolean; analysis_fps: number | null;
 }
-interface Metric { label: string; value: number; unit: string; basis: string; assumes: string[] }
-interface Line { name: string; count: number; bitrate_kbps: number; bitrate_source: string; duty: number; bytes_per_day: number; footage_bytes: number; assumed: string[] }
+interface Metric { label: string; value: number; unit: string; basis: string; assumes: string[]; inputs_assumed: boolean }
+interface Line { name: string; count: number; width: number; height: number; codec: string; fps: number; recording: string; retention_days: number; ai: boolean; bitrate_kbps: number; bitrate_source: string; duty: number; bytes_per_day: number; footage_bytes: number; assumed: string[] }
 interface AssumptionResult { key: string; label: string; value: number; unit: string; source: "default" | "entered"; used: boolean }
 interface Estimate { cameras: number; lines: Line[]; metrics: Record<string, Metric>; assumptions: AssumptionResult[]; disclaimer: string }
 interface AssumptionInfo { key: string; label: string; value: number; unit: string; low: number; high: number }
+interface Limits { max_rows: number; max_count: number; max_tiles: number; min_kbps: number; max_kbps: number }
 
 const PICTURES: [string, number, number][] = [["640 x 480", 640, 480], ["1280 x 720 (720p)", 1280, 720], ["1920 x 1080 (1080p)", 1920, 1080], ["2560 x 1440 (4 MP)", 2560, 1440], ["3072 x 1728 (5 MP)", 3072, 1728], ["3840 x 2160 (4K)", 3840, 2160]];
 const BLANK: PlanRow = { name: "Cameras", count: 10, width: 1920, height: 1080, codec: "h264", fps: 15, bitrate_kbps: null, bitrate_source: "entered", recording: "continuous", recorded_share: null, retention_days: 30, ai: false, analysis_fps: null };
@@ -42,7 +43,7 @@ export function CapacitySettings() {
   const [tiles, setTiles] = useState(4);
   const [overrides, setOverrides] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
-  const info = useQuery({ queryKey: ["admin", "capacity", "assumptions"], queryFn: ({ signal }) => api<{ assumptions: AssumptionInfo[]; disclaimer: string }>("/api/admin/capacity/assumptions", { signal }) });
+  const info = useQuery({ queryKey: ["admin", "capacity", "assumptions"], queryFn: ({ signal }) => api<{ assumptions: AssumptionInfo[]; limits: Limits; disclaimer: string }>("/api/admin/capacity/assumptions", { signal }) });
   const estimate = useMutation({
     mutationFn: (body: { rows: PlanRow[]; viewers: number; tiles_per_viewer: number; assumptions: Record<string, number> }) => api<Estimate>("/api/admin/capacity/estimate", { method: "POST", body }),
     onSuccess: () => setError(null), onError: problem => setError(failureText(problem, "The estimate could not be made.")),
@@ -51,7 +52,10 @@ export function CapacitySettings() {
     mutationFn: () => api<{ rows: PlanRow[] }>("/api/admin/capacity/inventory"),
     onSuccess: result => { setError(null); setRows(result.rows.length ? result.rows : [BLANK]); }, onError: problem => setError(failureText(problem, "The cameras could not be loaded.")),
   });
-  const valid = rows.every(row => row.count >= 1 && row.retention_days >= 1 && (row.bitrate_kbps === null || row.bitrate_kbps >= 16));
+  const limits = info.data?.limits;
+  const inRange = (key: string, value: number) => { const item = info.data?.assumptions.find(entry => entry.key === key); return !item || (Number.isFinite(value) && value >= item.low && value <= item.high); };
+  const valid = rows.every(row => row.count >= 1 && Number.isInteger(row.count) && row.retention_days >= 1 && (row.fps === null || row.fps >= 1) && (row.bitrate_kbps === null || row.bitrate_kbps >= (limits?.min_kbps ?? 16)))
+    && viewers >= 0 && tiles >= 1 && Object.entries(overrides).every(([key, value]) => inRange(key, value));
   const request = useMemo(() => ({ rows: rows.map(row => ({ ...row, bitrate_source: row.bitrate_kbps === null ? "entered" as const : row.bitrate_source })), viewers, tiles_per_viewer: tiles, assumptions: overrides }), [rows, viewers, tiles, overrides]);
   useEffect(() => {
     if (!valid) return;
@@ -61,20 +65,25 @@ export function CapacitySettings() {
 
   const set = (index: number, change: Partial<PlanRow>) => setRows(current => current.map((row, at) => (at === index ? { ...row, ...change, bitrate_source: "bitrate_kbps" in change ? "entered" : row.bitrate_source } : row)));
   const result = estimate.data;
-  const labelled = (index: number) => result?.lines[index];
+  // The estimate on screen belongs to the plan on screen only once the answer to exactly this plan has arrived; until then nothing is labelled from it or exported.
+  const current = Boolean(result) && !estimate.isPending && valid && JSON.stringify(estimate.variables) === JSON.stringify(request);
+  const labelled = (index: number) => (current ? result?.lines[index] : undefined);
 
   const exportCsv = () => {
-    if (!result) return;
+    if (!result || !current) return;
+    const keyLabel = (key: string) => result.assumptions.find(entry => entry.key === key)?.label ?? key;
     const lines = [
-      ["Capacity estimate (not a certification of capacity)"], [result.disclaimer], [], ["Result", "Value", "Unit", "Basis"],
-      ...ORDER.filter(key => result.metrics[key]).map(key => [result.metrics[key]!.label, String(result.metrics[key]!.value), result.metrics[key]!.unit, result.metrics[key]!.basis]), [],
-      ["Cameras", "Count", "Bitrate kbps", "Bitrate source", "Share of day recorded", "Bytes a day", "Footage bytes", "Assumed"],
-      ...result.lines.map(line => [line.name, String(line.count), String(line.bitrate_kbps), line.bitrate_source, String(line.duty), String(line.bytes_per_day), String(line.footage_bytes), line.assumed.join("; ")]), [],
-      ["Assumption", "Value", "Unit", "Source"], ...result.assumptions.map(item => [item.label, String(item.value), item.unit, item.source]),
+      ["Capacity estimate (not a certification of capacity)"], [result.disclaimer], [],
+      ["People watching Live at once", String(viewers)], ["Cameras each is watching", String(tiles)], [],
+      ["Result", "Value", "Unit", "Basis", "Assumes"],
+      ...ORDER.filter(key => result.metrics[key]).map(key => { const metric = result.metrics[key]!; return [metric.label, String(metric.value), metric.unit, metric.basis, [...metric.assumes.map(keyLabel), ...(metric.inputs_assumed ? ["camera details left empty"] : [])].join("; ")]; }), [],
+      ["Cameras", "Count", "Picture", "Codec", "Frames/s", "Recording", "Days kept", "AI", "Bitrate kbps", "Bitrate source", "Share of day recorded", "Bytes a day", "Footage bytes", "Assumed"],
+      ...result.lines.map(line => { return [line.name, String(line.count), `${line.width} x ${line.height}`, line.codec, String(line.fps), line.recording, String(line.retention_days), line.ai ? "yes" : "no", String(line.bitrate_kbps), line.bitrate_source, String(line.duty), String(line.bytes_per_day), String(line.footage_bytes), line.assumed.join("; ")]; }), [],
+      ["Assumption", "Value", "Unit", "Source", "Applied"], ...result.assumptions.map(item => [item.label, String(item.value), item.unit, item.source, item.used ? "yes" : "no"]),
     ];
     download("capacity-estimate.csv", "text/csv", lines.map(line => line.map(quote).join(",")).join("\n"));
   };
-  const exportJson = () => { if (result) download("capacity-estimate.json", "application/json", JSON.stringify({ plan: request, result }, null, 2)); };
+  const exportJson = () => { if (result && current) download("capacity-estimate.json", "application/json", JSON.stringify({ plan: request, result }, null, 2)); };
 
   return (
     <>
@@ -89,7 +98,7 @@ export function CapacitySettings() {
         </p>
         <div className="field-actions">
           <button type="button" className="button" onClick={() => inventory.mutate()} disabled={inventory.isPending}>Start from current cameras</button>
-          <button type="button" className="button" onClick={() => setRows(current => [...current, { ...BLANK, name: `Cameras ${current.length + 1}` }])} disabled={rows.length >= 200}>Add cameras</button>
+          <button type="button" className="button" onClick={() => setRows(current => [...current, { ...BLANK, name: `Cameras ${current.length + 1}` }])} disabled={rows.length >= (limits?.max_rows ?? 200)}>Add cameras</button>
         </div>
         {error ? <p className="notice" data-tone="bad" role="alert">{error}</p> : null}
         <div className="table-scroll">
@@ -102,7 +111,7 @@ export function CapacitySettings() {
                 return (
                   <tr key={index}>
                     <td><input aria-label={`Name of row ${index + 1}`} value={row.name} maxLength={80} onChange={event => set(index, { name: event.target.value })} /></td>
-                    <td><input aria-label={`Cameras in row ${index + 1}`} type="number" min={1} max={5000} value={row.count} onChange={event => set(index, { count: Number(event.target.value) })} /></td>
+                    <td><input aria-label={`Cameras in row ${index + 1}`} type="number" min={1} max={limits?.max_count ?? 5000} value={row.count} onChange={event => set(index, { count: Number(event.target.value) })} /></td>
                     <td>
                       <select aria-label={`Picture size of row ${index + 1}`} value={known ? `${row.width}x${row.height}` : row.width ? "other" : ""}
                               onChange={event => { const [w, h] = event.target.value.split("x").map(Number); set(index, event.target.value === "" ? { width: null, height: null } : { width: w!, height: h! }); }}>
@@ -137,7 +146,7 @@ export function CapacitySettings() {
         </div>
         <div className="field-row">
           <label className="field"><span>People watching Live at once</span><input type="number" min={0} max={1000} value={viewers} onChange={event => setViewers(Number(event.target.value))} /></label>
-          <label className="field"><span>Cameras each is watching</span><input type="number" min={1} max={64} value={tiles} onChange={event => setTiles(Number(event.target.value))} /></label>
+          <label className="field"><span>Cameras each is watching</span><input type="number" min={1} max={limits?.max_tiles ?? 64} value={tiles} onChange={event => setTiles(Number(event.target.value))} /></label>
         </div>
         <details>
           <summary>Change the assumptions</summary>
@@ -145,7 +154,7 @@ export function CapacitySettings() {
             {info.data?.assumptions.map(item => (
               <label className="field" key={item.key}>
                 <span>{item.label} ({item.unit})</span>
-                <input type="number" step="any" min={item.low} max={item.high} value={overrides[item.key] ?? item.value} onChange={event => setOverrides(current => ({ ...current, [item.key]: Number(event.target.value) }))} />
+                <input type="number" step="any" min={item.low} max={item.high} value={overrides[item.key] ?? item.value} onChange={event => setOverrides(previous => (event.target.value === "" ? Object.fromEntries(Object.entries(previous).filter(([key]) => key !== item.key)) : { ...previous, [item.key]: Number(event.target.value) }))} />
               </label>
             ))}
           </div>
@@ -164,21 +173,21 @@ export function CapacitySettings() {
                 return (
                   <tr key={key} data-metric={key}>
                     <th scope="row">{metric.label}</th><td>{format(metric)}</td><td className="muted">{metric.basis}</td>
-                    <td className="muted">{metric.assumes.map(item => result.assumptions.find(entry => entry.key === item)?.label ?? item).join("; ") || "Only what you entered"}</td>
+                    <td className="muted">{[...metric.assumes.map(item => result.assumptions.find(entry => entry.key === item)?.label ?? item), ...(metric.inputs_assumed ? ["Camera details left empty (listed below)"] : [])].join("; ") || "Only what you entered"}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
           <div className="field-actions">
-            <button type="button" className="button" onClick={exportCsv}>Download CSV</button>
-            <button type="button" className="button" onClick={exportJson}>Download JSON</button>
+            <button type="button" className="button" onClick={exportCsv} disabled={!current}>Download CSV</button>
+            <button type="button" className="button" onClick={exportJson} disabled={!current}>Download JSON</button>
           </div>
           <section aria-label="Assumptions">
             <h3 className="field-heading">Assumptions behind these figures</h3>
             <ul className="status-list">
               {result.assumptions.filter(item => item.used).map(item => <li key={item.key}><strong>{item.label}</strong><span className="muted">{item.value} {item.unit} ({item.source === "entered" ? "changed by you" : "default"})</span></li>)}
-              {result.lines.filter(line => line.assumed.length).map(line => <li key={line.name}><strong>{line.name}</strong><span className="muted">assumed: {line.assumed.join("; ")}</span></li>)}
+              {result.lines.map((line, at) => ({ line, at })).filter(({ line }) => line.assumed.length).map(({ line, at }) => <li key={at}><strong>{line.name}</strong><span className="muted">assumed: {line.assumed.join("; ")}</span></li>)}
             </ul>
           </section>
         </section>

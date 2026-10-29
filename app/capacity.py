@@ -6,9 +6,9 @@ plan starts from its own cameras, and otherwise from the stated defaults below, 
 - **Bitrate** of a camera: the one entered or measured, else a default for its resolution, scaled by frame rate over 15 and by 0.6 for H.265.
 - **Duty**: the share of the day a camera records: 1 for continuous recording, ``motion_share`` for motion recording (or the share measured here), 0 for disabled.
 - **Disk** = bitrate / 8 x 86 400 s x duty x retention days x cameras, then x ``overhead`` (container and filesystem), and x ``headroom`` for the recommended size.
-- **Write speed**: average = sum of bitrate x duty; peak = sum of bitrate (every camera recording at once).
-- **Network in**: every camera stays connected whether or not it is recording, so the sum of bitrates. **Network out**: viewers x tiles each x average bitrate x
-  ``live_share`` (Live grids use the low-quality stream).
+- **Write speed**: average = sum of bitrate x duty; peak = sum of bitrate of the cameras that record (all recording at once).
+- **Network in**: every camera stays connected whether or not it is recording, so the sum of bitrates. **Network out**: viewers x tiles each (no more than there are cameras) x average
+  bitrate x ``live_share`` (Live grids use the low-quality stream).
 - **Processing**: recording and live viewing copy the stream (cores per Mbps); H.265 shown to a browser that cannot play it is converted (cores per converted stream, scaled by
   its size); AI analysis costs a decoded frame and an inference per analysed frame, on the processor or, where there is one, an accelerator.
 """
@@ -29,6 +29,8 @@ MIN_MEASURED_SECONDS = 3_600  # Under an hour of footage in the window is too li
 BITRATE_CLASSES = ((0.35, 512), (1.0, 1024), (2.2, 2048), (4.2, 3072), (5.5, 4096), (8.5, 6144), (float("inf"), 8192))
 H265_FACTOR = 0.6
 DEFAULT_PICTURE = (1920, 1080)
+MIN_KBPS, MAX_KBPS = 16, 200_000  # What the plan accepts; a measured bitrate outside it is not used
+MIN_SIDE, MAX_SIDE = (160, 120), 16384
 DEFAULT_FPS = 15
 DEFAULT_CODEC = "h264"
 
@@ -149,7 +151,7 @@ def estimate(rows: list[Row], viewers: int, tiles_per_viewer: int, overrides: di
             "assumed": assumed,
         })
     average_kbps = ingest_kbps / cameras if cameras else 0.0
-    live_streams = viewers * tiles_per_viewer
+    live_streams = viewers * min(tiles_per_viewer, cameras)
     egress_kbps = live_streams * average_kbps * values["live_share"]
     recording_cores = ingest_kbps / 1000 * values["record_cores_per_mbps"]
     live_cores = egress_kbps / 1000 * values["live_cores_per_mbps"]
@@ -167,19 +169,23 @@ def estimate(rows: list[Row], viewers: int, tiles_per_viewer: int, overrides: di
     if ai_cameras:
         used.update({"ai_frame_megapixels", "decode_ms_per_megapixel", "inference_ms_cpu", "inference_ms_accelerator"})
 
-    def metric(label: str, value: float, unit: str, basis: str, *assumes: str) -> dict[str, Any]:
-        return {"label": label, "value": round(value) if unit == "bytes" else _n(value), "unit": unit, "basis": basis, "assumes": [key for key in assumes if key in values]}
+    inputs_assumed = any(line["assumed"] for line in lines)
+
+    def metric(label: str, value: float, unit: str, basis: str, *assumes: str, from_inputs: bool = False) -> dict[str, Any]:
+        """A result with how it is worked out and the assumptions it rests on: only those that actually applied to this plan."""
+        return {"label": label, "value": round(value) if unit == "bytes" else _n(value), "unit": unit, "basis": basis, "assumes": [key for key in assumes if key in used],
+                "inputs_assumed": from_inputs and inputs_assumed}
 
     footage = disk
     stored = footage * values["overhead"]
     metrics = {
-        "disk_footage": metric("Footage kept", footage, "bytes", "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras"),
-        "disk_needed": metric("Disk needed", stored, "bytes", "footage x overhead", "overhead"),
-        "disk_recommended": metric("Disk recommended", stored * values["headroom"], "bytes", "disk needed x headroom", "overhead", "headroom"),
-        "write_average": metric("Write speed, average", write_avg_kbps / 8 / 1000, "MB/s", "sum of bitrate x share of the day recorded, over 8", "motion_share"),
-        "write_peak": metric("Write speed, peak", write_peak_kbps / 8 / 1000, "MB/s", "every recording camera writing at once"),
-        "network_in": metric("Network in (cameras to the NVR)", ingest_kbps / 1000, "Mbps", "sum of every camera's bitrate: each stays connected whether or not it is recording"),
-        "network_out": metric("Network out (viewers)", egress_kbps / 1000, "Mbps", "viewers x tiles each x average bitrate x live share", "live_share"),
+        "disk_footage": metric("Footage kept", footage, "bytes", "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras", "motion_share", from_inputs=True),
+        "disk_needed": metric("Disk needed", stored, "bytes", "footage x overhead", "motion_share", "overhead", from_inputs=True),
+        "disk_recommended": metric("Disk recommended", stored * values["headroom"], "bytes", "disk needed x headroom", "motion_share", "overhead", "headroom", from_inputs=True),
+        "write_average": metric("Write speed, average", write_avg_kbps / 8 / 1000, "MB/s", "sum of bitrate x share of the day recorded, over 8", "motion_share", from_inputs=True),
+        "write_peak": metric("Write speed, peak", write_peak_kbps / 8 / 1000, "MB/s", "every recording camera writing at once", from_inputs=True),
+        "network_in": metric("Network in (cameras to the NVR)", ingest_kbps / 1000, "Mbps", "sum of every camera's bitrate: each stays connected whether or not it is recording", from_inputs=True),
+        "network_out": metric("Network out (viewers)", egress_kbps / 1000, "Mbps", "viewers x tiles each x average bitrate x live share", "live_share", from_inputs=True),
         "cores_streams": metric("Processor, recording and live copying", recording_cores + live_cores, "cores", "cores per Mbps x network in, and x network out",
                                 "record_cores_per_mbps", "live_cores_per_mbps"),
         "cores_conversion": metric("Processor, H.265 conversion for browsers", transcode_cores, "cores", "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
@@ -220,17 +226,22 @@ def inventory(db: sqlite3.Connection, now: datetime | None = None) -> list[dict[
         "SELECT camera_id,SUM(size_bytes) AS bytes,SUM((julianday(ends_at)-julianday(starts_at))*86400) AS seconds FROM recording_segments "
         "WHERE unavailable_at IS NULL AND starts_at>=? GROUP BY camera_id", (start,))}
     rows = []
-    for camera in db.execute("SELECT id,name,video_codec,video_width,video_height,recording_mode FROM cameras WHERE archived_at IS NULL ORDER BY name,id").fetchall():
+    for camera in db.execute("SELECT id,name,video_codec,video_width,video_height,recording_mode,recording_enabled FROM cameras WHERE archived_at IS NULL AND enabled=1 ORDER BY name,id").fetchall():
         found = measured.get(camera["id"])
         seconds = float(found["seconds"] or 0) if found else 0.0
         kbps = round(found["bytes"] * 8 / seconds / 1000, 1) if found and seconds >= MIN_MEASURED_SECONDS - 1 else None  # (a second of slack: the durations come out of date arithmetic)
+        if kbps is not None and not MIN_KBPS <= kbps <= MAX_KBPS:
+            kbps = None  # Not a believable bitrate (a stalled stream, say): left to the default rather than planned from
         share = min(1.0, seconds / WINDOW.total_seconds()) if kbps is not None else None
+        mode = camera["recording_mode"] if camera["recording_enabled"] else "disabled"
         config = effective_camera_config(camera["id"])
         retention, _ = effective_retention(db, camera["id"])
+        picture = camera["video_width"] and camera["video_height"] and MIN_SIDE[0] <= camera["video_width"] <= MAX_SIDE and MIN_SIDE[1] <= camera["video_height"] <= MAX_SIDE
         rows.append({
-            "name": camera["name"], "count": 1, "width": camera["video_width"], "height": camera["video_height"], "codec": _codec(camera["video_codec"]), "fps": None,
-            "bitrate_kbps": kbps, "bitrate_source": "measured" if kbps is not None else "assumed", "recording": camera["recording_mode"],
-            "recorded_share": round(share, 4) if share is not None and camera["recording_mode"] == "motion" else None, "retention_days": retention,
+            "name": camera["name"], "count": 1, "width": camera["video_width"] if picture else None, "height": camera["video_height"] if picture else None,
+            "codec": _codec(camera["video_codec"]), "fps": None,
+            "bitrate_kbps": kbps, "bitrate_source": "measured" if kbps is not None else "assumed", "recording": mode,
+            "recorded_share": round(share, 4) if share is not None and mode == "motion" else None, "retention_days": max(1, min(3650, retention)),
             "ai": bool(config and config.get("enabled")), "analysis_fps": float(config["analysis_fps"]) if config and config.get("enabled") and config.get("analysis_fps") else None,
         })
     return rows

@@ -13,16 +13,18 @@ from app.store import connect
 router = APIRouter()
 
 MAX_ROWS = 200
+MAX_COUNT = 5000
+MAX_TILES = 64
 
 
 class PlanRow(BaseModel):
     name: str = Field(default="Cameras", max_length=80)
-    count: int = Field(default=1, ge=1, le=5000)
-    width: int | None = Field(default=None, ge=160, le=16384)
-    height: int | None = Field(default=None, ge=120, le=16384)
+    count: int = Field(default=1, ge=1, le=MAX_COUNT)
+    width: int | None = Field(default=None, ge=capacity.MIN_SIDE[0], le=capacity.MAX_SIDE)
+    height: int | None = Field(default=None, ge=capacity.MIN_SIDE[1], le=capacity.MAX_SIDE)
     codec: Literal["h264", "h265"] | None = None
     fps: float | None = Field(default=None, ge=1, le=120)
-    bitrate_kbps: float | None = Field(default=None, ge=16, le=200_000)
+    bitrate_kbps: float | None = Field(default=None, ge=capacity.MIN_KBPS, le=capacity.MAX_KBPS)
     bitrate_source: Literal["entered", "measured", "assumed"] = "entered"
     recording: Literal["continuous", "motion", "disabled"] = "continuous"
     recorded_share: float | None = Field(default=None, ge=0, le=1)
@@ -39,7 +41,7 @@ class PlanRow(BaseModel):
 class PlanRequest(BaseModel):
     rows: list[PlanRow] = Field(min_length=1, max_length=MAX_ROWS)
     viewers: int = Field(default=0, ge=0, le=1000)
-    tiles_per_viewer: int = Field(default=4, ge=1, le=64)
+    tiles_per_viewer: int = Field(default=4, ge=1, le=MAX_TILES)
     assumptions: dict[str, float] = Field(default_factory=dict, max_length=len(capacity.ASSUMPTIONS))
 
     @field_validator("assumptions")
@@ -65,7 +67,7 @@ def get_inventory(_: Administrator) -> dict[str, object]:
 @router.get("/api/admin/capacity/assumptions")
 def get_assumptions(_: Administrator) -> dict[str, object]:
     return {"assumptions": [{"key": item.key, "label": item.label, "value": item.value, "unit": item.unit, "low": item.low, "high": item.high} for item in capacity.ASSUMPTIONS],
-            "disclaimer": capacity.DISCLAIMER}
+            "limits": {"max_rows": MAX_ROWS, "max_count": MAX_COUNT, "max_tiles": MAX_TILES, "min_kbps": capacity.MIN_KBPS, "max_kbps": capacity.MAX_KBPS}, "disclaimer": capacity.DISCLAIMER}
 
 
 @router.post("/api/admin/capacity/estimate")

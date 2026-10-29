@@ -26,6 +26,9 @@ test("a plan gives the worked figures, lists its assumptions, says what it is, a
   const csv = fs.readFileSync(await download.path(), "utf8");
   expect(csv).toContain("not a certification of capacity");
   expect(csv).toContain("13271040000000");
+  expect(csv).toContain("1920 x 1080");  // The plan's own inputs are in it, not just the results
+  expect(csv).toContain("People watching Live at once");
+  expect(csv).toContain("Assumes");
   expect(download.suggestedFilename()).toBe("capacity-estimate.csv");
 });
 
