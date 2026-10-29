@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import time
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -24,19 +25,25 @@ from app.store import connect
 
 router = APIRouter()
 
+SETTINGS_RECHECK_SECONDS = 2.0  # How often a talk in progress looks at whether it is still allowed
+
 
 class TalkSettingsRequest(BaseModel):
     enabled: bool
-    roles: list[str] = Field(default_factory=lambda: ["administrator"], max_length=len(talk.ROLES))
+    roles: list[Literal["administrator", "operator"]] = Field(default_factory=lambda: ["administrator"], max_length=len(talk.ROLES))
     record_audio: bool = False
 
 
 def _camera_row(camera_id: str, user: Principal):
     with connect() as db:
-        row = db.execute("SELECT id,name,archived_at,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if row is None or row["archived_at"] or not user.access.can_see(camera_id):
-            raise HTTPException(status_code=404, detail="Camera not found")
-        return row, talk.settings(db, camera_id)
+        return _visible_camera(db, camera_id, user), talk.settings(db, camera_id)
+
+
+def _visible_camera(db, camera_id: str, user: Principal):
+    row = db.execute("SELECT id,name,archived_at,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    if row is None or row["archived_at"] or not user.access.can_see(camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return row
 
 
 def _view(user: Principal, config: dict[str, object], camera_id: str) -> dict[str, object]:
@@ -74,14 +81,12 @@ def get_talk(camera_id: str, user: CurrentUser) -> dict[str, object]:
 @router.put("/api/cameras/{camera_id}/talk")
 def put_talk(camera_id: str, payload: TalkSettingsRequest, user: Administrator) -> dict[str, object]:
     roles = [role for role in talk.ROLES if role in payload.roles]
-    if len(roles) != len(set(payload.roles)):
-        raise HTTPException(status_code=422, detail="Unknown role")
     if payload.enabled and not roles:
         raise HTTPException(status_code=422, detail="Choose at least one role that may talk")
-    _camera_row(camera_id, user)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            _visible_camera(db, camera_id, user)
             db.execute("INSERT INTO camera_talk(camera_id,enabled,roles_json,record_audio) VALUES(?,?,?,?) ON CONFLICT(camera_id) DO UPDATE SET "
                        "enabled=excluded.enabled,roles_json=excluded.roles_json,record_audio=excluded.record_audio,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
                        (camera_id, int(payload.enabled), json.dumps(roles), int(payload.record_audio)))
@@ -112,6 +117,14 @@ def talk_audio(camera_id: str, session_id: str, user: Administrator) -> Response
             raise HTTPException(status_code=404, detail="No audio was kept for this talk")
         record(db, user.id, "talk_audio_downloaded", "camera", camera_id, session=session_id)
     return Response(content=bytes(row["audio_wav"]), media_type="audio/wav", headers={"Content-Disposition": f'attachment; filename="talk-{session_id[:8]}.wav"'})
+
+
+def _still_allowed(camera_id: str, user: Principal) -> bool:
+    try:
+        _, config = _camera_row(camera_id, user)
+    except HTTPException:
+        return False
+    return _may(user, config)
 
 
 # Close codes follow live_media's: 4403 not allowed, 4404 no such camera, 4415 camera has no usable speaker, 4429 someone else is talking, 4502 the camera failed.
@@ -151,14 +164,18 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
         await refuse(websocket, live_media.CLOSE_BUSY, {"type": "busy", "talker": busy.holder, "detail": f"{busy.holder} is talking through this camera"})
         return
     backchannel: talk.RtspBackchannel | None = None
-    reason, recorded, started = "released", False, False
+    reason, recorded, started, codec = "released", False, False, None
     session: talk.Talking | None = None
     try:
+        # Every attempt that gets this far is in the talk history and the audit log, whether or not the camera could be reached.
+        await asyncio.to_thread(talk.begin_record, talking)
+        started = True
         try:
             url = decrypt(row["stream_url_ciphertext"])
             safe_stream_url(url)
             backchannel = talk.RtspBackchannel(url)
             track = await backchannel.connect()
+            codec = track.codec
         except talk.BackchannelUnsupported as exc:
             reason = "unsupported"
             await refuse(websocket, live_media.CLOSE_UNSUPPORTED, {"type": "unsupported", "detail": str(exc)})
@@ -168,10 +185,8 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
             await refuse(websocket, live_media.CLOSE_STREAM_FAILED, {"type": "error", "detail": str(exc) if isinstance(exc, talk.BackchannelError) else "Camera stream configuration is invalid"})
             return
         session = talk.Talking(backchannel, bool(config["record_audio"]))
-        await asyncio.to_thread(talk.begin_record, talking, track.codec)
-        started = True
         await websocket.send_json({"type": "ready", "codec": track.codec, "max_seconds": talk.MAX_TALK_SECONDS})
-        last_audio = time.monotonic()
+        last_audio = last_check = time.monotonic()
         while True:
             now = time.monotonic()
             if now - talking.started > talk.MAX_TALK_SECONDS:
@@ -180,6 +195,11 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
             if backchannel.closed.is_set():
                 reason = "camera_failed"
                 break
+            if now - last_check >= SETTINGS_RECHECK_SECONDS:
+                last_check = now
+                if not await asyncio.to_thread(_still_allowed, camera_id, principal):  # Turned off, or the role removed, while someone is talking
+                    reason = "turned_off"
+                    break
             try:
                 message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -203,7 +223,7 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
                 with contextlib.suppress(ValueError):
                     if json.loads(message["text"]).get("type") == "stop":
                         break
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):  # The browser went away (a send on a closed socket raises RuntimeError)
         pass
     finally:
         talk.talkers.end(talking)  # First, and without waiting: a talk that is over never holds the camera, even if this task is being cancelled
@@ -213,7 +233,7 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
         if started:
             kept = bytes(session.keep) if session is not None and session.keep else None
             recorded = bool(kept)
-            await asyncio.shield(asyncio.to_thread(talk.end_record, talking, reason, kept))
+            await asyncio.shield(asyncio.to_thread(talk.end_record, talking, reason, kept, codec))
         with contextlib.suppress(Exception):
             await websocket.send_json({"type": "ended", "reason": reason, "recorded": recorded})
             await websocket.close()

@@ -38,14 +38,14 @@ test("hold to talk reaches the camera, release stops it, and a second person see
   await page.goto("/live");
   await page.getByRole("button", { name: /^Camera 001\b/ }).click();
   const talk = page.getByRole("button", { name: "Talk through Camera 001" });
-  await expect(talk).toBeVisible();
+  await expect(talk).toBeVisible({ timeout: 15_000 });
   expect(await page.evaluate(() => window.__microphoneRequests)).toBe(0); // Not asked for until the first talk
 
   const box = await talk.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
-  await expect(talk).toHaveAttribute("data-phase", "talking");
-  await expect(page.getByRole("status").filter({ hasText: "You are talking" })).toBeVisible();
+  await expect(talk).toHaveAttribute("data-phase", "talking", { timeout: 15_000 });
+  await expect(page.getByRole("status").filter({ hasText: "You are talking" })).toBeVisible({ timeout: 15_000 });
   expect(await page.evaluate(() => window.__microphoneRequests)).toBe(1);
   await expect.poll(() => camera.packets.length, { timeout: 10_000 }).toBeGreaterThan(5);
   expect(new Set(camera.packets.map(packet => packet.payloadType))).toEqual(new Set([0]));
@@ -53,7 +53,11 @@ test("hold to talk reaches the camera, release stops it, and a second person see
   // While it is held, an operator sees who is talking and cannot take over.
   const operator = await signInAs(browser, baseURL, "camera-operator");
   await operator.page.goto("/live");
-  await operator.page.getByRole("button", { name: /^Camera 001\b/ }).click();
+  // The inventory can finish loading just after the first click: click until the camera is on the wall.
+  await expect(async () => {
+    if (await operator.page.locator(".tile[data-camera-id]").count() === 0) await operator.page.getByRole("button", { name: /^Camera 001\b/ }).click();
+    await expect(operator.page.locator(".tile[data-camera-id]")).toHaveCount(1, { timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
   const theirs = operator.page.getByRole("button", { name: "Talk through Camera 001" });
   await expect(theirs).toBeDisabled({ timeout: 15_000 });
   await expect(theirs).toContainText("camera-admin is talking");

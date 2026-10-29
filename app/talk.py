@@ -8,6 +8,7 @@ connection. Only one person talks through a camera at a time (``Talkers``).
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import io
@@ -20,7 +21,7 @@ import threading
 import time
 import wave
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urljoin, urlsplit
 
 import numpy as np
@@ -78,6 +79,7 @@ def encode_alaw(pcm: np.ndarray) -> bytes:
 
 ENCODERS = {"PCMU": encode_ulaw, "PCMA": encode_alaw}
 PAYLOAD_TYPES = {"PCMU": 0, "PCMA": 8}
+STATIC_NAMES = {payload: name for name, payload in PAYLOAD_TYPES.items()}
 
 
 # --- RTSP backchannel ------------------------------------------------------------------------------------------------------------------
@@ -97,11 +99,10 @@ def parse_sdp(text: str) -> list[AudioTrack]:
     def close() -> None:
         if not media or media["kind"] != "audio" or media["direction"] != "sendonly":
             return
-        wanted = {PAYLOAD_TYPES[name]: name for name in PAYLOAD_TYPES}
         names = dict(media["names"])  # payload type -> codec name from a=rtpmap
         for payload in media["formats"]:
-            name = names.get(payload) or wanted.get(payload)
-            if name in ENCODERS and PAYLOAD_TYPES[name] == payload or (name in ENCODERS and payload >= 96):
+            name = names.get(payload) or STATIC_NAMES.get(payload)
+            if name in ENCODERS and (PAYLOAD_TYPES[name] == payload or payload >= 96):  # A static type, or a dynamic one the camera named
                 tracks.append(AudioTrack(name, payload, str(media["control"] or "")))
                 return
 
@@ -209,7 +210,6 @@ class RtspBackchannel:
             if self._challenge.lower().startswith("digest"):
                 lines.append(f"Authorization: {_digest(self._challenge, self.username, self.password, method, url)}")
             else:
-                import base64
                 lines.append("Authorization: Basic " + base64.b64encode(f"{self.username}:{self.password}".encode()).decode())
         lines += [f"{key}: {value}" for key, value in (headers or {}).items()]
         future: asyncio.Future | None = None
@@ -293,9 +293,8 @@ class RtspBackchannel:
         self.packets += 1
 
     async def close(self) -> None:
-        for task in (self._keepalive,):
-            if task is not None:
-                task.cancel()
+        if self._keepalive is not None:
+            self._keepalive.cancel()
         if self._writer is not None and not self.closed.is_set() and self._session:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._request("TEARDOWN", self.url), 1.0)
@@ -305,6 +304,8 @@ class RtspBackchannel:
                 await asyncio.wait_for(self._writer.wait_closed(), 1.0)
         if self._drain is not None:
             self._drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._drain
         self.closed.set()
 
 
@@ -381,21 +382,21 @@ def wav_bytes(pcm: bytes) -> bytes:
     return out.getvalue()
 
 
-def begin_record(talk: Talk, codec: str) -> None:
+def begin_record(talk: Talk) -> None:
     with connect() as db:
-        db.execute("INSERT INTO talk_sessions(id,camera_id,user_id,username,started_at,codec) VALUES(?,?,?,?,?,?)",
-                   (talk.id, talk.camera_id, talk.user_id, talk.username, talk.started_at, codec))
-        record(db, talk.user_id, "talk_started", "camera", talk.camera_id, session=talk.id, codec=codec)
+        db.execute("INSERT INTO talk_sessions(id,camera_id,user_id,username,started_at) VALUES(?,?,?,?,?)",
+                   (talk.id, talk.camera_id, talk.user_id, talk.username, talk.started_at))
+        record(db, talk.user_id, "talk_started", "camera", talk.camera_id, session=talk.id)
 
 
-def end_record(talk: Talk, reason: str, pcm: bytes | None) -> None:
+def end_record(talk: Talk, reason: str, pcm: bytes | None, codec: str | None = None) -> None:
     seconds = round(time.monotonic() - talk.started, 2)
     with connect() as db:
-        db.execute("UPDATE talk_sessions SET ended_at=?,seconds=?,ended_reason=?,audio_wav=? WHERE id=?",
-                   (datetime.now(timezone.utc).isoformat(), seconds, reason, wav_bytes(pcm) if pcm else None, talk.id))
-        record(db, talk.user_id, "talk_ended", "camera", talk.camera_id, session=talk.id, seconds=seconds, reason=reason, recorded=bool(pcm))
+        db.execute("UPDATE talk_sessions SET ended_at=?,seconds=?,ended_reason=?,codec=?,audio_wav=? WHERE id=?",
+                   (datetime.now(timezone.utc).isoformat(), seconds, reason, codec, wav_bytes(pcm) if pcm else None, talk.id))
+        record(db, talk.user_id, "talk_ended", "camera", talk.camera_id, session=talk.id, seconds=seconds, reason=reason, codec=codec, recorded=bool(pcm))
         db.execute("UPDATE talk_sessions SET audio_wav=NULL WHERE audio_wav IS NOT NULL AND started_at < ?",
-                   (datetime.fromtimestamp(time.time() - RECORDING_KEEP_DAYS * 86400, timezone.utc).isoformat(),))
+                   ((datetime.now(timezone.utc) - timedelta(days=RECORDING_KEEP_DAYS)).isoformat(),))  # Kept audio goes after RECORDING_KEEP_DAYS; the row stays
 
 
 class Talking:

@@ -31,8 +31,8 @@ export function TalkButton({ cameraId, name, keyTarget }: { cameraId: string; na
   const me = useMe().data;
   const [phase, setPhase] = useState<TalkPhase>("idle");
   const [note, setNote] = useState<string | null>(null);
-  const talker = useMemo(() => new Talker(setPhase, outcome => setNote(sentence(outcome))), []);
   const holding = useRef(false);
+  const talker = useMemo(() => new Talker(setPhase, outcome => { holding.current = false; setNote(sentence(outcome)); }), []);
   const entry = talk.data?.[cameraId];
   const holder = entry?.talking ?? null;
   const mine = holder !== null && holder.username === me?.username;
@@ -50,7 +50,13 @@ export function TalkButton({ cameraId, name, keyTarget }: { cameraId: string; na
     talker.release();
     void talk.refetch();
   };
-  useEffect(() => () => talker.release(), [talker]);
+  useEffect(() => {
+    // Leaving the page or hiding the tab lets go, whatever the pointer or key is doing.
+    const letGo = () => { if (document.visibilityState === "hidden") up(); };
+    window.addEventListener("pagehide", up);
+    document.addEventListener("visibilitychange", letGo);
+    return () => { window.removeEventListener("pagehide", up); document.removeEventListener("visibilitychange", letGo); talker.release(); };
+  }, [talker]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const target = keyTarget?.current;
     if (!target || !entry) return;

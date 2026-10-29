@@ -8,6 +8,7 @@ export type TalkOutcome = { kind: "ended"; reason: string } | { kind: "busy"; ta
 
 const SAMPLE_RATE = 8000;
 const BLOCK = 512; // 64 ms at 8 kHz
+const MAX_QUEUED_BLOCKS = 48; // About three seconds of speech spoken while the camera is still being reached
 
 function pcm16(samples: Float32Array): ArrayBuffer {
   const out = new Int16Array(samples.length);
@@ -25,12 +26,16 @@ export class Talker {
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private generation = 0;
+  private ready = false;
+  private queued: ArrayBuffer[] = [];
 
   constructor(private readonly onPhase: (phase: TalkPhase) => void, private readonly onOutcome: (outcome: TalkOutcome) => void) {}
 
   /** Start talking: the microphone first (the permission prompt), then the camera. Resolves once talking or refused; `release` before then cancels. */
   async press(cameraId: string): Promise<void> {
     const mine = ++this.generation;
+    this.ready = false;
+    this.queued = [];
     this.onPhase("connecting");
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
@@ -43,6 +48,7 @@ export class Talker {
     const socket = new WebSocket(`${scheme}//${location.host}/api/cameras/${encodeURIComponent(cameraId)}/talk/stream`);
     socket.binaryType = "arraybuffer";
     this.socket = socket;
+    this.capture(); // Speech starts at once: what is said while the camera is being reached is sent as soon as it is ready
     socket.onmessage = event => {
       if (mine !== this.generation || typeof event.data !== "string") return;
       const message = JSON.parse(event.data) as { type: string; talker?: string; detail?: string; reason?: string };
@@ -55,24 +61,35 @@ export class Talker {
     socket.onerror = () => undefined;
   }
 
-  private begin(): void {
-    if (!this.stream || !this.socket) return;
+  private capture(): void {
+    if (!this.stream) return;
     const context = new AudioContext({ sampleRate: SAMPLE_RATE }); // The browser resamples the microphone to this
     this.context = context;
     this.source = context.createMediaStreamSource(this.stream);
     this.processor = context.createScriptProcessor(BLOCK, 1, 1);
     this.processor.onaudioprocess = event => {
-      if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(pcm16(event.inputBuffer.getChannelData(0)));
+      const block = pcm16(event.inputBuffer.getChannelData(0));
+      if (this.ready && this.socket?.readyState === WebSocket.OPEN) this.socket.send(block);
+      else if (!this.ready && this.queued.length < MAX_QUEUED_BLOCKS) this.queued.push(block);
     };
     this.source.connect(this.processor);
     this.processor.connect(context.destination); // The processor only runs while connected on; it outputs silence
     void context.resume();
+  }
+
+  private begin(): void {
+    if (!this.socket) return;
+    this.ready = true;
+    for (const block of this.queued) this.socket.send(block);
+    this.queued = [];
     this.onPhase("talking");
   }
 
   /** Stop at once: the microphone is released, then the camera told. */
   release(): void {
     this.generation += 1;
+    this.ready = false;
+    this.queued = [];
     const socket = this.socket;
     this.closeMicrophone();
     this.socket = null;

@@ -7,6 +7,7 @@ import json
 import time
 import unittest
 import wave
+from unittest.mock import patch
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -201,6 +202,7 @@ class TalkApiTests(SceneTestCase):
     def test_settings_are_validated_and_audited(self):
         self.assertEqual(self.client.put(self.path, json={"enabled": True, "roles": []}).status_code, 422)
         self.assertEqual(self.client.put(self.path, json={"enabled": True, "roles": ["root"]}).status_code, 422)
+        self.assertEqual(self.client.put(self.path, json={"enabled": True, "roles": ["operator", "operator"]}).status_code, 200)  # A repeat is harmless
         self.assertEqual(self.client.put(f"/api/cameras/{self.camera_id[:-1]}x/talk", json={"enabled": False, "roles": []}).status_code, 404)
         self.enable(record_audio=True)
         self.assertEqual(self.audit("camera_talk_changed")[-1]["record_audio"], True)
@@ -242,7 +244,17 @@ class TalkApiTests(SceneTestCase):
         message, code = self.refused(self.client)
         self.assertEqual((message["type"], code), ("unsupported", 4415))
         self.assertIsNone(talk.talkers.holder(self.camera_id))  # The slot is not left held
-        self.assertEqual(self.client.get(f"{self.path}/sessions").json()["sessions"], [])
+        sessions = self.client.get(f"{self.path}/sessions").json()["sessions"]
+        self.assertEqual([(session["ended_reason"], session["has_audio"]) for session in sessions], [("unsupported", False)])  # The attempt is on record
+
+    def test_turning_talk_off_ends_a_talk_in_progress(self):
+        self.enable()
+        with patch("app.api.talk.SETTINGS_RECHECK_SECONDS", 0.2), self.client.websocket_connect(self.stream) as websocket:
+            self.assertEqual(websocket.receive_json()["type"], "ready")
+            self.enable(enabled=False)
+            ended = websocket.receive_json()
+        self.assertEqual((ended["type"], ended["reason"]), ("ended", "turned_off"))
+        self.assertIsNone(talk.talkers.holder(self.camera_id))
 
     def test_bad_audio_ends_the_talk(self):
         self.enable()
