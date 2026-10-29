@@ -80,6 +80,8 @@ Hold Talk on a Live tile to speak through a camera's speaker over the ONVIF audi
 
 Settings, Updates tells administrators when a newer release is out, with its notes and whether it migrates the database, runs a pre-update backup and then shows the exact host commands to upgrade and roll back; the NVR never runs them and has no Docker access (see [Guided updates](docs/guided-updates.md)).
 
+Settings, Capacity planner estimates the disk, write speed, network and processing a set of cameras needs, from this installation's measured bitrates or stated defaults, with its assumptions listed and exportable; it is an estimate, not a certification of capacity (see [Capacity planner](docs/capacity-planner.md)).
+
 Privacy masks black out areas of a camera's picture everywhere: written to cameras that support ONVIF masks, and otherwise drawn by the NVR into every live view, recording, snapshot and export. Administrators can see unmasked footage only for a stated, audited reason (see [privacy masks](docs/privacy-masks.md)).
 
 Access grants limit which cameras an operator sees, by camera group or for everyone holding an Entra role, optionally until an expiry; hidden cameras, their footage, alarms and exports behave as if they did not exist (see [camera access grants](docs/access-grants.md)).
