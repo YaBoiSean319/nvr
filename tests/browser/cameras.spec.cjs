@@ -393,6 +393,8 @@ test("200-camera filtering and selection record browser measurements without row
     // The sign-in page's own sign-in-options probe can still be in flight when signing in replaces the page, and the browser then cancels it. That is
     // not a failure of the Cameras workspace; any other failed request, and any other error for this one, still counts.
     if (pathname === "/api/auth/oidc/status" && reason === "net::ERR_ABORTED") return;
+    // Likewise Live's camera-groups read can still be in flight when the journey leaves Live for Cameras, and the page leaving cancels it.
+    if (pathname === "/api/camera-groups" && reason === "net::ERR_ABORTED") return;
     errors.failed_requests += 1;
     details.push(`request failed ${pathname}: ${reason}`);
   });
