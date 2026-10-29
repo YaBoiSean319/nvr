@@ -108,6 +108,17 @@ Tested here: a synthetic fisheye picture of a room with straight lines (an equid
 Tested here: the G.711 encoders (round trip within quantisation), an RTSP stand-in that implements the backchannel with digest sign-in, the one-talker rule, release, the audit log, the optional recording and a browser journey with a made-up microphone. No real camera speaker was available.
 
 
+### Guided updates (#148)
+
+- [ ] **Unchecked.** A real release and a real host.
+  - Version:
+  - Environment: how the NVR is run (compose file location, service name, image tag in use), whether backups are set up, internet access to api.github.com.
+  - Steps: tag a release (see docs/guided-updates.md) and confirm the workflow publishes the image and the release. In Settings, Updates choose Check now and confirm the new version, its notes and the migration line. Choose Back up, then show the upgrade steps and confirm the backup is listed before the commands. Run the commands on the host and confirm the container comes back at the new version and the page lists the upgrade and its migrations. Then follow the rollback and confirm the old version runs with the database copy named on the page. Turn the check off (switch and `NVR_UPDATE_CHECK=false`) and confirm no request leaves the host.
+  - Owner:
+  - Evidence:
+
+Tested here: the feed (releases, drafts, pre-releases, markers, broken feeds), the off switch making no request, the backup running before the steps, the rollback naming the pre-migration copy present, the upgrade history at startup, and that no route or file can reach Docker. The release workflow could not be run.
+
 ### Capacity planner (#149)
 
 - [ ] **Unchecked.** Real cameras and real hardware.

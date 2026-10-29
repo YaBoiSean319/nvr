@@ -267,7 +267,7 @@ def queue_backup(actor_id: int) -> dict[str, object]:
             "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
             (actor_id, "backup_requested", "backup", run_id, "{}"),
         )
-        return _run_view(db.execute("SELECT * FROM backup_runs WHERE id=?", (run_id,)).fetchone())
+        return run_view(db.execute("SELECT * FROM backup_runs WHERE id=?", (run_id,)).fetchone())
 
 
 def execute_run(run_id: str) -> dict[str, object]:
@@ -323,7 +323,7 @@ def start_scheduled_run() -> str:
 
 def status() -> dict[str, object]:
     with connect() as db:
-        runs = [_run_view(row) for row in db.execute("SELECT * FROM backup_runs ORDER BY created_at DESC LIMIT 20")]
+        runs = [run_view(row) for row in db.execute("SELECT * FROM backup_runs ORDER BY created_at DESC LIMIT 20")]
         last_success = db.execute("SELECT * FROM backup_runs WHERE status='succeeded' ORDER BY finished_at DESC LIMIT 1").fetchone()
         last_failure = db.execute("SELECT * FROM backup_runs WHERE status='failed' ORDER BY finished_at DESC LIMIT 1").fetchone()
     reason = disabled_reason()
@@ -343,8 +343,8 @@ def status() -> dict[str, object]:
         "destination_error": destination_error,
         "keep": keep(),
         "schedule": {"local_time": SCHEDULE_TIME.strftime("%H:%M"), "time_zone": str(site_zone())},
-        "last_success": _run_view(last_success) if last_success else None,
-        "last_failure": _run_view(last_failure) if last_failure else None,
+        "last_success": run_view(last_success) if last_success else None,
+        "last_failure": run_view(last_failure) if last_failure else None,
         "age_hours": age_hours,
         "stale": reason is None and (age_hours is None or age_hours * 3600 > STALE_AFTER.total_seconds()),
         "stored": stored,
@@ -421,7 +421,7 @@ class BackupManager:
         sync_backup_incident()
 
 
-def _run_view(row: sqlite3.Row) -> dict[str, object]:
+def run_view(row: sqlite3.Row) -> dict[str, object]:
     return {key: row[key] for key in ("id", "kind", "status", "created_at", "started_at", "finished_at", "file_name", "size_bytes", "error")}
 
 
