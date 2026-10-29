@@ -40,6 +40,7 @@ from .rule_actions import RuleActionManager
 from .rules import RulesManager
 from .principal import COOKIE_NAME, current_user, depends_on, scope_for, secure_cookie
 from .store import initialize
+from . import updates
 from .version import APP_VERSION
 from .webhooks import WebhookManager
 from .workers import liveness, supervised
@@ -89,6 +90,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     async def lifespan(app: FastAPI):
         os.umask(0o077)
         initialize()
+        updates.note_start()
         started = {}
         heartbeat = None
         app.state.live_hub = LiveHub()

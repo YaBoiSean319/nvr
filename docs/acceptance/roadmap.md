@@ -95,3 +95,14 @@ Tested here: a camera stand-in that records the ONVIF commands it gets, with a s
 
 Tested here: a synthetic fisheye picture of a room with straight lines (an equidistant lens model, ceiling, wall and floor mounts) rendered by the WebGL stage and by the export, straight to within about a pixel, and the two agreeing with a numpy reference; the same picture as a playing video; controls by keyboard, mouse and touch events; saved views and the workspace keeping views; exports through FFmpeg. Not tested here: a real fisheye lens (whose projection is not exactly equidistant), a stream from a real camera, or phones' WebGL.
 
+
+### Guided updates (#148)
+
+- [ ] **Unchecked.** A real release and a real host.
+  - Version:
+  - Environment: how the NVR is run (compose file location, service name, image tag in use), whether backups are set up, internet access to api.github.com.
+  - Steps: tag a release (see docs/guided-updates.md) and confirm the workflow publishes the image and the release. In Settings, Updates choose Check now and confirm the new version, its notes and the migration line. Choose Back up, then show the upgrade steps and confirm the backup is listed before the commands. Run the commands on the host and confirm the container comes back at the new version and the page lists the upgrade and its migrations. Then follow the rollback and confirm the old version runs with the database copy named on the page. Turn the check off (switch and `NVR_UPDATE_CHECK=false`) and confirm no request leaves the host.
+  - Owner:
+  - Evidence:
+
+Tested here: the feed (releases, drafts, pre-releases, markers, broken feeds), the off switch making no request, the backup running before the steps, the rollback naming the pre-migration copy present, the upgrade history at startup, and that no route or file can reach Docker. The release workflow could not be run.

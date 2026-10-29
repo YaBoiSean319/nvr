@@ -18,6 +18,7 @@ import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { SitesSettings } from "./SitesSettings";
 import { StorageSettings } from "./StorageSettings";
 import { TieringSettings } from "./TieringSettings";
+import { UpdatesSettings } from "./UpdatesSettings";
 
 const CATEGORIES = {
   general: { label: "General", page: GeneralSettings },
@@ -37,6 +38,7 @@ const CATEGORIES = {
   plates: { label: "Licence plates", page: PlatesSettings },
   sites: { label: "Sites (console)", page: SitesSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },
+  updates: { label: "Updates", page: UpdatesSettings },
   diagnostics: { label: "Diagnostics", page: DiagnosticsSettings },
 } as const;
 
