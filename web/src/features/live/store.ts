@@ -149,8 +149,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     }),
   setDewarp: (id, next) => set(state => ({ dewarp: next.mode === "raw" ? Object.fromEntries(Object.entries(state.dewarp).filter(([key]) => key !== id)) : { ...state.dewarp, [id]: next } })),
   markSaved: view => set(state => ({ view, baseline: state.arrangement, baselineDewarp: state.dewarp })),
-  restore: (arrangement, sidebarOpen, dewarp) =>
-    set({ arrangement, sidebarOpen, restored: true, dewarp: dewarp ?? {}, activeId: arrange.members(arrangement)[0] ?? null }),
+  restore: (saved, sidebarOpen, dewarp) =>
+    set(state => {
+      // Cameras clicked while the saved workspace was still on its way are kept, added to what came back (and the last one is the active tile).
+      const early = arrange.members(state.arrangement).filter(id => !arrange.members(saved).includes(id));
+      const arrangement = early.reduce((current, id) => arrange.add(current, id).arrangement, saved);
+      return { arrangement, sidebarOpen, restored: true, dewarp: dewarp ?? {}, activeId: early.length ? (early[early.length - 1] ?? null) : (arrange.members(arrangement)[0] ?? null) };
+    }),
   setActive: id => set({ activeId: id }),
   enlarge: id => set({ enlargedId: id, activeId: id }),
   unenlarge: () => set({ enlargedId: null }),
