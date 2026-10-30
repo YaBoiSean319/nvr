@@ -502,9 +502,12 @@ class DetectionManager:
         """The plate detector and recogniser for a region, loaded once for every plate camera that uses this provider and region (None when they are not installed)."""
         from . import plates
         key = (provider, region)
-        if key not in self._plate_readers:
-            self._plate_readers[key] = await asyncio.to_thread(plates.load_reader, provider, region)
-        return self._plate_readers[key]
+        reader = self._plate_readers.get(key)
+        if reader is None:  # A failed load is not remembered, so installing or re-choosing the models works without a restart.
+            reader = await asyncio.to_thread(plates.load_reader, provider, region)
+            if reader is not None:
+                self._plate_readers[key] = reader
+        return reader
 
     async def _reid_model(self, provider: str) -> Any:
         """The person re-identification model, loaded once for every camera that uses this provider (None when it is not installed)."""

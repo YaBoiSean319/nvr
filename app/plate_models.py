@@ -9,7 +9,7 @@ country) and a **recogniser** for each popular region; the administrator chooses
 - ``custom``: models the administrator installed beside the others (the paths in ``docs/licence-plates.md``), for example Intel's Open Model Zoo pair for Chinese plates.
 
 The shipped models are from the MIT-licensed ``open-image-models`` and ``fast-plate-ocr`` projects (ONNX, read directly by OpenVINO). They are downloaded in the image
-build with pinned checksums (``Dockerfile``, ``scripts/plate_model_files.py``) and verified again here before use. Their accuracy on a particular installation's cameras
+build with pinned checksums (``Dockerfile``, kept in step with this registry by a test) and verified again here before use. Their accuracy on a particular installation's cameras
 is not known until measured: ``python -m app.plates evaluate``.
 
 Contracts (from the projects' published source). **Detector**: input ``images`` ``[1,3,S,S]`` float32, RGB 0 to 1, the picture letter-boxed (grey 114 borders) to S x S; output
@@ -82,11 +82,23 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Files already hashed and found right, so the admin page does not re-read 13 MB per region on every request.
+_VERIFIED: set[tuple[str, int, int, str]] = set()
+
+
 def file_ok(model: ModelFile, directory: Path | None = None) -> bool:
     """Whether the file is there and is the one that was pinned."""
     path = (directory or MODELS_DIR) / model.name
     try:
-        return path.is_file() and path.stat().st_size == model.size_bytes and sha256_of(path) == model.sha256
+        stat = path.stat()
+        if not path.is_file() or stat.st_size != model.size_bytes:
+            return False
+        key = (str(path), stat.st_size, stat.st_mtime_ns, model.sha256)
+        if key not in _VERIFIED:
+            if sha256_of(path) != model.sha256:
+                return False
+            _VERIFIED.add(key)
+        return True
     except OSError:
         return False
 

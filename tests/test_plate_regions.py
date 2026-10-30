@@ -182,6 +182,8 @@ class RealModelTests(unittest.TestCase):
 
     def test_a_drawn_plate_is_found_and_read_through_the_real_detector_and_each_regions_recogniser(self):
         if self.frame is None:
+            if real_plate_models.required():
+                self.fail("NVR_REQUIRE_PLATE_MODELS is set but the plate could not be drawn (needs ffmpeg and the DejaVu font)")
             self.skipTest("needs ffmpeg and the DejaVu font to draw the plate")
         for region in (plate_models.WORLDWIDE, plate_models.EUROPE):
             reader = plate_models.RegionReader(region, directory=self.folder)
@@ -194,6 +196,8 @@ class RealModelTests(unittest.TestCase):
 
     def test_the_loader_gives_the_chosen_regions_reader_and_nothing_for_a_region_without_models(self):
         if self.frame is None:
+            if real_plate_models.required():
+                self.fail("NVR_REQUIRE_PLATE_MODELS is set but the plate could not be drawn (needs ffmpeg and the DejaVu font)")
             self.skipTest("needs ffmpeg and the DejaVu font to draw the plate")
         with patch.object(plate_models, "MODELS_DIR", self.folder):
             europe = plates.load_reader("CPU", "europe")
