@@ -78,6 +78,11 @@ export function PlatesSettings() {
     onSuccess: async () => { done("Saved."); await refresh(); },
     onError: problem => fail(problem, "The camera could not be saved."),
   });
+  const chooseRegion = useMutation({
+    mutationFn: (region: string) => api("/api/admin/plates/region", { method: "PUT", body: { region } }),
+    onSuccess: async () => { done("Region saved. Plate reading uses it from the next picture, with no restart."); await refresh(); },
+    onError: problem => fail(problem, "The region could not be saved."),
+  });
   const create = useMutation({
     mutationFn: () => api("/api/admin/plates/watch-lists", { method: "POST", body: form }),
     onSuccess: async () => { setForm({ name: "", kind: "deny", lookalikes: false }); done("Watch list created."); await refresh(); },
@@ -96,10 +101,23 @@ export function PlatesSettings() {
           Reads follow footage retention and access grants. Recognition quality depends on the camera and the site: read the confidence, and check a read against the footage before acting on it.
           Turn on AI analysis for a camera as well, because plates are read on the vehicles analysis finds.
         </p>
-        {data && !data.models.available ? (
+        <fieldset className="field-group" aria-label="Plate region" disabled={chooseRegion.isPending}>
+          <legend>Region</legend>
+          <p className="muted field-hint">
+            A plate reader knows only the plates it was trained on, so choose the region your cameras see. The models for the first two are built into this installation; accuracy on your own cameras is not known until you measure it
+            (<code>python -m app.plates evaluate</code>; see docs/licence-plates.md).
+          </p>
+          {(data?.models.regions ?? []).map(region => (
+            <label key={region.id} className="check" data-installed={region.installed}>
+              <input type="radio" name="plate-region" value={region.id} checked={data?.models.region === region.id} disabled={!region.installed} onChange={() => chooseRegion.mutate(region.id)} />
+              {" "}<strong>{region.label}</strong>
+              <span className="muted"> {region.covers} {region.manual ? "" : `(${((region.size_bytes ?? 0) / 1e6).toFixed(0)} MB)`} {region.installed ? "Installed." : region.manual ? "Not installed: install the models by hand to use this." : "Not installed in this image."}</span>
+            </label>
+          ))}
+        </fieldset>
+        {data && data.models.region && !data.models.regions.find(region => region.id === data.models.region)?.installed ? (
           <p className="notice" data-tone="warn" role="status">
-            The plate models are not installed, so nothing is read yet ({data.models.detector}: {data.models.detector_installed ? "installed" : "missing"}; {data.models.recogniser}: {data.models.recogniser_installed ? "installed" : "missing"}).
-            Install them beside the other models and restart the AI worker; see docs/licence-plates.md.
+            The models for the chosen region are not installed, so nothing is read yet. Choose an installed region, or install the models; see docs/licence-plates.md.
           </p>
         ) : null}
         <ul className="status-list" aria-label="Cameras for plates">

@@ -76,9 +76,36 @@ def get_plates(_: Administrator) -> dict[str, Any]:
         cameras = db.execute("SELECT c.id,c.name,coalesce(p.enabled,0) AS enabled,coalesce(p.min_confidence,0.6) AS min_confidence "
                              "FROM cameras c LEFT JOIN plate_settings p ON p.camera_id=c.id ORDER BY c.name COLLATE NOCASE,c.id").fetchall()
         lists = db.execute("SELECT * FROM plate_watch_lists ORDER BY name COLLATE NOCASE,id").fetchall()
-        return {"models": plates.model_status(),
+        return {"models": plates.model_status(plates.plate_region(db)),
                 "cameras": [{"id": row["id"], "name": row["name"], "enabled": bool(row["enabled"]), "min_confidence": row["min_confidence"]} for row in cameras],
                 "watch_lists": [_list_view(db, row, now) for row in lists]}
+
+
+class RegionChoice(BaseModel):
+    region: str = Field(min_length=1, max_length=40)
+
+
+@router.put("/api/admin/plates/region")
+def set_region(body: RegionChoice, user: Administrator) -> dict[str, Any]:
+    """Choose the region whose plate recogniser is used. A region whose models are not installed is refused; the next reading uses the choice (no restart)."""
+    from app import plate_models
+    region = plate_models.region_by_id(body.region)
+    if region is None:
+        raise HTTPException(status_code=422, detail="Unknown region")
+    if not plate_models.installed(region):
+        raise HTTPException(status_code=409, detail=f"The models for {region.label} are not installed" + (" (see docs/licence-plates.md)" if region.id == plate_models.CUSTOM else ""))
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            before = plates.plate_region(db)
+            db.execute("INSERT INTO plate_region_settings(singleton_id,region,updated_at) VALUES(1,?,?) ON CONFLICT(singleton_id) DO UPDATE SET region=excluded.region,updated_at=excluded.updated_at",
+                       (region.id, _now()))
+            record(db, int(user["id"]), "plates_region_changed", "settings", "plates", region=region.id, previous=before)
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+    return {"region": region.id}
 
 
 @router.put("/api/admin/plates/cameras/{camera_id}")

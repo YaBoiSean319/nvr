@@ -4,7 +4,7 @@ Cameras designated for it read the licence plates of the vehicles they see. Each
 
 ## Turning it on
 
-1. Install the models (below) beside the other AI models and restart the AI worker. Until both load, nothing is read and **Settings, Licence plates** says which one is missing.
+1. Choose the plate region under **Settings, Licence plates, Region**. The models for *Worldwide* and *Europe* are built into the image, so nothing needs installing; the choice applies from the next picture, with no restart. A region whose models are not installed cannot be chosen, and the page says so.
 2. Turn **AI analysis** on for the camera: plates are read on the vehicles analysis finds.
 3. Under **Settings, Licence plates**, tick **Read plates on** the camera (gates, car parks) and choose the lowest confidence to keep (60% by default; reads below it are dropped).
 
@@ -53,19 +53,35 @@ Plate reads belong to their footage. They are deleted with it: when the footage 
 
 ## The models
 
-Neither is bundled (no reviewed checksum is pinned for them yet; see `docs/acceptance/roadmap.md`). Put each model's `.xml` and `.bin` in `/opt/nvr/models` or set the paths:
+A plate reader knows only the plates it was trained on, so the administrator picks a region. One shared detector finds plates; each region has its own recogniser.
+
+| Region | Recogniser | Covers |
+| --- | --- | --- |
+| Worldwide, Latin alphabet (default) | `global_mobile_vit_v2_ocr` | Latin-alphabet plates from 65+ countries, including the United States, Canada, Mexico, Australia and the United Kingdom |
+| Europe | `european_mobile_vit_v2_ocr` | European plates |
+| Models I installed myself | your own files | Whatever you install by hand, for example Intel's Open Model Zoo pair, which is trained on Chinese plates |
+
+The shipped models are the MIT-licensed [open-image-models](https://github.com/ankandrew/open-image-models) YOLOv9 plate detector and [fast-plate-ocr](https://github.com/ankandrew/fast-plate-ocr) recognisers, downloaded from their GitHub releases when the image is built. The Dockerfile checks each file against a pinned SHA-256 (`app/plate_models.py` is the single registry; a test keeps the Dockerfile in step with it), and CI downloads the real files, reads a rendered plate through each region and runs `python -m scripts.check_plate_models` in the built image. The licence of the trained weights was taken from those projects' MIT licences and was not independently verified; check it before relying on it commercially. Models are looked for in `/opt/nvr/models/plates` (`NVR_PLATE_MODELS_DIR`).
+
+**Accuracy on your cameras is not known.** The test reads a clean rendered plate; real cameras, angles, night and speed differ. Measure it (below) and record the result.
+
+Regions that are not offered (for example Argentina, Brazil, India) have no shipped recogniser; use the hand-installed path.
+
+### Models you install by hand
+
+Put each model's `.xml` and `.bin` in `/opt/nvr/models` or set the paths, then choose *Models I installed myself*. A system upgraded with these files already in place keeps using them until a region is chosen.
 
 | Model | Default path | Contract |
-|---|---|---|
+| --- | --- | --- |
 | Plate detector | `/opt/nvr/models/vehicle-license-plate-detection-barrier-0106.xml` (`NVR_PLATE_DETECTOR_MODEL_PATH`) | input `[1,3,300,300]` BGR; output `[1,1,N,7]`, rows `image_id, label, confidence, x1, y1, x2, y2` as fractions of the picture; label 2 is a plate; confidence at least 0.5 |
 | Plate recogniser | `/opt/nvr/models/license-plate-recognition-barrier-0007.xml` (`NVR_PLATE_RECOGNISER_MODEL_PATH`) | input `[1,3,H,W]` BGR (the size is read from the model); output either per-position scores with an axis as long as the symbol list (CTC: best class per position, repeats collapsed, blank dropped; logits are softmaxed) or whole-number indices, one per position, `-1` ending the text |
 
-The recogniser's symbols are read from `<recogniser>.charset.txt` beside it: one symbol per line in class order, a line `<blank>` marking the CTC blank. Without the file they are `0`–`9`, `A`–`Z` and a blank last, which suits a Latin-plate recogniser. **Check that the symbols match the model you install**: the Open Model Zoo's `license-plate-recognition-barrier-0007` reads Chinese plates, and a model for another region needs its own symbols. Neither model's contract could be checked against the real files in this build (they could not be downloaded); the code was run against real OpenVINO models of the same contract built for the tests.
+The recogniser's symbols are read from `<recogniser>.charset.txt` beside it: one symbol per line in class order, a line `<blank>` marking the CTC blank. Without the file they are `0`–`9`, `A`–`Z` and a blank last. **Check that the symbols match the model you install.** This path was not run against the real Open Model Zoo files in this build; the code was run against real OpenVINO models of the same contract built for the tests.
 
 ## Measuring accuracy
 
 ```sh
-python -m app.plates evaluate labels.csv frames/   # labels.csv: image,plate   frames/: PNG, JPEG or BMP pictures
+python -m app.plates evaluate labels.csv frames/ [region]   # labels.csv: image,plate   frames/: PNG, JPEG or BMP pictures
 ```
 
 prints the share of plates read, right as a whole, right ignoring look-alikes, and characters right, using each picture's most confident read. Record a labelled sample from the cameras in service (day and night, the speeds in use) and put the result in `docs/acceptance/roadmap.md`. That file also holds the measurement made for this feature: the pipeline on a labelled sample of 500 rendered plates at eight picture qualities, with stand-in models (it measures the code, not the Open Model Zoo models or any camera).

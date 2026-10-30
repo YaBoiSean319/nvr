@@ -29,6 +29,13 @@ Scope: the roadmap in #106. These checks cannot be made from this repository (th
   - Owner:
   - Evidence:
 
+### Plate regions (#210)
+
+Verified here: each shipped region's real models load in OpenVINO and read a rendered plate ("AB12CDE") end to end; the Dockerfile pins match the registry; choosing a region switches the AI worker with no restart. **Not measured: accuracy on any real camera.**
+
+- [ ] **Unchecked.** Plate accuracy per region on real cameras.
+  - Steps: choose the region under Settings, Licence plates; record a labelled sample as for #142 and run `python -m app.plates evaluate labels.csv frames/` (uses the chosen region, or pass one); compare Worldwide with Europe on your plates; record the results here.
+
 ### Licence plate recognition (#142)
 
 Measured here (not a post-merge check): the plate pipeline, on a labelled sample of 500 plates rendered at eight levels of picture quality. The recogniser used is the template-matching stand-in in `tests/fixtures/plate_models.py`, built as a real OpenVINO model and run by the real `PlateReader`; the detector is a fixed-box stand-in. This measures the code (crop, resize, recognise, CTC decode, normalise, look-alike folding) and how quickly a simple reader degrades as pictures get worse. **It is not the accuracy of the Open Model Zoo models, which were not available to this build, and it says nothing about any camera.** Reproduce it with `python -m tests.fixtures.plate_accuracy` (deterministic: fixed seeds). "Right ignoring look-alikes" counts a read as right when it differs from the true plate only in characters the search treats as the same (O, Q or D and 0; I or L and 1; S and 5; B and 8; Z and 2).

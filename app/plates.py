@@ -229,21 +229,36 @@ class PlateReader:
         return plates
 
 
-def load_reader(provider: str = "CPU") -> PlateReader | None:
-    """The plate reader if both models are installed and load, else None (nothing is then read)."""
-    if not models_available():
+def plate_region(db: sqlite3.Connection) -> str:
+    """The region whose recogniser is chosen (see ``app/plate_models.py``)."""
+    from . import plate_models
+    row = db.execute("SELECT region FROM plate_region_settings WHERE singleton_id=1").fetchone()
+    return row["region"] if row and plate_models.region_by_id(row["region"]) else plate_models.DEFAULT_REGION
+
+
+def load_reader(provider: str = "CPU", region: str | None = None) -> Any:
+    """The plate reader for a region if its models are installed and load, else None (nothing is then read).
+
+    ``custom`` is the pair the administrator installed by hand (``PlateReader``); the other regions use the models shipped in the image (``plate_models.RegionReader``)."""
+    from . import plate_models
+    region = region or plate_models.CUSTOM
+    chosen = plate_models.region_by_id(region)
+    if chosen is None or not plate_models.installed(chosen):
         return None
     try:
-        return PlateReader(provider=provider)
+        return PlateReader(provider=provider) if chosen.id == plate_models.CUSTOM else plate_models.RegionReader(chosen, provider=provider)
     except Exception:  # noqa: BLE001 - models that will not load must never stop detection
         logger.exception("The plate models could not be loaded")
         return None
 
 
-def model_status() -> dict[str, Any]:
+def model_status(region: str | None = None) -> dict[str, Any]:
+    """The hand-installed pair's state (as before), and each region's."""
+    from . import plate_models
     return {"available": models_available(), "detector": DETECTOR_ID, "recogniser": RECOGNISER_ID,
             "detector_installed": DETECTOR_PATH.is_file() and DETECTOR_PATH.with_suffix(".bin").is_file(),
-            "recogniser_installed": RECOGNISER_PATH.is_file() and RECOGNISER_PATH.with_suffix(".bin").is_file()}
+            "recogniser_installed": RECOGNISER_PATH.is_file() and RECOGNISER_PATH.with_suffix(".bin").is_file(),
+            "regions": plate_models.status(), "region": region}
 
 
 def associate(box: dict[str, float], vehicles: Iterable[tuple[str, dict[str, float]]]) -> str | None:
@@ -544,12 +559,18 @@ def _decode_image(path: Path) -> np.ndarray | None:
     return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3) if len(data) == width * height * 3 else None
 
 
-if __name__ == "__main__":  # python -m app.plates evaluate <labels.csv> <image folder>
+if __name__ == "__main__":  # python -m app.plates evaluate <labels.csv> <image folder> [region]
     import sys
 
-    if len(sys.argv) != 4 or sys.argv[1] != "evaluate":
-        raise SystemExit("usage: python -m app.plates evaluate <labels.csv> <image folder>")
-    plate_reader = load_reader()
+    if len(sys.argv) not in (4, 5) or sys.argv[1] != "evaluate":
+        raise SystemExit("usage: python -m app.plates evaluate <labels.csv> <image folder> [region: worldwide | europe | custom]")
+    if len(sys.argv) == 5:
+        chosen = sys.argv[4]
+    else:  # The region chosen in Settings, when run inside the installation
+        from .store import connect
+        with connect() as _db:
+            chosen = plate_region(_db)
+    plate_reader = load_reader(region=chosen)
     if plate_reader is None:
-        raise SystemExit("The plate models are not installed (see docs/licence-plates.md)")
+        raise SystemExit(f"The plate models for {chosen} are not installed (see docs/licence-plates.md)")
     print(json.dumps(evaluate(Path(sys.argv[2]), Path(sys.argv[3]), plate_reader), indent=2))
