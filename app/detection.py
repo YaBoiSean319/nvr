@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -570,8 +571,8 @@ class DetectionManager:
                             raise
                         db.execute("COMMIT")
                     # A camera designated for plates gives each vehicle a few attempts at its plate; reading never holds up analysis.
-                    if self.clock().timestamp() - scanner_checked >= plates.SETTINGS_REFRESH:
-                        scanner_checked = self.clock().timestamp()
+                    if time.monotonic() - scanner_checked >= plates.SETTINGS_REFRESH:  # Not self.clock(): the analysis clock stamps the frames and must be read once per frame
+                        scanner_checked = time.monotonic()
                         with connect() as db:
                             wanted, minimum = plates.plate_settings(db, camera_id)
                             region = plates.plate_region(db) if wanted else None
