@@ -373,7 +373,7 @@ class DetectionManager:
         self.clock = clock
         self.detector: Any | None = None
         self._detectors: dict[tuple[str, str, str], Any] = {}
-        self._plate_readers: dict[str, Any] = {}
+        self._plate_readers: dict[tuple[str, str], Any] = {}
         self._model_lock = asyncio.Lock()
         self._inference_slots = asyncio.Semaphore(1)
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -498,12 +498,13 @@ class DetectionManager:
             self._attribute_models[provider] = await asyncio.to_thread(attributes.load_attribute_model, attributes.ATTRIBUTE_MODEL_PATH, provider)
         return self._attribute_models[provider]
 
-    async def _plate_reader(self, provider: str) -> Any:
-        """The plate detector and recogniser, loaded once for every plate camera that uses this provider (None when they are not installed)."""
+    async def _plate_reader(self, provider: str, region: str) -> Any:
+        """The plate detector and recogniser for a region, loaded once for every plate camera that uses this provider and region (None when they are not installed)."""
         from . import plates
-        if provider not in self._plate_readers:
-            self._plate_readers[provider] = await asyncio.to_thread(plates.load_reader, provider)
-        return self._plate_readers[provider]
+        key = (provider, region)
+        if key not in self._plate_readers:
+            self._plate_readers[key] = await asyncio.to_thread(plates.load_reader, provider, region)
+        return self._plate_readers[key]
 
     async def _reid_model(self, provider: str) -> Any:
         """The person re-identification model, loaded once for every camera that uses this provider (None when it is not installed)."""
@@ -531,7 +532,6 @@ class DetectionManager:
         attribute_model = await self._attribute_model(str(config["provider"]))
         reid_model = await self._reid_model(str(config["provider"]))
         clip_model = await self._clip_model()
-        plate_reader = await self._plate_reader(str(config["provider"]))
         plate_tasks: set[asyncio.Task[Any]] = set()
         while not self.stopping:
             try:
@@ -539,7 +539,7 @@ class DetectionManager:
                 zones = json.loads(config["zones_json"])
                 tracker = Tracker()
                 keyframed: set[str] = set()
-                scanner, scanner_checked = None, float("-inf")
+                scanner, scanner_reader, scanner_checked = None, None, float("-inf")
                 seen_frame = False
                 async for frame in _raw_frames(source, float(config["analysis_fps"])):
                     if self.stopping:
@@ -567,26 +567,29 @@ class DetectionManager:
                             raise
                         db.execute("COMMIT")
                     # A camera designated for plates gives each vehicle a few attempts at its plate; reading never holds up analysis.
-                    if plate_reader is not None:
-                        if self.clock().timestamp() - scanner_checked >= plates.SETTINGS_REFRESH:
-                            scanner_checked = self.clock().timestamp()
-                            with connect() as db:
-                                wanted, minimum = plates.plate_settings(db, camera_id)
-                            if wanted and scanner is None:
-                                scanner = plates.PlateScanner(plate_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)),
-                                                              lambda track, plate: plates.keep_plate(camera_id, track, plate, self.clock(), plate_reader.reader_id), min_confidence=minimum)
-                            elif not wanted:
-                                scanner = None
-                            elif scanner is not None:
-                                scanner.min_confidence = minimum
-                        if scanner is not None:
-                            for track_id, item in zip(track_ids, observations):
-                                scanner.seen(track_id, str(item["label"]), item["box"])
-                            scanner.forget({track.id for track in tracker.active})
-                            if scanner.due():
-                                task = asyncio.create_task(scanner.scan(), name=f"plates-{camera_id}")
-                                plate_tasks.add(task)
-                                task.add_done_callback(plate_tasks.discard)
+                    if self.clock().timestamp() - scanner_checked >= plates.SETTINGS_REFRESH:
+                        scanner_checked = self.clock().timestamp()
+                        with connect() as db:
+                            wanted, minimum = plates.plate_settings(db, camera_id)
+                            region = plates.plate_region(db) if wanted else None
+                        # The region chosen in Settings is looked at on every refresh, so a change takes effect without a restart.
+                        plate_reader = await self._plate_reader(str(config["provider"]), region) if wanted and region else None
+                        if not wanted or plate_reader is None:
+                            scanner = None
+                        elif scanner is None or scanner_reader is not plate_reader:
+                            scanner_reader = plate_reader
+                            scanner = plates.PlateScanner(plate_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)),
+                                                          lambda track, plate, reader=plate_reader: plates.keep_plate(camera_id, track, plate, self.clock(), reader.reader_id), min_confidence=minimum)
+                        else:
+                            scanner.min_confidence = minimum
+                    if scanner is not None:
+                        for track_id, item in zip(track_ids, observations):
+                            scanner.seen(track_id, str(item["label"]), item["box"])
+                        scanner.forget({track.id for track in tracker.active})
+                        if scanner.due():
+                            task = asyncio.create_task(scanner.scan(), name=f"plates-{camera_id}")
+                            plate_tasks.add(task)
+                            task.add_done_callback(plate_tasks.discard)
                     # Each object's first analysed frame, kept as its keyframe.
                     first_seen = {track_id: item for track_id, item in reversed(list(zip(track_ids, observations)))}
                     for track_id in dict.fromkeys(track_ids):

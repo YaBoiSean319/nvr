@@ -6,7 +6,10 @@ export interface WatchEntry { id: string; pattern: string; note: string; expires
 export interface WatchList { id: string; name: string; kind: "allow" | "deny"; lookalikes: boolean; created_at: string; entries: WatchEntry[] }
 export interface PlateCamera { id: string; name: string; enabled: boolean; min_confidence: number }
 export interface PlateAdmin {
-  models: { available: boolean; detector: string; recogniser: string; detector_installed: boolean; recogniser_installed: boolean };
+  models: {
+    available: boolean; detector: string; recogniser: string; detector_installed: boolean; recogniser_installed: boolean;
+    region: string | null; regions: { id: string; label: string; covers: string; installed: boolean; size_bytes: number | null; manual: boolean }[];
+  };
   cameras: PlateCamera[];
   watch_lists: WatchList[];
 }

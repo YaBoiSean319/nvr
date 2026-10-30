@@ -175,6 +175,7 @@ jobs:
         env:
           NVR_RTSP_TEST_URL: rtsp://127.0.0.1:8554/nvr-test
           NVR_RTSP_AUDIO_TEST_URL: rtsp://127.0.0.1:8554/nvr-audio
+          NVR_REQUIRE_PLATE_MODELS: "1"  # The real plate models are downloaded and tested here, never silently skipped
         run: python -m unittest discover -s tests -v
       - name: Compile Python
         run: python -m compileall -q app tests
@@ -195,6 +196,8 @@ jobs:
         run: docker build --tag ghcr.io/yaboisean319/nvr:edge .
       - name: Benchmark and validate bundled CPU detection model
         run: docker run --rm ghcr.io/yaboisean319/nvr:edge python -m scripts.benchmark_ai
+      - name: Check the licence plate models in the image
+        run: docker run --rm ghcr.io/yaboisean319/nvr:edge python -m scripts.check_plate_models
       - name: Smoke test Compose health and persistence
         run: |
           NVR_PORT=8080 docker compose up --pull never -d

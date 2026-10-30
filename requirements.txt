@@ -7,3 +7,4 @@ h2==4.3.0
 itsdangerous==2.2.0
 openvino==2026.2.1
 sqlite-vec==0.1.6
+PyYAML==6.0.3

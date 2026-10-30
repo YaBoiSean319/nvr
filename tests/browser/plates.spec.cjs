@@ -13,7 +13,7 @@ test("an administrator designates a camera, makes watch lists and sees why nothi
   await signInNext(page);
   await page.goto("/settings/plates");
   await expect(page_(page)).toBeVisible();
-  await expect(page.getByText(/The plate models are not installed, so nothing is read yet/)).toBeVisible();
+  await expect(page.getByText(/The models for the chosen region are not installed, so nothing is read yet/)).toBeVisible();
 
   await page.getByRole("checkbox", { name: "Read plates on Camera 001" }).click();
   await expect(page.getByRole("checkbox", { name: "Read plates on Camera 001" })).toBeChecked();
@@ -113,4 +113,37 @@ test("a plate is found in full or in part, look-alikes included, and a result op
   await search("KT55");
   await cards(page).first().click();
   await expect(page.getByRole("region", { name: "Playback" })).toBeVisible();
+});
+
+test("an administrator chooses the plate region: an installed region is chosen, one without models cannot be", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  let region = "worldwide";
+  const puts = [];
+  const regions = () => [
+    { id: "worldwide", label: "Worldwide, Latin alphabet (United States, Canada, Mexico, Australia, United Kingdom and 60+ more)", covers: "Plates in the Latin alphabet from more than 65 countries.", installed: true, size_bytes: 12_800_000, manual: false },
+    { id: "europe", label: "Europe", covers: "European plates.", installed: true, size_bytes: 12_800_000, manual: false },
+    { id: "custom", label: "Models I installed myself (for example Intel's Chinese-plate pair)", covers: "Whatever you installed by hand.", installed: false, size_bytes: null, manual: true },
+  ];
+  await page.route("**/api/admin/plates", async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, models: { ...body.models, region, regions: regions() } } });
+  });
+  await page.route("**/api/admin/plates/region", async route => {
+    puts.push(route.request().postDataJSON());
+    region = route.request().postDataJSON().region;
+    await route.fulfill({ json: { region } });
+  });
+  await page.goto("/settings/plates");
+  const group = page.getByRole("group", { name: "Plate region" });
+  await expect(group.getByRole("radio", { name: /Worldwide, Latin alphabet/ })).toBeChecked();
+  await expect(group.getByRole("radio", { name: /Models I installed myself/ })).toBeDisabled();
+  await expect(group).toContainText("Not installed: install the models by hand to use this.");
+  await expect(group).toContainText("(13 MB)");
+  await group.getByRole("radio", { name: /^Europe/ }).click();
+  await expect(page.getByText(/Region saved\. Plate reading uses it from the next picture, with no restart/)).toBeVisible();
+  expect(puts).toEqual([{ region: "europe" }]);
+  await expect(group.getByRole("radio", { name: /^Europe/ })).toBeChecked();
+  await expect(group).toContainText("accuracy on your own cameras is not known until you measure it");
 });
