@@ -14,7 +14,7 @@ stream again ("Connection recovered, back on Main"). If the step up goes badly, 
 
 ## Main streams only
 
-**Data > Main streams only** (stored in this browser, off by default) puts every tile on its main stream: a grid no longer plays substreams, and Auto never steps a tile down when the connection is slow. The video wall follows the same choice. The cost is bandwidth and server load: a wall of main streams carries several times the data of the same wall on substreams, so use it where the connection and the machine can carry it.
+**Data > Main streams only** (stored in this browser, off by default) puts every tile on its main stream: a grid no longer plays substreams, and Auto never steps a tile down when the connection is slow. The video wall follows the same choice when it runs in the same browser (the choice is stored in the browser, not on the server). The cost is bandwidth and server load: a wall of main streams carries several times the data of the same wall on substreams, so use it where the connection and the machine can carry it.
 
 What wins when settings meet:
 

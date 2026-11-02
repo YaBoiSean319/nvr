@@ -183,7 +183,14 @@ test("'Main streams only' puts every tile on its main stream, keeps Auto from st
   expect(network.connections.slice(before)).toEqual([]);
   await expect(tile(page, "Camera 001").getByTestId("tile-quality-note")).toHaveCount(0);
 
-  // The choice is kept across a reload.
+  // Turning it off puts the grid back on its substreams, and the choice is kept across a reload either way.
+  await page.getByRole("button", { name: "Data use" }).click();
+  await page.getByRole("menuitemcheckbox", { name: /Main streams only/ }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Normal");
+  for (const name of ["Camera 001", "Camera 002"]) {
+    await expect(tile(page, name)).toHaveAttribute("data-quality", "sub");
+  }
   await page.reload();
-  await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Main streams");
+  await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Normal");
 });

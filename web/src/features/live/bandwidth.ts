@@ -68,7 +68,7 @@ export function automaticLowData(): boolean {
   return Boolean(installed && (connection.type === "cellular" || connection.saveData));
 }
 
-/** Low-data mode: on when chosen, and in Automatic only when "Main stream only" has not been asked for (an explicit choice outranks the automatic one). */
+/** Low-data mode: on when chosen, and in Automatic only when "Main streams only" has not been asked for (an explicit choice outranks the automatic one). */
 export function lowDataActive(setting: LowDataSetting, mainOnly = false): boolean {
   return setting === "on" || (setting === "auto" && !mainOnly && automaticLowData());
 }

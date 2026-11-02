@@ -79,7 +79,7 @@ export function ViewBar({ role }: { role: Role }) {
             </Menu.RadioGroup>
             <Menu.Separator className="menu-separator" />
             <Menu.CheckboxItem className="menu-item" checked={prefs.mainOnly} onCheckedChange={checked => prefs.set({ mainOnly: checked })}>
-              <Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Main streams only (full quality in every tile, more data)
+              <Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Main streams only (full quality in every tile, more data{prefs.lowData === "on" ? "; Low-data mode, chosen above, still wins" : ""})
             </Menu.CheckboxItem>
             <Menu.Separator className="menu-separator" />
             <Menu.Label className="menu-label">Auto quality changes at most every</Menu.Label>
