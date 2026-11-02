@@ -145,18 +145,18 @@ class Supervisor:
 
     def _explain(self, worker: Worker, code: int) -> str:
         """Why a worker is gone: a SIGKILL (-9) comes either from this supervisor or from the kernel, and the two need different fixes."""
-        if worker.killed_reason:
-            return worker.killed_reason
-        kills = process_info.oom_kills()
+        kills = process_info.oom_kills()  # Read on every exit, so one kill is attributed once and never to a later, unrelated exit
         newly_killed = kills is not None and self._oom_kills_seen is not None and kills > self._oom_kills_seen
         if kills is not None:
             self._oom_kills_seen = kills
+        if worker.killed_reason:
+            return worker.killed_reason
         if code == -signal.SIGKILL:
             memory = f"; it was using about {process_info.megabytes(worker.last_rss)} MB when last measured" if worker.last_rss else ""
             limit = process_info.megabytes(process_info.memory_limit_bytes())
             limit_text = f" (container limit {limit} MB)" if limit else " (no container memory limit is set)"
             if newly_killed:
-                return f"killed by the kernel: the container ran out of memory{memory}{limit_text}"
+                return f"killed by the kernel: a process in the container was killed for lack of memory{memory}{limit_text}"
             return f"killed by SIGKILL from outside the supervisor; the usual cause is the host's out-of-memory killer{memory}{limit_text}"
         if code < 0:
             return f"killed by signal {-code}"

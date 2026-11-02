@@ -32,14 +32,13 @@ def memory_limit_bytes(cgroup: Path = CGROUP) -> int | None:
 
 def oom_kills(cgroup: Path = CGROUP) -> int | None:
     """How many processes the kernel has killed in this container for lack of memory since it started, or None when it cannot be read."""
-    for name in ("memory.events", "memory/memory.oom_control"):
-        try:
-            for line in (cgroup / name).read_text().splitlines():
-                key, _, value = line.partition(" ")
-                if key == "oom_kill" and value.strip().isdigit():
-                    return int(value)
-        except OSError:
-            continue
+    try:  # cgroup v2 only: the v1 file has no such counter on most kernels
+        for line in (cgroup / "memory.events").read_text().splitlines():
+            key, _, value = line.partition(" ")
+            if key == "oom_kill" and value.strip().isdigit():
+                return int(value)
+    except OSError:
+        pass
     return None
 
 

@@ -40,6 +40,11 @@ class ProcessInfoTests(unittest.TestCase):
         self.assertIsNone(process_info.oom_kills(self.root))
         self.write("memory.events", "low 0\nhigh 0\nmax 3\noom 2\noom_kill 2\n")
         self.assertEqual(process_info.oom_kills(self.root), 2)
+        self.write("memory/memory.oom_control", "oom_kill_disabled 0\nunder_oom 0\n")  # cgroup v1 has no counter to read
+        other = Path(tempfile.mkdtemp())
+        (other / "memory").mkdir()
+        (other / "memory/memory.oom_control").write_text("oom_kill_disabled 0\nunder_oom 0\noom_kill 5\n")
+        self.assertIsNone(process_info.oom_kills(other))
 
 
 class SupervisorReasonTests(unittest.TestCase):
@@ -65,9 +70,9 @@ class SupervisorReasonTests(unittest.TestCase):
             supervisor._oom_kills_seen = 0
             kernel = supervisor._explain(worker, -9)
             again = supervisor._explain(worker, -9)  # The same kill is not counted twice
-        self.assertIn("the container ran out of memory", kernel)
+        self.assertIn("killed for lack of memory", kernel)
         self.assertIn("no container memory limit", kernel)
-        self.assertNotIn("ran out of memory", again)
+        self.assertNotIn("killed by the kernel", again)
 
     def test_a_worker_killed_for_missing_its_heartbeat_says_so(self):
         supervisor = Supervisor([])
@@ -79,6 +84,16 @@ class SupervisorReasonTests(unittest.TestCase):
         worker.process.kill.assert_called_once()
         self.assertIn("no heartbeat", supervisor._explain(worker, -9))
         exited.assert_called_once()
+
+    def test_a_kill_by_the_supervisor_does_not_leave_a_stale_count_to_blame_a_later_exit(self):
+        supervisor = Supervisor([])
+        supervisor._oom_kills_seen = 0
+        worker = self.worker()
+        worker.killed_reason = "killed by the supervisor: no heartbeat"
+        with patch.object(process_info, "oom_kills", return_value=1):
+            self.assertEqual(supervisor._explain(worker, -9), "killed by the supervisor: no heartbeat")
+            later = supervisor._explain(self.worker(), -9)  # The counter was already advanced to 1
+        self.assertIn("from outside the supervisor", later)
 
     def test_other_exits_are_described(self):
         supervisor = Supervisor([])
