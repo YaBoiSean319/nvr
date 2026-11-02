@@ -21,6 +21,8 @@ export interface PlayerSnapshot {
   audioAvailable: boolean;
   listening: boolean;
   profile: "main" | "sub" | null;
+  /** How long the first picture took, from asking for the camera to a frame on screen (ms); null until it has appeared. */
+  firstFrameMs: number | null;
 }
 
 interface Options {
@@ -55,8 +57,9 @@ export class LivePlayer {
   private askedHevc = false;
   private hevcBroken = false;
   private snapshot: PlayerSnapshot = {
-    phase: "connecting", transport: null, converted: false, detail: null, lastFrameAt: null, audioAvailable: false, listening: false, profile: null,
+    phase: "connecting", transport: null, converted: false, detail: null, lastFrameAt: null, audioAvailable: false, listening: false, profile: null, firstFrameMs: null,
   };
+  private asked = Date.now();
 
   constructor(private readonly options: Options) {}
 
@@ -252,7 +255,8 @@ export class LivePlayer {
     this.disconnectedAt = null;
     const now = Date.now();
     if (this.snapshot.phase !== "live" || !this.snapshot.lastFrameAt || now - this.snapshot.lastFrameAt > 500) {
-      this.update({ phase: "live", lastFrameAt: now, detail: this.snapshot.transport === "mjpeg" ? this.snapshot.detail : null });
+      this.update({ phase: "live", lastFrameAt: now, detail: this.snapshot.transport === "mjpeg" ? this.snapshot.detail : null,
+                    firstFrameMs: this.snapshot.firstFrameMs ?? now - this.asked });
     } else {
       this.snapshot.lastFrameAt = now;
     }

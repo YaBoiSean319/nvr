@@ -16,7 +16,7 @@ from starlette.websockets import WebSocketDisconnect
 from app.api import live_media
 from app.application import create_app
 from app.credentials import encrypt
-from app.live_hub import Fragmenter, codec_string
+from app.live_hub import Fragmenter, LiveHub, codec_string, summarise_starts
 from app.principal import COOKIE_NAME
 from app.store import connect
 from tests.test_support import TEST_PASSWORD
@@ -117,6 +117,31 @@ class LiveStreamTests(unittest.TestCase):
             with self.client.websocket_connect("/api/cameras/cam/live/stream", headers={"origin": "https://attacker.example"}) as websocket:
                 websocket.receive_json()
 
+    def test_how_long_each_viewer_waited_for_video_is_recorded_with_where_the_time_went(self):
+        hub = self.app.state.live_hub
+        with patch("app.live_hub.LINGER_SECONDS", 0.5):
+            with self.client.websocket_connect("/api/cameras/cam/live/stream") as first:
+                self._receive_stream(first, 2)
+                with self.client.websocket_connect("/api/cameras/cam/live/stream") as second:
+                    self._receive_stream(second, 1)
+                    deadline = time.monotonic() + 5
+                    while len(hub.starts) < 2 and time.monotonic() < deadline:
+                        time.sleep(0.05)
+        started, joined = sorted(hub.starts, key=lambda entry: entry["joined_running"])
+        self.assertEqual((started["camera_id"], started["profile"], started["mode"]), ("cam", "main", "direct"))
+        for stage in ("spawned_ms", "init_ms", "first_keyframe_ms", "first_media_ms"):
+            self.assertIsInstance(started[stage], int, stage)
+        # The camera's keyframe is the last thing the viewer waits for, so the stages come in order.
+        self.assertLessEqual(started["spawned_ms"], started["init_ms"])
+        self.assertLessEqual(started["init_ms"], started["first_keyframe_ms"])
+        self.assertTrue(joined["joined_running"])
+        self.assertNotIn("spawned_ms", joined)  # Nothing was started for the second viewer
+        self.assertLess(joined["first_media_ms"], started["first_media_ms"])  # Joining a running stream is quicker than starting one
+        report = self.client.get("/api/system/live-startup").json()
+        self.assertEqual(report["summary"]["started"]["count"], 1)
+        self.assertEqual(report["summary"]["joined"]["count"], 1)
+        self.assertEqual({row["camera"] for row in report["recent"]}, {"Lobby"})
+
     def test_viewers_share_one_camera_connection_and_late_viewers_start_at_a_keyframe(self):
         hub = self.app.state.live_hub
         with patch("app.live_hub.LINGER_SECONDS", 0.3):
@@ -213,3 +238,24 @@ class LiveStreamTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupSummaryTests(unittest.TestCase):
+    def test_the_summary_separates_those_who_started_a_stream_from_those_who_joined_one(self):
+        starts = [{"first_media_ms": ms, "spawned_ms": 100, "init_ms": 400, "first_keyframe_ms": ms - 20} for ms in (1000, 2000, 3000, 4000, 5000)]
+        starts += [{"first_media_ms": 80, "joined_running": True}, {"first_media_ms": 120, "joined_running": True}]
+        summary = summarise_starts(starts)
+        self.assertEqual(summary["count"], 7)
+        self.assertEqual({key: summary["started"][key] for key in ("count", "median_ms", "worst_ms")}, {"count": 5, "median_ms": 3000, "worst_ms": 5000})
+        self.assertEqual(summary["started"]["stages_median_ms"], {"spawned_ms": 100, "init_ms": 400, "first_keyframe_ms": 2980})
+        self.assertEqual({key: summary["joined"][key] for key in ("count", "median_ms", "worst_ms")}, {"count": 2, "median_ms": 120, "worst_ms": 120})
+
+    def test_an_empty_history_summarises_to_nothing_rather_than_failing(self):
+        summary = summarise_starts([])
+        self.assertEqual((summary["count"], summary["started"]["median_ms"], summary["joined"]["worst_ms"]), (0, None, None))
+
+    def test_only_the_most_recent_starts_are_kept(self):
+        hub = LiveHub()
+        for index in range(250):
+            hub.record_start({"first_media_ms": index})
+        self.assertEqual((len(hub.starts), hub.starts[0]["first_media_ms"]), (200, 50))

@@ -196,6 +196,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
       className="tile"
       data-active={active}
       data-phase={phase}
+      data-first-frame-ms={state?.firstFrameMs ?? undefined}
       data-camera-id={camera.id}
       data-transport={state?.transport ?? undefined}
       data-quality={quality === "low" ? "sub" : "main"}
