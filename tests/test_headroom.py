@@ -128,6 +128,22 @@ class KeepHeadroomTests(HeadroomCase):
         self.assertIn(ids[0], self.remaining())
         self.assertEqual(len(self.remaining()), 7)
 
+    def test_a_long_run_of_held_footage_at_the_front_does_not_stop_newer_footage_being_removed(self):
+        ids = [self.segment("north", hour) for hour in range(9, 0, -1)]
+        with connect() as db:
+            for segment in ids[:6]:
+                db.execute("INSERT INTO recording_holds(id,segment_id,camera_id) VALUES(?,?,?)", (str(uuid.uuid4()), segment, self.cameras["north"]))
+        headroom.set_headroom("default", 200)
+        with patch.object(headroom, "MAX_SEGMENTS_PER_PASS", 2):
+            result = headroom.keep_headroom(NOW)
+        self.assertEqual(result["default"]["removed_segments"], 1)  # The held six are not among the two it looks at
+        self.assertEqual(self.remaining(), ids[:6] + ids[7:])
+
+    def test_a_headroom_larger_than_the_volume_allows_is_capped(self):
+        with connect() as db:
+            headroom.set_headroom("default", 10**12)
+            self.assertEqual(headroom.effective_headroom(db, "default", 1000), 900)
+
     def test_when_everything_is_protected_the_shortfall_is_reported_instead(self):
         ids = [self.segment("north", hour) for hour in range(9, 0, -1)]
         with connect() as db:
@@ -195,16 +211,19 @@ class HeadroomApiTests(HeadroomCase):
         shown = self.client.get("/api/storage").json()["volumes"]
         default = next(volume for volume in shown if volume["id"] == "default")
         self.assertTrue(default["headroom"]["headroom_is_default"])
-        saved = self.client.put("/api/storage/default/headroom", json={"headroom_bytes": 123456789})
+        saved = self.client.put("/api/storage/default/headroom", json={"headroom_bytes": 500})
         self.assertEqual(saved.status_code, 200, saved.text)
-        self.assertEqual(saved.json()["headroom_bytes"], 123456789)
+        self.assertEqual(saved.json()["headroom_bytes"], 500)
         again = next(volume for volume in self.client.get("/api/storage").json()["volumes"] if volume["id"] == "default")
-        self.assertEqual((again["headroom"]["headroom_bytes"], again["headroom"]["headroom_is_default"]), (123456789, False))
+        self.assertEqual((again["headroom"]["headroom_bytes"], again["headroom"]["headroom_is_default"]), (500, False))
         reset = self.client.put("/api/storage/default/headroom", json={"headroom_bytes": None})
         self.assertTrue(reset.json()["headroom_is_default"])
         with connect() as db:
             actions = [row[0] for row in db.execute("SELECT action FROM audit_log WHERE action='storage_headroom_changed'")]
         self.assertEqual(len(actions), 2)
+
+    def test_a_headroom_most_of_the_volume_is_refused(self):
+        self.assertEqual(self.client.put("/api/storage/default/headroom", json={"headroom_bytes": int(self.CAPACITY * 0.95)}).status_code, 422)
 
     def test_an_unknown_volume_and_a_negative_headroom_are_refused(self):
         self.assertEqual(self.client.put("/api/storage/nowhere/headroom", json={"headroom_bytes": 1}).status_code, 404)

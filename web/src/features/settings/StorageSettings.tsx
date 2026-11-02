@@ -83,7 +83,7 @@ function HeadroomCard({ volume, onSaved }: { volume: Volume; onSaved: () => void
       {error ? <p className="field-error" role="alert">{error}</p> : null}
       {saved ? <p className="notice" data-tone="good" role="status">Headroom saved.</p> : null}
       <ul className="status-list" aria-label={`Headroom status for ${volume.id}`}>
-        <li>Keeping {size(info.headroom_bytes)} free{info.headroom_is_default ? ` (the default: 5% of the volume, at least ${size(5 * GIB)})` : ""}. Free now: {size(volume.free_bytes)}.</li>
+        <li>Keeping {size(info.headroom_bytes)} free{info.headroom_is_default ? ` (the default: 5% of the volume, at least ${size(Math.min(info.headroom_default_bytes, 5 * GIB))})` : ""}. Free now: {size(volume.free_bytes)}.</li>
         {info.removing_oldest_footage || info.below_headroom
           ? <li data-tone="warn">Below the headroom now, so the oldest footage on this volume is being deleted to keep it free.</li> : <li>Above the headroom: nothing is being deleted for it.</li>}
         {info.removed_24h_segments > 0

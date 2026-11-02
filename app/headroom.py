@@ -16,6 +16,8 @@ GIB = 1 << 30
 DEFAULT_SHARE = 0.05
 DEFAULT_FLOOR_BYTES = 5 * GIB
 MAX_SEGMENTS_PER_PASS = 5000
+MAX_SHARE = 0.9  # A headroom is never more than this much of the volume, so a mistyped one cannot delete everything over and over
+KEEP_LOG_DAYS = 30
 RECENT_SECONDS = 600  # Footage removed within this long means the volume is "keeping its headroom now"
 
 
@@ -31,7 +33,8 @@ def chosen_headroom(db: sqlite3.Connection, volume_id: str) -> int | None:
 
 def effective_headroom(db: sqlite3.Connection, volume_id: str, capacity_bytes: int | None) -> int:
     chosen = chosen_headroom(db, volume_id)
-    return default_headroom(capacity_bytes) if chosen is None else chosen
+    wanted = default_headroom(capacity_bytes) if chosen is None else chosen
+    return min(wanted, int(capacity_bytes * MAX_SHARE)) if capacity_bytes else wanted
 
 
 def set_headroom(volume_id: str, headroom_bytes: int | None) -> None:
@@ -85,14 +88,16 @@ def keep_headroom(now: datetime | None = None) -> dict[str, dict[str, int]]:
         if free < wanted:
             with connect() as db:
                 kept_since = resolved_kept_since(db, now)
-                candidates = db.execute("SELECT id,relative_path,ends_at FROM recording_segments WHERE tier_id IS NULL ORDER BY ends_at").fetchall()
-            examined = 0
+                # This volume's oldest footage that nothing in the database protects; alarms are checked as each is removed. Held and reserved footage is left out here, so a long run of it
+                # at the front cannot use up the pass.
+                candidates = [row for row in db.execute(
+                    "SELECT id,relative_path,ends_at FROM recording_segments s WHERE tier_id IS NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
+                    "AND NOT EXISTS (SELECT 1 FROM export_sources x JOIN exports e ON e.id=x.export_id WHERE x.segment_id=s.id AND e.status IN ('queued','running')) "
+                    "ORDER BY ends_at", (now.isoformat(),)) if volume_of(row["relative_path"], volumes) == volume_id][:MAX_SEGMENTS_PER_PASS]
             for candidate in candidates:
-                if free >= wanted or examined >= MAX_SEGMENTS_PER_PASS:
+                if free >= wanted:
                     break
-                if volume_of(candidate["relative_path"], volumes) != volume_id:
-                    continue
-                examined += 1
                 try:
                     with connect() as db:
                         db.execute("BEGIN IMMEDIATE")
@@ -114,6 +119,8 @@ def keep_headroom(now: datetime | None = None) -> dict[str, dict[str, int]]:
                 db.execute("INSERT INTO storage_headroom_removals(volume_id,removed_at,segments,bytes,newest_removed_at) VALUES(?,?,?,?,?)",
                            (volume_id, now.isoformat(), removed_segments, removed_bytes, newest))
         _record_check(volume_id, now, max(0, wanted - free))
+        with connect() as db:
+            db.execute("DELETE FROM storage_headroom_removals WHERE removed_at<?", ((now - timedelta(days=KEEP_LOG_DAYS)).isoformat(),))
         results[volume_id] = {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "short_bytes": max(0, wanted - free)}
     return results
 
