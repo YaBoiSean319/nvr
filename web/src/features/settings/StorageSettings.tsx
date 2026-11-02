@@ -6,8 +6,12 @@ import { alarmKeys } from "@/features/alarms/api";
 import { failureText, useTabDraft } from "@/features/admin/tabDraft";
 import { formatRelative } from "@/lib/time";
 
+interface Headroom {
+  headroom_bytes: number; headroom_is_default: boolean; headroom_default_bytes: number; below_headroom: boolean; removing_oldest_footage: boolean;
+  removed_24h_segments: number; removed_24h_bytes: number; short_bytes: number; last_checked_at: string | null; oldest_footage_days: number | null; longest_policy_days: number | null;
+}
 interface Volume {
-  id: string; relative_path: string | null; state: string; free_bytes: number | null; capacity_bytes: number | null;
+  id: string; headroom: Headroom; relative_path: string | null; state: string; free_bytes: number | null; capacity_bytes: number | null;
   write_latency_ms: number | null; retention_at_risk: boolean; cameras: { id: string; name: string }[];
 }
 interface Run { id: string; kind: string; status: string; created_at: string; finished_at: string | null; file_name: string | null; size_bytes: number | null; error: string | null }
@@ -40,6 +44,58 @@ const size = (bytes: number | null | undefined) => {
   }
   return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 };
+
+const GIB = 1024 ** 3;
+
+/** One volume's headroom: the free space the NVR keeps by deleting the oldest footage, and what that is doing now. */
+function HeadroomCard({ volume, onSaved }: { volume: Volume; onSaved: () => void }) {
+  const info = volume.headroom;
+  const [gigabytes, setGigabytes] = useState((info.headroom_bytes / GIB).toFixed(1));
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  async function save(bytes: number | null) {
+    setError(null);
+    setSaved(false);
+    try {
+      const result = await api<Headroom>(`/api/storage/${encodeURIComponent(volume.id)}/headroom`, { method: "PUT", body: { headroom_bytes: bytes } });
+      setGigabytes((result.headroom_bytes / GIB).toFixed(1));
+      setSaved(true);
+      onSaved();
+    } catch (problem) {
+      setError(failureText(problem, "The headroom could not be saved."));
+    }
+  }
+  const parsed = Number(gigabytes);
+  const valid = gigabytes.trim() !== "" && Number.isFinite(parsed) && parsed >= 0;
+  const behind = info.longest_policy_days !== null && info.oldest_footage_days !== null && info.oldest_footage_days < info.longest_policy_days - 1;
+  return (
+    <article className="field-group settings-block" aria-label={`Headroom for ${volume.id}`}>
+      <h3 className="field-heading">Headroom for {volume.id}</h3>
+      <form className="tab-form" onSubmit={event => { event.preventDefault(); if (valid) void save(Math.round(parsed * GIB)); }}>
+        <label className="field"><span>Free space to keep on {volume.id} (GB)</span>
+          <input type="number" min="0" step="0.1" value={gigabytes} onChange={event => { setGigabytes(event.target.value); setSaved(false); }} />
+        </label>
+        <div className="field-actions">
+          <button type="submit" className="button" data-variant="primary" disabled={!valid}>Save headroom for {volume.id}</button>
+          <button type="button" className="button" data-variant="ghost" disabled={info.headroom_is_default} onClick={() => void save(null)}>Use the default for {volume.id}</button>
+        </div>
+      </form>
+      {error ? <p className="field-error" role="alert">{error}</p> : null}
+      {saved ? <p className="notice" data-tone="good" role="status">Headroom saved.</p> : null}
+      <ul className="status-list" aria-label={`Headroom status for ${volume.id}`}>
+        <li>Keeping {size(info.headroom_bytes)} free{info.headroom_is_default ? ` (the default: 5% of the volume, at least ${size(5 * GIB)})` : ""}. Free now: {size(volume.free_bytes)}.</li>
+        {info.removing_oldest_footage || info.below_headroom
+          ? <li data-tone="warn">Below the headroom now, so the oldest footage on this volume is being deleted to keep it free.</li> : <li>Above the headroom: nothing is being deleted for it.</li>}
+        {info.removed_24h_segments > 0
+          ? <li>Deleted in the last 24 hours to keep it: {info.removed_24h_segments} segment{info.removed_24h_segments === 1 ? "" : "s"} ({size(info.removed_24h_bytes)}).</li> : null}
+        {info.oldest_footage_days !== null && info.longest_policy_days !== null
+          ? <li data-tone={behind ? "warn" : undefined}>The oldest footage kept is about {info.oldest_footage_days} days old{behind ? `, so this volume cannot hold the ${info.longest_policy_days}-day retention policy at the current write rate` : `, against a ${info.longest_policy_days}-day retention policy`}.</li> : null}
+        {info.short_bytes > 0
+          ? <li data-tone="warn">{size(info.short_bytes)} short of the headroom: the rest is held, being exported, kept for an alarm or being played, which is never deleted.</li> : null}
+      </ul>
+    </article>
+  );
+}
 
 /** Storage volumes and their health, the retention default, and configuration backups. */
 export function StorageSettings() {
@@ -103,6 +159,15 @@ export function StorageSettings() {
           </table>
         ) : <p className="muted">{storage.error ? failureText(storage.error) : "Loading…"}</p>}
         <p className="muted field-hint">Volumes are configured on the NVR host. Assign a policy group to a volume in Groups &amp; Policies.</p>
+      </section>
+
+      <section className="field-group" aria-label="Storage headroom">
+        <h2 className="field-heading">Storage headroom</h2>
+        <p className="muted field-hint">
+          A recorder fills its disks, so storage space comes before the retention policy. Each volume keeps this much free space: when it falls below, the oldest footage on the volume is deleted until it is free again,
+          even if it is still inside its retention policy. Footage that is held, being exported, kept for an alarm or being played is never deleted. The headroom keeps room for recording and for exports.
+        </p>
+        {(storage.data?.volumes ?? []).filter(volume => volume.headroom).map(volume => <HeadroomCard key={`${volume.id}:${volume.headroom.headroom_bytes}`} volume={volume} onSaved={() => void client.invalidateQueries({ queryKey: ["storage"] })} />)}
       </section>
 
       <section className="field-group" aria-label="Disk health">

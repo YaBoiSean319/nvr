@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sqlite3
 import uuid
 import json
@@ -18,7 +19,8 @@ from app.store import connect
 from app.scheduling import effective_policy, validate_schedule
 from app import notices
 from app.retention import coverage_summary, effective_purpose, effective_retention
-from app.storage import assign_group_volume, configured_volumes, refresh_registry, storage_status
+from app.storage import assign_group_volume, configured_volumes, refresh_registry, storage_status, volume_path
+from app.audit import record
 from app.incidents import sync_storage_incidents
 from app.request_validation import normalize_required_group_name
 
@@ -264,6 +266,33 @@ def get_storage_status(_: Administrator) -> dict[str, object]:
     with connect() as db:
         sync_storage_incidents(db, result["volumes"])
     return result
+
+
+class HeadroomRequest(BaseModel):
+    """The free space to keep on a volume, in bytes (null: the default again)."""
+    headroom_bytes: int | None = Field(default=None, ge=0, le=1 << 50)
+
+
+@router.put("/api/storage/{volume_id}/headroom")
+def set_volume_headroom(volume_id: str, payload: HeadroomRequest, admin: Administrator) -> dict[str, object]:
+    from datetime import datetime, timezone
+    from app.headroom import set_headroom, status as headroom_status
+    if volume_id not in configured_volumes():
+        raise HTTPException(status_code=404, detail="Storage volume not found")
+    previous = None
+    with connect() as db:
+        from app.headroom import chosen_headroom
+        previous = chosen_headroom(db, volume_id)
+    set_headroom(volume_id, payload.headroom_bytes)
+    with connect() as db:
+        record(db, int(admin["id"]), "storage_headroom_changed", "storage_volume", volume_id, headroom_bytes=payload.headroom_bytes, previous=previous)
+    usage = None
+    try:
+        usage = shutil.disk_usage(volume_path(volume_id))
+    except (OSError, ValueError):
+        pass
+    with connect() as db:
+        return {"volume_id": volume_id, **headroom_status(db, volume_id, usage.total if usage else None, usage.free if usage else None, configured_volumes())}
 
 
 @router.get("/api/camera-groups/{group_id}/storage-volume")

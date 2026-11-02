@@ -61,3 +61,24 @@ test("a camera that will not keep its policy is shown in Settings and on its Rec
   expect(api.camera.below_policy).toBe(true);
   expect(api.camera.days_until_shortfall).toBeLessThanOrEqual(7); // A shortfall that near is an incident.
 });
+
+test("an administrator sets a volume's storage headroom and sees what it is doing beside it", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openStorage(page);
+  const section = page.getByRole("region", { name: "Storage headroom" });
+  await expect(section).toContainText("storage space comes before the retention policy");
+  const card = section.getByRole("article", { name: "Headroom for default" });
+  await expect(card.getByRole("list", { name: "Headroom status for default" })).toContainText("the default: 5% of the volume");
+  await expect(card.getByRole("button", { name: "Use the default for default" })).toBeDisabled();
+
+  await card.getByLabel("Free space to keep on default (GB)").fill("0.5");
+  await card.getByRole("button", { name: "Save headroom for default" }).click();
+  await expect(card.getByRole("status")).toContainText("Headroom saved.");
+  await expect(card.getByRole("list", { name: "Headroom status for default" })).toContainText("Keeping 512.0 MB free.");
+  await expect(card.getByRole("list", { name: "Headroom status for default" })).toContainText("nothing is being deleted for it");
+  expect((await (await page.request.get("/api/storage")).json()).volumes.find(volume => volume.id === "default").headroom.headroom_bytes).toBe(536870912);
+
+  await card.getByRole("button", { name: "Use the default for default" }).click();
+  await expect(card.getByRole("list", { name: "Headroom status for default" })).toContainText("the default: 5% of the volume");
+});

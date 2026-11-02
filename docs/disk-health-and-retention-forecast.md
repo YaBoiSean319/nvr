@@ -36,7 +36,7 @@ services:
 
 ## Retention forecast
 
-Footage is removed only when it is older than its camera's retention policy; nothing removes it to make room. When the cameras on a disk write faster than the disk can hold their policies' worth, the disk fills and what the policy promised is not kept. The forecast works out what the disk can really hold:
+Footage is removed when it is older than its camera's retention policy, and the oldest is also removed to keep the volume's free-space headroom (see [storage headroom](recording-health-and-retention.md#storage-headroom)). When the cameras on a disk write faster than the disk can hold their policies' worth, the oldest footage goes early and what the policy promised is not kept. The forecast works out what the disk can really hold:
 
 - **Write rate** per camera: the footage indexed in the last 48 hours over the time it has been recording in that window (a camera needs 6 hours of footage before it is forecast; a motion camera's rate is what it writes, not what it would write recording all day).
 - **Budget** per disk: free space, less the reserve at which storage pressure is reported (`NVR_STORAGE_PRESSURE_FREE_BYTES`, 1 GiB), plus the footage already stored on it, less footage under a hold (which age never removes). Volumes on the same disk share one budget.

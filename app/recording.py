@@ -155,6 +155,7 @@ class RecordingManager:
         self.task_modes: dict[str, str] = {}
         self.scheduler_task: asyncio.Task[None] | None = None
         self.retention_task: asyncio.Task[None] | None = None
+        self.headroom_task: asyncio.Task[None] | None = None
         self.tamper = tamper.TamperManager()
         self._dropped: set[str] = set()  # Segments already counted as dropped: the index is re-read every few seconds.
         self.storage_task: asyncio.Task[None] | None = None
@@ -171,6 +172,7 @@ class RecordingManager:
             await self.sync_camera(row["id"])
         self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
         self.retention_task = asyncio.create_task(self._retention_loop(), name="recording-retention-cleanup")
+        self.headroom_task = asyncio.create_task(self._headroom_loop(), name="recording-storage-headroom")
         self.storage_task = asyncio.create_task(self._storage_loop(), name="recording-storage-health")
         await self.tamper.start()
 
@@ -185,6 +187,10 @@ class RecordingManager:
             self.retention_task.cancel()
             await asyncio.gather(self.retention_task, return_exceptions=True)
         self.retention_task = None
+        if self.headroom_task and not self.headroom_task.done():
+            self.headroom_task.cancel()
+            await asyncio.gather(self.headroom_task, return_exceptions=True)
+        self.headroom_task = None
         if self.storage_task and not self.storage_task.done():
             self.storage_task.cancel()
             await asyncio.gather(self.storage_task, return_exceptions=True)
@@ -241,6 +247,18 @@ class RecordingManager:
             except sqlite3.Error:
                 pass
             await asyncio.sleep(5)
+
+    async def _headroom_loop(self) -> None:
+        """Keep each volume's free-space headroom by deleting its oldest footage, often enough that a busy site cannot fill the disk between passes."""
+        from .headroom import keep_headroom
+        while not self.stopping:
+            try:
+                await asyncio.to_thread(keep_headroom)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, sqlite3.Error):
+                pass
+            await asyncio.sleep(60)
 
     async def _retention_loop(self) -> None:
         from .retention import cleanup_expired_recordings

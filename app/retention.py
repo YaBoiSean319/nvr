@@ -202,6 +202,41 @@ def coverage_summary(db, camera_id: str, root: Path | None = None, now: datetime
     }
 
 
+def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, policy_applies: bool) -> tuple[str, "sqlite3.Row | None"]:
+    """Delete one segment's files and row, inside the caller's write transaction, unless something protects it.
+
+    Returns ("removed", row) or the reason it stayed: "gone" (no such row), "held" (a hold), "alarm" (an open or recent alarm's clip), "reserved" (a queued or running export),
+    "young" (still inside its retention policy, only when ``policy_applies``) or "leased" (being played). Retention removes only what is past its policy; keeping a volume's headroom
+    (``policy_applies=False``) removes the oldest footage whatever its policy says, but never what is held, reserved or being played."""
+    current=db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE id=?",(segment_id,)).fetchone()
+    if current is None:
+        return "gone", None
+    active=db.execute("SELECT 1 FROM recording_holds WHERE segment_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(segment_id,now.astimezone(timezone.utc).isoformat())).fetchone()
+    if active:
+        return "held", None
+    if protects_footage(db,current["camera_id"],current["starts_at"],current["ends_at"],kept_since):
+        return "alarm", None
+    reserved=db.execute(
+        "SELECT 1 FROM export_sources s JOIN exports e ON e.id=s.export_id "
+        "WHERE s.segment_id=? AND e.status IN ('queued','running') LIMIT 1",
+        (segment_id,),
+    ).fetchone()
+    if reserved:
+        return "reserved", None
+    if policy_applies:
+        days,_=effective_retention(db,current["camera_id"])
+        current_end=datetime.fromisoformat(current["ends_at"].replace("Z","+00:00"))
+        if current_end.tzinfo is None: current_end=current_end.replace(tzinfo=timezone.utc)
+        if current_end>now-timedelta(days=days):
+            return "young", None
+    from .storage import remove_segment_files
+    if not remove_segment_files([current]):
+        return "leased", None
+    db.execute("DELETE FROM recording_segments WHERE id=?", (segment_id,))
+    record_deletion(db,current["camera_id"],int(current["size_bytes"]),current["starts_at"],current["ends_at"],now)
+    return "removed", current
+
+
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
     removed_segments = removed_bytes = skipped_leased = skipped_alarm = failed = 0
@@ -223,34 +258,15 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
         try:
             with connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                current=db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE id=?",(row["id"],)).fetchone()
-                if current is None:
+                outcome, current = remove_segment(db, row["id"], now, kept_since, policy_applies=True)
+                if outcome == "gone" or outcome == "young" or outcome == "held":
                     continue
-                active=db.execute("SELECT 1 FROM recording_holds WHERE segment_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(row["id"],now.astimezone(timezone.utc).isoformat())).fetchone()
-                if active:
+                if outcome == "alarm":
+                    skipped_alarm += 1
                     continue
-                if protects_footage(db,current["camera_id"],current["starts_at"],current["ends_at"],kept_since):
-                    skipped_alarm+=1
+                if outcome != "removed":
+                    skipped_leased += 1
                     continue
-                reserved=db.execute(
-                    "SELECT 1 FROM export_sources s JOIN exports e ON e.id=s.export_id "
-                    "WHERE s.segment_id=? AND e.status IN ('queued','running') LIMIT 1",
-                    (row["id"],),
-                ).fetchone()
-                if reserved:
-                    skipped_leased+=1
-                    continue
-                days,_=effective_retention(db,row["camera_id"])
-                current_end=datetime.fromisoformat(current["ends_at"].replace("Z","+00:00"))
-                if current_end.tzinfo is None: current_end=current_end.replace(tzinfo=timezone.utc)
-                if current_end>now-timedelta(days=days):
-                    continue
-                from .storage import remove_segment_files
-                if not remove_segment_files([current]):
-                    skipped_leased+=1
-                    continue
-                db.execute("DELETE FROM recording_segments WHERE id=?", (row["id"],))
-                record_deletion(db,current["camera_id"],int(current["size_bytes"]),current["starts_at"],current["ends_at"],now)
             from .tiering import discard_objects
             discard_objects([current])  # A copy in an object store goes once the row is gone (outside the write lock)
             removed_segments += 1
