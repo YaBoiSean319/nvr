@@ -27,6 +27,9 @@ test("no Settings page lets text or a table run past its card", async ({ page })
   seedFixtures(2);
   await signInNext(page);
   writeHistory(1, 20); // A camera that will not keep its policy: long sentences in the retention forecast.
+  // An event source: its address is one long unbreakable line.
+  const source = await page.request.post("/api/event-sources", { data: { name: "Door-controller-with-a-very-long-name-that-has-no-spaces-in-it-at-all-and-keeps-going-on", kind: "http", secret: "a-secret-long-enough-to-be-accepted" } });
+  expect(source.status()).toBe(201);
   const problems = [];
   for (const [width, category] of CATEGORIES.flatMap(name => [[1100, name], [420, name]])) {
     await page.setViewportSize({ width, height: 800 });

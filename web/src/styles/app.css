@@ -87,7 +87,7 @@
 .status-details h3 { margin: 0 0 var(--n-space-2); font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--n-muted); }
 .status-details section[data-focused="true"] h3 { color: var(--n-text); }
 .status-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--n-space-2); }
-.status-list li { display: grid; gap: 2px; padding: var(--n-space-2) var(--n-space-3); border: 1px solid var(--n-line); border-radius: var(--n-radius); }
+.status-list li { display: grid; gap: 2px; padding: var(--n-space-2) var(--n-space-3); border: 1px solid var(--n-line); border-radius: var(--n-radius); min-width: 0; overflow-wrap: anywhere; grid-template-columns: minmax(0, 1fr); }
 .status-list li .button { justify-self: start; margin-top: var(--n-space-1); }
 .alarm-inbox, .alarm-detail { display: grid; gap: var(--n-space-3); }
 .alarm-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--n-space-2); }
@@ -400,6 +400,8 @@
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table th { text-align: left; padding: 6px var(--n-space-2); border-bottom: 1px solid var(--n-line); background: var(--n-panel); font-weight: 650; }
 .data-table td { padding: 6px var(--n-space-2); border-bottom: 1px solid var(--n-line); }
+/* A button named after something long (Edit <a long source name>) wraps inside its card instead of running past it. */
+.field-actions .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
 /* A table too wide for its card scrolls sideways inside it. */
 .table-scroll { max-width: 100%; overflow-x: auto; }
 .table-scroll .data-table th, .table-scroll .data-table td { white-space: nowrap; }
@@ -436,7 +438,7 @@
   min-height: 34px; padding: 0 var(--n-space-2); border: 1px solid var(--n-line); border-radius: var(--n-radius-small); background: var(--n-panel); min-width: 0;
 }
 .field input:disabled { opacity: 0.6; }
-.field-group { display: grid; gap: var(--n-space-2); margin: 0; padding: var(--n-space-3); border: 1px solid var(--n-line); border-radius: var(--n-radius); background: var(--n-panel); min-width: 0; }
+.field-group { display: grid; gap: var(--n-space-2); margin: 0; padding: var(--n-space-3); border: 1px solid var(--n-line); border-radius: var(--n-radius); background: var(--n-panel); min-width: 0; grid-template-columns: minmax(0, 1fr); }
 .field-group legend { padding: 0 var(--n-space-1); font-weight: 650; }
 .field-hint { margin: 0; font-size: 12px; }
 .field-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--n-space-2); }
