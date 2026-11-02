@@ -10,6 +10,8 @@ export interface ViewingPrefs {
   lowData: LowDataSetting;
   /** Auto quality changes a tile's stream at most this often. */
   intervalSeconds: number;
+  /** Every tile uses its main stream: no grid substreams and no Auto step-down. Explicit Low-data mode and a tile's own Sub choice still win. */
+  mainOnly: boolean;
 }
 
 export const QUALITY_INTERVALS = [15, 30, 60, 120] as const;
@@ -17,7 +19,7 @@ export const QUALITY_INTERVALS = [15, 30, 60, 120] as const;
 export const LOW_DATA_MAX_TILES = 4;
 
 const STORAGE_KEY = "nvr.viewing";
-const DEFAULTS: ViewingPrefs = { lowData: "auto", intervalSeconds: 30 };
+const DEFAULTS: ViewingPrefs = { lowData: "auto", intervalSeconds: 30, mainOnly: false };
 
 function load(): ViewingPrefs {
   try {
@@ -25,6 +27,7 @@ function load(): ViewingPrefs {
     return {
       lowData: saved?.lowData === "on" || saved?.lowData === "off" ? saved.lowData : "auto",
       intervalSeconds: typeof saved?.intervalSeconds === "number" && saved.intervalSeconds >= 1 ? saved.intervalSeconds : DEFAULTS.intervalSeconds,
+      mainOnly: saved?.mainOnly === true,
     };
   } catch {
     return DEFAULTS;
@@ -46,7 +49,7 @@ interface PrefsState extends ViewingPrefs {
 export const useViewingPrefs = create<PrefsState>(set => ({
   ...load(),
   set: patch => set(state => {
-    const next = { lowData: state.lowData, intervalSeconds: state.intervalSeconds, ...patch };
+    const next = { lowData: state.lowData, intervalSeconds: state.intervalSeconds, mainOnly: state.mainOnly, ...patch };
     save(next);
     return next;
   }),
@@ -65,12 +68,15 @@ export function automaticLowData(): boolean {
   return Boolean(installed && (connection.type === "cellular" || connection.saveData));
 }
 
-export function lowDataActive(setting: LowDataSetting): boolean {
-  return setting === "on" || (setting === "auto" && automaticLowData());
+/** Low-data mode: on when chosen, and in Automatic only when "Main streams only" has not been asked for (an explicit choice outranks the automatic one). */
+export function lowDataActive(setting: LowDataSetting, mainOnly = false): boolean {
+  return setting === "on" || (setting === "auto" && !mainOnly && automaticLowData());
 }
 
 export function useLowData(): boolean {
-  return lowDataActive(useViewingPrefs(state => state.lowData));
+  const setting = useViewingPrefs(state => state.lowData);
+  const mainOnly = useViewingPrefs(state => state.mainOnly);
+  return lowDataActive(setting, mainOnly);
 }
 
 export interface QualityChange {

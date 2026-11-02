@@ -152,3 +152,45 @@ test("low data turns on by itself for the installed app on a cellular connection
   await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Normal");
   await expect(tile(page, "Camera 001")).toHaveAttribute("data-quality-mode", "auto");
 });
+
+test("'Main streams only' puts every tile on its main stream, keeps Auto from stepping down, and is remembered", async ({ page }) => {
+  test.setTimeout(120_000);
+  seedFixtures(2, { substreams: { 1: STREAM, 2: STREAM } });
+  await viewing(page, { lowData: "off", intervalSeconds: INTERVAL_SECONDS });
+  const network = await throttle(page);
+  await signInNext(page);
+  await addCameras(page, 2);
+  // Two tiles share the screen, so each normally plays its substream.
+  for (const name of ["Camera 001", "Camera 002"]) {
+    await expect(tile(page, name)).toHaveAttribute("data-quality", "sub");
+  }
+  await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Normal");
+
+  await page.getByRole("button", { name: "Data use" }).click();
+  await page.getByRole("menuitemcheckbox", { name: /Main streams only/ }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Main streams");
+  for (const name of ["Camera 001", "Camera 002"]) {
+    await expect(tile(page, name)).toHaveAttribute("data-quality", "main");
+    await expect(tile(page, name)).toHaveAttribute("data-phase", "live", { timeout: 25_000 });
+  }
+
+  // A slow connection does not step a tile down: no reconnect, no note.
+  const before = network.connections.length;
+  network.slow = true;
+  await page.waitForTimeout(INTERVAL_SECONDS * 1_000 * 3 + 6_000);
+  await expect(tile(page, "Camera 001")).toHaveAttribute("data-quality", "main");
+  expect(network.connections.slice(before)).toEqual([]);
+  await expect(tile(page, "Camera 001").getByTestId("tile-quality-note")).toHaveCount(0);
+
+  // Turning it off puts the grid back on its substreams, and the choice is kept across a reload either way.
+  await page.getByRole("button", { name: "Data use" }).click();
+  await page.getByRole("menuitemcheckbox", { name: /Main streams only/ }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Normal");
+  for (const name of ["Camera 001", "Camera 002"]) {
+    await expect(tile(page, name)).toHaveAttribute("data-quality", "sub");
+  }
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Data use" })).toHaveText("Data: Normal");
+});

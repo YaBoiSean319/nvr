@@ -4,6 +4,7 @@ import { api, ApiError, onSessionExpired } from "@/api/client";
 import { useCameras, useDisplaySettings, useLiveViews } from "@/api/queries";
 import type { Camera, SavedView } from "@/api/types";
 import { popInSummary } from "@/features/live/AlarmBanner";
+import { useViewingPrefs } from "@/features/live/bandwidth";
 import { useAlarmPopIns } from "@/features/live/popIns";
 import { autoGrid, MAX_DISPLAYED_CAMERAS } from "@/lib/layout";
 import { formatSiteTime } from "@/lib/zonedTime";
@@ -116,6 +117,7 @@ function members(view: SavedView): string[] {
 }
 
 function WallScreen({ address }: { address: WallAddress }) {
+  const mainOnly = useViewingPrefs(prefs => prefs.mainOnly);
   const cameras = useCameras();
   const views = useLiveViews();
   const display = useDisplaySettings();
@@ -157,7 +159,7 @@ function WallScreen({ address }: { address: WallAddress }) {
       <div className="wall-grid" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))` }}>
         {shown.map(camera => (
           <WallTile key={camera.id} camera={camera} highlighted={state.alarm?.camera_id === camera.id}
-                    quality={shown.length > 1 && camera.live_substream_available ? "low" : "high"} />
+                    quality={shown.length > 1 && camera.live_substream_available && !mainOnly ? "low" : "high"} />
         ))}
       </div>
     </main>
