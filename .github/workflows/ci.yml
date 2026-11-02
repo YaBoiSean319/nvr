@@ -96,7 +96,7 @@ jobs:
 
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60  # The unit tests take 27-40 minutes depending on the runner; 40 cut a run short
     services:
       mediamtx:
         image: bluenviron/mediamtx:1.21.0
