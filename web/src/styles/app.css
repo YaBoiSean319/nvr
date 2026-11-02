@@ -393,6 +393,16 @@
 .inventory-table tr[data-archived="true"] td { color: var(--n-muted); }
 .check-cell { width: 32px; text-align: center; }
 .inventory-table th.check-cell { padding: 0 var(--n-space-2); }
+/* Tables on the Settings pages hold sentences and sit in cards, so their cells wrap inside the card instead of running past it, and their headings keep their own space. */
+.settings-page .inventory-table th, .settings-page .inventory-table td, .settings-page .data-table th, .settings-page .data-table td { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
+.settings-page .inventory-table th { position: static; padding: 6px var(--n-space-2); }
+.settings-page .inventory-table tbody tr { cursor: default; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th { text-align: left; padding: 6px var(--n-space-2); border-bottom: 1px solid var(--n-line); background: var(--n-panel); font-weight: 650; }
+.data-table td { padding: 6px var(--n-space-2); border-bottom: 1px solid var(--n-line); }
+/* A table too wide for its card scrolls sideways inside it. */
+.table-scroll { max-width: 100%; overflow-x: auto; }
+.table-scroll .data-table th, .table-scroll .data-table td { white-space: nowrap; }
 .sort-button { width: 100%; min-height: 32px; padding: 0 var(--n-space-2); border: 0; background: transparent; color: var(--n-muted); font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
 .sort-button:hover { color: var(--n-text); }
 .row-select { padding: 0; border: 0; background: transparent; color: var(--n-text); font: inherit; font-weight: 600; cursor: pointer; text-align: left; }
@@ -558,7 +568,9 @@
 .brand-preview-name { font-weight: 650; }
 .brand-preview-button { padding: 4px 10px; border-radius: var(--n-radius-small); color: #fff; font-size: 12px; margin-left: auto; }
 .color-field { display: flex; gap: var(--n-space-1); }
-.color-field input[type="color"] { width: 44px; padding: 2px; }
+.color-field input[type="color"] { width: 44px; padding: 2px; flex: none; }
+.color-field input.mono { min-width: 0; flex: 1 1 0; }
+.color-field { min-width: 0; }
 .asset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--n-space-3); }
 .asset-field { display: grid; gap: 4px; align-content: start; }
 .asset-thumb { display: grid; place-content: center; height: 64px; border: 1px dashed var(--n-line); border-radius: var(--n-radius-small); background: var(--n-raised); overflow: hidden; }
