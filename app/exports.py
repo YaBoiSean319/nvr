@@ -727,50 +727,59 @@ class ExportManager:
             work_dir.mkdir(parents=True, exist_ok=False)
             final_path.parent.mkdir(parents=True, exist_ok=True)
             _ensure_export_space(final_path.parent)
-            with connect() as db:
-                # Retention also takes this write lock before unlinking a segment.
-                # Keep it until the in-memory lease is installed for every source.
-                db.execute("BEGIN IMMEDIATE")
-                per_camera: list[dict[str, Any]] = []
-                total_segments = 0
-                total_source_bytes = 0
-                for index, camera_id in enumerate(camera_ids):
-                    camera = db.execute("SELECT id,name,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
-                    if camera is None:
-                        raise RuntimeError("A selected camera was removed before export started")
-                    segments = [dict(item) for item in db.execute(
-                        "SELECT id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments "
-                        "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
-                        (camera_id, end.isoformat(), start.isoformat()),
-                    ).fetchall()]
-                    # Privacy masks: burn in the mask over the whole camera if any of its footage needs it.
-                    zones: list[dict[str, float]] = []
-                    for segment in segments:
-                        zones = zones or privacy.server_zones(db, camera_id, _parse_time(segment["starts_at"]))
-                    per_camera.append({"camera_id": camera_id, "name": camera["name"], "index": index, "segments": segments, "privacy_zones": zones,
-                                       "audio_supported": bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
-                                       "spans": _unique_output_spans(start, end, segments)})
-                    total_segments += len(segments)
-                    total_source_bytes += sum(int(segment["size_bytes"]) for segment in segments)
-                if not total_segments:
-                    raise RuntimeError("No indexed footage is available in the requested interval")
-                if total_segments > MAX_EXPORT_SEGMENTS or total_source_bytes > MAX_EXPORT_SOURCE_BYTES:
-                    raise RuntimeError("Export source exceeds the supported size or segment limit")
-                if include_audio:
-                    eligible_audio = [camera for camera in per_camera if camera["audio_supported"] and camera["audio_enabled"]]
-                    if "grid" in output_modes:
-                        source = next((camera for camera in per_camera if camera["camera_id"] == audio_camera_id), None)
-                        if source is None or not source["audio_supported"] or not source["audio_enabled"]:
-                            raise RuntimeError("Grid audio source must have administrator-enabled audio")
-                    elif not eligible_audio:
-                        raise RuntimeError("Audio export requires at least one administrator-enabled camera audio source")
-                for camera in per_camera:
-                    for segment in camera["segments"]:
-                        path = await asyncio.to_thread(recording_file_path, segment["relative_path"])
-                        if not path.is_file():
-                            raise RuntimeError("A source recording is unavailable; no partial export was produced")
-                        acquire_playback(path)
-                        acquired.append(path)
+            def reserve_sources() -> tuple[list[dict[str, Any]], int]:
+                """Read what is to be exported and install the playback lease on every source, under the write lock.
+
+                One synchronous call, run in a worker thread: the lock is never held while the event loop waits for something. Anything else on the loop that writes to the
+                database would otherwise wait for a lock whose holder cannot continue until the loop is free (a deadlock that ends only at the busy timeout).
+                """
+                with connect() as db:
+                    # Retention also takes this write lock before unlinking a segment.
+                    # Keep it until the in-memory lease is installed for every source.
+                    db.execute("BEGIN IMMEDIATE")
+                    per_camera: list[dict[str, Any]] = []
+                    total_segments = 0
+                    total_source_bytes = 0
+                    for index, camera_id in enumerate(camera_ids):
+                        camera = db.execute("SELECT id,name,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+                        if camera is None:
+                            raise RuntimeError("A selected camera was removed before export started")
+                        segments = [dict(item) for item in db.execute(
+                            "SELECT id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments "
+                            "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
+                            (camera_id, end.isoformat(), start.isoformat()),
+                        ).fetchall()]
+                        # Privacy masks: burn in the mask over the whole camera if any of its footage needs it.
+                        zones: list[dict[str, float]] = []
+                        for segment in segments:
+                            zones = zones or privacy.server_zones(db, camera_id, _parse_time(segment["starts_at"]))
+                        per_camera.append({"camera_id": camera_id, "name": camera["name"], "index": index, "segments": segments, "privacy_zones": zones,
+                                           "audio_supported": bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
+                                           "spans": _unique_output_spans(start, end, segments)})
+                        total_segments += len(segments)
+                        total_source_bytes += sum(int(segment["size_bytes"]) for segment in segments)
+                    if not total_segments:
+                        raise RuntimeError("No indexed footage is available in the requested interval")
+                    if total_segments > MAX_EXPORT_SEGMENTS or total_source_bytes > MAX_EXPORT_SOURCE_BYTES:
+                        raise RuntimeError("Export source exceeds the supported size or segment limit")
+                    if include_audio:
+                        eligible_audio = [camera for camera in per_camera if camera["audio_supported"] and camera["audio_enabled"]]
+                        if "grid" in output_modes:
+                            source = next((camera for camera in per_camera if camera["camera_id"] == audio_camera_id), None)
+                            if source is None or not source["audio_supported"] or not source["audio_enabled"]:
+                                raise RuntimeError("Grid audio source must have administrator-enabled audio")
+                        elif not eligible_audio:
+                            raise RuntimeError("Audio export requires at least one administrator-enabled camera audio source")
+                    for camera in per_camera:
+                        for segment in camera["segments"]:
+                            path = recording_file_path(segment["relative_path"])
+                            if not path.is_file():
+                                raise RuntimeError("A source recording is unavailable; no partial export was produced")
+                            acquire_playback(path)
+                            acquired.append(path)
+                return per_camera, total_segments
+
+            per_camera, total_segments = await asyncio.to_thread(reserve_sources)
 
             metadata: dict[str, Any] = {
                 "schema_version": 1,
