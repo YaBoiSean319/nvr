@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from app.store import connect
 
+logger = logging.getLogger(__name__)
+
 HEARTBEAT_SECONDS = 5
+LOOP_LAG_WARN_SECONDS = 5.0
+LOOP_TICK_SECONDS = 1.0
 STALE_AFTER = timedelta(seconds=30)
 SUPERVISED_WORKERS = ("web", "recorder", "exporter", "ai", "rules", "background")
 
@@ -45,6 +50,18 @@ async def heartbeat_forever(name: str) -> None:
         except sqlite3.Error:
             pass
         await asyncio.sleep(HEARTBEAT_SECONDS)
+
+
+async def watch_loop_lag(name: str, warn_after: float = LOOP_LAG_WARN_SECONDS, tick: float = LOOP_TICK_SECONDS) -> None:
+    """Say so in the log when this process's event loop was blocked, since a loop blocked for 30 s stops the heartbeat and gets the worker killed."""
+    loop = asyncio.get_running_loop()
+    expected = loop.time() + tick
+    while True:
+        await asyncio.sleep(tick)
+        late = loop.time() - expected
+        if late >= warn_after:
+            logger.warning("%s worker: the event loop was blocked for %.1f s (the supervisor restarts a worker whose loop is blocked for %.0f s)", name, late, STALE_AFTER.total_seconds())
+        expected = loop.time() + tick
 
 
 def is_fresh(row: sqlite3.Row, now: datetime | None = None) -> bool:

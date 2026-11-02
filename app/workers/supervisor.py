@@ -20,13 +20,14 @@ from app import backup, failover, logforward, migrations
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
-from app.workers import liveness
+from app.workers import liveness, process_info
 
 logger = logging.getLogger("nvr.supervisor")
 
 BACKOFF_BASE_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 60.0
 STABLE_AFTER_SECONDS = 60.0
+MEMORY_SAMPLE_SECONDS = 5.0
 POLL_SECONDS = 0.5
 STOP_GRACE_SECONDS = float(os.environ.get("NVR_STOP_GRACE_SECONDS", "25"))
 
@@ -52,11 +53,16 @@ class Worker:
     consecutive_failures: int = 0
     incident_active: bool = False
     pending_restart: bool = field(default=False)
+    killed_reason: str | None = None
+    last_rss: int | None = None
+    peak_rss: int | None = None
+    rss_sampled_at: float = 0.0
 
     def start(self) -> None:
         environment = {**os.environ, "NVR_SUPERVISED": "1"}
         self.process = subprocess.Popen([sys.executable, "-m", self.module], env=environment)
         self.started_at = time.monotonic()
+        self.killed_reason, self.last_rss, self.peak_rss, self.rss_sampled_at = None, None, None, 0.0
         liveness.record(self.name, state="starting", pid=self.process.pid, started=True, restarted=self.pending_restart)
         self.pending_restart = False
         logger.info("Started %s worker (pid %s)", self.name, self.process.pid)
@@ -66,6 +72,7 @@ class Supervisor:
     def __init__(self, workers: list[Worker]) -> None:
         self.workers = workers
         self.stopping = False
+        self._oom_kills_seen = process_info.oom_kills()
 
     def request_stop(self, *_: object) -> None:
         self.stopping = True
@@ -90,11 +97,13 @@ class Supervisor:
         code = process.poll()
         if code is None and self._hung(worker, now):
             logger.warning("%s worker stopped reporting liveness; restarting it", worker.name)
+            worker.killed_reason = f"killed by the supervisor: no heartbeat for {liveness.STALE_AFTER.total_seconds():.0f} s (the process was alive but its event loop was blocked or starved)"
             process.kill()
             code = process.wait()
         if code is not None:
             self._exited(worker, code, now)
             return
+        self._sample_memory(worker, now)
         if now - worker.started_at >= STABLE_AFTER_SECONDS:
             worker.consecutive_failures = 0
         if worker.incident_active and self._reporting(worker):
@@ -106,17 +115,52 @@ class Supervisor:
         delay = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * 2 ** (worker.consecutive_failures - 1))
         worker.next_start_at = now + delay
         worker.pending_restart = True
-        logger.error("%s worker exited with code %s; restarting in %.0fs", worker.name, code, delay)
+        reason = self._explain(worker, code)
+        logger.error("%s worker exited with code %s (%s); restarting in %.0fs", worker.name, code, reason, delay)
         try:
             liveness.record(worker.name, state="crashed", exit_code=code, exited=True)
         except Exception:  # noqa: BLE001 - keep supervising even if the database is unavailable
             logger.exception("Could not record %s worker exit", worker.name)
-        self._incident(worker, active=True, details={"exit_code": code, "restart_in_seconds": round(delay)})
+        self._incident(worker, active=True, details={
+            "exit_code": code, "reason": reason, "restart_in_seconds": round(delay),
+            "memory_mb_at_last_sample": process_info.megabytes(worker.last_rss), "peak_memory_mb": process_info.megabytes(worker.peak_rss),
+            "container_memory_limit_mb": process_info.megabytes(process_info.memory_limit_bytes()),
+        })
         if worker.name == "ai":
             try:
                 mark_analysis_interrupted("AI analysis process stopped; analysis resumes when it restarts")
             except Exception:  # noqa: BLE001
                 logger.exception("Could not mark AI analysis interrupted")
+
+    @staticmethod
+    def _sample_memory(worker: Worker, now: float) -> None:
+        """Remember the worker's memory every few seconds, so that a later exit can say how much it was using."""
+        if worker.process is None or now - worker.rss_sampled_at < MEMORY_SAMPLE_SECONDS:
+            return
+        worker.rss_sampled_at = now
+        rss = process_info.rss_bytes(worker.process.pid)
+        if rss is not None:
+            worker.last_rss = rss
+            worker.peak_rss = max(rss, worker.peak_rss or 0)
+
+    def _explain(self, worker: Worker, code: int) -> str:
+        """Why a worker is gone: a SIGKILL (-9) comes either from this supervisor or from the kernel, and the two need different fixes."""
+        kills = process_info.oom_kills()  # Read on every exit, so one kill is attributed once and never to a later, unrelated exit
+        newly_killed = kills is not None and self._oom_kills_seen is not None and kills > self._oom_kills_seen
+        if kills is not None:
+            self._oom_kills_seen = kills
+        if worker.killed_reason:
+            return worker.killed_reason
+        if code == -signal.SIGKILL:
+            memory = f"; it was using about {process_info.megabytes(worker.last_rss)} MB when last measured" if worker.last_rss else ""
+            limit = process_info.megabytes(process_info.memory_limit_bytes())
+            limit_text = f" (container limit {limit} MB)" if limit else " (no container memory limit is set)"
+            if newly_killed:
+                return f"killed by the kernel: a process in the container was killed for lack of memory{memory}{limit_text}"
+            return f"killed by SIGKILL from outside the supervisor; the usual cause is the host's out-of-memory killer{memory}{limit_text}"
+        if code < 0:
+            return f"killed by signal {-code}"
+        return "exited by itself"
 
     def _hung(self, worker: Worker, now: float) -> bool:
         if now - worker.started_at < liveness.STALE_AFTER.total_seconds():

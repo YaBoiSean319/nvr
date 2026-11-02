@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -366,6 +367,29 @@ async def _decode_frames(source: str, fps: float, hardware: bool):
             await proc.wait()
 
 
+def _with_db(write: Any, *args: Any) -> Any:
+    """Run one database write on a connection of its own, for callers that run it in a thread."""
+    with connect() as db:
+        return write(db, *args)
+
+
+def _store_frame(camera_id: str, observations: list[dict[str, Any]], at: datetime, tracker: Any, frame: Any, model: dict[str, str]) -> list[str]:
+    """Store one analysed frame: the camera's state, its detections and the tracks they belong to. Blocking, so callers run it in a thread."""
+    from .tracks import record_detections
+    # Analysed coverage starts no later than the detections it contains.
+    set_camera_state(camera_id, "analyzed", at=at)
+    record_observations(camera_id, observations, at, **model)
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            track_ids = record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+    return track_ids
+
+
 class DetectionManager:
     def __init__(self, detector_factory: Callable[..., Any] = OpenVINODetector,
                  clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
@@ -376,6 +400,8 @@ class DetectionManager:
         self._detectors: dict[tuple[str, str, str], Any] = {}
         self._plate_readers: dict[tuple[str, str], Any] = {}
         self._model_lock = asyncio.Lock()
+        # Database writes can wait seconds for a busy database; their own threads keep them from starving inference, embedding and JPEG work in the shared pool.
+        self._db_threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-db")
         self._inference_slots = asyncio.Semaphore(1)
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.task_configs: dict[str, tuple[Any, ...]] = {}
@@ -499,6 +525,9 @@ class DetectionManager:
             self._attribute_models[provider] = await asyncio.to_thread(attributes.load_attribute_model, attributes.ATTRIBUTE_MODEL_PATH, provider)
         return self._attribute_models[provider]
 
+    async def _db(self, write: Any, *args: Any) -> Any:
+        return await asyncio.get_running_loop().run_in_executor(self._db_threads, write, *args)
+
     async def _plate_reader(self, provider: str, region: str) -> Any:
         """The plate detector and recogniser for a region, loaded once for every plate camera that uses this provider and region (None when they are not installed)."""
         from . import plates
@@ -553,23 +582,15 @@ class DetectionManager:
                     async with self._inference_slots:
                         queue_wait = asyncio.get_running_loop().time() - wait_started
                         if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
-                            set_camera_state(camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
+                            await self._db(set_camera_state, camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
                         observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
                     await asyncio.to_thread(attributes.describe, frame, observations, attribute_model)
                     at = self.clock()
-                    # Analysed coverage starts no later than the detections it contains.
-                    set_camera_state(camera_id, "analyzed", at=at)
                     model = {"model_id": str(config["model_id"]), "model_version": str(config["model_version"]), "provider": str(config["provider"])}
-                    record_observations(camera_id, observations, at, **model)
-                    with connect() as db:
-                        db.execute("BEGIN IMMEDIATE")
-                        try:
-                            track_ids = record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
-                        except BaseException:
-                            db.execute("ROLLBACK")
-                            raise
-                        db.execute("COMMIT")
+                    # The database writes wait up to 10 s each for a busy database, so they run off the event loop: a loop blocked for 30 s
+                    # stops the heartbeat and the supervisor kills the whole worker (exit code -9), taking every camera's analysis with it.
+                    track_ids = await self._db(_store_frame, camera_id, observations, at, tracker, frame, model)
                     # A camera designated for plates gives each vehicle a few attempts at its plate; reading never holds up analysis.
                     if time.monotonic() - scanner_checked >= plates.SETTINGS_REFRESH:  # Not self.clock(): the analysis clock stamps the frames and must be read once per frame
                         scanner_checked = time.monotonic()
@@ -602,23 +623,20 @@ class DetectionManager:
                         keyframed.add(track_id)
                         jpeg = await asyncio.to_thread(encode_jpeg, frame)
                         if jpeg:
-                            with connect() as db:
-                                store_keyframe(db, track_id, at, jpeg)
+                            await self._db(_with_db, store_keyframe, track_id, at, jpeg)
                         item = first_seen.get(track_id)
                         # What the object looks like, for finding it again on other cameras. A failure here never stops detection.
                         try:
                             described = await asyncio.to_thread(similar.embed, frame, str(item["label"]), item["box"], reid_model) if item else None
                             if described:
-                                with connect() as db:
-                                    similar.store_embedding(db, track_id, described[0], described[1])
+                                await self._db(_with_db, similar.store_embedding, track_id, described[0], described[1])
                         except Exception:  # noqa: BLE001
                             pass
                         # What it looks like to the image-text model, for natural-language search. Also never fatal.
                         try:
                             vector = await asyncio.to_thread(clip_model.embed_image, frame, item["box"]) if clip_model and item else None
                             if vector is not None:
-                                with connect() as db:
-                                    clip.store_embedding(db, track_id, clip_model.model_id, vector)
+                                await self._db(_with_db, clip.store_embedding, track_id, clip_model.model_id, vector)
                         except Exception:  # noqa: BLE001
                             pass
                 if not self.stopping:
@@ -627,6 +645,6 @@ class DetectionManager:
                 raise
             except Exception as exc:
                 reason = str(exc)[:240] or "Inference stream failed"
-                set_camera_state(camera_id, "failed", reason)
+                await self._db(set_camera_state, camera_id, "failed", reason)
                 await asyncio.sleep(5)
 
