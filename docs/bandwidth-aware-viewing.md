@@ -12,6 +12,17 @@ stream again ("Connection recovered, back on Main"). If the step up goes badly, 
   the **Data** menu of the Live toolbar (stored in this browser).
 - A tile set to **Main** or **Sub** is never changed by Auto.
 
+## Main streams only
+
+**Data > Main streams only** (stored in this browser, off by default) puts every tile on its main stream: a grid no longer plays substreams, and Auto never steps a tile down when the connection is slow. The video wall follows the same choice. The cost is bandwidth and server load: a wall of main streams carries several times the data of the same wall on substreams, so use it where the connection and the machine can carry it.
+
+What wins when settings meet:
+
+- A tile set to **Sub** keeps its substream (your explicit choice for that tile).
+- **Low-data mode** switched on by hand keeps substreams and the four-tile cap: it is also an explicit choice, and it is the one that saves data.
+- **Automatic** low-data (the installed app on cellular) does not turn on while Main streams only is chosen.
+- Recorded footage (Playback and exports) is always the main stream: recording never uses the substream, so there is nothing to switch there.
+
 ## Low-data mode
 
 Turn it on from the Live toolbar (**Data**), or leave it on **Automatic**: it then turns on by itself for the installed
