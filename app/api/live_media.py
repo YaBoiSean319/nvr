@@ -504,8 +504,8 @@ async def live_stream(
                 # The first picture left the server: how long this viewer waited, and, for the viewer who started the camera's stream, where the time went.
                 wait["first_media_ms"] = round((time.monotonic() - asked_at) * 1000)
                 if not joined_running:
-                    wait.update(stream.timing)
-                hub.record_start(wait)
+                    wait.update(getattr(stream, "timing", None) or {})
+                hub.record_start(wait)  # Measuring never gets in the way of the picture
     except (WebSocketDisconnect, RuntimeError, OSError):
         return
     finally:
