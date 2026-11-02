@@ -8,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import headroom
 from .recording import recordings_path
 from .store import connect
 
@@ -168,7 +169,9 @@ def storage_status() -> dict[str, object]:
             exists=path.is_dir(); mounted=False; writable=False; write_latency=None; free=None; capacity=None; state="unavailable"
         assigned=[dict(id=camera["id"],name=camera["name"],recording_status=camera["recording_status"],last_error=camera["last_error"]) for camera in cameras if (camera["storage_volume_id"] or "default")==name]
         at_risk=state in {"pressure","missing","read_only","unavailable","slow"} and bool(assigned)
-        result.append({"id":name,"relative_path":relative,"exists":exists,"mounted":mounted,"writable":writable,"write_latency_ms":write_latency,"capacity_bytes":capacity,"free_bytes":free,"state":state,"retention_at_risk":at_risk,"cameras":assigned})
+        with connect() as db:
+            headroom_status=headroom.status(db,name,capacity,free,volumes)
+        result.append({"id":name,"headroom":headroom_status,"relative_path":relative,"exists":exists,"mounted":mounted,"writable":writable,"write_latency_ms":write_latency,"capacity_bytes":capacity,"free_bytes":free,"state":state,"retention_at_risk":at_risk,"cameras":assigned})
     unconfigured={camera["storage_volume_id"] for camera in cameras if camera["storage_volume_id"] and camera["storage_volume_id"] not in volumes}
     for name in sorted(unconfigured):
         assigned=[dict(id=camera["id"],name=camera["name"],recording_status=camera["recording_status"],last_error=camera["last_error"]) for camera in cameras if camera["storage_volume_id"]==name]

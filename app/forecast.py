@@ -1,7 +1,8 @@
 """How long each camera's footage will really be kept, against how long its policy says.
 
-Footage is removed only when it is older than its camera's retention policy; nothing removes it to make room. So when the cameras on a
-disk are writing faster than the disk can hold their policies' worth, the disk fills, and what the policy promised is not what is kept.
+Footage is removed when it is older than its camera's retention policy, and, because storage comes before policy, the oldest footage is also removed to keep each volume's
+free-space headroom (``app/headroom.py``). So when the cameras on a disk are writing faster than the disk can hold their policies' worth, the oldest footage goes early,
+and what the policy promised is not what is kept.
 This works out, from each camera's recent write rate, what the disk can hold:
 
 - a **write rate** per camera: the bytes of footage indexed in the last 48 hours over the time it has been recording in that window (at least
@@ -178,7 +179,7 @@ def forecast(db: sqlite3.Connection, now: datetime | None = None, usage: Callabl
         entry["suggestions"] = suggest(camera, measured, context, volumes, groups, headroom, reserve) if below else []
         cameras.append(entry)
     return {"as_of": now.isoformat(), "window_hours": int(WINDOW.total_seconds() // 3600), "warn_days": WARN_DAYS, "reserve_bytes": reserve, "disks": disks, "cameras": cameras,
-            "note": "Footage is removed only when it passes its policy, never to make room: when the disk fills first, recording on it stops. Estimates use the last 48 hours of writing, and footage under a hold is not counted as room."}
+            "note": "Footage is removed when it passes its policy, and the oldest is removed early to keep each volume's headroom free (Settings > Recording & storage > Storage headroom), so a full disk does not stop recording. Estimates use the last 48 hours of writing, and footage under a hold is not counted as room."}
 
 
 def suggest(camera: dict[str, Any], measured: list[dict[str, Any]], context: dict[str, Any], volumes: dict[str, dict[str, Any]], groups: dict[Any, list[str]],
