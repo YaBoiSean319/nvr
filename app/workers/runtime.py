@@ -28,11 +28,13 @@ async def run(name: str, service: Service) -> None:
     await service.start()
     server = await control.serve(name, service.handle)
     heartbeat = asyncio.create_task(liveness.heartbeat_forever(name), name=f"{name}-heartbeat")
+    lag = asyncio.create_task(liveness.watch_loop_lag(name), name=f"{name}-loop-lag")
     try:
         await stop.wait()
     finally:
         server.close()
         heartbeat.cancel()
+        lag.cancel()
         await service.stop()
 
 
