@@ -312,6 +312,25 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual({row["name"]: row["state"] for row in self.nvr.query("SELECT name,state FROM worker_status")}, {name: "stopped" for name in ("web", "recorder", "exporter", "ai", "rules", "background")})
 
 
+def _explain(nvr: SupervisedInstallation, camera_id: str) -> str:
+    """What the installation was doing, for a failure's message: CI keeps nothing else of a run that went wrong."""
+    parts = []
+    for label, sql, parameters in (
+        ("workers", "SELECT name,state,pid,heartbeat_at,restarts FROM worker_status", ()),
+        ("segments", "SELECT starts_at,ends_at,size_bytes FROM recording_segments WHERE camera_id=? ORDER BY starts_at", (camera_id,)),
+        ("incidents", "SELECT fault_type,state,summary FROM incidents", ()),
+    ):
+        try:
+            parts.append(f"{label}: {[dict(row) for row in nvr.query(sql, parameters)]}")
+        except sqlite3.Error as error:
+            parts.append(f"{label}: unreadable ({error})")
+    try:
+        parts.append("supervisor log (tail):\n" + "\n".join((nvr.root / "supervisor.log").read_text(errors="replace").splitlines()[-60:]))
+    except OSError as error:
+        parts.append(f"supervisor log unreadable ({error})")
+    return "\n".join(parts)
+
+
 @unittest.skipUnless(os.environ.get("NVR_RTSP_TEST_URL"), "A simulated RTSP publisher is required")
 class RecordingContinuityTests(unittest.TestCase):
     def test_recording_continues_while_the_web_process_restarts(self):
@@ -328,11 +347,17 @@ class RecordingContinuityTests(unittest.TestCase):
         def segments() -> list[sqlite3.Row]:
             return nvr.query("SELECT starts_at,ends_at FROM recording_segments WHERE camera_id=? ORDER BY starts_at", (camera["id"],))
 
-        _wait(lambda: len(segments()) >= 1, 40, "no segment was written before the web restart")
+        try:
+            _wait(lambda: len(segments()) >= 1, 40, "no segment was written before the web restart")
+        except AssertionError as error:
+            raise AssertionError(f"{error}\n{_explain(nvr, camera['id'])}") from None
         web = nvr.worker("web")["pid"]
         killed_at = time.time()
         os.kill(web, signal.SIGKILL)
-        _wait(lambda: len(segments()) >= 3, 60, "segments stopped being written while the web process restarted")
+        try:
+            _wait(lambda: len(segments()) >= 3, 60, "segments stopped being written while the web process restarted")
+        except AssertionError as error:
+            raise AssertionError(f"{error}\n{_explain(nvr, camera['id'])}") from None
         self.assertEqual(nvr.worker("recorder")["pid"], recorder)
         written = segments()
         self.assertGreater(written[-1]["ends_at"], time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(killed_at)))
