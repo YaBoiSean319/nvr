@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from app import exports as exports_module
 from app.exports import ExportManager, create_export_record, expire_exports, recover_interrupted_exports
 from app.main import app
 from app.principal import current_user
@@ -358,6 +360,40 @@ class ExportJobTests(unittest.TestCase):
         result = self._wait_for_status(job_id, "cancelled", "completed", "failed")
         self.assertIn(result["status"], {"cancelled", "completed"})
         self.assertFalse(playback_is_leased(self.media))
+
+    def test_a_writer_on_the_event_loop_is_not_stuck_behind_an_export_reserving_its_sources(self):
+        # The recorder and other tasks on the app's event loop write to the database from the loop itself. If the export held the write lock while waiting on the loop,
+        # that write would wait for a lock whose holder could not continue until the loop was free: a deadlock that ended only at the 10 s busy timeout.
+        reserving = threading.Event()
+        real = exports_module.recording_file_path
+
+        def slow(relative_path):
+            reserving.set()
+            time.sleep(0.4)
+            return real(relative_path)
+
+        outcome: dict[str, object] = {}
+
+        async def write_from_the_loop():
+            while not reserving.is_set():
+                await asyncio.sleep(0.01)
+            began = time.monotonic()
+            try:
+                with connect() as db:  # Blocking, on the loop's own thread, as the recorder's writes are
+                    db.execute("BEGIN IMMEDIATE")
+                    db.execute("UPDATE users SET username=username WHERE id=1")
+                    db.execute("COMMIT")
+                outcome["waited"] = time.monotonic() - began
+            except sqlite3.OperationalError as error:
+                outcome["error"] = str(error)
+
+        with patch.object(exports_module, "recording_file_path", slow):
+            job_id = self._create()
+            self.client.portal.start_task_soon(write_from_the_loop).result(timeout=40)
+            result = self._wait_for_status(job_id, "completed", "failed", "cancelled")
+        self.assertNotIn("error", outcome, outcome)
+        self.assertLess(float(outcome["waited"]), 5)
+        self.assertEqual(result["status"], "completed", result)
 
     def test_accepted_export_protects_source_during_lease_handoff_and_until_terminal(self):
         with connect() as db:
