@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shutil
 import time
@@ -19,6 +20,8 @@ from . import acceleration
 from .credentials import decrypt
 from .recording import _manifest_bytes, _PROTOCOLS, safe_stream_url
 from .store import connect
+
+logger = logging.getLogger(__name__)
 
 MODEL_ID = "person-vehicle-bike-detection-2004"
 MODEL_VERSION = "2021.4-FP32"
@@ -399,6 +402,7 @@ class DetectionManager:
         self.detector: Any | None = None
         self._detectors: dict[tuple[str, str, str], Any] = {}
         self._plate_readers: dict[tuple[str, str], Any] = {}
+        self._pose_readers: dict[str, Any] = {}
         self._model_lock = asyncio.Lock()
         # Database writes can wait seconds for a busy database; their own threads keep them from starving inference, embedding and JPEG work in the shared pool.
         self._db_threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-db")
@@ -528,6 +532,16 @@ class DetectionManager:
     async def _db(self, write: Any, *args: Any) -> Any:
         return await asyncio.get_running_loop().run_in_executor(self._db_threads, write, *args)
 
+    async def _pose_reader(self, provider: str) -> Any:
+        """The pose model, loaded once for every camera with fall detection that uses this provider (None when it is not installed or will not load, and then not remembered)."""
+        from . import pose_models
+        reader = self._pose_readers.get(provider)
+        if reader is None:
+            reader = await asyncio.to_thread(pose_models.load_reader, provider)
+            if reader is not None:
+                self._pose_readers[provider] = reader
+        return reader
+
     async def _plate_reader(self, provider: str, region: str) -> Any:
         """The plate detector and recogniser for a region, loaded once for every plate camera that uses this provider and region (None when they are not installed)."""
         from . import plates
@@ -558,7 +572,7 @@ class DetectionManager:
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         from . import attributes
         from . import clip
-        from . import plates
+        from . import falls, plates
         from . import similar
         from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
 
@@ -573,6 +587,7 @@ class DetectionManager:
                 tracker = Tracker()
                 keyframed: set[str] = set()
                 scanner, scanner_reader, scanner_checked = None, None, float("-inf")
+                fall_detector, fall_reader, fall_checked = None, None, float("-inf")
                 seen_frame = False
                 async for frame in _raw_frames(source, float(config["analysis_fps"])):
                     if self.stopping:
@@ -615,6 +630,39 @@ class DetectionManager:
                             task = asyncio.create_task(scanner.scan(), name=f"plates-{camera_id}")
                             plate_tasks.add(task)
                             task.add_done_callback(plate_tasks.discard)
+                    # A camera with fall detection on has each person's body points read and watched; a fall raises the alarm. This never holds up analysis for long and never stops it.
+                    if time.monotonic() - fall_checked >= falls.SETTINGS_REFRESH:
+                        fall_checked = time.monotonic()
+                        with connect() as db:
+                            fall_on, sensitivity, stay_down = falls.fall_settings(db, camera_id)
+                            fall_aspect = falls.camera_aspect(db, camera_id) if fall_on else 16 / 9
+                        fall_reader = await self._pose_reader(str(config["provider"])) if fall_on else None
+                        if fall_reader is None:
+                            fall_detector = None
+                        elif fall_detector is None:
+                            fall_detector = falls.FallDetector(sensitivity=sensitivity, stay_down_seconds=stay_down, aspect=fall_aspect)
+                        else:
+                            fall_detector.sensitivity, fall_detector.stay_down_seconds, fall_detector.aspect = sensitivity, stay_down, fall_aspect
+                    if fall_detector is not None and fall_reader is not None:
+                        try:
+                            moment = at.timestamp()
+                            picture = np.frombuffer(frame, dtype=np.uint8).reshape(MODEL_HEIGHT, MODEL_WIDTH, 3)  # The analysed frame: small, so far-off people are rough
+                            people = [(track_id, item) for track_id, item in zip(track_ids, observations) if item["label"] == "person"][:falls.MAX_PEOPLE_PER_FRAME]
+                            boxes = {track_id: item["box"] for track_id, item in people}
+                            raised = []
+                            for track_id, item in people:
+                                pose = await asyncio.to_thread(fall_reader.pose, picture, item["box"])
+                                found = fall_detector.update(track_id, moment, pose)
+                                if found:
+                                    raised.append(found)
+                            raised += fall_detector.tick(moment, set(boxes))
+                            fall_detector.forget({track.id for track in tracker.active})
+                            for found in raised:
+                                await self._db(falls.store_fall, camera_id, found.track_id, datetime.fromtimestamp(found.at, timezone.utc), found.down_seconds, boxes.get(found.track_id) or falls.FULL_FRAME_BOX)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:  # noqa: BLE001 - fall detection must never stop analysis
+                            logger.exception("Fall detection failed on a frame")
                     # Each object's first analysed frame, kept as its keyframe.
                     first_seen = {track_id: item for track_id, item in reversed(list(zip(track_ids, observations)))}
                     for track_id in dict.fromkeys(track_ids):
