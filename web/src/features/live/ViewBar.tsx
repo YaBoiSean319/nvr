@@ -68,7 +68,7 @@ export function ViewBar({ role }: { role: Role }) {
         </Menu.Portal>
       </Menu.Root>
       <Menu.Root>
-        <Menu.Trigger className="button" aria-label="Data use">Data: {lowDataActive(prefs.lowData) ? "Low" : "Normal"}</Menu.Trigger>
+        <Menu.Trigger className="button" aria-label="Data use">Data: {lowDataActive(prefs.lowData, prefs.mainOnly) ? "Low" : prefs.mainOnly ? "Main streams" : "Normal"}</Menu.Trigger>
         <Menu.Portal>
           <Menu.Content className="menu" align="end" sideOffset={4}>
             <Menu.Label className="menu-label">Data use</Menu.Label>
@@ -77,6 +77,10 @@ export function ViewBar({ role }: { role: Role }) {
               <Menu.RadioItem className="menu-item" value="on"><Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Low-data mode</Menu.RadioItem>
               <Menu.RadioItem className="menu-item" value="off"><Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Normal</Menu.RadioItem>
             </Menu.RadioGroup>
+            <Menu.Separator className="menu-separator" />
+            <Menu.CheckboxItem className="menu-item" checked={prefs.mainOnly} onCheckedChange={checked => prefs.set({ mainOnly: checked })}>
+              <Menu.ItemIndicator className="menu-indicator">✓</Menu.ItemIndicator>Main streams only (full quality in every tile, more data{prefs.lowData === "on" ? "; Low-data mode, chosen above, still wins" : ""})
+            </Menu.CheckboxItem>
             <Menu.Separator className="menu-separator" />
             <Menu.Label className="menu-label">Auto quality changes at most every</Menu.Label>
             <Menu.RadioGroup value={String(prefs.intervalSeconds)} onValueChange={value => prefs.set({ intervalSeconds: Number(value) })}>

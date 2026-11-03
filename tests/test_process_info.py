@@ -95,6 +95,17 @@ class SupervisorReasonTests(unittest.TestCase):
             later = supervisor._explain(self.worker(), -9)  # The counter was already advanced to 1
         self.assertIn("from outside the supervisor", later)
 
+    def test_analysis_is_marked_interrupted_before_the_ai_incident_is_announced(self):
+        # Whoever reacts to the incident (a person, a webhook, a test) must find analysis already marked interrupted.
+        order: list[str] = []
+        supervisor = Supervisor([])
+        worker = self.worker()
+        with patch("app.workers.supervisor.mark_analysis_interrupted", side_effect=lambda reason: order.append("interrupted")), \
+                patch.object(Supervisor, "_incident", side_effect=lambda *args, **kwargs: order.append("incident")), \
+                patch("app.workers.supervisor.liveness.record"):
+            supervisor._exited(worker, -9, time.monotonic())
+        self.assertEqual(order, ["interrupted", "incident"])
+
     def test_other_exits_are_described(self):
         supervisor = Supervisor([])
         self.assertEqual(supervisor._explain(self.worker(), 1), "exited by itself")

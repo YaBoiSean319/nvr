@@ -38,11 +38,11 @@ function clock(timestamp: number | null): string {
   return timestamp ? new Date(timestamp).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "";
 }
 
-function resolveQuality(override: Quality | undefined, enlarged: boolean, substream: boolean, lowData: boolean): "low" | "high" {
+function resolveQuality(override: Quality | undefined, enlarged: boolean, substream: boolean, lowData: boolean, mainOnly: boolean): "low" | "high" {
   if (override === "main") return "high";
   if (override === "sub") return "low";
   if (lowData && substream) return "low";
-  return enlarged || !substream ? "high" : "low";
+  return mainOnly || enlarged || !substream ? "high" : "low";
 }
 
 export const VideoTile = memo(function VideoTile({ camera, active, enlarged, suspended, lowDataCapped, onReplaceRequest }: TileProps) {
@@ -64,11 +64,12 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
   const onNoWebgl = useCallback(() => setNoWebgl(true), []);
   const lowData = useLowData();
   const intervalSeconds = useViewingPrefs(prefs => prefs.intervalSeconds);
+  const mainOnly = useViewingPrefs(prefs => prefs.mainOnly);
   const hasSub = Boolean(camera.live_substream_available);
   const manual = override === "main" || override === "sub";
-  const base = resolveQuality(override, enlarged, hasSub, lowData);
+  const base = resolveQuality(override, enlarged, hasSub, lowData, mainOnly);
   // Auto steps a main-stream tile down to the substream when video arrives late, and back up when it recovers; a Main or Sub choice is never touched.
-  const adaptive = !manual && !lowData && hasSub && base === "high";
+  const adaptive = !manual && !lowData && !mainOnly && hasSub && base === "high";
   const governor = useRef<QualityGovernor | null>(null);
   const [adapted, setAdapted] = useState<QualityChange | null>(null);
   const quality = adaptive && adapted?.quality === "low" ? "low" : base;
