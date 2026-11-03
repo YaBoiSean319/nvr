@@ -50,10 +50,22 @@ test("an operator handles an alarm and another signed-in user sees each step wit
 
 test("Open in Playback lands on the alarm time with the camera selected", async ({ page }) => {
   const fixtures = seedFixtures(3, { alarm: true });
+  // If the page does not reach Playback, say what it did instead: where it went, what it logged and which requests failed (CI keeps no other trace in its log).
+  const trace = [];
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) trace.push(`${new Date().toISOString()} navigated ${frame.url()}`); });
+  page.on("console", message => { if (["error", "warning"].includes(message.type())) trace.push(`${new Date().toISOString()} console.${message.type()} ${message.text().slice(0, 300)}`); });
+  page.on("pageerror", error => trace.push(`${new Date().toISOString()} pageerror ${String(error).slice(0, 300)}`));
+  page.on("requestfailed", request => trace.push(`${new Date().toISOString()} requestfailed ${request.url()} ${request.failure()?.errorText}`));
   await signInNext(page);
   await openAlarm(page);
+  trace.push(`${new Date().toISOString()} clicking Open in Playback at ${page.url()}`);
   await detail(page).getByRole("button", { name: "Open in Playback" }).click();
-  await expect(page).toHaveURL(/\/playback$/);
+  try {
+    await expect(page).toHaveURL(/\/playback$/);
+  } catch (error) {
+    console.log(`Open in Playback did not reach Playback; the page said:\n${trace.join("\n")}`);
+    throw error;
+  }
   await expect(inbox(page)).toHaveCount(0);
   const cameraTile = page.getByRole("group", { name: /^Camera 001.*: playback$/ });
   await expect(cameraTile).toBeVisible();
