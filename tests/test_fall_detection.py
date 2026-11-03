@@ -138,8 +138,8 @@ class ApiTests(unittest.TestCase):
 
     def test_the_page_lists_cameras_with_their_defaults_and_the_models_state(self):
         body = self.client.get("/api/admin/falls").json()
-        self.assertEqual(body["defaults"], {"sensitivity": "high", "stay_down_seconds": 3.0, "least_analysis_fps": 1.0})
-        self.assertEqual(body["cameras"], [{"id": "c1", "name": "Lounge", "enabled": False, "sensitivity": "high", "stay_down_seconds": 3.0, "analysis_fps": None, "analysis_on": False}])
+        self.assertEqual(body["defaults"], {"sensitivity": "high", "stay_down_seconds": 8.0, "least_analysis_fps": 1.0})
+        self.assertEqual(body["cameras"], [{"id": "c1", "name": "Lounge", "enabled": False, "sensitivity": "high", "stay_down_seconds": 8.0, "analysis_fps": None, "analysis_on": False}])
         self.assertIn("Apache-2.0", body["model"]["licence"])
         self.assertEqual(body["recent"], [])
 

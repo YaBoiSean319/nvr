@@ -33,7 +33,7 @@ Pose = Mapping[str, tuple[float, float, float]]
 
 SENSITIVITIES = ("low", "normal", "high")
 DEFAULT_SENSITIVITY = "high"  # A missed fall costs more than a false alert
-DEFAULT_STAY_DOWN_SECONDS = 3.0
+DEFAULT_STAY_DOWN_SECONDS = 8.0  # Measured (tests/fixtures/fall_accuracy.py): 3 s raised alerts for deep bends, crouching and stumbles that 8 s did not, with no fall missed
 MIN_STAY_DOWN_SECONDS, MAX_STAY_DOWN_SECONDS = 1.0, 60.0
 SETTINGS_REFRESH = 30.0
 LEAST_ANALYSIS_FPS = 1.0  # Below this the AI looks at a camera less than once a second and a fall is seen late and coarsely; AI analysis defaults to one picture every two seconds
