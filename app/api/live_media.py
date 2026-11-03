@@ -6,15 +6,16 @@ import hashlib
 import json
 import shutil
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_TRANSCODES, MAX_LIVE_VIEWERS
 from app.live_hub import LiveHub, Viewer
-from app.principal import CurrentUser, current_user, requires_scope
+from app.principal import Administrator, CurrentUser, current_user, requires_scope
 from app.store import connect
 from app import network, privacy, viewing_audit
 from app.credentials import decrypt
@@ -94,6 +95,16 @@ def _release_live_audio() -> None:
     global _live_audio_count
     with _live_view_lock:
         _live_audio_count = max(0, _live_audio_count - 1)
+
+
+@router.get("/api/system/live-startup")
+def live_startup(request: Request, _: Administrator) -> dict[str, object]:
+    """How long viewers waited for live video recently (since the server started): the summary, and the latest starts with camera names."""
+    hub: LiveHub = request.app.state.live_hub
+    recent = list(hub.starts)[-30:]
+    with connect() as db:
+        names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras")}
+    return {"summary": hub.start_summary(), "recent": [{**entry, "camera": names.get(str(entry.get("camera_id")), "")} for entry in reversed(recent)]}
 
 
 @router.get("/api/cameras/{camera_id}/live/status")
@@ -342,6 +353,7 @@ async def live_stream(
     if not _same_origin(websocket):
         await websocket.close(code=1008)
         return
+    asked_at = time.monotonic()
     await websocket.accept()
     try:
         principal = current_user(websocket)
@@ -411,8 +423,10 @@ async def live_stream(
     # joining a stream that is still connected to the old one.
     fingerprint = hashlib.sha256(f"{source}|{video_filter or ''}".encode()).hexdigest()[:16]
     mode = "masked" if video_filter else "h264" if transcode else "hevc" if hevc_copy else "direct"
+    joined_running = (running := hub.streams.get((camera_id, profile, "audio" if include_audio else "video", mode, fingerprint))) is not None and running.ready.is_set() and not running.failed
     stream = hub.join((camera_id, profile, "audio" if include_audio else "video", mode, fingerprint),
                       source, include_audio, viewer, mark_fresh, video_filter, transcode, hevc_copy)
+    wait: dict[str, object] = {"camera_id": camera_id, "at": datetime.now(timezone.utc).isoformat(), "profile": profile, "mode": mode, "joined_running": joined_running}
     receiver = asyncio.create_task(websocket.receive())
     getter: asyncio.Task | None = None
     watching = viewing_audit.LiveSession(principal.id, camera_id, quality)
@@ -442,6 +456,7 @@ async def live_stream(
         await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening,
                                    "codec": "hevc" if hevc_copy else "h264", "transcoded": transcode, "accelerated": bool(stream.accelerated)})
         await websocket.send_bytes(stream.init)
+        wait["init_ms"] = round((time.monotonic() - asked_at) * 1000)
         while True:
             await watching.delivered()
             if getter is None:
@@ -485,6 +500,12 @@ async def live_stream(
                     await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera stream ended"})
                 return
             await websocket.send_bytes(item)
+            if "first_media_ms" not in wait:
+                # The first picture left the server: how long this viewer waited, and, for the viewer who started the camera's stream, where the time went.
+                wait["first_media_ms"] = round((time.monotonic() - asked_at) * 1000)
+                if not joined_running:
+                    wait.update(getattr(stream, "timing", None) or {})
+                hub.record_start(wait)  # Measuring never gets in the way of the picture
     except (WebSocketDisconnect, RuntimeError, OSError):
         return
     finally:

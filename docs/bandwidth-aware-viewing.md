@@ -33,6 +33,16 @@ app on a cellular connection (or with the browser's data-saver on), where the br
 - Tiles that are scrolled out of sight, or when the page is in the background, are released: their connection and server
   slot are freed, and they resume when they are visible again.
 
+## How long live video takes to start
+
+Settings > Diagnostics > **Live video start-up** shows how long people waited, since the NVR last started, from asking for a camera to the first picture leaving the server (`GET /api/system/live-startup`, administrators only; the last 200 starts are kept in memory):
+
+- A viewer who is **first on a camera** makes the NVR connect to it and wait for its next keyframe. Its wait is split into the time to start the connection, until the stream began (the camera's description and codec parameters arrived), and until the first keyframe. Cameras with a long keyframe interval (GOP) make the last part long: nothing can be shown before a keyframe.
+- A viewer who **joins a stream already running** starts at its latest keyframe and waits very little. The NVR keeps a stream for five seconds after its last viewer leaves.
+- Each Live tile also records its own wait, from the page asking for the camera to a picture on screen, as `data-first-frame-ms` on the tile (in the browser's developer tools); it includes the server's wait plus the browser's own time.
+
+Nothing here makes video faster by itself: it says where the time goes on your cameras. Read the medians for your site before changing anything, and send them with a question about start-up.
+
 ## Not covered by automated tests
 
 The browser journeys (`tests/browser/bandwidth.spec.cjs`) hold video back in bursts through a WebSocket proxy to simulate

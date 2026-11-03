@@ -11,6 +11,8 @@ camera connection closes a few seconds after the last viewer leaves.
 from __future__ import annotations
 
 import asyncio
+import collections
+import time
 import logging
 import shutil
 import struct
@@ -229,9 +231,16 @@ class LiveStream:
         self.task: asyncio.Task[None] | None = None
         self.linger: asyncio.TimerHandle | None = None
         self.connections = 0
+        # How long this stream took to start, from the moment it was asked for: the stages a viewer who started it waited through (ms).
+        self.timing: dict[str, int] = {}
+        self._started = time.monotonic()
 
     def start(self) -> None:
+        self._started = time.monotonic()
         self.task = asyncio.create_task(self._run(), name=f"live-{'-'.join(self.key)}")
+
+    def _stage(self, name: str) -> None:
+        self.timing.setdefault(name, round((time.monotonic() - self._started) * 1000))
 
     async def stop(self) -> None:
         if self.process and self.process.returncode is None:
@@ -317,6 +326,7 @@ class LiveStream:
                 *self._arguments(executable, hardware), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
             self.connections += 1
+            self._stage("spawned_ms")
             assert self.process.stdin and self.process.stdout
             self.process.stdin.write(_manifest_bytes(self.source))
             await self.process.stdin.drain()
@@ -330,6 +340,7 @@ class LiveStream:
                     if self.init is None:
                         continue
                     if fragment.keyframe:
+                        self._stage("first_keyframe_ms")
                         self.gop = [fragment.data]
                     elif self.gop:
                         self.gop.append(fragment.data)
@@ -341,6 +352,7 @@ class LiveStream:
                 if self.init is None and fragmenter.init is not None:
                     self.init = fragmenter.init
                     self.mime = codec_string(self.init)
+                    self._stage("init_ms")
                     if self._hardware_failure and not hardware:
                         acceleration.disable(self._hardware_failure)
                     self.ready.set()
@@ -359,6 +371,14 @@ class LiveHub:
 
     def __init__(self) -> None:
         self.streams: dict[tuple[str, ...], LiveStream] = {}
+        self.starts: collections.deque[dict[str, object]] = collections.deque(maxlen=STARTS_KEPT)
+
+    def record_start(self, entry: dict[str, object]) -> None:
+        """Remember how long one viewer waited for live video (kept in memory, newest last)."""
+        self.starts.append(entry)
+
+    def start_summary(self) -> dict[str, object]:
+        return summarise_starts(list(self.starts))
 
     def join(self, key: tuple[str, ...], source: str, include_audio: bool, viewer: Viewer,
              on_fragment: Callable[[], None] | None = None, video_filter: str | None = None,
@@ -389,6 +409,30 @@ class LiveHub:
         return [{"key": list(stream.key), "viewers": len(stream.viewers), "camera_connections": stream.connections,
                  "ready": stream.init is not None, "failed": stream.failed, "transcoded": stream.transcode,
                  "accelerated": stream.accelerated} for stream in self.streams.values()]
+
+
+STARTS_KEPT = 200
+
+
+def _percentile(values: list[int], share: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(share * len(ordered)))]
+
+
+def summarise_starts(starts: list[dict[str, object]]) -> dict[str, object]:
+    """How long viewers waited for the first picture: the median, the slow end and the slowest, for viewers who started a camera's stream and for those who joined one already running."""
+    def ms(entries: list[dict[str, object]], key: str) -> list[int]:
+        return [int(entry[key]) for entry in entries if isinstance(entry.get(key), int)]
+
+    groups = {"started": [entry for entry in starts if not entry.get("joined_running")], "joined": [entry for entry in starts if entry.get("joined_running")]}
+    summary: dict[str, object] = {"count": len(starts)}
+    for name, entries in groups.items():
+        waits = ms(entries, "first_media_ms")
+        summary[name] = {"count": len(entries), "median_ms": _percentile(waits, 0.5), "p90_ms": _percentile(waits, 0.9), "worst_ms": max(waits) if waits else None,
+                         "stages_median_ms": {stage: _percentile(ms(entries, stage), 0.5) for stage in ("spawned_ms", "init_ms", "first_keyframe_ms")}}
+    return summary
 
 
 def now_iso() -> str:

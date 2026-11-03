@@ -551,6 +551,7 @@ class LiveSocketTests(GrantCase):
         init = b"init"
         failed = None
         accelerated = False
+        timing: dict = {}
 
         class ready:  # noqa: N801 - mimics asyncio.Event for the one thing the socket uses it for
             @staticmethod
