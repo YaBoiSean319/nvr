@@ -134,12 +134,13 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Start simulated RTSP camera
+        # The camera must outlive the whole run (the suite takes 36-40 minutes; verify stops at 60): at 2100 s it ended before the last live-recording test.
         run: |
-          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 2100 -an \
+          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 3900 -an \
             -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 10 \
             -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-test \
             >/tmp/nvr-rtsp-publisher.log 2>&1 &
-          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -f lavfi -i sine=frequency=440:sample_rate=16000 -t 2100 \
+          nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -f lavfi -i sine=frequency=440:sample_rate=16000 -t 3900 \
             -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 10 -c:a aac -b:a 32k \
             -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/nvr-audio \
             >/tmp/nvr-rtsp-publisher-audio.log 2>&1 &
