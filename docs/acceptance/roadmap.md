@@ -29,6 +29,14 @@ Scope: the roadmap in #106. These checks cannot be made from this repository (th
   - Owner:
   - Evidence:
 
+### Fall detection (#230)
+
+Verified here: the fall decision on synthetic body-point sequences; the AI worker over a scripted scene with a stand-in pose reader (one fall, one alarm, none for another camera's rule, analysis unaffected by a missing or failing model); the settings and rule screens; the real pose model's loading and contract. **Not measured: any detection or false-alarm rate on real people or real cameras.** The pose model has not been shown a person falling.
+
+- [ ] **Unchecked.** Fall detection on the nursing home's own cameras.
+  - Environment: wide views of corridors, lounges and dining rooms (not beds behind rails, bathrooms or ceiling fisheyes), AI analysis on, the rule "A person fell" with push (and email once #231 exists) to staff.
+  - Steps: turn it on for each camera under Settings, Fall detection at high sensitivity and 3 s; have staff perform staged falls (forward, sideways, from a chair, slowly sliding down a wall), and also sitting down, bending to pick something up, lying on the floor on purpose, and walking behind furniture; record for each how long the alarm took and whether one came; run a normal day with nobody falling and count the alerts per camera. Record the results here, per camera, and adjust sensitivity and stay-down time. Confirm the alarm reaches staff quickly and that its clip shows the fall.
+
 ### Plate regions (#210)
 
 Verified here: each shipped region's real models load in OpenVINO and read a rendered plate ("AB12CDE") end to end; the Dockerfile pins match the registry; choosing a region switches the AI worker with no restart. **Not measured: accuracy on any real camera.**

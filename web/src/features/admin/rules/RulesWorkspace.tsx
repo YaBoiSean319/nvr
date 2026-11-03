@@ -29,6 +29,8 @@ function summary(rule: Rule): string {
     ? (rule.condition.types.join(", ") || "any event")
     : rule.condition.type === "plate"
     ? "plate reads"
+    : rule.condition.type === "fall"
+    ? "people who have fallen"
     : rule.classes.map(item => CLASS_LABEL[item].toLowerCase()).join(" and ");
   return `${CONDITION_LABEL[rule.condition.type]} · ${subject}${rule.enabled ? "" : " · disabled"}`;
 }
@@ -184,7 +186,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
         <fieldset className="field-group">
           <legend>Condition</legend>
           <div className="field-row">
-            <label className="field"><span>{condition.type === "tamper" || condition.type === "external_event" || condition.type === "plate" ? "When" : "When an object"}</span>
+            <label className="field"><span>{condition.type === "tamper" || condition.type === "external_event" || condition.type === "plate" || condition.type === "fall" ? "When" : "When an object"}</span>
               <select value={condition.type} onChange={event => setCondition(switchCondition(condition, event.target.value as Condition["type"]))}>
                 {(Object.keys(CONDITION_LABEL) as Condition["type"][]).map(type => <option key={type} value={type}>{CONDITION_LABEL[type]}</option>)}
               </select>
@@ -220,6 +222,11 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                   {(plateLists.data?.watch_lists ?? []).map(list => <option key={list.id} value={list.id}>{list.name} ({list.kind})</option>)}
                 </select>
               </label>
+            </fieldset>
+          ) : condition.type === "fall" ? (
+            <fieldset className="plain">
+              <legend className="field-heading">Falls</legend>
+              <p className="muted field-hint">Fires when fall detection decides that a person on one of this rule's cameras fell and stayed down. Turn it on for each camera, and set its sensitivity and how long a person must stay down, under Settings, Fall detection. It can miss falls and raise alerts that are not falls: it is an aid, not a safety system.</p>
             </fieldset>
           ) : condition.type === "external_event" ? (
             <fieldset className="plain">
