@@ -153,8 +153,10 @@ class AccessTests(MaintenanceCase):
         mine = self.open(self.limited, camera_ids=[self.d1]).json()
         theirs = self.open(self.admin, camera_ids=[self.y1], name="Yard camera").json()
         site = self.open(self.admin, scope="site", name="Power").json()
-        listed = {item["id"] for item in self.limited.get("/api/maintenance").json()["windows"]}
-        self.assertEqual(listed, {mine["id"], site["id"]})
+        shown = {item["id"]: item for item in self.limited.get("/api/maintenance").json()["windows"]}
+        self.assertEqual(set(shown), {mine["id"], site["id"]})
+        self.assertEqual((shown[mine["id"]]["can_end"], shown[site["id"]]["can_end"]), (True, False))  # Their own, and the administrator's
+        self.assertTrue(all(item["can_end"] for item in self.admin.get("/api/maintenance").json()["windows"]))
         self.assertEqual(self.limited.post(f"/api/maintenance/{theirs['id']}/end").status_code, 404)
         self.assertEqual(self.limited.post(f"/api/maintenance/{site['id']}/end").status_code, 404)
         self.assertEqual(self.limited.post(f"/api/maintenance/{mine['id']}/end").status_code, 200)

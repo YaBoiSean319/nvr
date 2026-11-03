@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useNavigate } from "react-router";
+import { NavLink, useNavigate } from "react-router";
 import { create } from "zustand";
 import { ApiError } from "@/api/client";
 import { useAcknowledgeIncident, useCameras, useConsoleStatus, useExportJobs, useFailoverStatus, useOpenIncidents, type ConsoleSite, type FailoverStatus } from "@/api/queries";
@@ -8,11 +8,12 @@ import { Drawer } from "@/components/Drawer";
 import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
 import { useAlarms } from "@/features/alarms/api";
 import { ExportJobs } from "@/features/exports/ExportJobs";
+import { useEndWindow, useMaintenance, type MaintenanceWindow } from "@/features/maintenance/api";
 import { usePlaybackStore } from "@/features/playback/store";
 import { formatRelative } from "@/lib/time";
 import { summarize, type StatusSummary, type Tone } from "./summary";
 
-type Section = "video" | "recording" | "incidents" | "jobs" | "sites" | "failover";
+type Section = "video" | "recording" | "incidents" | "jobs" | "sites" | "failover" | "maintenance";
 
 /** Which part of the status drawer is open; other workspaces can open it (for example, export jobs). */
 export const useStatusPanel = create<{ section: Section | null; show: (section: Section | null) => void }>(set => ({
@@ -84,6 +85,9 @@ export function StatusArea() {
   const setSection = useStatusPanel(state => state.show);
   const summary = summarize(cameras.data, incidents.data, jobs.data);
   const unreachable = cameras.isError || incidents.isError;
+  const maintenance = useMaintenance().data;
+  const activeWindows = (maintenance?.windows ?? []).filter(window => window.state === "active");
+  const maintenanceLabel = maintenance?.site_active ? "Maintenance: whole site" : maintenance?.covered_camera_ids.length ? `Maintenance: ${maintenance.covered_camera_ids.length} camera${maintenance.covered_camera_ids.length === 1 ? "" : "s"}` : activeWindows.length ? `Maintenance: ${activeWindows.length} window${activeWindows.length === 1 ? "" : "s"}` : null;
   const alarms = useAlarms({ state: "open", camera_id: "", rule_id: "" });
   const inbox = useAlarmInbox();
   useLinkFromAddress();
@@ -98,6 +102,7 @@ export function StatusArea() {
         <Chip tone={summary.video.tone} label={summary.video.label} onClick={() => setSection("video")} />
         <Chip tone={summary.incidents.tone} label={summary.incidents.label} onClick={() => setSection("incidents")} />
         <Chip tone={summary.jobs.tone} label={summary.jobs.label} onClick={() => setSection("jobs")} />
+        {maintenanceLabel ? <Chip tone="warn" label={maintenanceLabel} onClick={() => setSection("maintenance")} /> : null}
         {sites.length ? <Chip tone={downSites.length ? "bad" : "good"} label={downSites.length ? `Sites: ${downSites.length} unreachable` : `Sites: ${sites.length} reachable`} onClick={() => setSection("sites")} /> : null}
         {failover && failover.role !== "off" ? <Chip tone={failoverTone(failover)} label={failoverLabel(failover)} onClick={() => setSection("failover")} /> : null}
         <Chip tone={counts?.new ? "bad" : openAlarms ? "warn" : "good"} label={alarmLabel} onClick={() => inbox.setOpen(true)} />
@@ -108,7 +113,7 @@ export function StatusArea() {
       </Drawer>
       <Drawer open={section !== null} onOpenChange={open => !open && setSection(null)} title="Operational status"
               description="Live video health and recording health are reported separately; a live picture does not prove footage is being written.">
-        <StatusDetails summary={summary} focus={section} sites={sites} failover={failover} />
+        <StatusDetails summary={summary} focus={section} sites={sites} failover={failover} onClose={() => setSection(null)} />
       </Drawer>
     </>
   );
@@ -128,7 +133,40 @@ function CameraList({ cameras, empty }: { cameras: Camera[]; empty: string }) {
   );
 }
 
-function StatusDetails({ summary, focus, sites, failover }: { summary: StatusSummary; focus: Section | null; sites: ConsoleSite[]; failover: FailoverStatus | undefined }) {
+/** Windows in which alerts are quiet: what is covered, until when, what was held back, and ending one that is yours to end. */
+function MaintenanceSection({ focused, onClose }: { focused: boolean; onClose: () => void }) {
+  const list = useMaintenance();
+  const end = useEndWindow();
+  const windows = (list.data?.windows ?? []).filter(window => window.state !== "ended");
+  const scope = (window: MaintenanceWindow) => (window.scope === "site" ? "The whole site" : window.scope === "groups" ? `Groups: ${window.group_names.join(", ")}` : `Cameras: ${window.camera_names.join(", ")}`);
+  return (
+    <section aria-labelledby="status-maintenance" data-focused={focused}>
+      <h3 id="status-maintenance">Maintenance</h3>
+      <p className="muted">While cameras are being worked on they send no alerts. Alarms are still kept, marked; recording carries on.</p>
+      {windows.length ? (
+        <ul className="status-list">
+          {windows.map(window => (
+            <li key={window.id}>
+              <strong>{window.name}</strong>
+              <span className="muted">
+                {scope(window)} · {window.state === "upcoming" ? `starts ${new Date(window.starts_at).toLocaleString()}` : `until ${new Date(window.ends_at).toLocaleString()}`}
+                {window.state === "active" ? ` · held back: ${window.suppressed_alarms} alarm${window.suppressed_alarms === 1 ? "" : "s"}, ${window.suppressed_incidents} incident notification${window.suppressed_incidents === 1 ? "" : "s"}` : ""}
+              </span>
+              {window.can_end ? (
+                <button type="button" className="button" disabled={end.isPending} onClick={() => end.mutate(window.id)}>
+                  {window.state === "upcoming" ? `Cancel ${window.name}` : `End ${window.name} now`}
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : <p className="muted">No maintenance windows are open.</p>}
+      <p><NavLink to="/cameras/maintenance" className="button" onClick={onClose}>Start or manage maintenance</NavLink></p>
+    </section>
+  );
+}
+
+function StatusDetails({ summary, focus, sites, failover, onClose }: { summary: StatusSummary; focus: Section | null; sites: ConsoleSite[]; failover: FailoverStatus | undefined; onClose: () => void }) {
   const acknowledge = useAcknowledgeIncident();
   return (
     <div className="status-details">
@@ -192,6 +230,7 @@ function StatusDetails({ summary, focus, sites, failover }: { summary: StatusSum
           </p>
         </section>
       ) : null}
+      <MaintenanceSection focused={focus === "maintenance"} onClose={onClose} />
       <section aria-labelledby="status-jobs" data-focused={focus === "jobs"}>
         <h3 id="status-jobs">Export jobs</h3>
         <ExportJobs />

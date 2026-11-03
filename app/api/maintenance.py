@@ -39,6 +39,7 @@ class WindowInput(BaseModel):
 def _visible(db, user: CurrentUser, row) -> dict[str, Any] | None:
     """The window as this person may see it, or None when it concerns nothing they can see (and they did not open it)."""
     view = maintenance.view(db, row)
+    view["can_end"] = user["role"] == "administrator" or row["created_by"] == int(user["id"])  # An administrator ends any window; anyone else only their own
     if user["role"] == "administrator":
         return view
     pairs = [(item, name) for item, name in zip(view["camera_ids"], view["camera_names"]) if user.access.can_see(item)]
