@@ -837,8 +837,10 @@ class UpgradeTests(unittest.TestCase):
                     db.execute("INSERT INTO rules(id,name,condition_type,condition_json,classes_json,active_from,camera_ids_json,pop_into_live,cooldown_seconds) "
                                "VALUES('r1','Gate','zone_entry','{\"zone\":{}}','[\"person\"]','2026-01-01T00:00:00Z','[\"c1\"]',1,30)")
                     db.execute("INSERT INTO rule_events(id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json) VALUES('e1','r1','Gate','c1','t1','person','zone_entry','2026-01-02T00:00:00Z','{}')")
-                    from app import alarms
-                    alarm_id = alarms.create_alarm(db, "e1")
+                    # The row itself, as this old schema has it: the application's own create_alarm moves on with the schema (it writes the maintenance columns of later versions).
+                    alarm_id = "a1"
+                    db.execute("INSERT INTO alarms(id,rule_event_id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at) "
+                               "VALUES('a1','e1','r1','Gate','c1','t1','person','zone_entry','2026-01-01T00:00:00Z','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:30Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
                     with self.assertRaises(Exception):
                         db.execute("INSERT INTO rules(name,condition_type,condition_json,classes_json,active_from) VALUES('x','tamper','{}','[]','2026-01-01T00:00:00Z')")
                 initialize()
