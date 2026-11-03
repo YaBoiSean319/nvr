@@ -22,6 +22,12 @@ test("an administrator connects Microsoft 365 with a code and a link, and sends 
     if (polls >= 2) state = { state: "connected", limits: state.limits, tenant_id: state.tenant_id, client_id: state.client_id, account: "alerts@contoso.com", sender: null };
     return json(route, state);
   });
+  await page.route("**/api/admin/email/incidents", route => {
+    const body = route.request().postDataJSON();
+    sent.push({ incidents: body });
+    state = { ...state, incidents: { enabled: body.enabled, recipients: body.recipients }, held_back: { count: 3, since: new Date(Date.now() - 3600_000).toISOString() } };
+    return json(route, state);
+  });
   await page.route("**/api/admin/email/test", route => {
     sent.push(route.request().postDataJSON());
     return json(route, { sent: true, ...state });
@@ -49,5 +55,13 @@ test("an administrator connects Microsoft 365 with a code and a link, and sends 
   await test_.getByRole("button", { name: "Send test email" }).click();
   await expect(page.getByText("A test email was sent to desk@contoso.com.")).toBeVisible();
   expect(sent.at(-1)).toEqual({ to: "desk@contoso.com" });
+
+  const problems = page.getByRole("region", { name: "Emails about NVR problems" });
+  await problems.getByLabel("Email these problems").check();
+  await problems.getByLabel("Send to").fill("it@contoso.com, desk@contoso.com");
+  await problems.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  expect(sent.at(-1)).toEqual({ incidents: { enabled: true, recipients: ["it@contoso.com", "desk@contoso.com"] } });
+  await expect(problems).toContainText("3 alert emails were held back by the hourly limit");
   expect(sent[0]).toMatchObject({ tenant_id: "contoso.onmicrosoft.com" });
 });

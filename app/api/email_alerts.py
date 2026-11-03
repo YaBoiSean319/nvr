@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app import ms_mail
+from app import email_outbox, ms_mail
 from app.audit import record
 from app.principal import Administrator
 from app.store import connect
@@ -20,18 +20,35 @@ class ConnectInput(BaseModel):
     sender: str | None = Field(default=None, max_length=320)  # A shared mailbox to send as; left out, mail is sent as the signed-in account
 
 
+class IncidentEmailInput(BaseModel):
+    enabled: bool
+    recipients: list[str] = Field(default_factory=list, max_length=ms_mail.MAX_RECIPIENTS)
+
+
 class TestInput(BaseModel):
     to: str = Field(min_length=1, max_length=320)
 
 
 def _state() -> dict[str, Any]:
     with connect() as db:
-        return ms_mail.view(ms_mail.load(db))
+        return {**ms_mail.view(ms_mail.load(db)), "incidents": email_outbox.settings(db), "held_back": email_outbox.held(db), "recent": email_outbox.recent(db)}
 
 
 @router.get("/api/admin/email")
 def email_state(_: Administrator) -> dict[str, Any]:
     return {**_state(), "scope": "Mail.Send", "limits": {"per_rule_per_hour": 20, "per_hour": 100}}
+
+
+@router.put("/api/admin/email/incidents")
+def set_incident_emails(payload: IncidentEmailInput, user: Administrator) -> dict[str, Any]:
+    """Who is emailed about problems the NVR finds in itself (a camera that stopped recording, a full disk, the AI worker stopping...)."""
+    try:
+        with connect() as db:
+            saved = email_outbox.save_settings(db, payload.enabled, payload.recipients)
+            record(db, int(user["id"]), "email_incidents_changed", "email", "microsoft", enabled=saved["enabled"], recipients=len(saved["recipients"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return _state()
 
 
 @router.post("/api/admin/email/connect")
