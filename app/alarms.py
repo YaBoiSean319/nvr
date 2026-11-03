@@ -70,17 +70,27 @@ def label_text(label: object) -> str:
 
 
 def create_alarm(db: sqlite3.Connection, rule_event_id: str) -> str:
-    """Raise the alarm for a rule event, inside the caller's transaction."""
+    """Raise the alarm for a rule event, inside the caller's transaction.
+
+    During a maintenance window for the camera (#234) the alarm is kept and marked with the window, but nothing goes out: no pop-in, webhook, push or rule action."""
+    from . import maintenance
+
     event = db.execute("SELECT * FROM rule_events WHERE id=?", (rule_event_id,)).fetchone()
     occurred = _parse(event["occurred_at"]).astimezone(timezone.utc)
     alarm_id = str(uuid.uuid4())
     stamp = _now()
+    window = maintenance.covering(db, event["camera_id"], occurred)
     db.execute(
-        "INSERT INTO alarms(id,rule_event_id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO alarms(id,rule_event_id,rule_id,rule_name,camera_id,track_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at,maintenance_window_id,maintenance_name) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (alarm_id, event["id"], event["rule_id"], event["rule_name"], event["camera_id"], event["track_id"], event["label"], event["condition_type"],
-         occurred.isoformat(), event["box_json"], (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(), stamp, stamp),
+         occurred.isoformat(), event["box_json"], (occurred - CLIP_BEFORE).isoformat(), (occurred + CLIP_AFTER).isoformat(), stamp, stamp,
+         window["id"] if window else None, window["name"] if window else None),
     )
+    if window is not None:
+        _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"], "maintenance": window["name"]})
+        maintenance.count_held(db, window["id"], "alarm")
+        return alarm_id
     if db.execute("SELECT 1 FROM rules WHERE id=? AND pop_into_live=1", (event["rule_id"],)).fetchone():
         db.execute("INSERT INTO alarm_pop_ins(alarm_id) VALUES(?)", (alarm_id,))
     _record(db, alarm_id, None, "created", {"rule_name": event["rule_name"], "camera_id": event["camera_id"]})
@@ -196,6 +206,7 @@ def alarm_view(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         "track_id": row["track_id"], "label": row["label"], "box": json.loads(row["box_json"]),
         "assigned_to": names.get(row["assigned_to"]), "acknowledged_by": names.get(row["acknowledged_by"]), "acknowledged_at": row["acknowledged_at"],
         "resolved_by": names.get(row["resolved_by"]), "resolved_at": row["resolved_at"], "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "maintenance": {"id": row["maintenance_window_id"], "name": row["maintenance_name"]} if row["maintenance_window_id"] else None,
     }
 
 

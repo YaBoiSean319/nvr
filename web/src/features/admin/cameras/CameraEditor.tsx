@@ -5,6 +5,7 @@ import { ApiError } from "@/api/client";
 import { keys } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { Modal } from "@/components/Modal";
+import { QuickMaintenance } from "@/features/maintenance/QuickMaintenance";
 import { HEALTH_TONE } from "@/features/cameras/CameraBrowser";
 import { guarded } from "../drafts";
 import { archiveCamera, restoreCamera } from "./api";
@@ -111,6 +112,7 @@ export function CameraEditor({ camera, admin, extraTabs = {} }: { camera: Camera
           </p>
         </div>
         <div className="editor-actions">
+          {!archived ? <QuickMaintenance camera={camera} /> : null}
           {!archived && !previewing ? <button type="button" className="button" onClick={() => setPreviewing(true)}>Show preview</button> : null}
           {admin && !archived ? <button type="button" className="button" data-variant="danger" onClick={() => setArchiving(true)}>Archive…</button> : null}
           {admin && archived ? <button type="button" className="button" onClick={() => void restore()} disabled={busy}>Restore camera</button> : null}

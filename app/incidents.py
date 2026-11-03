@@ -27,6 +27,14 @@ def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: d
     incident = db.execute("SELECT fault_type,camera_id,summary,recurrence_count FROM incidents WHERE id=?", (incident_id,)).fetchone()
     if incident is None:
         return
+    from . import maintenance
+
+    window = maintenance.covering(db, incident["camera_id"])
+    if window is not None:
+        # Worked on at the moment: kept and shown, but nothing goes out. A fault still there when the window ends is announced then (``release_held``).
+        maintenance.count_held(db, window["id"], "incident")
+        db.execute("UPDATE incidents SET held_by_window=? WHERE id=?", (window["id"] if event_type != "recovered" else None, incident_id))
+        return
     if str(incident["fault_type"]).startswith("ai_"):
         webhook_type = "ai.recovered" if event_type == "recovered" else "ai.failure"
     elif str(incident["fault_type"]).startswith("tamper_"):
@@ -93,12 +101,26 @@ def sync_incident(
                 "UPDATE incidents SET summary=?,last_seen_at=?,details_json=? WHERE id=?",
                 (summary, now, details_json, row["id"]),
             )
+            if row["held_by_window"]:
+                release_held(db, row["id"], details or {})
     elif row is not None and row["fault_active"]:
         db.execute(
             "UPDATE incidents SET state='recovered',fault_active=0,last_seen_at=?,recovered_at=?,details_json=? WHERE id=?",
             (now, now, details_json, row["id"]),
         )
         _event(db, row["id"], "recovered", details or {})
+
+
+def release_held(db: sqlite3.Connection, incident_id: str, details: dict[str, Any]) -> None:
+    """An incident whose notification was held back during a maintenance window is announced now if no window covers it any more and the fault is still active."""
+    from . import maintenance
+
+    row = db.execute("SELECT camera_id,fault_active,held_by_window FROM incidents WHERE id=?", (incident_id,)).fetchone()
+    if row is None or not row["held_by_window"] or maintenance.covering(db, row["camera_id"]) is not None:
+        return
+    db.execute("UPDATE incidents SET held_by_window=NULL WHERE id=?", (incident_id,))
+    if row["fault_active"]:
+        _event(db, incident_id, "raised", {**details, "held_during_maintenance": True})
 
 
 def acknowledge_incident(db: sqlite3.Connection, incident_id: str, actor_id: int) -> dict[str, Any] | None:

@@ -62,7 +62,7 @@ export function AlarmsInbox({ onNavigate, initialAlarmId = null }: { onNavigate:
           <li key={alarm.id} data-state={alarm.state}>
             <button type="button" className="row-select alarm-row" onClick={() => setSelectedId(alarm.id)}>
               <span>{alarm.rule_name}: {labelOf(alarm.label)} on {alarm.camera_name ?? "a removed camera"}</span>
-              <span className="muted">{STATE_LABEL[alarm.state]}{alarm.assigned_to ? ` to ${alarm.assigned_to}` : ""} · {when(alarm.occurred_at)}</span>
+              <span className="muted">{STATE_LABEL[alarm.state]}{alarm.assigned_to ? ` to ${alarm.assigned_to}` : ""} · {when(alarm.occurred_at)}{alarm.maintenance ? ` · during maintenance (${alarm.maintenance.name}), no notifications sent` : ""}</span>
             </button>
           </li>
         ))}
@@ -132,7 +132,7 @@ function AlarmDetailView({ id, onBack, onNavigate }: { id: string; onBack: () =>
       <button type="button" className="button" onClick={onBack}><span aria-hidden="true">← </span>All alarms</button>
       <header>
         <h3>{data.rule_name}: {labelOf(data.label)} on {data.camera_name ?? "a removed camera"}</h3>
-        <p className="muted">{when(data.occurred_at)} · <span data-state={data.state}>{STATE_LABEL[data.state]}{data.assigned_to ? ` to ${data.assigned_to}` : ""}</span></p>
+        <p className="muted">{when(data.occurred_at)} · <span data-state={data.state}>{STATE_LABEL[data.state]}{data.assigned_to ? ` to ${data.assigned_to}` : ""}</span>{data.maintenance ? <> · <strong>During maintenance ({data.maintenance.name}): kept, but nothing was sent about it</strong></> : null}</p>
       </header>
       {data.snapshot_url ? <img className="alarm-snapshot" src={data.snapshot_url} alt={`Snapshot from ${data.camera_name ?? "the camera"} at the alarm time`} /> : null}
       {first ? (
