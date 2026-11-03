@@ -2,7 +2,7 @@
 
 Each rule event queues one delivery per enabled action: a signed webhook (the NVR's
 webhook signing scheme), an MQTT publish, a Slack or Microsoft Teams incoming-webhook
-message, an ONVIF relay pulse on a camera, or a PTZ camera starting to follow the object that triggered the rule. Deliveries run in the background worker
+message, an email through Microsoft 365 (#231), an ONVIF relay pulse on a camera, or a PTZ camera starting to follow the object that triggered the rule. Deliveries run in the background worker
 with retries and are logged per rule. Destination URLs, MQTT credentials and signing
 keys are encrypted with the credential key, never returned, and never logged: errors
 are recorded as short codes.
@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from . import mqtt
+from . import mqtt, ms_mail
 from .alarms import label_text
 from .credentials import decrypt, encrypt
 from .store import connect
@@ -34,6 +34,9 @@ KEEP_DELIVERIES = timedelta(days=30)
 REQUEST_TIMEOUT_SECONDS = 10
 MIN_SIGNING_SECRET = 16
 MAX_RELAY_SECONDS = 60
+# One noisy rule must not send hundreds of emails: a limit per rule and one for the whole site, each over the last hour.
+EMAIL_PER_RULE_PER_HOUR = 20
+EMAIL_PER_HOUR = 100
 # Deliveries run side by side, so a relay held for a minute or a slow receiver never holds up the rest.
 WORKERS = 4
 
@@ -86,6 +89,11 @@ def _settings(action: dict[str, Any]) -> dict[str, Any]:
         return {"allow_private": bool(action.get("allow_private"))}
     if kind == "mqtt":
         return {"allow_private": bool(action.get("allow_private")), "topic": mqtt.validate_topic(action.get("topic") or ""), "retain": bool(action.get("retain"))}
+    if kind == "email":
+        recipients = [ms_mail.valid_address(item) for item in (action.get("recipients") or [])]
+        if not recipients or len(recipients) > ms_mail.MAX_RECIPIENTS:
+            raise ActionError(f"Enter one to {ms_mail.MAX_RECIPIENTS} recipient addresses")
+        return {"recipients": list(dict.fromkeys(item.lower() for item in recipients)), "subject": (action.get("subject") or "").strip()[:ms_mail.MAX_SUBJECT] or None}
     if kind == "relay":
         duration = float(action.get("duration_seconds") or 1)
         if not 0.1 <= duration <= MAX_RELAY_SECONDS:
@@ -290,6 +298,24 @@ async def _post(url: str, body: bytes, headers: dict[str, str], allow_private: b
     return int(response.status_code)
 
 
+def _email(delivery: dict[str, Any], settings: dict[str, Any], payload: dict[str, Any]) -> tuple[int | None, str | None, bool]:
+    since = (_now() - timedelta(hours=1)).isoformat()
+    with connect() as db:
+        rule_sent = db.execute("SELECT COUNT(*) FROM rule_action_deliveries WHERE rule_id=? AND action_type='email' AND status='delivered' AND delivered_at>?",
+                               (delivery["rule_id"], since)).fetchone()[0]
+        site_sent = db.execute("SELECT COUNT(*) FROM rule_action_deliveries WHERE action_type='email' AND status='delivered' AND delivered_at>?", (since,)).fetchone()[0]
+    if rule_sent >= EMAIL_PER_RULE_PER_HOUR or site_sent >= EMAIL_PER_HOUR:
+        return None, "email_rate_limited", False
+    subject, text = ms_mail.compose(settings.get("subject"), payload)
+    try:
+        ms_mail.send(list(settings.get("recipients") or []), subject, text)
+    except ms_mail.MailError as exc:
+        ms_mail.note_failure(exc)
+        return None, f"email_{exc.code}", exc.retryable
+    ms_mail.note_success()
+    return 202, None, False
+
+
 async def _ptz_track(payload: dict[str, Any]) -> tuple[int | None, str | None, bool]:
     """Start the camera the rule fired on following the object that made it fire. Nobody is steered away from: if a person is driving, or the camera
     already follows something, it is left alone."""
@@ -336,6 +362,8 @@ async def _perform(delivery: dict[str, Any]) -> tuple[int | None, str | None, bo
             if 200 <= status < 300:
                 return status, None, False
             return status, f"http_{status}", status == 429 or status >= 500
+        if kind == "email":
+            return await asyncio.to_thread(_email, delivery, settings, payload)
         if kind == "mqtt":
             broker = await asyncio.wait_for(asyncio.to_thread(lambda: _check_broker(secret["url"], bool(settings.get("allow_private")), delivering=True)), timeout=5)
             await mqtt.publish(broker, settings["topic"], json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),

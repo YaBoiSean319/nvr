@@ -6,6 +6,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { CoverageSettings } from "./CoverageSettings";
 import { DigestsSettings } from "./DigestsSettings";
 import { DiagnosticsSettings } from "./DiagnosticsSettings";
+import { EmailSettings } from "./EmailSettings";
 import { EventSourcesSettings } from "./EventSourcesSettings";
 import { FailoverSettings } from "./FailoverSettings";
 import { GeneralSettings } from "./GeneralSettings";
@@ -34,6 +35,7 @@ const CATEGORIES = {
   audit: { label: "Viewing audit", page: AuditSettings },
   hardening: { label: "Camera hardening", page: HardeningSettings },
   notifications: { label: "Notifications", page: NotificationsSettings },
+  email: { label: "Email alerts", page: EmailSettings },
   digests: { label: "Digests", page: DigestsSettings },
   events: { label: "Event sources", page: EventSourcesSettings },
   failover: { label: "Failover", page: FailoverSettings },
