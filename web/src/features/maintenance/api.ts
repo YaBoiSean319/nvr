@@ -39,8 +39,9 @@ export interface WindowRequest {
 
 export const MAINTENANCE_KEY = ["maintenance"] as const;
 
+// Not cancelled when a camera editor unmounts (every camera chosen mounts a new one), and not asked again on every mount: it is read once and refreshed every 30 seconds.
 export const useMaintenance = () =>
-  useQuery({ queryKey: MAINTENANCE_KEY, queryFn: ({ signal }) => api<MaintenanceList>("/api/maintenance", { signal }), refetchInterval: 30_000 });
+  useQuery({ queryKey: MAINTENANCE_KEY, queryFn: () => api<MaintenanceList>("/api/maintenance"), staleTime: 15_000, refetchInterval: 30_000 });
 
 export function useOpenWindow() {
   const client = useQueryClient();
