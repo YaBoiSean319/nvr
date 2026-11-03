@@ -30,6 +30,9 @@ incidents of the last day.
 A ``plate`` rule is not about object classes either. It names a watch list (see ``app.plates``): on a deny list it fires when a plate read on a camera it watches
 matches an entry that has not expired, on an allow list when the read matches no entry (a plate that is on the list does nothing). It fires once per
 track, with the usual schedule, cooldown and scope, and raises an alarm labelled with the plate. Test mode replays the reads kept.
+
+A ``fall`` rule is not about object classes either. It fires when fall detection (see ``app.falls``) decides that a person on a camera it watches has fallen and stayed down,
+once per fall, with the usual schedule, cooldown and scope, and raises an alarm labelled "Person fell". Test mode replays the falls kept.
 """
 from __future__ import annotations
 
@@ -428,6 +431,44 @@ def _replay_plate(rule: Rule, start: datetime, end: datetime) -> list[dict[str, 
     return events
 
 
+def fire_fall(db: sqlite3.Connection, camera_id: str, track_id: str, at: datetime, box: dict[str, float]) -> int:
+    """Raise an alarm for each ``fall`` rule that watches the camera, inside the caller's transaction."""
+    groups = _camera_groups(db, camera_id)
+    fired = 0
+    for rule in load_rules(db):
+        if rule.condition_type != "fall" or not rule.watches_camera(camera_id, groups) or at < rule.active_from or not rule.scheduled(at):
+            continue
+        if rule.cooldown and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                                        (rule.id, camera_id, (at - rule.cooldown).isoformat(), (at + rule.cooldown).isoformat())).fetchone():
+            continue
+        event_id = str(uuid.uuid4())
+        inserted = db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                              (event_id, rule.id, rule.name, camera_id, track_id, None, "fall", "fall", at.isoformat(), json.dumps(box, separators=(",", ":")))).rowcount
+        if inserted:
+            create_alarm(db, event_id)
+            fired += 1
+    return fired
+
+
+def _replay_fall(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """The falls of [start, end) the rule would have fired on, from those kept."""
+    with connect() as db:
+        rows = db.execute(
+            "SELECT f.track_id,f.camera_id,f.occurred_at,f.box_json,c.name AS camera_name FROM fall_events f JOIN cameras c ON c.id=f.camera_id "
+            "WHERE f.occurred_at>=? AND f.occurred_at<? ORDER BY f.occurred_at,f.id", (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat())).fetchall()
+        groups = {row["camera_id"]: _camera_groups(db, row["camera_id"]) for row in rows}
+    events, last = [], {}
+    for row in rows:
+        at = _parse(row["occurred_at"])
+        if not rule.watches_camera(row["camera_id"], groups[row["camera_id"]]) or at < rule.active_from or not rule.scheduled(at):
+            continue
+        if rule.cooldown and row["camera_id"] in last and abs(at - last[row["camera_id"]]) < rule.cooldown:
+            continue
+        last[row["camera_id"]] = at
+        events.append({"camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": row["track_id"], "label": "fall", "occurred_at": at.isoformat(), "box": json.loads(row["box_json"])})
+    return events
+
+
 def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
     """What the rule would have fired over stored tracks in [start, end); writes nothing."""
     if rule.condition_type == "tamper":
@@ -436,6 +477,8 @@ def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
         return _replay_external(rule, start, end)
     if rule.condition_type == "plate":
         return _replay_plate(rule, start, end)
+    if rule.condition_type == "fall":
+        return _replay_fall(rule, start, end)
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
         tracks = db.execute(

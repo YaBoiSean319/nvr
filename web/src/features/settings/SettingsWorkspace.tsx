@@ -14,6 +14,7 @@ import { HardeningSettings } from "./HardeningSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
 import { NotificationsSettings } from "./NotificationsSettings";
 import { PlatesSettings } from "./PlatesSettings";
+import { FallsSettings } from "./FallsSettings";
 import { PrivacySettings } from "./PrivacySettings";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { SitesSettings } from "./SitesSettings";
@@ -40,6 +41,7 @@ const CATEGORIES = {
   events: { label: "Event sources", page: EventSourcesSettings },
   failover: { label: "Failover", page: FailoverSettings },
   plates: { label: "Licence plates", page: PlatesSettings },
+  falls: { label: "Fall detection", page: FallsSettings },
   sites: { label: "Sites (console)", page: SitesSettings },
   integrations: { label: "Integrations", page: IntegrationsSettings },
   updates: { label: "Updates", page: UpdatesSettings },

@@ -100,7 +100,12 @@ class Plate(BaseModel):
     watch_list_id: str = Field(min_length=1, max_length=64)
 
 
-Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper, ExternalEvent, Plate], Field(discriminator="type")]
+class Fall(BaseModel):
+    """A person fell and stayed down (see Fall detection): which cameras are watched, how sensitive it is and how long a person must stay down are set there."""
+    type: Literal["fall"]
+
+
+Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper, ExternalEvent, Plate, Fall], Field(discriminator="type")]
 
 
 class ScheduleInterval(BaseModel):
@@ -171,7 +176,7 @@ class RuleDefinition(BaseModel):
     def valid_definition(self) -> "RuleDefinition":
         if not self.camera_ids and not self.group_ids:
             raise ValueError("Choose at least one camera or group")
-        if self.condition.type in ("tamper", "external_event", "plate"):
+        if self.condition.type in ("tamper", "external_event", "plate", "fall"):
             self.classes = []
         elif not self.classes:
             raise ValueError("Choose at least one object class")

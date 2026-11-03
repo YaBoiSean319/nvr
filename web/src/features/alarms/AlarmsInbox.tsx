@@ -12,7 +12,7 @@ import {
   type Alarm, type AlarmFilter, type AlarmQuery,
 } from "./api";
 
-const LABEL: Record<string, string> = { person: "Person", vehicle: "Vehicle", covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused" };
+const LABEL: Record<string, string> = { person: "Person", vehicle: "Vehicle", covered: "Camera covered", moved: "Camera moved", defocused: "Camera defocused", fall: "Person fell" };
 /** What an alarm was about: an object, tampering, or a licence plate ("plate:AB12CDE"). */
 const labelOf = (label: string) => (label.startsWith("plate:") ? `Plate ${label.slice(6)}` : LABEL[label] ?? label);
 
