@@ -23,6 +23,7 @@ import { CasesList, CaseView } from "@/features/cases/CasesWorkspace";
 import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
 import { useUnmaskedStore } from "@/features/privacy/store";
+import { MaintenanceWorkspace } from "@/features/maintenance/MaintenanceWorkspace";
 import { Shell } from "@/features/shell/Shell";
 import { applyTheme, reapplyBranding, storedTheme } from "@/lib/appearance";
 import { deviceLabel } from "@/features/alarms/pushDevice";
@@ -55,6 +56,7 @@ function router(me: Me) {
             children: [
               { index: true, element: <CamerasInventory /> },
               { path: "health", element: <FleetHealth /> },
+              { path: "maintenance", element: <MaintenanceWorkspace /> },
               { path: "add", element: <AdminRoute me={me}><AddCameras /></AdminRoute> },
               { path: "groups", element: <AdminRoute me={me}><GroupsWorkspace /></AdminRoute> },
               { path: "rules", element: <AdminRoute me={me}><RulesWorkspace /></AdminRoute> },

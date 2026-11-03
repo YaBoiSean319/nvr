@@ -22,6 +22,8 @@ export interface Alarm {
   resolved_by: string | null;
   resolved_at: string | null;
   updated_at: string;
+  /** Raised while the camera was in a maintenance window: kept, but nothing was sent about it. */
+  maintenance?: { id: string; name: string } | null;
 }
 
 export interface AlarmDetail extends Alarm {
