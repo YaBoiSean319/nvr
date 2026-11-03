@@ -16,12 +16,14 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from . import acceleration
+from . import acceleration, ai_capacity
 from .credentials import decrypt
 from .recording import _manifest_bytes, _PROTOCOLS, safe_stream_url
 from .store import connect
 
 logger = logging.getLogger(__name__)
+
+_FACTOR_TEXT = {"cpu": "CPU", "inference": "the AI model is busy", "memory": "memory", "late": "analysis is falling behind"}
 
 MODEL_ID = "person-vehicle-bike-detection-2004"
 MODEL_VERSION = "2021.4-FP32"
@@ -407,6 +409,9 @@ class DetectionManager:
         # Database writes can wait seconds for a busy database; their own threads keep them from starving inference, embedding and JPEG work in the shared pool.
         self._db_threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-db")
         self._inference_slots = asyncio.Semaphore(1)
+        self.capacity = ai_capacity.Capacity()
+        self.limit_now: int | None = None  # How many cameras may be analysed now (from the controller, or the fixed number)
+        self.waiting_text = "Waiting because the configured number of AI analysis slots is in use"
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.task_configs: dict[str, tuple[Any, ...]] = {}
         self.configuration_task: asyncio.Task[None] | None = None
@@ -417,18 +422,65 @@ class DetectionManager:
         await self.reconcile()
         self.configuration_task = asyncio.create_task(self._configuration_loop(), name="ai-configuration-supervisor")
 
+    def _runtime(self) -> tuple[str, int, int | None]:
+        """(mode, the fixed number, the limit the status last recorded) from the settings."""
+        with connect() as db:
+            row = db.execute("SELECT capacity_mode,max_active_cameras FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+            status = db.execute("SELECT limit_cameras FROM ai_capacity_status WHERE singleton_id=1").fetchone()
+        return (str(row["capacity_mode"]), int(row["max_active_cameras"]), int(status["limit_cameras"]) if status else None) if row else ("auto", 4, None)
+
+    def _by_importance(self, camera_ids: list[str]) -> list[str]:
+        """The cameras that matter most first: those with an enabled rule, fall detection or plate reading, then the rest by name (the order they came in)."""
+        with connect() as db:
+            rules = db.execute("SELECT camera_ids_json,group_ids_json FROM rules WHERE enabled=1").fetchall()
+            falls_on = {row[0] for row in db.execute("SELECT camera_id FROM fall_settings WHERE enabled=1")}
+            plates_on = {row[0] for row in db.execute("SELECT camera_id FROM plate_settings WHERE enabled=1")}
+            groups = {row["id"]: row["group_id"] for row in db.execute("SELECT id,group_id FROM cameras")}
+        watched: dict[str, int] = {}
+        for rule in rules:
+            direct, by_group = set(json.loads(rule["camera_ids_json"])), set(json.loads(rule["group_ids_json"]))
+            for camera_id in camera_ids:
+                if camera_id in direct or (groups.get(camera_id) and groups[camera_id] in by_group):
+                    watched[camera_id] = watched.get(camera_id, 0) + 1
+        score = {camera_id: (1 if watched.get(camera_id) else 0) + (1 if camera_id in falls_on else 0) + (1 if camera_id in plates_on else 0) for camera_id in camera_ids}
+        return sorted(camera_ids, key=lambda camera_id: -score[camera_id])  # Stable: ties stay in name order
+
     async def reconcile(self) -> None:
         with connect() as db:
             cameras = db.execute("SELECT id FROM cameras WHERE enabled=1 ORDER BY name COLLATE NOCASE").fetchall()
-            runtime = db.execute("SELECT max_active_cameras FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
-        max_active = int(runtime["max_active_cameras"]) if runtime else 4
-        eligible: list[str] = []
-        for row in cameras:
-            config = effective_camera_config(row["id"])
-            if config and config["enabled"] and len(eligible) < max_active:
-                eligible.append(row["id"])
+        mode, fixed, last_limit = self._runtime()
+        wanting = [row["id"] for row in cameras if (config := effective_camera_config(row["id"])) and config["enabled"]]
+        wanting = self._by_importance(wanting)
+        analysed = sum(1 for camera_id in wanting if camera_id in self.tasks and not self.tasks[camera_id].done())
+        if mode == "fixed":
+            limit = fixed
+            self.waiting_text = f"Waiting because the fixed limit of {fixed} analysed camera{'s' if fixed != 1 else ''} is in use"
+        else:
+            if self.capacity.controller is None or self.capacity.due():
+                decision = await asyncio.to_thread(self.capacity.evaluate, analysed, len(wanting), last_limit)
+                if decision.action in {"shed", "grow"}:
+                    logger.info("AI capacity: %s to %d cameras (%s)", decision.action, decision.limit, decision.detail)
+            controller = self.capacity.controller
+            limit = controller.limit if controller else ai_capacity.START_CAMERAS
+            factor = self.capacity.controller.last.factor if self.capacity.controller and self.capacity.controller.last else None
+            self.waiting_text = "Waiting: this machine is at its limit" + (f" ({_FACTOR_TEXT.get(factor, factor)})" if factor else "")
+        self.limit_now = limit
+        eligible = wanting[:limit]
         for row in cameras:
             await self.sync_camera(row["id"], capacity_allowed=row["id"] in eligible)
+        await asyncio.to_thread(self._write_status, mode, limit, len(wanting))
+
+    def _write_status(self, mode: str, limit: int, wanting: int) -> None:
+        analysed = sum(1 for task in self.tasks.values() if not task.done())
+        status = self.capacity.status(mode, limit, analysed, wanting)
+        with connect() as db:
+            db.execute(
+                "INSERT INTO ai_capacity_status(singleton_id,mode,limit_cameras,analysed,wanting,factor,action,cpu,cores,inference_busy,memory_used_bytes,memory_total_bytes,late_share,detail,updated_at) "
+                "VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(singleton_id) DO UPDATE SET mode=excluded.mode,limit_cameras=excluded.limit_cameras,analysed=excluded.analysed,"
+                "wanting=excluded.wanting,factor=excluded.factor,action=excluded.action,cpu=excluded.cpu,cores=excluded.cores,inference_busy=excluded.inference_busy,"
+                "memory_used_bytes=excluded.memory_used_bytes,memory_total_bytes=excluded.memory_total_bytes,late_share=excluded.late_share,detail=excluded.detail,updated_at=excluded.updated_at",
+                (status["mode"], status["limit_cameras"], status["analysed"], status["wanting"], status["factor"], status["action"], status["cpu"], status["cores"], status["inference_busy"],
+                 status["memory_used_bytes"], status["memory_total_bytes"], status["late_share"], status["detail"], datetime.now(timezone.utc).isoformat(timespec="seconds")))
 
     async def _configuration_loop(self) -> None:
         while not self.stopping:
@@ -454,6 +506,11 @@ class DetectionManager:
         self.tasks.clear()
         self.task_configs.clear()
         self._detectors.clear()
+
+    def _current_limit(self) -> int:
+        """The limit before the first reconcile: the fixed number, or where the controller starts."""
+        mode, fixed, last_limit = self._runtime()
+        return fixed if mode == "fixed" else (ai_capacity.Controller.starting(ai_capacity.hardware_ceiling(self.capacity.sampler.cores(), self.capacity.sampler.memory_total()), last_limit).limit)
 
     async def sync_camera(self, camera_id: str, force_restart: bool = False, capacity_allowed: bool | None = None) -> None:
         if self.stopping:
@@ -489,14 +546,12 @@ class DetectionManager:
                 await asyncio.gather(task, return_exceptions=True)
             self.tasks.pop(camera_id, None)
             self.task_configs.pop(camera_id, None)
-            set_camera_state(camera_id, "skipped", "Waiting because the configured number of AI analysis slots is in use")
+            set_camera_state(camera_id, "skipped", self.waiting_text)
             return
         active_count = sum(1 for active in self.tasks.values() if not active.done())
-        with connect() as db:
-            runtime = db.execute("SELECT max_active_cameras FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
-        max_active = int(runtime["max_active_cameras"]) if runtime else 4
+        max_active = self.limit_now if self.limit_now is not None else self._current_limit()
         if task is None and active_count >= max_active:
-            set_camera_state(camera_id, "skipped", "Waiting because the configured number of AI analysis slots is in use")
+            set_camera_state(camera_id, "skipped", self.waiting_text)
             self.task_configs.pop(camera_id, None)
             return
         if task is None or task.done() or force_restart:
@@ -597,8 +652,11 @@ class DetectionManager:
                     async with self._inference_slots:
                         queue_wait = asyncio.get_running_loop().time() - wait_started
                         if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
+                            self.capacity.note_late(camera_id)
                             await self._db(set_camera_state, camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
+                        infer_started = time.monotonic()
                         observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
+                        self.capacity.note_inference(time.monotonic() - infer_started)
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
                     await asyncio.to_thread(attributes.describe, frame, observations, attribute_model)
                     at = self.clock()

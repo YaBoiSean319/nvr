@@ -4,8 +4,15 @@ import { api } from "@/api/client";
 import { TabFooter } from "@/features/admin/TabFooter";
 import { failureText, useTabDraft } from "@/features/admin/tabDraft";
 
+interface CapacityStatus {
+  mode: "auto" | "fixed"; limit_cameras: number; analysed: number; wanting: number; factor: string | null; action: string | null; detail: string | null;
+  cpu: number | null; cores: number | null; inference_busy: number | null; memory_used_bytes: number | null; memory_total_bytes: number | null; late_share: number | null; updated_at: string;
+}
+
 interface Runtime {
   max_active_cameras: number;
+  capacity_mode: "auto" | "fixed";
+  capacity: CapacityStatus | null;
   resource_note: string;
   model: {
     provider: string; model_id: string; model_version: string; runtime: string; available: boolean; reason: string | null; validated: boolean;
@@ -14,11 +21,38 @@ interface Runtime {
   };
 }
 
+const FACTOR = { cpu: "the CPU", inference: "the AI model's time", memory: "memory", late: "analysis falling behind" } as const;
+const gigabytes = (bytes: number) => (bytes / 2 ** 30).toFixed(1);
+
+/** What the AI worker is doing about capacity, as it last measured: how many cameras, and what is closest to its limit. */
+function CapacityReport({ status, mode }: { status: CapacityStatus | null; mode: "auto" | "fixed" }) {
+  if (!status) return <p className="muted" role="status">The AI worker has not reported yet.</p>;
+  const measured = [
+    status.cpu !== null ? `CPU ${Math.round(status.cpu * 100)}% of ${status.cores ?? "?"} cores` : null,
+    status.inference_busy !== null ? `the AI model busy ${Math.round(status.inference_busy * 100)}%` : null,
+    status.memory_used_bytes !== null && status.memory_total_bytes ? `memory ${gigabytes(status.memory_used_bytes)} of ${gigabytes(status.memory_total_bytes)} GB` : null,
+  ].filter(Boolean).join(" · ");
+  const waiting = Math.max(0, status.wanting - status.analysed);
+  return (
+    <div className="capacity-report" role="status" aria-label="AI capacity now">
+      <p><strong>Analysing {status.analysed} of {status.wanting} camera{status.wanting === 1 ? "" : "s"}.</strong>{" "}
+        {mode === "auto" && status.mode === "auto"
+          ? (waiting > 0 ? `The limit is ${status.limit_cameras} for now${status.factor ? `, held by ${FACTOR[status.factor as keyof typeof FACTOR] ?? status.factor}` : ""}${status.detail ? ` (${status.detail})` : ""}.` : "Every camera that wants analysis is being analysed.")
+          : mode === "fixed" && status.mode === "fixed" ? `The fixed limit is ${status.limit_cameras}.` : "This changes when you save."}
+      </p>
+      {measured ? <p className="muted">Measured now: {measured}.</p> : null}
+      {mode === "auto" && status.mode === "auto" && waiting > 0 ? <p className="muted">It adds a camera only after the machine has had room for a minute, and takes cameras away at once when it is short of CPU, AI model time or memory. Cameras with rules, fall detection or plate reading are analysed first.</p> : null}
+    </div>
+  );
+}
+
 /** The AI runtime: how many cameras are analysed at once, and which validated model and device. */
 export function IntegrationsSettings() {
   const client = useQueryClient();
   const runtime = useQuery({ queryKey: ["ai", "runtime"], queryFn: ({ signal }) => api<Runtime>("/api/ai/settings", { signal }) });
-  const published = useMemo(() => (runtime.data ? { max_active_cameras: runtime.data.max_active_cameras, provider: runtime.data.model.provider, model_id: runtime.data.model.model_id } : undefined), [runtime.data]);
+  // What the AI worker last measured and decided: read on its own and often, so a draft being edited is never replaced by it.
+  const capacity = useQuery({ queryKey: ["ai", "capacity"], queryFn: ({ signal }) => api<Runtime>("/api/ai/settings", { signal }).then(result => result.capacity), refetchInterval: 10_000 });
+  const published = useMemo(() => (runtime.data ? { max_active_cameras: runtime.data.max_active_cameras, capacity_mode: runtime.data.capacity_mode, provider: runtime.data.model.provider, model_id: runtime.data.model.model_id } : undefined), [runtime.data]);
   const [check, setCheck] = useState<{ busy: boolean; text?: string; tone?: "good" | "bad" }>({ busy: false });
   const tab = useTabDraft(published, {
     label: "AI runtime",
@@ -27,10 +61,10 @@ export function IntegrationsSettings() {
       try {
         const changedModel = draft.provider !== base.provider || draft.model_id !== base.model_id;
         const saved = await api<Runtime>("/api/ai/settings", {
-          method: "PUT", body: { max_active_cameras: draft.max_active_cameras, ...(changedModel ? { provider: draft.provider, model_id: draft.model_id } : {}) },
+          method: "PUT", body: { max_active_cameras: draft.max_active_cameras, capacity_mode: draft.capacity_mode, ...(changedModel ? { provider: draft.provider, model_id: draft.model_id } : {}) },
         });
         client.setQueryData(["ai", "runtime"], saved);
-        return { ok: true, base: { max_active_cameras: saved.max_active_cameras, provider: saved.model.provider, model_id: saved.model.model_id }, outcome: { tone: "good", text: changedModel ? "Validated and activated." : "Saved." } };
+        return { ok: true, base: { max_active_cameras: saved.max_active_cameras, capacity_mode: saved.capacity_mode, provider: saved.model.provider, model_id: saved.model.model_id }, outcome: { tone: "good", text: changedModel ? "Validated and activated." : "Saved." } };
       } catch (error) {
         return { ok: false, base, outcome: { tone: "bad", text: `Not saved: ${failureText(error)}.` } };
       }
@@ -59,9 +93,17 @@ export function IntegrationsSettings() {
       </p>
       <fieldset className="field-group">
         <legend>Person and vehicle detection</legend>
-        <label className="field"><span>Cameras analysed at once</span>
-          <input type="number" min={1} max={16} value={tab.draft.max_active_cameras} onChange={event => tab.change({ max_active_cameras: Number(event.target.value) })} />
-        </label>
+        <fieldset className="field-group" aria-label="How many cameras are analysed">
+          <legend>How many cameras are analysed</legend>
+          <label className="check"><input type="radio" name="capacity-mode" checked={tab.draft.capacity_mode === "auto"} onChange={() => tab.change({ capacity_mode: "auto" })} /> Automatic (recommended): as many as this machine can carry</label>
+          <label className="check"><input type="radio" name="capacity-mode" checked={tab.draft.capacity_mode === "fixed"} onChange={() => tab.change({ capacity_mode: "fixed" })} /> A fixed number</label>
+          {tab.draft.capacity_mode === "fixed" ? (
+            <label className="field"><span>Cameras analysed at once</span>
+              <input type="number" min={1} step={1} value={Number.isNaN(tab.draft.max_active_cameras) ? "" : tab.draft.max_active_cameras} onChange={event => tab.change({ max_active_cameras: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
+            </label>
+          ) : null}
+          <CapacityReport status={capacity.data ?? runtime.data.capacity} mode={tab.draft.capacity_mode === runtime.data.capacity_mode ? runtime.data.capacity_mode : tab.draft.capacity_mode} />
+        </fieldset>
         <p className="muted field-hint">{runtime.data.resource_note}</p>
         <div className="field-row">
           <label className="field"><span>Device</span>
@@ -81,7 +123,7 @@ export function IntegrationsSettings() {
         </div>
       </fieldset>
       <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert}
-                 blocked={tab.draft.max_active_cameras >= 1 && tab.draft.max_active_cameras <= 16 ? null : "Choose between 1 and 16 cameras."} />
+                 blocked={tab.draft.capacity_mode === "auto" || (Number.isInteger(tab.draft.max_active_cameras) && tab.draft.max_active_cameras >= 1) ? null : "Choose a whole number of cameras, 1 or more."} />
     </form>
   );
 }
