@@ -19,7 +19,7 @@ test("without the pose model the page says so and a camera cannot be turned on",
 test("an administrator turns fall detection on for a camera and chooses its sensitivity and stay-down time", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);
-  let camera = { enabled: false, sensitivity: "high", stay_down_seconds: 3 };
+  let camera = { enabled: false, sensitivity: "high", stay_down_seconds: 8 };
   let ruleMade = false;
   const puts = [];
   page.on("response", response => { if (response.url().endsWith("/api/rules") && response.request().method() === "POST" && response.status() === 201) ruleMade = true; });
@@ -54,13 +54,13 @@ test("an administrator turns fall detection on for a camera and chooses its sens
   expect(made.map(rule => [rule.name, rule.condition.type, rule.pop_into_live, rule.cooldown_seconds])).toEqual([["Person fell", "fall", true, 60]]);
   await section(page).getByLabel("Sensitivity for Camera 001").selectOption("low");
   await expect(section(page).getByLabel("Sensitivity for Camera 001")).toHaveValue("low");
-  await section(page).getByLabel("Seconds a person must stay down on Camera 001").fill("8");
+  await section(page).getByLabel("Seconds a person must stay down on Camera 001").fill("12");
   await section(page).getByLabel("Seconds a person must stay down on Camera 001").blur();
   await expect.poll(() => puts.length).toBe(3);
   expect(puts).toEqual([
-    { enabled: true, sensitivity: "high", stay_down_seconds: 3 },
-    { enabled: true, sensitivity: "low", stay_down_seconds: 3 },
+    { enabled: true, sensitivity: "high", stay_down_seconds: 8 },
     { enabled: true, sensitivity: "low", stay_down_seconds: 8 },
+    { enabled: true, sensitivity: "low", stay_down_seconds: 12 },
   ]);
 });
 
