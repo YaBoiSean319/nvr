@@ -10,6 +10,9 @@ interface EmailState {
   error?: { code: string; message: string; reconnect: boolean };
   sign_in?: SignIn;
   limits?: { per_rule_per_hour: number; per_hour: number };
+  incidents?: { enabled: boolean; recipients: string[] };
+  held_back?: { count: number; since: string | null };
+  recent?: { kind: string; subject: string; status: string; last_error: string | null; created_at: string; sent_at: string | null }[];
 }
 
 const KEY = ["admin", "email"] as const;
@@ -49,6 +52,19 @@ export function EmailSettings() {
     mutationFn: () => api("/api/admin/email/test", { method: "POST", body: { to } }),
     onSuccess: async () => { setError(null); setMessage(`A test email was sent to ${to}.`); await refresh(); },
     onError: async problem => { setMessage(null); setError(failureText(problem, "The test email could not be sent.")); await refresh(); },
+  });
+  const [problems, setProblems] = useState({ enabled: false, recipients: "" });
+  const [problemsLoaded, setProblemsLoaded] = useState(false);
+  useEffect(() => {
+    if (data?.incidents && !problemsLoaded) {
+      setProblems({ enabled: data.incidents.enabled, recipients: data.incidents.recipients.join(", ") });
+      setProblemsLoaded(true);
+    }
+  }, [data, problemsLoaded]);
+  const saveProblems = useMutation({
+    mutationFn: () => api("/api/admin/email/incidents", { method: "PUT", body: { enabled: problems.enabled, recipients: problems.recipients.split(/[,;\s]+/).filter(Boolean) } }),
+    onSuccess: async () => { setError(null); setMessage("Saved."); await refresh(); },
+    onError: problem => { setMessage(null); setError(failureText(problem, "Could not save.")); },
   });
   const disconnect = useMutation({
     mutationFn: () => api("/api/admin/email", { method: "DELETE" }),
@@ -112,6 +128,29 @@ export function EmailSettings() {
             <button type="button" className="button" disabled={!to.trim() || test.isPending} onClick={() => test.mutate()}>Send test email</button>
           </div>
           <p className="muted">To email alerts, add the action &ldquo;Email (Microsoft 365)&rdquo; to a rule. To keep one busy rule from flooding inboxes, at most {data?.limits?.per_rule_per_hour ?? 20} emails an hour are sent per rule and {data?.limits?.per_hour ?? 100} in all; further alerts still appear in the alarm inbox and are marked failed in the rule&rsquo;s delivery log.</p>
+        </section>
+      ) : null}
+      {connected ? (
+        <section className="field-group settings-block" aria-label="Emails about NVR problems">
+          <h2 className="field-heading">NVR problems</h2>
+          <p className="muted">Email people when the NVR finds a problem in itself: a camera that stopped recording, a full or failing disk, the AI worker stopping, a covered camera, a failed backup. They get one email when it starts and one when it is mended. Nothing is sent about a camera during a maintenance window.</p>
+          <label className="check"><input type="checkbox" checked={problems.enabled} onChange={event => setProblems({ ...problems, enabled: event.target.checked })} /> Email these problems</label>
+          <label className="field"><span>Send to</span>
+            <input value={problems.recipients} placeholder="it@example.com, desk@example.com" onChange={event => setProblems({ ...problems, recipients: event.target.value })} />
+            <small className="muted field-hint">At most 30 emails an hour; past that, a single summary email says how many were held back.</small>
+          </label>
+          <div className="field-actions">
+            <button type="button" className="button" disabled={saveProblems.isPending} onClick={() => saveProblems.mutate()}>Save</button>
+          </div>
+          {data?.held_back?.count ? <p className="notice" data-tone="warn" role="status">{data.held_back.count} alert email{data.held_back.count === 1 ? " was" : "s were"} held back by the hourly limit{data.held_back.since ? ` since ${new Date(data.held_back.since).toLocaleString()}` : ""}. The alerts are in the alarm inbox and the incident list.</p> : null}
+        </section>
+      ) : null}
+      {connected && data?.recent?.length ? (
+        <section className="field-group settings-block" aria-label="Recent emails about problems">
+          <h2 className="field-heading">Recent emails about problems</h2>
+          <ul className="status-list">
+            {data.recent.map(item => <li key={`${item.created_at}-${item.subject}`}>{item.subject} · {item.status === "sent" ? "sent" : item.status === "failed" ? `failed (${item.last_error ?? "error"})` : "waiting"} · {new Date(item.created_at).toLocaleString()}</li>)}
+          </ul>
         </section>
       ) : null}
     </>

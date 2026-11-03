@@ -20,10 +20,16 @@ To send as a shared mailbox, put its address in **Send as**; the signed-in accou
 - Tokens are stored encrypted with the credential key, like camera credentials, never shown again, never in logs or audit entries. Connecting, failing, testing and disconnecting are audited. Only administrators can manage it.
 - The refresh token lets the NVR keep sending until it is revoked or Microsoft's sign-in policy expires it; a conditional access policy that requires a fresh sign-in will need a reconnect.
 
+## Emails about the NVR itself
+
+**Settings > Email alerts > NVR problems**: choose who is emailed when the NVR finds a problem in itself (a camera that stopped recording, a full or failing disk, the AI worker stopping, a covered camera, a failed backup): one email when it starts and one when it is mended. Nothing is sent about a camera during a [maintenance window](maintenance-windows.md); a problem still there when the window ends is emailed then. Failed sends are retried with backoff, and the page lists the recent ones.
+
+**Held back.** At most 30 problem emails an hour are sent (and the rule limits above). Every alert email a limit stops is counted, shown on the page, and told about in **one summary email** once things have been quiet for 10 minutes ("N alert emails held back"), sent to the people chosen for problems. The alerts themselves are in the alarm inbox and the incident list.
+
 ## For installers
 
 `NVR_MS_LOGIN_URL` (default `https://login.microsoftonline.com`) and `NVR_MS_GRAPH_URL` (default `https://graph.microsoft.com/v1.0`) can point at another cloud (such as a sovereign one) or a test stand-in.
 
 ## Not built yet
 
-Per-person recipients in notification preferences, NVR incident emails (camera offline, disk health), an attached snapshot, the held-back digest, and other providers. Not yet checked against a real Microsoft 365 tenant: connect one and send a test.
+Per-person recipients in notification preferences, an attached snapshot, and other providers. Not yet checked against a real Microsoft 365 tenant: connect one and send a test.

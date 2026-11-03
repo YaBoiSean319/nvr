@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from . import mqtt, ms_mail
+from . import email_outbox, mqtt, ms_mail
 from .alarms import label_text
 from .credentials import decrypt, encrypt
 from .store import connect
@@ -305,6 +305,10 @@ def _email(delivery: dict[str, Any], settings: dict[str, Any], payload: dict[str
                                (delivery["rule_id"], since)).fetchone()[0]
         site_sent = db.execute("SELECT COUNT(*) FROM rule_action_deliveries WHERE action_type='email' AND status='delivered' AND delivered_at>?", (since,)).fetchone()[0]
     if rule_sent >= EMAIL_PER_RULE_PER_HOUR or site_sent >= EMAIL_PER_HOUR:
+        from . import email_outbox
+
+        with connect() as db:
+            email_outbox.note_held(db)  # Counted, and told about in one summary email once things are quiet
         return None, "email_rate_limited", False
     subject, text = ms_mail.compose(settings.get("subject"), payload)
     try:
@@ -431,6 +435,7 @@ class RuleActionManager:
 
     async def start(self) -> None:
         await asyncio.to_thread(recover_inflight)
+        await asyncio.to_thread(email_outbox.recover_inflight)
         self.tasks = [asyncio.create_task(self._run(), name=f"rule-action-worker-{index}") for index in range(WORKERS)]
 
     async def stop(self) -> None:
@@ -442,7 +447,7 @@ class RuleActionManager:
     async def _run(self) -> None:
         while True:
             try:
-                if not await deliver_one():
+                if not await deliver_one() and not await asyncio.to_thread(email_outbox.deliver_one):
                     await asyncio.sleep(self.poll_seconds)
             except asyncio.CancelledError:
                 raise

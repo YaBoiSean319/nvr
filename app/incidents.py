@@ -35,6 +35,9 @@ def _event(db: sqlite3.Connection, incident_id: str, event_type: str, details: d
         maintenance.count_held(db, window["id"], "incident")
         db.execute("UPDATE incidents SET held_by_window=? WHERE id=?", (window["id"] if event_type != "recovered" else None, incident_id))
         return
+    from . import email_outbox
+
+    email_outbox.queue_incident(db, db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone(), event_type, occurred_at, details)
     if str(incident["fault_type"]).startswith("ai_"):
         webhook_type = "ai.recovered" if event_type == "recovered" else "ai.failure"
     elif str(incident["fault_type"]).startswith("tamper_"):
