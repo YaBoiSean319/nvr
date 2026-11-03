@@ -121,16 +121,17 @@ class Supervisor:
             liveness.record(worker.name, state="crashed", exit_code=code, exited=True)
         except Exception:  # noqa: BLE001 - keep supervising even if the database is unavailable
             logger.exception("Could not record %s worker exit", worker.name)
+        if worker.name == "ai":
+            # Before the incident is announced, so that whoever reacts to it finds analysis already marked interrupted.
+            try:
+                mark_analysis_interrupted("AI analysis process stopped; analysis resumes when it restarts")
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not mark AI analysis interrupted")
         self._incident(worker, active=True, details={
             "exit_code": code, "reason": reason, "restart_in_seconds": round(delay),
             "memory_mb_at_last_sample": process_info.megabytes(worker.last_rss), "peak_memory_mb": process_info.megabytes(worker.peak_rss),
             "container_memory_limit_mb": process_info.megabytes(process_info.memory_limit_bytes()),
         })
-        if worker.name == "ai":
-            try:
-                mark_analysis_interrupted("AI analysis process stopped; analysis resumes when it restarts")
-            except Exception:  # noqa: BLE001
-                logger.exception("Could not mark AI analysis interrupted")
 
     @staticmethod
     def _sample_memory(worker: Worker, now: float) -> None:
