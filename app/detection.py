@@ -572,7 +572,7 @@ class DetectionManager:
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         from . import attributes
         from . import clip
-        from . import falls, plates
+        from . import falls, plates, privacy
         from . import similar
         from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
 
@@ -636,6 +636,7 @@ class DetectionManager:
                         with connect() as db:
                             fall_on, sensitivity, stay_down = falls.fall_settings(db, camera_id)
                             fall_aspect = falls.camera_aspect(db, camera_id) if fall_on else 16 / 9
+                            fall_zones = privacy.server_zones(db, camera_id, at) if fall_on else []
                         fall_reader = await self._pose_reader(str(config["provider"])) if fall_on else None
                         if fall_reader is None:
                             fall_detector = None
@@ -647,16 +648,18 @@ class DetectionManager:
                         try:
                             moment = at.timestamp()
                             picture = np.frombuffer(frame, dtype=np.uint8).reshape(MODEL_HEIGHT, MODEL_WIDTH, 3)  # The analysed frame: small, so far-off people are rough
-                            people = [(track_id, item) for track_id, item in zip(track_ids, observations) if item["label"] == "person"][:falls.MAX_PEOPLE_PER_FRAME]
+                            # Never anyone inside a privacy mask: a masked area yields no picture to read, as for plates.
+                            people = [(track_id, item) for track_id, item in zip(track_ids, observations)
+                                      if item["label"] == "person" and not plates.overlaps_privacy_zone(item["box"], fall_zones)][:falls.MAX_PEOPLE_PER_FRAME]
                             boxes = {track_id: item["box"] for track_id, item in people}
                             raised = []
                             for track_id, item in people:
                                 pose = await asyncio.to_thread(fall_reader.pose, picture, item["box"])
-                                found = fall_detector.update(track_id, moment, pose)
+                                found = fall_detector.update(track_id, moment, pose, centre=(item["box"]["x"] + item["box"]["width"] / 2, item["box"]["y"] + item["box"]["height"] / 2))
                                 if found:
                                     raised.append(found)
                             raised += fall_detector.tick(moment, set(boxes))
-                            fall_detector.forget({track.id for track in tracker.active})
+                            fall_detector.forget({track.id for track in tracker.active}, moment)
                             for found in raised:
                                 await self._db(falls.store_fall, camera_id, found.track_id, datetime.fromtimestamp(found.at, timezone.utc), found.down_seconds, boxes.get(found.track_id) or falls.FULL_FRAME_BOX)
                         except asyncio.CancelledError:

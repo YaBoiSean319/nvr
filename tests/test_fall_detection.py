@@ -97,6 +97,17 @@ class WorkerTests(SceneTestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM fall_events").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM alarms").fetchone()[0], 0)
 
+    def test_a_person_inside_a_privacy_mask_is_never_looked_at(self):
+        with connect() as db:  # The whole picture is masked
+            db.execute("INSERT INTO privacy_masks(camera_id,zones_json,camera_side,updated_at) VALUES(?,?,'none','2026-11-03T00:00:00+00:00')",
+                       (self.camera_id, json.dumps([{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}])))
+        reader = ScriptedReader()
+        with patch.object(pose_models, "load_reader", return_value=reader):
+            self.analyse_footage()
+        self.assertEqual(reader.calls, 0)  # No person's picture is given to the model
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM fall_events").fetchone()[0], 0)
+
     def test_a_rule_needs_a_camera_or_group(self):
         response = self.client.post("/api/rules", json={"name": "Nowhere", "camera_ids": [], "group_ids": [], "condition": {"type": "fall"}})
         self.assertEqual(response.status_code, 422)
@@ -127,8 +138,8 @@ class ApiTests(unittest.TestCase):
 
     def test_the_page_lists_cameras_with_their_defaults_and_the_models_state(self):
         body = self.client.get("/api/admin/falls").json()
-        self.assertEqual(body["defaults"], {"sensitivity": "high", "stay_down_seconds": 3.0})
-        self.assertEqual(body["cameras"], [{"id": "c1", "name": "Lounge", "enabled": False, "sensitivity": "high", "stay_down_seconds": 3.0}])
+        self.assertEqual(body["defaults"], {"sensitivity": "high", "stay_down_seconds": 3.0, "least_analysis_fps": 1.0})
+        self.assertEqual(body["cameras"], [{"id": "c1", "name": "Lounge", "enabled": False, "sensitivity": "high", "stay_down_seconds": 3.0, "analysis_fps": None, "analysis_on": False}])
         self.assertIn("Apache-2.0", body["model"]["licence"])
         self.assertEqual(body["recent"], [])
 
@@ -139,6 +150,28 @@ class ApiTests(unittest.TestCase):
         with connect() as db:
             self.assertEqual(falls.fall_settings(db, "c1"), (True, "normal", 5.0))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM audit_log WHERE action='falls_camera_changed'").fetchone()[0], 1)
+
+    def test_a_camera_nobody_would_be_alerted_about_is_flagged_until_an_enabled_rule_covers_it(self):
+        with patch.object(pose_models, "installed", return_value=True):
+            self.client.put("/api/admin/falls/cameras/c1", json={"enabled": True})
+        self.assertEqual(self.client.get("/api/admin/falls").json()["unalerted_camera_ids"], ["c1"])
+        made = self.client.post("/api/rules", json={"name": "Person fell", "camera_ids": ["c1"], "condition": {"type": "fall"}})
+        self.assertEqual(made.status_code, 201, made.text)
+        self.assertEqual(self.client.get("/api/admin/falls").json()["unalerted_camera_ids"], [])
+        self.client.put(f"/api/rules/{made.json()['id']}", json={**{key: made.json()[key] for key in ("name", "camera_ids", "group_ids", "condition", "classes", "schedule", "cooldown_seconds", "pop_into_live")}, "enabled": False, "actions": []})
+        self.assertEqual(self.client.get("/api/admin/falls").json()["unalerted_camera_ids"], ["c1"])  # A disabled rule alerts nobody
+
+    def test_the_analysis_rate_of_a_watched_camera_is_reported_so_a_slow_one_can_be_flagged(self):
+        with patch.object(pose_models, "installed", return_value=True):
+            self.client.put("/api/admin/falls/cameras/c1", json={"enabled": True})
+        with connect() as db:
+            db.execute("INSERT INTO ai_camera_settings(camera_id,config_override,enabled,analysis_fps) VALUES('c1',1,1,0.5)")
+        camera = self.client.get("/api/admin/falls").json()["cameras"][0]
+        self.assertEqual((camera["analysis_on"], camera["analysis_fps"]), (True, 0.5))
+        with connect() as db:
+            db.execute("UPDATE ai_camera_settings SET enabled=0")
+        camera = self.client.get("/api/admin/falls").json()["cameras"][0]
+        self.assertEqual((camera["analysis_on"], camera["analysis_fps"]), (False, None))  # AI analysis is off, so nothing is looked at at all
 
     def test_it_cannot_be_turned_on_without_the_model_and_bad_values_are_refused(self):
         with patch.object(pose_models, "installed", return_value=False):

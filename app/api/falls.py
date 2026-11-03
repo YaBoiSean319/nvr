@@ -7,7 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app import falls, pose_models
+from app import detection, falls, pose_models, rules as rules_engine
 from app.audit import record
 from app.principal import Administrator
 from app.store import connect
@@ -31,9 +31,20 @@ def get_falls(_: Administrator) -> dict[str, Any]:
             (falls.DEFAULT_SENSITIVITY, falls.DEFAULT_STAY_DOWN_SECONDS)).fetchall()
         recent = db.execute(
             "SELECT e.id,e.camera_id,c.name AS camera_name,e.occurred_at,e.down_seconds FROM fall_events e JOIN cameras c ON c.id=e.camera_id ORDER BY e.occurred_at DESC,e.id LIMIT 20").fetchall()
+    cameras_out = []
+    for row in cameras:
+        config = detection.effective_camera_config(row["id"]) if row["enabled"] else None
+        cameras_out.append({"id": row["id"], "name": row["name"], "enabled": bool(row["enabled"]), "sensitivity": row["sensitivity"], "stay_down_seconds": row["stay_down_seconds"],
+                            # The rate the AI looks at this camera, and whether it is looking at all: a fall is a matter of seconds
+                            "analysis_fps": float(config["analysis_fps"]) if config and config["enabled"] else None, "analysis_on": bool(config and config["enabled"])})
+    with connect() as db:
+        fall_rules = [rule for rule in rules_engine.load_rules(db) if rule.condition_type == "fall" and rule.enabled]
+        unalerted = [camera["id"] for camera in cameras_out if camera["enabled"]
+                     and not any(rule.watches_camera(camera["id"], rules_engine._camera_groups(db, camera["id"])) for rule in fall_rules)]
     return {"model": pose_models.status(),
-            "defaults": {"sensitivity": falls.DEFAULT_SENSITIVITY, "stay_down_seconds": falls.DEFAULT_STAY_DOWN_SECONDS},
-            "cameras": [{"id": row["id"], "name": row["name"], "enabled": bool(row["enabled"]), "sensitivity": row["sensitivity"], "stay_down_seconds": row["stay_down_seconds"]} for row in cameras],
+            "defaults": {"sensitivity": falls.DEFAULT_SENSITIVITY, "stay_down_seconds": falls.DEFAULT_STAY_DOWN_SECONDS, "least_analysis_fps": falls.LEAST_ANALYSIS_FPS},
+            "cameras": cameras_out,
+            "unalerted_camera_ids": unalerted,  # Cameras looking for falls that no enabled rule alerts anyone about
             "recent": [{"id": row["id"], "camera_id": row["camera_id"], "camera_name": row["camera_name"], "occurred_at": row["occurred_at"], "down_seconds": row["down_seconds"]} for row in recent]}
 
 

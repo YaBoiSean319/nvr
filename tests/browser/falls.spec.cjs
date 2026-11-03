@@ -20,11 +20,16 @@ test("an administrator turns fall detection on for a camera and chooses its sens
   seedFixtures(1);
   await signInNext(page);
   let camera = { enabled: false, sensitivity: "high", stay_down_seconds: 3 };
+  let ruleMade = false;
   const puts = [];
+  page.on("response", response => { if (response.url().endsWith("/api/rules") && response.request().method() === "POST" && response.status() === 201) ruleMade = true; });
   await page.route("**/api/admin/falls", async route => {
     const response = await route.fetch();
     const body = await response.json();
-    await route.fulfill({ response, json: { ...body, model: { ...body.model, installed: true }, cameras: body.cameras.map(item => ({ ...item, ...camera })) } });
+    // As the API answers for a camera that is on, AI analysis is slow on it, and no rule covers it until one is made.
+    await route.fulfill({ response, json: { ...body, model: { ...body.model, installed: true },
+      cameras: body.cameras.map(item => ({ ...item, ...camera, analysis_on: camera.enabled, analysis_fps: camera.enabled ? 0.5 : null })),
+      unalerted_camera_ids: camera.enabled && !ruleMade ? body.cameras.map(item => item.id) : [] } });
   });
   await page.route("**/api/admin/falls/cameras/*", async route => {
     const sent = route.request().postDataJSON();
@@ -39,6 +44,14 @@ test("an administrator turns fall detection on for a camera and chooses its sens
   await checkbox.click();
   await expect(page.getByText(/Saved\. The AI worker follows within about half a minute/)).toBeVisible();
   await expect(checkbox).toBeChecked();
+  // A camera that is on, with AI looking at it only every two seconds and no rule to alert anyone, is flagged on both counts.
+  await expect(section(page)).toContainText("only every 2 seconds, which is too slow to follow a fall well");
+  await expect(section(page)).toContainText("no rule will alert anyone about it");
+  await section(page).getByRole("button", { name: "Create an alert rule for these cameras" }).click();
+  await expect(page.getByText(/Rule created: a fall now raises an alarm/)).toBeVisible();
+  await expect(section(page)).not.toContainText("no rule will alert anyone");
+  const made = (await (await page.request.get("/api/rules")).json()).rules;
+  expect(made.map(rule => [rule.name, rule.condition.type, rule.pop_into_live, rule.cooldown_seconds])).toEqual([["Person fell", "fall", true, 60]]);
   await section(page).getByLabel("Sensitivity for Camera 001").selectOption("low");
   await expect(section(page).getByLabel("Sensitivity for Camera 001")).toHaveValue("low");
   await section(page).getByLabel("Seconds a person must stay down on Camera 001").fill("8");

@@ -7,12 +7,12 @@ On the cameras you choose, the NVR looks for a person who has fallen and stayed 
 ## Turning it on
 
 1. **Settings > Fall detection**: tick **Look for falls on** each camera that should be watched. It is off for every camera until you do. Set the **sensitivity** (high by default: catches more falls, raises more alerts that are not falls) and **how many seconds a person must stay down** (3 by default).
-2. **Rules** (Cameras > Rules): make a rule with the condition **A person fell**, choose its cameras or groups, an optional schedule and cooldown, and the actions that tell staff. Turning detection on only records falls; the rule is what alerts anyone. A fall raises one alarm, labelled **Person fell**.
+2. **Rules** (Cameras > Rules, or the **Create an alert rule for these cameras** button in Settings > Fall detection, which also warns while watched cameras have no rule): make a rule with the condition **A person fell**, choose its cameras or groups, an optional schedule and cooldown, and the actions that tell staff. Turning detection on only records falls; the rule is what alerts anyone. A fall raises one alarm, labelled **Person fell**.
 3. Changes reach the AI worker within about half a minute, with no restart.
 
 ## How it decides
 
-The AI worker already finds and follows each person. For a camera with fall detection on, about twice a second it asks a pose model for the position of each person's shoulders, hips, knees and ankles, and watches how the body changes:
+The AI worker already finds and follows each person. For a camera with fall detection on, on every frame the AI worker analyses (the camera's **AI analysis rate**: 0.5 frames a second by default, and **at least 1 to 2 is recommended** for falls; Settings warns when it is too slow) it asks a pose model for the position of each person's shoulders, hips, knees and ankles, and watches how the body changes:
 
 - A **fall** is a person who was **upright**, went **low** (the torso well away from vertical, or the body wider than tall) within a few seconds, and **stays low** for the stay-down time.
 - Someone **first seen lying down** (a resident in bed, on a sofa) is **not** a fall: nothing is raised for someone never seen upright.
@@ -21,17 +21,19 @@ The AI worker already finds and follows each person. For a camera with fall dete
 - A person who goes **out of sight while low** (behind a bed or furniture) still counts, for a few seconds, because that is often what a fall looks like.
 - One fall raises one alarm; the person has to be upright again for a moment before another can.
 
-| Sensitivity | Counts as low from a torso angle of | A drop may take | Unseen time that still counts |
-| --- | --- | --- | --- |
-| High (default) | 50° from upright (or 40° if the body is also wider than tall) | 4 s | 6 s |
-| Normal | 60° | 3 s | 4 s |
-| Low | 70° | 2 s | 3 s |
+| Sensitivity | Low from a torso angle of | Upright below | A drop may take | Unseen time that still counts |
+| --- | --- | --- | --- | --- |
+| High (default) | 50° from upright | 40° | 4 s | 6 s |
+| Normal | 60° | 35° | 3 s | 4 s |
+| Low | 70° | 30° | 2 s | 3 s |
+
+A body wider than tall counts as low 10° sooner than the angle above. Frames in between "upright" and "low", or where the body points cannot be seen, neither start nor end a fall; only an upright frame clears one.
 
 ## What it needs from the cameras
 
 - A view where people are **large enough to see** and not mostly hidden. The AI worker analyses a small copy of the picture (448 × 256), so a person far from the camera is only a few dozen pixels tall and the body points are rough. Wide-angle views of corridors, lounges and dining rooms where people walk in the open suit it best; a camera on a bed behind rails, a bathroom, or a ceiling fisheye (which sees people from above) does not.
 - Fall detection watches **people the NVR is already tracking**, so a camera needs AI analysis turned on as well, and the person has to be found as a person. It never looks at anyone it has not found.
-- Privacy masks, access grants, the viewing audit and retention apply to its alarms and clips as to every other. Whether a camera may cover a resident's room is the home's decision (consent and policy), not something the software settles.
+- **Privacy masks:** a person inside a masked zone is never looked at by the pose model. Access grants, the viewing audit and retention apply to its alarms and clips as to every other. Whether a camera may cover a resident's room is the home's decision (consent and policy), not something the software settles.
 
 ## The model
 
@@ -41,7 +43,7 @@ MediaPipe **Pose Landmarker (lite)**, licensed Apache-2.0 by the MediaPipe proje
 
 - The **decision** (what is and is not a fall) is tested on synthetic body-point sequences: a fall that stays down, a recovered stumble, bending, sitting, someone in bed, a slow lie-down, a fall behind furniture, one alarm per fall, sensitivity, and the stay-down time.
 - The **whole path** is tested with a stand-in pose reader over a scripted scene: the AI worker records one fall, raises one alarm for a fall rule, raises none for a rule on another camera, and carries on analysing when the model is missing or fails.
-- The **real model** is tested for loading, its input and output shape, and returning nothing for an empty picture. It has **not** been run on pictures of people falling, and **no detection rate or false-alarm rate has been measured**. The numbers for your own cameras are unknown until you try it: have staff or a colleague perform staged falls, sits, bends and lying down in front of each camera, and note what is raised.
+- The **real model** is tested for loading, its input and output shape, and returning nothing for an empty picture (its pose score is a probability; points below 0.3 are discarded). It has **not** been run on pictures of people falling, and **no detection rate or false-alarm rate has been measured**. The numbers for your own cameras are unknown until you try it: have staff or a colleague perform staged falls, sits, bends and lying down in front of each camera, and note what is raised.
 - Not built: a tool to run recorded clips through the detector and report detections and false alarms per camera-day. That is the next thing to add before relying on it.
 - Not covered: ceiling fisheye cameras, cameras that see only part of a person, and crowds (at most 8 people per frame of a camera are looked at).
 

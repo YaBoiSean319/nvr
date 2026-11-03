@@ -119,6 +119,57 @@ class FallTests(unittest.TestCase):
         long = run(falls.FallDetector(aspect=ASPECT, stay_down_seconds=8.0), steps)
         self.assertEqual((short[0][0], long[0][0]), (3.5, 9.5))
 
+    def test_a_person_in_between_poses_after_going_down_is_still_down(self):
+        # Down, then a torso at 45 degrees (neither upright nor low: sitting up on the floor), then down again: the fall is not forgotten.
+        raised = run(self.detector(), [5, 5, 85, 45, 45, 45, 85, 85, 85, 85])
+        self.assertEqual(len(raised), 1)
+
+    def test_a_person_unseen_for_a_while_then_found_low_still_raises_the_fall(self):
+        detector = self.detector()
+        run(detector, [5, 5, 85])
+        raised = run(detector, [None] * 8 + [85], start=2.0)  # Hidden for four seconds, then seen low again
+        self.assertEqual(len(raised), 1)
+
+    def test_a_fallen_person_the_tracker_loses_and_finds_again_is_still_one_fall(self):
+        # The tracker follows the person to the floor, drops them, and starts a new track where they lie: the new track is the same person.
+        detector = self.detector()
+        for index, angle in enumerate([5, 5, 85]):
+            detector.update("old", index * 0.5, pose(angle), centre=(0.4, 0.5))
+        detector.forget(set(), now=1.0)  # The tracker has lost them
+        raised = []
+        for index in range(12):
+            found = detector.update("new", 1.5 + index * 0.5, pose(88), centre=(0.42, 0.55))
+            if found:
+                raised.append(found)
+        self.assertEqual(len(raised), 1)
+
+    def test_a_new_track_lying_far_from_anyone_just_lost_is_not_a_fall(self):
+        detector = self.detector()
+        for index, angle in enumerate([5, 5, 5]):
+            detector.update("walker", index * 0.5, pose(angle), centre=(0.1, 0.5))
+        detector.forget(set(), now=1.0)
+        raised = [detector.update("bed", 1.5 + index * 0.5, pose(88), centre=(0.9, 0.5)) for index in range(12)]
+        self.assertEqual([item for item in raised if item], [])  # A resident in a bed across the room, nowhere near
+
+    def test_someone_standing_beside_a_bed_does_not_make_the_person_in_it_a_fall(self):
+        detector = self.detector()
+        raised = []
+        for index in range(14):
+            now = index * 0.5
+            detector.update("carer", now, pose(5), centre=(0.5, 0.5))  # Still being followed, upright, right by the bed
+            found = detector.update("resident", now, pose(88), centre=(0.52, 0.55))
+            if found:
+                raised.append(found)
+        self.assertEqual(raised, [])
+
+    def test_a_lost_person_is_forgotten_after_a_while(self):
+        detector = self.detector()
+        for index in range(3):
+            detector.update("old", index * 0.5, pose(5 if index < 2 else 85), centre=(0.4, 0.5))
+        detector.forget(set(), now=1.0)
+        later = [detector.update("new", 30.0 + index * 0.5, pose(88), centre=(0.4, 0.5)) for index in range(12)]
+        self.assertEqual([item for item in later if item], [])  # Half a minute on, a new track lying there is not the person who fell
+
     def test_tracks_that_have_gone_are_forgotten(self):
         detector = self.detector()
         run(detector, [5, 5], track="gone")

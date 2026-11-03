@@ -36,12 +36,24 @@ DEFAULT_SENSITIVITY = "high"  # A missed fall costs more than a false alert
 DEFAULT_STAY_DOWN_SECONDS = 3.0
 MIN_STAY_DOWN_SECONDS, MAX_STAY_DOWN_SECONDS = 1.0, 60.0
 SETTINGS_REFRESH = 30.0
+LEAST_ANALYSIS_FPS = 1.0  # Below this the AI looks at a camera less than once a second and a fall is seen late and coarsely; AI analysis defaults to one picture every two seconds
 MAX_PEOPLE_PER_FRAME = 8  # The most people posed in one analysed frame of one camera: a crowd is not a place this works well, and the cost is a few milliseconds each
 FULL_FRAME_BOX = {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
 VISIBLE = 0.3  # The least visibility at which a body point is believed
 
-# Per sensitivity: (torso angle from upright above which the person is "low", torso angle below which they are "upright", seconds a drop may take, seconds unseen that still count)
-_THRESHOLDS = {"low": (70.0, 30.0, 2.0, 3.0), "normal": (60.0, 35.0, 3.0, 4.0), "high": (50.0, 40.0, 4.0, 6.0)}
+@dataclass(frozen=True)
+class Thresholds:
+    low_above: float  # Torso angle from upright above which the person is "low"
+    upright_below: float  # ...and below which they are "upright"
+    transition: float  # Seconds a drop from upright to low may take and still be a fall
+    unseen_grace: float  # Seconds out of sight after going low that still count
+
+
+_THRESHOLDS = {"low": Thresholds(70.0, 30.0, 2.0, 3.0), "normal": Thresholds(60.0, 35.0, 3.0, 4.0), "high": Thresholds(50.0, 40.0, 4.0, 6.0)}
+WIDE_BODY = 1.3  # A body wider than tall (width over height above this) counts as low a little sooner
+WIDE_BODY_HEAD_START = 10.0  # ...by this many degrees of torso angle
+INHERIT_DISTANCE = 0.3  # A new track this near (in picture heights) to one that was just upright or down is the same person the tracker lost and found again
+INHERIT_SECONDS = 10.0
 REARM_UPRIGHT_SECONDS = 2.0
 
 
@@ -78,11 +90,13 @@ def body_shape(pose: Pose, aspect: float = 1.0) -> float | None:
 @dataclass
 class _Track:
     upright_at: float | None = None  # Last time the person was seen upright
-    low_since: float | None = None  # When they went low, if they are low now and it looks like a fall
+    low_since: float | None = None  # When they went low, if they are low and it looks like a fall; kept until they are seen upright again
     low_ignored: bool = False  # Low, but first seen so or got there too slowly: not a fall
-    seen_at: float = 0.0
+    low_seen_at: float = 0.0  # Last time they were seen low
     fired: bool = False
     upright_since: float | None = None
+    centre: tuple[float, float] | None = None
+    last_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -99,26 +113,55 @@ class FallDetector:
     stay_down_seconds: float = DEFAULT_STAY_DOWN_SECONDS
     aspect: float = 16 / 9
     tracks: dict[str, _Track] = field(default_factory=dict)
+    lost: list[_Track] = field(default_factory=list)  # People the tracker stopped following a moment ago: it often loses someone who has just fallen and finds them again as a new track
 
     def _classify(self, pose: Pose | None) -> str:
         """"upright", "low" or "unknown" for one observation."""
         if pose is None:
             return "unknown"
-        low_above, upright_below, _, _ = _THRESHOLDS[self.sensitivity]
+        limits = _THRESHOLDS[self.sensitivity]
         angle, shape = torso_angle(pose, self.aspect), body_shape(pose, self.aspect)
         if angle is None:
             return "unknown"
         # Past the threshold the torso is low; a body that is also wider than tall counts a little sooner (a person lying towards the camera has a short torso on screen).
-        if angle >= low_above or (shape is not None and shape > 1.3 and angle >= low_above - 10):
+        if angle >= limits.low_above or (shape is not None and shape > WIDE_BODY and angle >= limits.low_above - WIDE_BODY_HEAD_START):
             return "low"
-        if angle <= upright_below and (shape is None or shape <= 1.3):
+        if angle <= limits.upright_below and (shape is None or shape <= WIDE_BODY):
             return "upright"
         return "unknown"  # In between (bending, sitting up from lying): neither upright nor low
 
-    def update(self, track_id: str, now: float, pose: Pose | None) -> Fall | None:
+    def _distance(self, a: tuple[float, float], b: tuple[float, float]) -> float:
+        return math.hypot((a[0] - b[0]) * self.aspect, a[1] - b[1])
+
+    def _inherit(self, state: _Track, now: float) -> None:
+        """A track that begins low or unclear next to a person the tracker has just *lost* is that person: it takes over what is known of them, so a person who falls and is
+        picked up again as a new track is not mistaken for someone who was lying there all along. Only lost tracks count: someone still being followed (a carer standing by a bed)
+        is somebody else."""
+        if state.centre is None:
+            return
+        nearest = None
+        for other in self.lost:
+            if other.centre is None or now - other.last_at > INHERIT_SECONDS or (other.upright_at is None and other.low_since is None):
+                continue
+            distance = self._distance(state.centre, other.centre)
+            if distance <= INHERIT_DISTANCE and (nearest is None or distance < nearest[0]):
+                nearest = (distance, other)
+        if nearest is not None:
+            other = nearest[1]
+            state.upright_at, state.low_since, state.fired, state.low_ignored, state.low_seen_at = other.upright_at, other.low_since, other.fired, other.low_ignored, other.low_seen_at
+
+    def update(self, track_id: str, now: float, pose: Pose | None, centre: tuple[float, float] | None = None) -> Fall | None:
+        """One person's pose in one analysed frame (None when it could not be made out), and where they are (the middle of their box, in fractions of the picture)."""
+        self.lost = [item for item in self.lost if now - item.last_at <= INHERIT_SECONDS]
+        fresh = track_id not in self.tracks
         state = self.tracks.setdefault(track_id, _Track())
-        _, _, transition, unseen_grace = _THRESHOLDS[self.sensitivity]
+        if centre is not None:
+            state.centre = centre
+        state.last_at = now
+        limits = _THRESHOLDS[self.sensitivity]
         kind = self._classify(pose)
+        if fresh and kind != "upright":
+            self._inherit(state, now)
         if kind == "upright":
             state.upright_at = now
             if state.upright_since is None:
@@ -126,37 +169,40 @@ class FallDetector:
             state.low_since, state.low_ignored = None, False
             if state.fired and now - state.upright_since >= REARM_UPRIGHT_SECONDS:
                 state.fired = False
-        elif kind == "low":
-            state.upright_since = None
-            if state.low_since is None and not state.low_ignored:
-                # Went low just now: a fall only if they were upright a moment ago.
-                if state.upright_at is not None and now - state.upright_at <= transition:
-                    state.low_since = now
-                else:
-                    state.low_ignored = True
-            state.seen_at = now
-        else:  # Unknown: out of view or in between. A person who was going down and is now hidden stays "down" for the grace period.
-            if state.low_since is not None and now - state.seen_at > unseen_grace:
-                state.low_since = None
+            return None
+        state.upright_since = None
+        if kind != "low":
+            return None  # In between or out of sight: it neither makes a fall nor ends one; only being upright again does
+        state.low_seen_at = now
+        if state.low_since is None and not state.low_ignored:
+            # Went low just now: a fall only if they were upright a moment ago.
+            if state.upright_at is not None and now - state.upright_at <= limits.transition:
+                state.low_since = now
+            else:
+                state.low_ignored = True
         if state.low_since is not None and not state.fired and now - state.low_since >= self.stay_down_seconds:
             state.fired = True
             return Fall(track_id, state.low_since, now - state.low_since)
         return None
 
     def tick(self, now: float, seen_tracks: set[str]) -> list[Fall]:
-        """For people the camera still follows but the pose could not be made out this time: count the time, so a fall behind furniture is still raised."""
+        """For people the camera still follows but whose pose was not made out this time: count the time, so a fall behind furniture is still raised (if they were seen low a moment ago)."""
         raised = []
+        grace = _THRESHOLDS[self.sensitivity].unseen_grace
         for track_id, state in self.tracks.items():
             if track_id in seen_tracks or state.low_since is None or state.fired:
                 continue
-            if now - state.seen_at <= _THRESHOLDS[self.sensitivity][3] and now - state.low_since >= self.stay_down_seconds:
+            if now - state.low_seen_at <= grace and now - state.low_since >= self.stay_down_seconds:
                 state.fired = True
                 raised.append(Fall(track_id, state.low_since, now - state.low_since))
         return raised
 
-    def forget(self, active: set[str]) -> None:
+    def forget(self, active: set[str], now: float | None = None) -> None:
+        """Drop the people the tracker no longer follows, keeping them for a few seconds in case it finds them again under a new track."""
         for track_id in [key for key in self.tracks if key not in active]:
-            del self.tracks[track_id]
+            state = self.tracks.pop(track_id)
+            if now is not None and (state.upright_at is not None or state.low_since is not None):
+                self.lost.append(state)
 
 
 # --- settings and the events kept -------------------------------------------------------------------------------------------------------------------------------
