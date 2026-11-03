@@ -17,6 +17,8 @@ export interface MaintenanceWindow {
   created_by: string | null;
   suppressed_alarms: number;
   suppressed_incidents: number;
+  /** Whether this person may end it: an administrator any window, anyone else the ones they opened. */
+  can_end: boolean;
 }
 
 export interface MaintenanceList {

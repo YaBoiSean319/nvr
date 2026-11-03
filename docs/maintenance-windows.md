@@ -7,6 +7,7 @@ While cameras are being worked on, they should not set off alerts. A **maintenan
 - **Cameras > Maintenance**: give what is being done, choose the cameras (administrators can also choose camera groups or the whole site), how long, and optionally a later start. **Start maintenance.**
 - **On a camera** (Cameras > select a camera): **Start maintenance (1 hour)** with one press, and **End maintenance** to stop early. A camera in a window shows **In maintenance**.
 - Windows are one-off: a start and an end. Operators can open a window on cameras they can see for up to **8 hours** (starting within 24 hours); administrators can cover cameras, groups or the whole site for up to **7 days**. If the work goes on, end the window and start another.
+- **In every workspace** the status bar shows **Maintenance: 3 cameras** (or **Maintenance: whole site**) while a window covers cameras you can see. Pressing it lists the windows with what each has held back, an **End now** button for the ones you may end (an administrator any window, anyone else the windows they opened), and a link to start or manage them.
 - A window can be ended early, or, before it has started, cancelled. Everything is audited (`maintenance_opened`, `maintenance_ended`).
 
 ## What happens in a window
