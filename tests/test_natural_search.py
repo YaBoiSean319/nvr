@@ -204,9 +204,23 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((plain.label, plain.facets, plain.any_colours), (None, {}, []))
 
 
+class _FrozenDatetime(datetime):
+    """``datetime`` whose ``now()`` is the tests' ``NOW``."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return NOW.astimezone(tz) if tz else NOW.replace(tzinfo=None)
+
+
 class AskCase(SearchCase):
     def setUp(self):
         super().setUp()
+        # The tracks are placed relative to NOW, which is read once when the test module is imported; the application reads the clock when it is asked. In a long run
+        # (the suite takes over half an hour) the two drift apart, and a run that crosses UTC midnight put "yesterday" on a different day for each: so the application
+        # is asked at the same moment the tracks were made for.
+        frozen = mock.patch("app.api.search.datetime", _FrozenDatetime)
+        frozen.start()
+        self.addCleanup(frozen.stop)
         self.model = fake_model()
         patch = mock.patch.object(clip, "shared_model", return_value=self.model)
         patch.start()
