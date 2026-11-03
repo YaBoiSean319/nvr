@@ -22,7 +22,7 @@ export type Condition =
 export interface RuleScheduleInterval { days: number[]; start: string; end: string }
 export interface RuleSchedule { timezone: string; intervals: RuleScheduleInterval[] }
 
-export type ActionType = "webhook" | "mqtt" | "slack" | "teams" | "relay" | "ptz_track";
+export type ActionType = "webhook" | "mqtt" | "slack" | "teams" | "relay" | "ptz_track" | "email";
 
 /** One rule action as the form edits it. `url` and `signing_secret` are write-only: left empty on a saved action, the saved ones are kept. */
 export interface ActionDraft {
@@ -38,6 +38,8 @@ export interface ActionDraft {
   camera_id?: string | null;
   relay_token?: string | null;
   duration_seconds?: number;
+  recipients?: string[];
+  subject?: string | null;
   /** From the server: where a saved action delivers, without its secret parts. */
   target?: string | null;
   has_signing_secret?: boolean;
@@ -86,12 +88,13 @@ export const listDeliveries = (id: string, signal?: AbortSignal) =>
   api<{ deliveries: ActionDelivery[] }>(`${at(id)}/deliveries`, { signal }).then(body => body.deliveries);
 
 export const ACTION_LABEL: Record<ActionType, string> = {
-  webhook: "Signed webhook", mqtt: "MQTT message", slack: "Slack message", teams: "Microsoft Teams message", relay: "Camera relay output", ptz_track: "PTZ camera follows the object",
+  webhook: "Signed webhook", mqtt: "MQTT message", slack: "Slack message", teams: "Microsoft Teams message", relay: "Camera relay output", ptz_track: "PTZ camera follows the object", email: "Email (Microsoft 365)",
 };
 
 export function newAction(type: ActionType): ActionDraft {
   const base = { type, name: ACTION_LABEL[type], enabled: true, key: `new-${Date.now()}-${Math.random().toString(36).slice(2)}` };
   if (type === "mqtt") return { ...base, url: "", topic: "", retain: false, allow_private: false };
+  if (type === "email") return { ...base, recipients: [], subject: "" };
   if (type === "relay") return { ...base, camera_id: null, relay_token: null, duration_seconds: 1 };
   if (type === "webhook") return { ...base, url: "", signing_secret: "", allow_private: false };
   return { ...base, url: "" };
@@ -157,7 +160,8 @@ export function definitionProblem(definition: RuleDefinition): string | null {
     if (!action.name.trim()) return "Every action needs a name.";
     if (action.type === "relay" && !action.camera_id) return `Choose the camera whose relay ${action.name} switches.`;
     if (action.type === "relay" && !((action.duration_seconds ?? 0) >= 0.1 && (action.duration_seconds ?? 0) <= 60)) return `Hold ${action.name}'s relay for 0.1 to 60 seconds.`;
-    if (action.type !== "relay" && !action.id && !action.url?.trim()) return `Enter the destination for ${action.name}.`;
+    if (action.type === "email" && !(action.recipients ?? []).length) return `Enter at least one recipient address for ${action.name}.`;
+    if (action.type !== "relay" && action.type !== "email" && !action.id && !action.url?.trim()) return `Enter the destination for ${action.name}.`;
     if (action.type === "webhook" && !action.has_signing_secret && (action.signing_secret ?? "").length < 16) return `Enter a signing secret of at least 16 characters for ${action.name}.`;
     if (action.type === "mqtt" && !action.topic?.trim()) return `Enter the MQTT topic for ${action.name}.`;
   }

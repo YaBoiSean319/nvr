@@ -128,7 +128,7 @@ class ActionDefinition(BaseModel):
     """One rule action. Secrets (url, signing_secret) are write-only: send them to set or
     change them, leave them out (with the action's id) to keep what is saved."""
     id: str | None = Field(default=None, max_length=64)
-    type: Literal["webhook", "mqtt", "slack", "teams", "relay", "ptz_track"]
+    type: Literal["webhook", "mqtt", "slack", "teams", "relay", "ptz_track", "email"]
     name: str = Field(min_length=1, max_length=80)
     enabled: bool = True
     url: str | None = Field(default=None, max_length=2048)
@@ -138,6 +138,8 @@ class ActionDefinition(BaseModel):
     retain: bool = False
     camera_id: str | None = Field(default=None, max_length=64)
     relay_token: str | None = Field(default=None, max_length=128)
+    recipients: list[str] = Field(default_factory=list, max_length=20)
+    subject: str | None = Field(default=None, max_length=200)
     duration_seconds: float = Field(default=1.0, ge=0.1, le=rule_actions.MAX_RELAY_SECONDS)
 
     @field_validator("name")

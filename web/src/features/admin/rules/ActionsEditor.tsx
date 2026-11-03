@@ -43,6 +43,20 @@ function ActionFields({ action, cameras, onChange }: { action: ActionDraft; came
     case "teams":
       return <SecretField label="Incoming webhook URL" saved={saved} value={action.url} onChange={url => onChange({ url })}
                           hint={`The message names the rule, object, camera and time, with snapshot and alarm links when the NVR's public address is set.`} />;
+    case "email":
+      return (
+        <>
+          <label className="field"><span>Send to</span>
+            <input value={(action.recipients ?? []).join(", ")} placeholder="desk@example.com, nurse@example.com"
+                   onChange={event => onChange({ recipients: event.target.value.split(/[,;\s]+/).filter(Boolean) })} />
+            <small className="muted field-hint">Up to 20 addresses. Sent from the Microsoft 365 account connected in Settings &gt; Email alerts. The message names the rule, camera and time and links to the alarm (sign-in required); it carries no footage.</small>
+          </label>
+          <label className="field"><span>Subject (optional)</span>
+            <input value={action.subject ?? ""} placeholder="{rule}: {label} on {camera}" onChange={event => onChange({ subject: event.target.value })} />
+            <small className="muted field-hint">You can use {"{rule}"}, {"{camera}"}, {"{label}"} and {"{time}"}.</small>
+          </label>
+        </>
+      );
     case "ptz_track":
       return <p className="muted field-hint">The camera the rule fired on, when it can pan and tilt, follows the object that triggered it: it holds the camera's control lease while it does, stops when the object is lost, and returns to its home preset after the timeout set in the camera's PTZ settings. Someone driving the camera, or a camera already following something, is left alone.</p>;
     case "relay":
