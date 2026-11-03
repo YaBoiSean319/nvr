@@ -28,7 +28,8 @@ class AIDetectionConfigRequest(BaseModel):
 
 
 class AIRuntimeSettingsRequest(BaseModel):
-    max_active_cameras: int = Field(ge=1, le=16)
+    max_active_cameras: int = Field(ge=1, le=100_000)  # The fixed number, used when the mode is fixed
+    capacity_mode: Literal["auto", "fixed"] | None = None  # Left out: a number sent alone means a fixed number, as it always did
     provider: Literal["CPU", "GPU"] | None = None
     model_id: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -179,9 +180,12 @@ async def update_group_ai_config(
 @router.get("/api/ai/settings")
 def get_ai_runtime_settings(_: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        row = db.execute("SELECT max_active_cameras,updated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
-    return {"max_active_cameras": int(row["max_active_cameras"]), "inflight_inferences": 1, "updated_at": row["updated_at"],
-            "resource_note": "Inference calls run through one bounded slot to preserve headroom for recording. Cameras beyond the active limit are marked skipped; no unbounded analysis queue is maintained.",
+        row = db.execute("SELECT max_active_cameras,capacity_mode,updated_at FROM ai_runtime_settings WHERE singleton_id=1").fetchone()
+        status = db.execute("SELECT * FROM ai_capacity_status WHERE singleton_id=1").fetchone()
+    return {"max_active_cameras": int(row["max_active_cameras"]), "capacity_mode": row["capacity_mode"], "inflight_inferences": 1, "updated_at": row["updated_at"],
+            "capacity": {key: status[key] for key in status.keys()} if status else None,
+            "resource_note": "Inference calls run through one bounded slot to preserve headroom for recording. In automatic mode the number of analysed cameras follows what this machine can carry (CPU, the AI model's time, memory); "
+                             "with a fixed number, cameras beyond it are marked skipped. No unbounded analysis queue is maintained.",
             "model": ai_runtime_model_view()}
 
 
@@ -205,11 +209,12 @@ async def update_ai_runtime_settings(payload: AIRuntimeSettingsRequest, request:
             raise HTTPException(status_code=422, detail=f"AI runtime was not changed: {validation['reason']}")
         model_version = str(validation["model_version"])
         validated_at = datetime.now(timezone.utc).isoformat()
+    mode = payload.capacity_mode or "fixed"
     with connect() as db:
-        db.execute("UPDATE ai_runtime_settings SET max_active_cameras=?,provider=?,model_id=?,model_version=?,validated_at=COALESCE(?,validated_at),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
-                   (payload.max_active_cameras, provider, model_id, model_version, validated_at))
+        db.execute("UPDATE ai_runtime_settings SET max_active_cameras=?,capacity_mode=?,provider=?,model_id=?,model_version=?,validated_at=COALESCE(?,validated_at),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
+                   (payload.max_active_cameras, mode, provider, model_id, model_version, validated_at))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "ai_runtime_configured", "ai_runtime", "local",
-                    json.dumps({"max_active_cameras": payload.max_active_cameras, "provider": provider, "model_id": model_id, "model_version": model_version, "validated": validated_at is not None}, separators=(",", ":"))))
+                    json.dumps({"max_active_cameras": payload.max_active_cameras, "capacity_mode": mode, "provider": provider, "model_id": model_id, "model_version": model_version, "validated": validated_at is not None}, separators=(",", ":"))))
     await request.app.state.detectors.reconcile()
     return get_ai_runtime_settings(_=user)
