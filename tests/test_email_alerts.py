@@ -32,6 +32,10 @@ class MailCase(SceneTestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def audit(self, action: str) -> list[dict]:
+        with connect() as db:
+            return [{**dict(row), "details": json.loads(row["details_json"])} for row in db.execute("SELECT * FROM audit_log WHERE action=? ORDER BY id", (action,))]
+
     def connect_account(self, sender: str | None = None) -> dict:
         body = {"tenant_id": self.microsoft.tenant, "client_id": self.microsoft.client_id}
         if sender:
@@ -113,6 +117,21 @@ class SendTests(MailCase):
         self.assertEqual([item["emailAddress"]["address"] for item in message["toRecipients"]], ["me@contoso.com"])
         self.assertEqual(self.microsoft.sent_paths, ["/v1.0/me/sendMail"])
 
+    def test_the_test_email_keeps_a_copy_in_sent_items_and_says_who_it_was_sent_as_to_whom_and_when(self):
+        self.connect_account()
+        result = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"}).json()
+        self.assertEqual((result["sent_as"], result["to"], result["request_id"], result["saved_to_sent_items"]), ("alerts@contoso.com", "me@contoso.com", "stub-request-1", True))
+        self.assertTrue(result["at"].endswith("+00:00"))
+        self.assertEqual(self.microsoft.saved_copy, [True])  # Proof Exchange took it: it is in the sender's Sent Items
+        self.assertEqual(self.audit("email_test_sent")[0]["details"]["request_id"], "stub-request-1")
+
+    def test_alert_emails_do_not_fill_the_senders_sent_items(self):
+        self.connect_account()
+        rule = self.email_rule()
+        self.raise_event(rule["id"])
+        self.deliver()
+        self.assertEqual(self.microsoft.saved_copy, [False])
+
     def test_a_shared_mailbox_sender_is_used_when_it_differs_from_the_account(self):
         self.connect_account(sender="shared@contoso.com")
         self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
@@ -148,6 +167,42 @@ class SendTests(MailCase):
         self.assertIn("Reconnect", failed.json()["detail"])
         state = self.client.get("/api/admin/email").json()
         self.assertEqual((state["state"], state["error"]["code"], state["error"]["reconnect"]), ("error", "invalid_grant", True))
+
+    def test_a_refusal_shows_what_microsoft_said_and_what_usually_causes_it(self):
+        self.connect_account()
+        self.microsoft.send_status = [(403, "ErrorAccessDenied", "Access is denied. Check credentials and try again.")]
+        failed = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        self.assertEqual(failed.status_code, 409)
+        self.assertIn("ErrorAccessDenied: Access is denied", failed.json()["detail"])
+        self.assertIn("no Exchange Online mailbox or licence", failed.json()["detail"])
+        shown = self.client.get("/api/admin/email").json()["error"]  # The page shows the same, and keeps it
+        self.assertEqual(shown["detail"], "ErrorAccessDenied: Access is denied. Check credentials and try again.")
+        self.assertIn("ErrorAccessDenied", shown["message"])
+        self.microsoft.send_status = [(404, "MailboxNotEnabledForRESTAPI", "The requested user is invalid or the mailbox is not enabled.")]
+        missing = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        self.assertIn("MailboxNotEnabledForRESTAPI", missing.json()["detail"])
+        self.assertIn("unlicensed", missing.json()["detail"])
+        self.assertEqual(self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"}).status_code, 200)  # Mended: the error goes
+        self.assertNotIn("error", self.client.get("/api/admin/email").json())
+
+    def test_an_answer_with_no_error_body_still_says_the_status(self):
+        self.connect_account()
+        self.microsoft.send_status = [400]
+        failed = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        self.assertEqual(failed.status_code, 409)
+        self.assertIn("Failure", failed.json()["detail"])  # Whatever code Microsoft gave
+
+    def test_microsofts_description_of_a_sign_in_failure_is_shown_without_its_trace_ids_or_anything_token_like(self):
+        self.microsoft.expires_in = 1
+        self.connect_account()
+        self.microsoft.revoked = True
+        self.microsoft.revoked_description = "AADSTS65001: The user has not consented to Mail.Send. Trace ID: 0a1b2c3d Correlation ID: 4e5f6a7b token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop"
+        failed = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        detail = failed.json()["detail"]
+        self.assertIn("AADSTS65001: The user has not consented to Mail.Send.", detail)
+        self.assertIn("grant consent", detail)  # The hint for that code
+        self.assertNotIn("Trace ID", detail)
+        self.assertNotIn("eyJ", detail)
 
     def test_sending_without_a_connection_is_refused(self):
         self.assertEqual(self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"}).status_code, 409)
@@ -237,4 +292,5 @@ class MigrationTests(MailCase):
             self.assertIn("'email'", sql)
             self.assertIn("'ptz_track'", sql)
             self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='email_connection'").fetchone())
+            self.assertIn("last_detail", {row[1] for row in db.execute("PRAGMA table_info(email_connection)")})
 

@@ -15,6 +15,8 @@ interface EmailState {
   recent?: { kind: string; subject: string; status: string; last_error: string | null; created_at: string; sent_at: string | null }[];
 }
 
+interface TestResult { sent: boolean; to: string; at: string; sent_as: string | null; account: string | null; request_id: string | null; saved_to_sent_items: boolean }
+
 const KEY = ["admin", "email"] as const;
 
 /** Email alerts sent through Microsoft 365 with a Microsoft sign-in: give the tenant, then sign in at the link with the code shown. */
@@ -49,8 +51,15 @@ export function EmailSettings() {
     },
   });
   const test = useMutation({
-    mutationFn: () => api("/api/admin/email/test", { method: "POST", body: { to } }),
-    onSuccess: async () => { setError(null); setMessage(`A test email was sent to ${to}.`); await refresh(); },
+    mutationFn: () => api<TestResult>("/api/admin/email/test", { method: "POST", body: { to } }),
+    onSuccess: async result => {
+      setError(null);
+      const when = new Date(result.at).toLocaleTimeString();
+      setMessage(`Microsoft accepted a test email from ${result.sent_as ?? "the connected account"} to ${result.to} at ${when}.${result.saved_to_sent_items ? ` A copy is in that account's Sent Items.` : ""} `
+        + `If it does not reach ${result.to}: look in its Junk folder, look in ${result.account ?? "the connected account"}'s Inbox for an "Undeliverable" bounce, and ask your Microsoft 365 administrator to run a message trace (Exchange admin centre) for ${result.sent_as ?? "the sender"} to ${result.to} around ${when}.`
+        + `${result.request_id ? ` Microsoft's request id: ${result.request_id}.` : ""}`);
+      await refresh();
+    },
     onError: async problem => { setMessage(null); setError(failureText(problem, "The test email could not be sent.")); await refresh(); },
   });
   const [problems, setProblems] = useState({ enabled: false, recipients: "" });

@@ -22,9 +22,11 @@ class MicrosoftStub:
         self.access_tokens: dict[str, float] = {}
         self.refresh_token = ""
         self.revoked = False  # The next refresh answers invalid_grant
-        self.send_status: list[int] = []  # Statuses to answer sendMail with, once each, before accepting
+        self.send_status: list[int | tuple[int, str, str]] = []  # Answers for sendMail, once each, before accepting: a status, or (status, Graph error code, Graph message)
+        self.revoked_description = "AADSTS70008: The provided authorization code or refresh token has expired. Trace ID: 0a1b2c3d Correlation ID: 4e5f6a7b Timestamp: 2026-11-03 12:00:00Z"
         self.messages: list[dict] = []
         self.sent_paths: list[str] = []
+        self.saved_copy: list[bool] = []
         self.requests: list[tuple[str, str]] = []
         self.token_requests: list[dict[str, str]] = []
         self.lock = threading.Lock()
@@ -85,7 +87,7 @@ class MicrosoftStub:
                     return self._json(200, self._issue())
                 if form.get("grant_type") == "refresh_token":
                     if stub.revoked or form.get("refresh_token") != stub.refresh_token:
-                        return self._json(400, {"error": "invalid_grant", "error_description": "AADSTS70008: expired"})
+                        return self._json(400, {"error": "invalid_grant", "error_description": stub.revoked_description})
                     return self._json(200, self._issue())
                 self._json(400, {"error": "unsupported_grant_type"})
 
@@ -94,10 +96,15 @@ class MicrosoftStub:
                 if stub.access_tokens.get(token, 0) <= time.time():
                     return self._json(401, {"error": {"code": "InvalidAuthenticationToken"}})
                 if stub.send_status:
-                    return self._json(stub.send_status.pop(0), {"error": {"code": "Failure"}})
+                    answer = stub.send_status.pop(0)
+                    if isinstance(answer, tuple):
+                        return self._json(answer[0], {"error": {"code": answer[1], "message": answer[2]}})
+                    return self._json(answer, {"error": {"code": "Failure"}})
                 stub.sent_paths.append(path)
                 stub.messages.append(json.loads(raw))
+                stub.saved_copy.append(bool(stub.messages[-1].get("saveToSentItems")))
                 self.send_response(202)
+                self.send_header("request-id", f"stub-request-{len(stub.messages)}")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 

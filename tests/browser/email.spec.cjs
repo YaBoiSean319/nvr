@@ -30,7 +30,7 @@ test("an administrator connects Microsoft 365 with a code and a link, and sends 
   });
   await page.route("**/api/admin/email/test", route => {
     sent.push(route.request().postDataJSON());
-    return json(route, { sent: true, ...state });
+    return json(route, { sent: true, to: "desk@contoso.com", at: new Date().toISOString(), sent_as: "alerts@contoso.com", account: "alerts@contoso.com", request_id: "req-123", saved_to_sent_items: true, ...state });
   });
 
   await signInNext(page);
@@ -53,7 +53,12 @@ test("an administrator connects Microsoft 365 with a code and a link, and sends 
   const test_ = page.getByRole("region", { name: "Send a test email" });
   await test_.getByLabel("Send a test email to").fill("desk@contoso.com");
   await test_.getByRole("button", { name: "Send test email" }).click();
-  await expect(page.getByText("A test email was sent to desk@contoso.com.")).toBeVisible();
+  const accepted = page.getByRole("status").filter({ hasText: "Microsoft accepted a test email from alerts@contoso.com to desk@contoso.com" });
+  await expect(accepted).toBeVisible();
+  await expect(accepted).toContainText("A copy is in that account's Sent Items.");
+  await expect(accepted).toContainText("look in its Junk folder");
+  await expect(accepted).toContainText("message trace");
+  await expect(accepted).toContainText("Microsoft's request id: req-123.");
   expect(sent.at(-1)).toEqual({ to: "desk@contoso.com" });
 
   const problems = page.getByRole("region", { name: "Emails about NVR problems" });
