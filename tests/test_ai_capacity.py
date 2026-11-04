@@ -190,6 +190,17 @@ class CapacityTests(unittest.TestCase):
         self.now = 10.0 + cap.LATE_SECONDS + 1
         self.assertEqual(capacity.sample(analysed=4).late_share, 0.0)
 
+    def test_delays_on_a_lightly_loaded_machine_are_not_a_capacity_signal(self):
+        capacity = self.make()
+        capacity.evaluate(analysed=6, demand=7)
+        self.now = 10.0
+        capacity.note_inference(2.0)  # 20% busy, CPU 30%: the machine has room
+        capacity.note_late("a")
+        capacity.note_late("b")
+        sample = capacity.sample(analysed=6)
+        self.assertEqual(sample.late_share, 0.0)
+        self.assertIn("a", capacity.late)
+
     def test_the_first_evaluation_starts_carefully_and_later_ones_use_the_measurements(self):
         capacity = self.make()
         first = capacity.evaluate(analysed=0, demand=34, last_limit=40)

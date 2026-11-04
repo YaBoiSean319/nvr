@@ -33,6 +33,8 @@ MEMORY_MAX, MEMORY_GROW = 0.85, 0.70  # Share of the memory the container may us
 MIN_FREE_BYTES = 1 << 30
 GROW_FREE_BYTES = 2 << 30
 LATE_MAX = 0.25  # Share of the analysed cameras that were delayed waiting for inference
+LATE_COUNTS_FROM_BUSY = 0.4  # Delays only say the machine is short of capacity when the inference slot or the CPU is actually busy; at a low load they are a start-up or a stall
+LATE_COUNTS_FROM_CPU = 0.5
 LATE_SECONDS = 60.0  # How long a camera counts as late after a delayed frame
 PER_CAMERA_BYTES = 200 << 20  # Only for the ceiling of the search, never for a decision: measured memory decides
 CAMERAS_PER_CORE = 8
@@ -236,7 +238,9 @@ class Capacity:
         self._busy_mark = (now, self.busy_seconds)
         self.late = {camera: until for camera, until in self.late.items() if until > now}
         used, free, _ = self.sampler.memory()
-        self.last_sample = Sample(cpu=self.sampler.cpu(), inference_busy=busy, memory_used=used, memory_free=free, late_share=(len(self.late) / analysed) if analysed else 0.0)
+        cpu = self.sampler.cpu()
+        loaded = busy >= LATE_COUNTS_FROM_BUSY or (cpu or 0.0) >= LATE_COUNTS_FROM_CPU
+        self.last_sample = Sample(cpu=cpu, inference_busy=busy, memory_used=used, memory_free=free, late_share=(len(self.late) / analysed) if analysed and loaded else 0.0)
         return self.last_sample
 
     def due(self) -> bool:
