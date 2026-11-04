@@ -34,7 +34,13 @@ The settings page and the test email now show what Microsoft actually said (its 
 | `AADSTS7000218` | The app registration needs "Allow public client flows" turned on |
 | `invalid_grant` | The saved sign-in expired or was withdrawn (password change, policy): sign in again |
 
-A message that is accepted (Microsoft answers "202") but never arrives has been handed to Exchange: look in the recipient's **Junk** folder, in Exchange's message trace, and for mail rules or transport rules in the tenant that drop messages from this account.
+**Sent, but never arrives.** The test email asks Microsoft to keep a copy in the sending account's **Sent Items**, and the page then says who it was sent as, to whom, when, and Microsoft's request id. If Microsoft says it accepted the message, Exchange has it, and the problem is after sending:
+
+1. **Sent Items of the sending account** (open it in Outlook on the web): the test email is there if Exchange took it.
+2. **That account's Inbox**: a bounce ("Undeliverable") names the reason, for example a recipient that does not exist or an external address the tenant will not send to.
+3. **The recipient's Junk or quarantine folder.**
+4. **Exchange admin centre > Mail flow > Message trace** for the sender and the recipient around that time, which says delivered, failed, quarantined or pending, and which rule did it.
+5. **Mail flow rules (transport rules)**, outbound spam policies and sending limits in the tenant, which can drop or hold messages from a particular account.
 
 ## Emails about the NVR itself
 

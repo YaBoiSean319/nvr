@@ -307,15 +307,16 @@ def access_token(force: bool = False) -> tuple[str, Connection]:
         raise failure
 
 
-def send(recipients: list[str], subject: str, text: str) -> None:
-    """Send one plain-text message. Raises ``MailError``; ``retryable`` says whether trying again later can help."""
+def send(recipients: list[str], subject: str, text: str, *, save_copy: bool = False) -> dict[str, Any]:
+    """Send one plain-text message and say what Microsoft did with it (who it was sent as, and Microsoft's request id). ``save_copy`` keeps a copy in the sender's Sent Items, which proves Exchange took it: the test email does.
+    Raises ``MailError``; ``retryable`` says whether trying again later can help."""
     if not recipients or len(recipients) > MAX_RECIPIENTS:
         raise MailError("rejected")
     message = {"message": {
         "subject": subject.replace("\r", " ").replace("\n", " ")[:MAX_SUBJECT],
         "body": {"contentType": "Text", "content": text[:MAX_BODY]},
         "toRecipients": [{"emailAddress": {"address": address}} for address in recipients],
-    }, "saveToSentItems": False}
+    }, "saveToSentItems": save_copy}
     for attempt in (0, 1):
         token, connection = access_token(force=bool(attempt))
         path = "/me/sendMail" if not connection.sender or connection.sender.lower() == (connection.account or "").lower() else f"/users/{quote(connection.sender, safe='@')}/sendMail"
@@ -324,7 +325,8 @@ def send(recipients: list[str], subject: str, text: str) -> None:
         except (httpx.TransportError, OSError) as exc:
             raise MailError("unreachable", retryable=True) from exc
         if response.status_code == 202:
-            return
+            return {"sent_as": connection.sender or connection.account, "account": connection.account, "request_id": response.headers.get("request-id") or response.headers.get("client-request-id"),
+                    "saved_to_sent_items": save_copy}
         detail = graph_detail(response)
         if response.status_code == 401 and not attempt:
             continue  # The token was refused (revoked or clock skew): one forced refresh, then try again

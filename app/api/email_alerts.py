@@ -1,6 +1,7 @@
 """Email alerts through Microsoft sign-in (#231). Administrators connect one Microsoft 365 mailbox with a device sign-in, send a test, and disconnect."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -83,7 +84,7 @@ def send_test(payload: TestInput, user: Administrator) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     try:
-        ms_mail.send([address], "Test email from your NVR", "This is a test of email alerts from your NVR. If you can read it, alerts can reach you.")
+        sent = ms_mail.send([address], "Test email from your NVR", "This is a test of email alerts from your NVR. If you can read it, alerts can reach you.", save_copy=True)
     except ms_mail.MailError as exc:
         ms_mail.note_failure(exc)
         with connect() as db:
@@ -91,8 +92,9 @@ def send_test(payload: TestInput, user: Administrator) -> dict[str, Any]:
         raise HTTPException(status_code=502 if exc.retryable else 409, detail=exc.message) from None
     ms_mail.note_success()
     with connect() as db:
-        record(db, int(user["id"]), "email_test_sent", "email", "microsoft")
-    return {"sent": True, **_state()}
+        record(db, int(user["id"]), "email_test_sent", "email", "microsoft", sent_as=sent["sent_as"], request_id=sent["request_id"])
+    # Microsoft accepted it (HTTP 202): Exchange now delivers it. A copy is in the sender's Sent Items, so "accepted but never arrived" is told apart from "never sent".
+    return {"sent": True, "to": address, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **sent, **_state()}
 
 
 @router.delete("/api/admin/email", status_code=204)

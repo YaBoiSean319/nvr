@@ -32,6 +32,10 @@ class MailCase(SceneTestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def audit(self, action: str) -> list[dict]:
+        with connect() as db:
+            return [{**dict(row), "details": json.loads(row["details_json"])} for row in db.execute("SELECT * FROM audit_log WHERE action=? ORDER BY id", (action,))]
+
     def connect_account(self, sender: str | None = None) -> dict:
         body = {"tenant_id": self.microsoft.tenant, "client_id": self.microsoft.client_id}
         if sender:
@@ -112,6 +116,21 @@ class SendTests(MailCase):
         message = self.microsoft.messages[0]["message"]
         self.assertEqual([item["emailAddress"]["address"] for item in message["toRecipients"]], ["me@contoso.com"])
         self.assertEqual(self.microsoft.sent_paths, ["/v1.0/me/sendMail"])
+
+    def test_the_test_email_keeps_a_copy_in_sent_items_and_says_who_it_was_sent_as_to_whom_and_when(self):
+        self.connect_account()
+        result = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"}).json()
+        self.assertEqual((result["sent_as"], result["to"], result["request_id"], result["saved_to_sent_items"]), ("alerts@contoso.com", "me@contoso.com", "stub-request-1", True))
+        self.assertTrue(result["at"].endswith("+00:00"))
+        self.assertEqual(self.microsoft.saved_copy, [True])  # Proof Exchange took it: it is in the sender's Sent Items
+        self.assertEqual(self.audit("email_test_sent")[0]["details"]["request_id"], "stub-request-1")
+
+    def test_alert_emails_do_not_fill_the_senders_sent_items(self):
+        self.connect_account()
+        rule = self.email_rule()
+        self.raise_event(rule["id"])
+        self.deliver()
+        self.assertEqual(self.microsoft.saved_copy, [False])
 
     def test_a_shared_mailbox_sender_is_used_when_it_differs_from_the_account(self):
         self.connect_account(sender="shared@contoso.com")
