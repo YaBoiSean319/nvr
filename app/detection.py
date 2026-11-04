@@ -23,6 +23,7 @@ from .store import connect
 
 logger = logging.getLogger(__name__)
 
+WARM_UP_FRAMES = 3
 _FACTOR_TEXT = {"cpu": "CPU", "inference": "the AI model is busy", "memory": "memory", "late": "analysis is falling behind"}
 
 MODEL_ID = "person-vehicle-bike-detection-2004"
@@ -644,15 +645,18 @@ class DetectionManager:
                 scanner, scanner_reader, scanner_checked = None, None, float("-inf")
                 fall_detector, fall_reader, fall_checked = None, None, float("-inf")
                 seen_frame = False
+                frames_seen = 0
                 async for frame in _raw_frames(source, float(config["analysis_fps"])):
                     if self.stopping:
                         return
                     seen_frame = True
+                    frames_seen += 1
                     wait_started = asyncio.get_running_loop().time()
                     async with self._inference_slots:
                         queue_wait = asyncio.get_running_loop().time() - wait_started
                         if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
-                            self.capacity.note_late(camera_id)
+                            if frames_seen > WARM_UP_FRAMES:  # The first frames wait behind other cameras' model start-up: not a sign of too little capacity
+                                self.capacity.note_late(camera_id)
                             await self._db(set_camera_state, camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
                         infer_started = time.monotonic()
                         observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
