@@ -13,7 +13,7 @@ import subprocess
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import acceleration, footage_chain, privacy, redaction, viewing_audit
@@ -242,6 +242,30 @@ def _interval_metadata(start: datetime, end: datetime, segments: list[dict[str, 
     return actual, missing
 
 
+SEAM_TOLERANCE = timedelta(seconds=2)
+CLIP_PADDING_SECONDS = 0.5
+
+
+def _contiguous_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Segments as they follow each other in time.
+
+    The recorder cuts one run of the camera into back-to-back files, but names each file after the whole second it was opened, while a file's length comes from
+    its own timestamps. Neighbouring files then disagree by up to a second: read literally, the next file starts "before" the last ended, and the export skips that much
+    real footage. A file of the same run, named by the whole second, that starts up to a couple of seconds before the last one ended is placed end to end instead. A gap is left as it is (it is reported
+    as a gap, and the last frame is held), and so is a file from another run (the recorder reconnected): its times are its own.
+    """
+    placed: list[dict[str, Any]] = []
+    for segment in sorted(segments, key=lambda item: (_parse_time(item["starts_at"]), int(item["id"]))):
+        item = dict(segment)
+        previous = placed[-1] if placed else None
+        if previous is not None and PurePosixPath(previous["relative_path"]).parent == PurePosixPath(item["relative_path"]).parent:
+            starts, ends, previous_end = _parse_time(item["starts_at"]), _parse_time(item["ends_at"]), _parse_time(previous["ends_at"])
+            if starts.microsecond == 0 and timedelta(0) < previous_end - starts <= SEAM_TOLERANCE:  # The recorder's names are whole seconds; any other start is a time someone chose
+                item["starts_at"], item["ends_at"] = previous_end.isoformat(), (previous_end + (ends - starts)).isoformat()
+        placed.append(item)
+    return placed
+
+
 def _unique_output_spans(start: datetime, end: datetime, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Trim, order, and de-duplicate indexed source intervals for one camera."""
     cursor = start
@@ -398,7 +422,9 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
             args.extend(["-ss", f"{source_offset:.6f}", "-t", f"{span_duration:.6f}", "-i", str(recording_file_path(segment["relative_path"]))])
             clip, composed = f"tile{tile_index}_clip{span_index}", f"tile{tile_index}_composed{span_index}"
             mask = f"{privacy.drawbox_filter(camera['privacy_zones'])}," if camera.get("privacy_zones") else ""
-            graph.append(f"[{next_input}:v]{mask}fps=15,scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration={max(0.01, next_start-output_start-span_duration):.6f},trim=duration={max(0.01, next_start-output_start):.6f},setpts=PTS-STARTPTS+{output_start:.6f}/TB[{clip}]")
+            graph.append(f"[{next_input}:v]{mask}fps=15,scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration={max(0.0, next_start-output_start-span_duration) + CLIP_PADDING_SECONDS:.6f},setpts=PTS-STARTPTS+{output_start:.6f}/TB[{clip}]")
+            # The overlay's enable window keeps each clip to its own stretch; the padding only keeps the clip's real last frame from being its stream's last,
+            # which the overlay drops (a black frame at every seam).
             graph.append(f"[{current}][{clip}]overlay=eof_action=pass:shortest=0:enable='between(t,{output_start:.6f},{next_start:.6f})'[{composed}]")
             current = composed
             next_input += 1
@@ -744,11 +770,11 @@ class ExportManager:
                         camera = db.execute("SELECT id,name,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
                         if camera is None:
                             raise RuntimeError("A selected camera was removed before export started")
-                        segments = [dict(item) for item in db.execute(
+                        segments = _contiguous_segments([dict(item) for item in db.execute(
                             "SELECT id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments "
                             "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
                             (camera_id, end.isoformat(), start.isoformat()),
-                        ).fetchall()]
+                        ).fetchall()])
                         # Privacy masks: burn in the mask over the whole camera if any of its footage needs it.
                         zones: list[dict[str, float]] = []
                         for segment in segments:
