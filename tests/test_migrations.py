@@ -272,6 +272,52 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(calls, [database_path()] * 5)
         self.assertEqual(len(self._copies()), migrations.PRE_MIGRATION_COPIES_KEPT)
 
+    def _database_with_a_pending_migration(self):
+        initialize()
+        with connect() as db:
+            db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(1,'admin','unused','administrator')")
+        version = migrations.latest_version() + 1
+        return mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, (version, types.SimpleNamespace(NAME="next", upgrade=lambda db: None))])
+
+    def test_a_full_disk_removes_older_copies_to_make_room_and_the_upgrade_goes_ahead(self):
+        pending = self._database_with_a_pending_migration()
+        old = self.path.with_name(self.path.name + ".pre-migration-v1-to-v2-20200101T000000000000Z")
+        old.write_bytes(b"x" * 1000)
+        os.utime(old, (1, 1))
+        free = {"value": 0}
+        real = migrations.shutil.disk_usage
+
+        def usage(target):
+            result = real(target)
+            return types.SimpleNamespace(total=result.total, used=result.used, free=free["value"] if old.exists() else result.free)
+
+        with pending, mock.patch.object(migrations.shutil, "disk_usage", usage):
+            initialize()
+        self.assertFalse(old.exists())
+        self.assertEqual(len(self._copies()), 1)
+        self.assertEqual(self._versions()[-1], migrations.latest_version() + 1)
+
+    def test_no_room_even_after_removing_copies_stops_with_a_clear_message_and_changes_nothing(self):
+        pending = self._database_with_a_pending_migration()
+        before = self._versions()
+        usage = lambda target: types.SimpleNamespace(total=100, used=100, free=0)  # noqa: E731
+        with pending, mock.patch.object(migrations.shutil, "disk_usage", usage), self.assertRaisesRegex(migrations.MigrationError, "not enough free disk space"):
+            initialize()
+        self.assertEqual(self._versions(), before)
+        self.assertEqual(self._copies(), [])
+
+    def test_a_copy_that_fails_part_way_leaves_nothing_behind(self):
+        initialize()
+
+        class FullDisk:
+            def backup(self, target):
+                target.execute("CREATE TABLE half(x)")  # Some of the copy is already written
+                raise sqlite3.OperationalError("database or disk is full")
+
+        with self.assertRaises(sqlite3.OperationalError):
+            migrations._pre_migration_copy(FullDisk(), self.path, 1, 2)  # type: ignore[arg-type]
+        self.assertEqual(self._copies(), [])
+        self.assertEqual(list(self.path.parent.glob("*-journal")), [])
 
 if __name__ == "__main__":
     unittest.main()

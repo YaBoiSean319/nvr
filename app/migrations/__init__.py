@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -177,17 +178,52 @@ def _applied_versions(db: sqlite3.Connection) -> set[int]:
     return {row[0] for row in db.execute("SELECT version FROM schema_migrations")}
 
 
+SPACE_MARGIN = 64 << 20  # Left free after the copy, for the migration itself
+
+
+def _copies_of(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(f"{path.name}.pre-migration-*"), key=lambda item: item.stat().st_mtime)
+
+
+def _database_bytes(path: Path) -> int:
+    return sum(item.stat().st_size for item in (path, path.with_name(path.name + "-wal")) if item.exists())
+
+
+def _make_room(path: Path, needed: int) -> int:
+    """Free space for the copy by removing older copies (oldest first) only as far as needed: a full disk must not stop the NVR starting. Returns the free space."""
+    free = shutil.disk_usage(path.parent).free
+    older = _copies_of(path)
+    while free < needed and older:
+        stale = older.pop(0)
+        size = stale.stat().st_size
+        stale.unlink(missing_ok=True)
+        logger.warning("The disk is nearly full: removed the older pre-migration copy %s (%d bytes) to make room", stale.name, size)
+        free = shutil.disk_usage(path.parent).free
+    return free
+
+
 def _pre_migration_copy(db: sqlite3.Connection, path: Path, from_version: int, to_version: int) -> Path:
+    needed = _database_bytes(path) + SPACE_MARGIN
+    free = _make_room(path, needed)
+    if free < needed:
+        raise MigrationError(
+            f"There is not enough free disk space to upgrade the database safely: {free // (1 << 20)} MB free where {path.parent} is, {needed // (1 << 20)} MB needed "
+            "(a copy of the database is kept before every upgrade). Free some space on that disk (for example delete the oldest recordings or other large files, "
+            "or remove files named *.pre-migration-* in that folder) and start again. Nothing was changed."
+        )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     target = path.with_name(f"{path.name}.pre-migration-v{from_version}-to-v{to_version}-{stamp}")
     copy = sqlite3.connect(target)
     try:
         db.backup(copy)
-    finally:
+    except BaseException:
         copy.close()
+        for leftover in (target, target.with_name(target.name + "-journal")):
+            leftover.unlink(missing_ok=True)  # A half-written copy is no use and would fill the disk further on every restart
+        raise
+    copy.close()
     os.chmod(target, 0o600)
-    copies = sorted(path.parent.glob(f"{path.name}.pre-migration-*"), key=lambda item: item.stat().st_mtime)
-    for stale in copies[:-PRE_MIGRATION_COPIES_KEPT]:
+    for stale in _copies_of(path)[:-PRE_MIGRATION_COPIES_KEPT]:
         stale.unlink(missing_ok=True)
     logger.info("Saved pre-migration database copy to %s", target)
     return target
