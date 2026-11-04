@@ -149,6 +149,42 @@ class SendTests(MailCase):
         state = self.client.get("/api/admin/email").json()
         self.assertEqual((state["state"], state["error"]["code"], state["error"]["reconnect"]), ("error", "invalid_grant", True))
 
+    def test_a_refusal_shows_what_microsoft_said_and_what_usually_causes_it(self):
+        self.connect_account()
+        self.microsoft.send_status = [(403, "ErrorAccessDenied", "Access is denied. Check credentials and try again.")]
+        failed = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        self.assertEqual(failed.status_code, 409)
+        self.assertIn("ErrorAccessDenied: Access is denied", failed.json()["detail"])
+        self.assertIn("no Exchange Online mailbox or licence", failed.json()["detail"])
+        shown = self.client.get("/api/admin/email").json()["error"]  # The page shows the same, and keeps it
+        self.assertEqual(shown["detail"], "ErrorAccessDenied: Access is denied. Check credentials and try again.")
+        self.assertIn("ErrorAccessDenied", shown["message"])
+        self.microsoft.send_status = [(404, "MailboxNotEnabledForRESTAPI", "The requested user is invalid or the mailbox is not enabled.")]
+        missing = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        self.assertIn("MailboxNotEnabledForRESTAPI", missing.json()["detail"])
+        self.assertIn("unlicensed", missing.json()["detail"])
+        self.assertEqual(self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"}).status_code, 200)  # Mended: the error goes
+        self.assertNotIn("error", self.client.get("/api/admin/email").json())
+
+    def test_an_answer_with_no_error_body_still_says_the_status(self):
+        self.connect_account()
+        self.microsoft.send_status = [400]
+        failed = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        self.assertEqual(failed.status_code, 409)
+        self.assertIn("Failure", failed.json()["detail"])  # Whatever code Microsoft gave
+
+    def test_microsofts_description_of_a_sign_in_failure_is_shown_without_its_trace_ids_or_anything_token_like(self):
+        self.microsoft.expires_in = 1
+        self.connect_account()
+        self.microsoft.revoked = True
+        self.microsoft.revoked_description = "AADSTS65001: The user has not consented to Mail.Send. Trace ID: 0a1b2c3d Correlation ID: 4e5f6a7b token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop"
+        failed = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
+        detail = failed.json()["detail"]
+        self.assertIn("AADSTS65001: The user has not consented to Mail.Send.", detail)
+        self.assertIn("grant consent", detail)  # The hint for that code
+        self.assertNotIn("Trace ID", detail)
+        self.assertNotIn("eyJ", detail)
+
     def test_sending_without_a_connection_is_refused(self):
         self.assertEqual(self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"}).status_code, 409)
 
@@ -237,4 +273,5 @@ class MigrationTests(MailCase):
             self.assertIn("'email'", sql)
             self.assertIn("'ptz_track'", sql)
             self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='email_connection'").fetchone())
+            self.assertIn("last_detail", {row[1] for row in db.execute("PRAGMA table_info(email_connection)")})
 

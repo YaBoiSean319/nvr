@@ -20,6 +20,22 @@ To send as a shared mailbox, put its address in **Send as**; the signed-in accou
 - Tokens are stored encrypted with the credential key, like camera credentials, never shown again, never in logs or audit entries. Connecting, failing, testing and disconnecting are audited. Only administrators can manage it.
 - The refresh token lets the NVR keep sending until it is revoked or Microsoft's sign-in policy expires it; a conditional access policy that requires a fresh sign-in will need a reconnect.
 
+## If sign-in works but sending does not
+
+The settings page and the test email now show what Microsoft actually said (its error code and message) and what usually causes it. The common ones:
+
+| Microsoft says | Usually |
+| --- | --- |
+| `ErrorAccessDenied` | The signed-in account has no Exchange Online mailbox or licence, or a policy blocks it. Sign in with an account that has a mailbox |
+| `MailboxNotEnabledForRESTAPI` | The account has no Exchange Online mailbox for the API (unlicensed, or the mailbox is on-premises) |
+| `ErrorSendAsDenied` | The account may not send as the shared mailbox in "Send as": give it Send As in Exchange |
+| `AADSTS65001` | Consent was not given for Mail.Send: sign in again and accept, or an administrator grants it |
+| `AADSTS50158` / `AADSTS53003` | A conditional access policy (compliant device, location, blocked app) is stopping the app |
+| `AADSTS7000218` | The app registration needs "Allow public client flows" turned on |
+| `invalid_grant` | The saved sign-in expired or was withdrawn (password change, policy): sign in again |
+
+A message that is accepted (Microsoft answers "202") but never arrives has been handed to Exchange: look in the recipient's **Junk** folder, in Exchange's message trace, and for mail rules or transport rules in the tenant that drop messages from this account.
+
 ## Emails about the NVR itself
 
 **Settings > Email alerts > NVR problems**: choose who is emailed when the NVR finds a problem in itself (a camera that stopped recording, a full or failing disk, the AI worker stopping, a covered camera, a failed backup): one email when it starts and one when it is mended. Nothing is sent about a camera during a [maintenance window](maintenance-windows.md); a problem still there when the window ends is emailed then. Failed sends are retried with backoff, and the page lists the recent ones.

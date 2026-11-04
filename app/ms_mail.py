@@ -57,18 +57,64 @@ MESSAGES = {
 }
 
 
-class MailError(Exception):
-    """A short code that is safe to store and show, whether trying again can help, and whether the connection needs signing in again."""
+# What Microsoft's own error codes usually mean, in words an administrator can act on (the code itself is always shown too).
+HINTS = {
+    "ErrorAccessDenied": "The signed-in account is not allowed to send mail here: it may have no Exchange Online mailbox or licence, or a policy blocks it.",
+    "MailboxNotEnabledForRESTAPI": "The signed-in account has no Exchange Online mailbox for the API to use (it may be unlicensed, or its mailbox may be on-premises).",
+    "MailboxNotFound": "The mailbox could not be found: check the account, or the shared mailbox in \"Send as\".",
+    "ErrorSendAsDenied": "The signed-in account may not send as that shared mailbox: give it the Send As permission in Exchange.",
+    "ErrorQuotaExceeded": "The mailbox is full or over its sending limit.",
+    "ApplicationThrottled": "Microsoft is limiting how fast this app can send.",
+    "ErrorInvalidRecipients": "Microsoft rejected one of the recipient addresses.",
+    "AADSTS65001": "The account or an administrator has not consented to this app sending mail: sign in again and accept, or have an administrator grant consent for Mail.Send.",
+    "AADSTS50076": "A second sign-in step (multi-factor) is required again: sign in again.",
+    "AADSTS50158": "A conditional access policy needs more from this sign-in (for example a compliant device): it may block this app.",
+    "AADSTS53003": "A conditional access policy blocked this app's access.",
+    "AADSTS700016": "The application (client) ID was not found in this tenant: check it and the tenant.",
+    "AADSTS7000218": "The app registration is not set to allow public client flows: turn that on under Authentication.",
+}
+_SECRETISH = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-.]+|[A-Za-z0-9+/_\-]{60,}")
 
-    def __init__(self, code: str, *, retryable: bool = False, reconnect: bool = False) -> None:
+
+def _clean(text: str, limit: int = 300) -> str:
+    """Microsoft's words for a failure, cut to the sentence before its trace and correlation ids and with anything token-like removed."""
+    text = re.split(r"\s*(?:Trace ID|Correlation ID|Timestamp):", text, maxsplit=1)[0]
+    return _SECRETISH.sub("[removed]", " ".join(text.split()))[:limit]
+
+
+def graph_detail(response: httpx.Response) -> str | None:
+    """The error code and message in a Graph answer ("ErrorAccessDenied: Access is denied"), or None."""
+    try:
+        error = response.json().get("error")
+    except ValueError:
+        return None
+    if isinstance(error, dict) and (error.get("code") or error.get("message")):
+        return _clean(f"{error.get('code', '')}: {error.get('message', '')}".strip(": "))
+    return None
+
+
+class MailError(Exception):
+    """A short code that is safe to store and show, whether trying again can help, whether the connection needs signing in again, and what Microsoft said (its error code and message)."""
+
+    def __init__(self, code: str, *, retryable: bool = False, reconnect: bool = False, detail: str | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.retryable = retryable
         self.reconnect = reconnect
+        self.detail = detail
 
     @property
     def message(self) -> str:
-        return MESSAGES.get(self.code, "Microsoft refused the request.")
+        return explain(self.code, self.detail)
+
+
+def explain(code: str | None, detail: str | None) -> str:
+    """The sentence for a failure: what it means, what Microsoft's error was, and what usually causes that one."""
+    text = MESSAGES.get(code or "", "Microsoft refused the request.")
+    if detail:
+        hint = next((words for key, words in HINTS.items() if detail.startswith(key) or key in detail), None)
+        text = f"{text} Microsoft said: {detail}" + (f" Usually: {hint}" if hint else "")
+    return text
 
 
 def _now() -> datetime:
@@ -114,13 +160,14 @@ def _post_form(url: str, data: dict[str, str]) -> tuple[int, dict[str, Any]]:
 
 def _token_error(body: dict[str, Any], status: int) -> MailError:
     code = str(body.get("error") or "")
+    detail = _clean(str(body.get("error_description") or "")) or None  # "AADSTS65001: The user or administrator has not consented..."
     if code in {"invalid_grant", "interaction_required", "consent_required"}:
-        return MailError("invalid_grant", reconnect=True)
+        return MailError("invalid_grant", reconnect=True, detail=detail)
     if code in MESSAGES:
-        return MailError(code, reconnect=code in {"invalid_client", "unauthorized_client"})
+        return MailError(code, reconnect=code in {"invalid_client", "unauthorized_client"}, detail=detail)
     if status >= 500 or status == 429:
-        return MailError("throttled" if status == 429 else "unexpected", retryable=True)
-    return MailError("invalid_request")
+        return MailError("throttled" if status == 429 else "unexpected", retryable=True, detail=detail)
+    return MailError("invalid_request", detail=detail)
 
 
 @dataclass(frozen=True)
@@ -131,6 +178,7 @@ class Connection:
     account: str | None
     state: str
     last_error: str | None
+    last_detail: str | None
     connected_at: str | None
     pending: dict[str, Any] | None
     tokens: dict[str, Any] | None
@@ -141,7 +189,7 @@ def load(db: sqlite3.Connection) -> Connection | None:
     if row is None:
         return None
     return Connection(
-        row["tenant_id"], row["client_id"], row["sender"], row["account"], row["state"], row["last_error"], row["connected_at"],
+        row["tenant_id"], row["client_id"], row["sender"], row["account"], row["state"], row["last_error"], row["last_detail"], row["connected_at"],
         json.loads(decrypt(row["pending_ciphertext"])) if row["pending_ciphertext"] else None,
         json.loads(decrypt(row["tokens_ciphertext"])) if row["tokens_ciphertext"] else None,
     )
@@ -154,7 +202,7 @@ def view(connection: Connection | None) -> dict[str, Any]:
     result: dict[str, Any] = {"state": connection.state, "tenant_id": connection.tenant_id, "client_id": connection.client_id, "sender": connection.sender,
                               "account": connection.account, "connected_at": connection.connected_at}
     if connection.last_error:
-        result["error"] = {"code": connection.last_error, "message": MESSAGES.get(connection.last_error, "Microsoft refused the request."),
+        result["error"] = {"code": connection.last_error, "message": explain(connection.last_error, connection.last_detail), "detail": connection.last_detail,
                            "reconnect": connection.last_error in {"invalid_grant", "invalid_client", "unauthorized_client", "not_connected"}}
     if connection.state == "pending" and connection.pending:
         result["sign_in"] = {key: connection.pending[key] for key in ("user_code", "verification_uri", "expires_at", "interval")}
@@ -228,7 +276,7 @@ def poll() -> dict[str, Any]:
         failure = _token_error(body, status)
         if failure.retryable:
             return view(connection)  # Microsoft hiccuped: the sign-in is still open
-        _save(db, state="error", last_error=failure.code, pending_ciphertext=None)
+        _save(db, state="error", last_error=failure.code, last_detail=failure.detail, pending_ciphertext=None)
         return view(load(db))
 
 
@@ -255,7 +303,7 @@ def access_token(force: bool = False) -> tuple[str, Connection]:
             return fresh["access_token"], connection
         failure = _token_error(body, status)
         if failure.reconnect:
-            _save(db, state="error", last_error=failure.code)
+            _save(db, state="error", last_error=failure.code, last_detail=failure.detail)
         raise failure
 
 
@@ -277,15 +325,16 @@ def send(recipients: list[str], subject: str, text: str) -> None:
             raise MailError("unreachable", retryable=True) from exc
         if response.status_code == 202:
             return
+        detail = graph_detail(response)
         if response.status_code == 401 and not attempt:
             continue  # The token was refused (revoked or clock skew): one forced refresh, then try again
         if response.status_code == 401:
-            raise MailError("invalid_grant", reconnect=True)
+            raise MailError("invalid_grant", reconnect=True, detail=detail)
         if response.status_code == 403:
-            raise MailError("forbidden")
+            raise MailError("forbidden", detail=detail)
         if response.status_code == 429 or response.status_code >= 500:
-            raise MailError("throttled" if response.status_code == 429 else "unexpected", retryable=True)
-        raise MailError("rejected")
+            raise MailError("throttled" if response.status_code == 429 else "unexpected", retryable=True, detail=detail)
+        raise MailError("rejected", detail=detail or f"HTTP {response.status_code}")
     raise MailError("unexpected")  # pragma: no cover - the loop returns or raises
 
 
@@ -293,12 +342,12 @@ def note_failure(error: MailError) -> None:
     """Remember the last send failure where the settings page shows it (only a failure that needs a new sign-in changes the state)."""
     with connect() as db:
         if db.execute("SELECT 1 FROM email_connection WHERE singleton_id=1").fetchone() is not None:
-            _save(db, last_error=error.code, **({"state": "error"} if error.reconnect else {}))
+            _save(db, last_error=error.code, last_detail=error.detail, **({"state": "error"} if error.reconnect else {}))
 
 
 def note_success() -> None:
     with connect() as db:
-        db.execute("UPDATE email_connection SET last_error=NULL WHERE singleton_id=1 AND state='connected' AND last_error IS NOT NULL")
+        db.execute("UPDATE email_connection SET last_error=NULL,last_detail=NULL WHERE singleton_id=1 AND state='connected' AND last_error IS NOT NULL")
 
 
 def compose(template: str | None, payload: dict[str, Any]) -> tuple[str, str]:
