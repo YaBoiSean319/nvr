@@ -250,7 +250,7 @@ export function AiSection({ group, cameras, admin }: SectionProps) {
   const key = ["camera-groups", group.id, "ai"] as const;
   const query = useQuery({ queryKey: key, queryFn: ({ signal }) => getGroupAi(group.id, signal) });
   const published = useMemo(() => (query.data ? {
-    enabled: query.data.enabled, analysis_fps: query.data.analysis_fps, confidence_threshold: query.data.confidence_threshold,
+    enabled: query.data.enabled, analysis_fps: query.data.analysis_fps, confidence_threshold: query.data.confidence_threshold, vehicle_confidence_threshold: query.data.vehicle_confidence_threshold,
     use_substream: query.data.use_substream, zones: query.data.zones as Zone[],
   } : undefined), [query.data]);
   const tab = useTabDraft(published, {
@@ -261,7 +261,7 @@ export function AiSection({ group, cameras, admin }: SectionProps) {
         const fresh = await putGroupAi(group.id, draft);
         client.setQueryData(key, fresh);
         invalidate(client);
-        return ok({ enabled: fresh.enabled, analysis_fps: fresh.analysis_fps, confidence_threshold: fresh.confidence_threshold, use_substream: fresh.use_substream, zones: fresh.zones }, "Saved AI settings.");
+        return ok({ enabled: fresh.enabled, analysis_fps: fresh.analysis_fps, confidence_threshold: fresh.confidence_threshold, vehicle_confidence_threshold: fresh.vehicle_confidence_threshold, use_substream: fresh.use_substream, zones: fresh.zones }, "Saved AI settings.");
       } catch (error) {
         return bad(base, error, "AI settings");
       }
@@ -278,7 +278,8 @@ export function AiSection({ group, cameras, admin }: SectionProps) {
         <label className="check"><input type="checkbox" checked={draft.enabled} onChange={event => tab.change({ enabled: event.target.checked })} /> Detect people and vehicles</label>
         <div className="field-row">
           <label className="field"><span>Frames analysed per second</span><input type="number" min={0.1} max={5} step={0.1} value={draft.analysis_fps} onChange={event => tab.change({ analysis_fps: Number(event.target.value) })} /></label>
-          <label className="field"><span>Confidence threshold</span><input type="number" min={0.1} max={0.99} step={0.01} value={draft.confidence_threshold} onChange={event => tab.change({ confidence_threshold: Number(event.target.value) })} /></label>
+          <label className="field"><span>Person confidence threshold</span><input type="number" min={0.1} max={0.99} step={0.01} value={draft.confidence_threshold} onChange={event => tab.change({ confidence_threshold: Number(event.target.value) })} /></label>
+          <label className="field"><span>Vehicle confidence threshold</span><input type="number" min={0.1} max={0.99} step={0.01} value={draft.vehicle_confidence_threshold ?? ""} placeholder={String(query.data.effective_vehicle_confidence_threshold)} onChange={event => tab.change({ vehicle_confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
         </div>
         <label className="check"><input type="checkbox" checked={draft.use_substream} onChange={event => tab.change({ use_substream: event.target.checked })} /> Analyse the lower-resolution substream</label>
       </fieldset>

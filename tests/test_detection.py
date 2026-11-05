@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.credentials import encrypt
-from app.detection import DetectionManager, MODEL_ID, MODEL_VERSION, point_in_zones, record_observations
+from app.detection import DetectionManager, MODEL_ID, MODEL_VERSION, effective_vehicle_threshold, keep_confident_vehicles, point_in_zones, record_observations
 from app.main import app
 from app.principal import administrator, current_user
 from app.store import connect, initialize
@@ -90,6 +90,30 @@ class DetectionApiTests(unittest.TestCase):
         self.assertEqual(item["model_version"], "sha256:fixture-1")
         self.assertEqual(item["provider"], "GPU")
         self.assertIn("do not prove", results.json()["coverage_note"])
+
+    def test_vehicles_need_more_confidence_than_people_by_default_and_the_threshold_can_be_set_per_camera_and_group(self):
+        self.assertEqual(effective_vehicle_threshold(None, 0.55), 0.7)  # A doorway at 56% is not a vehicle
+        self.assertEqual(effective_vehicle_threshold(None, 0.85), 0.85)  # Never below the threshold for people
+        self.assertEqual(effective_vehicle_threshold(0.6, 0.55), 0.6)  # What was set wins
+        seen = [{"label": "vehicle", "confidence": 0.56}, {"label": "vehicle", "confidence": 0.83}, {"label": "person", "confidence": 0.56}]
+        self.assertEqual([(item["label"], item["confidence"]) for item in keep_confident_vehicles(seen, 0.7)], [("vehicle", 0.83), ("person", 0.56)])
+        self.active_user = principal(2, "administrator", "administrator")
+        manager = app.state.detectors
+        manager.detector = object()
+        unset = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": True, "confidence_threshold": 0.55, "zones": []})
+        self.assertEqual(unset.status_code, 200, unset.text)
+        self.assertEqual((unset.json()["vehicle_confidence_threshold"], unset.json()["effective_vehicle_confidence_threshold"]), (None, 0.7))
+        chosen = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": True, "confidence_threshold": 0.55, "vehicle_confidence_threshold": 0.8, "zones": []})
+        self.assertEqual((chosen.json()["vehicle_confidence_threshold"], chosen.json()["effective_vehicle_confidence_threshold"]), (0.8, 0.8))
+        self.assertEqual(self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"enabled": True, "vehicle_confidence_threshold": 0.05, "zones": []}).status_code, 422)
+        group = self.client.post("/api/camera-groups", json={"name": "Vehicle group"}).json()["id"]
+        saved = self.client.put(f"/api/camera-groups/{group}/ai", json={"enabled": True, "confidence_threshold": 0.6, "vehicle_confidence_threshold": 0.9, "use_substream": True, "zones": []})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual((saved.json()["vehicle_confidence_threshold"], saved.json()["effective_vehicle_confidence_threshold"]), (0.9, 0.9))
+        with connect() as db:
+            db.execute("UPDATE cameras SET group_id=? WHERE id=?", (group, self.camera_id))
+        inherited = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={"inherit_group": True, "enabled": True, "zones": []})
+        self.assertEqual(inherited.json()["effective_vehicle_confidence_threshold"], 0.9)
 
     def test_invalid_zones_and_substream_are_rejected_and_only_one_camera_can_be_enabled(self):
         self.active_user = principal(2, "administrator", "administrator")

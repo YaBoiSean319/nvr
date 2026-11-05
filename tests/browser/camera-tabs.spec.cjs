@@ -114,12 +114,14 @@ test("AI overrides the group or inherits it, with the source visible", async ({ 
   await form.getByLabel("Use the Operations group's AI settings").uncheck();
   await form.getByLabel("Analyse the lower-resolution substream").uncheck();
   await form.getByLabel("Frames analysed per second").fill("1.5");
-  await form.getByLabel("Confidence threshold").fill("0.7");
+  await form.getByLabel("Person confidence threshold").fill("0.7");
+  await expect(form.getByLabel("Vehicle confidence threshold")).toHaveAttribute("placeholder", "0.7");
+  await form.getByLabel("Vehicle confidence threshold").fill("0.8");
   await form.getByRole("group", { name: "AI zones" }).getByRole("button", { name: "Add zone" }).click();
   await form.getByRole("button", { name: "Save" }).click();
   await expect(form.getByRole("status")).toContainText("Saved AI settings (camera)");
   const ai = await (await page.request.get(`/api/cameras/${fixtures.camera_ids[2]}/ai`)).json();
-  expect([ai.config_source, ai.analysis_fps, ai.confidence_threshold, ai.zones]).toEqual(["camera", 1.5, 0.7, [{ x: 0.25, y: 0.25, width: 0.5, height: 0.5 }]]);
+  expect([ai.config_source, ai.analysis_fps, ai.confidence_threshold, ai.vehicle_confidence_threshold, ai.zones]).toEqual(["camera", 1.5, 0.7, 0.8, [{ x: 0.25, y: 0.25, width: 0.5, height: 0.5 }]]);
 
   await page.reload();
   await openTab(page, "Camera 003", "AI");

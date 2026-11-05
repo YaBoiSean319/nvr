@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.principal import Administrator, CurrentUser
 from app.store import connect
-from app.detection import detector_availability, effective_camera_config, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
+from app.detection import detector_availability, effective_camera_config, effective_vehicle_threshold, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
 from app.api.cameras import MotionZoneRequest
 
 router = APIRouter()
@@ -22,6 +22,7 @@ class AIDetectionConfigRequest(BaseModel):
     enabled: bool = False
     analysis_fps: float = Field(default=0.5, ge=0.1, le=5)
     confidence_threshold: float = Field(default=0.55, ge=0.1, le=0.99)
+    vehicle_confidence_threshold: float | None = Field(default=None, ge=0.1, le=0.99)  # Empty: the default for vehicles (see detection.DEFAULT_VEHICLE_THRESHOLD)
     use_substream: bool = True
     zones: list[MotionZoneRequest] = Field(default_factory=list, max_length=16)
     inherit_group: bool = False
@@ -82,6 +83,8 @@ def get_ai_detection_config(camera_id: str, _: CurrentUser) -> dict[str, object]
         "enabled": bool(effective.get("enabled", False)),
         "analysis_fps": effective.get("analysis_fps", 0.5),
         "confidence_threshold": effective.get("confidence_threshold", 0.55),
+        "vehicle_confidence_threshold": effective.get("vehicle_confidence_threshold"),
+        "effective_vehicle_confidence_threshold": effective.get("effective_vehicle_confidence_threshold", effective_vehicle_threshold(None, 0.55)),
         "use_substream": bool(effective.get("use_substream", True)),
         "zones": json.loads(effective.get("zones_json", "[]")),
         "config_source": effective.get("config_source", "default"),
@@ -112,8 +115,8 @@ async def update_ai_detection_config(
         if not payload.inherit_group and payload.enabled and payload.use_substream and not camera["live_substream_url_ciphertext"]:
             raise HTTPException(status_code=422, detail="Configure and validate a lower-resolution camera profile, or select the main stream")
         db.execute(
-            "UPDATE ai_camera_settings SET config_override=?,enabled=?,analysis_fps=?,confidence_threshold=?,use_substream=?,zones_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE camera_id=?",
-            (int(not payload.inherit_group), int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":")), camera_id),
+            "UPDATE ai_camera_settings SET config_override=?,enabled=?,analysis_fps=?,confidence_threshold=?,vehicle_confidence_threshold=?,use_substream=?,zones_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE camera_id=?",
+            (int(not payload.inherit_group), int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, payload.vehicle_confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":")), camera_id),
         )
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "ai_detection_configured", "camera", camera_id,
@@ -135,6 +138,8 @@ def _group_ai_view(group_id: str) -> dict[str, object]:
         "enabled": bool(config["enabled"]) if config else False,
         "analysis_fps": config["analysis_fps"] if config else 0.5,
         "confidence_threshold": config["confidence_threshold"] if config else 0.55,
+        "vehicle_confidence_threshold": config["vehicle_confidence_threshold"] if config else None,
+        "effective_vehicle_confidence_threshold": effective_vehicle_threshold(config["vehicle_confidence_threshold"] if config else None, config["confidence_threshold"] if config else 0.55),
         "use_substream": bool(config["use_substream"]) if config else True,
         "zones": json.loads(config["zones_json"]) if config else [],
         "camera_count": camera_count, "inherited_camera_count": inherited_count,
@@ -164,9 +169,9 @@ async def update_group_ai_config(
             if missing:
                 raise HTTPException(status_code=422, detail=f"{missing} inherited camera(s) do not have a validated lower-resolution profile; choose the main stream or configure the profiles")
         db.execute(
-            "INSERT INTO ai_group_settings(group_id,enabled,analysis_fps,confidence_threshold,use_substream,zones_json,updated_at) VALUES(?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now')) "
-            "ON CONFLICT(group_id) DO UPDATE SET enabled=excluded.enabled,analysis_fps=excluded.analysis_fps,confidence_threshold=excluded.confidence_threshold,use_substream=excluded.use_substream,zones_json=excluded.zones_json,updated_at=excluded.updated_at",
-            (group_id, int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":"))),
+            "INSERT INTO ai_group_settings(group_id,enabled,analysis_fps,confidence_threshold,vehicle_confidence_threshold,use_substream,zones_json,updated_at) VALUES(?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now')) "
+            "ON CONFLICT(group_id) DO UPDATE SET enabled=excluded.enabled,analysis_fps=excluded.analysis_fps,confidence_threshold=excluded.confidence_threshold,vehicle_confidence_threshold=excluded.vehicle_confidence_threshold,use_substream=excluded.use_substream,zones_json=excluded.zones_json,updated_at=excluded.updated_at",
+            (group_id, int(payload.enabled), payload.analysis_fps, payload.confidence_threshold, payload.vehicle_confidence_threshold, int(payload.use_substream), json.dumps(zones, separators=(",", ":"))),
         )
         camera_ids = [row[0] for row in db.execute("SELECT c.id FROM cameras c LEFT JOIN ai_camera_settings s ON s.camera_id=c.id WHERE c.group_id=? AND c.enabled=1 AND COALESCE(s.config_override,0)=0", (group_id,)).fetchall()]
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
