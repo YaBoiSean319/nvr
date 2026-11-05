@@ -206,6 +206,18 @@ def box_iou(left: dict[str, float], right: dict[str, float]) -> float:
     return intersection / union if union > 0 else 0.0
 
 
+DEFAULT_VEHICLE_THRESHOLD = 0.70  # Vehicles are scored lower than people and an empty doorway or hedge can reach the person threshold: ask for more unless told otherwise
+
+
+def effective_vehicle_threshold(stored: float | None, person_threshold: float) -> float:
+    """The confidence a vehicle needs: what was set, or the default (never less than the threshold for people)."""
+    return float(stored) if stored is not None else max(float(person_threshold), DEFAULT_VEHICLE_THRESHOLD)
+
+
+def keep_confident_vehicles(observations: list[dict[str, Any]], vehicle_threshold: float) -> list[dict[str, Any]]:
+    return [item for item in observations if item["label"] != "vehicle" or item["confidence"] >= vehicle_threshold]
+
+
 def effective_camera_config(camera_id: str) -> dict[str, Any] | None:
     with connect() as db:
         camera = db.execute("SELECT group_id FROM cameras WHERE id=? AND enabled=1", (camera_id,)).fetchone()
@@ -224,6 +236,8 @@ def effective_camera_config(camera_id: str) -> dict[str, Any] | None:
         result = {"enabled": 0, "analysis_fps": 0.5, "confidence_threshold": 0.55, "use_substream": 1, "zones_json": "[]", "config_source": "default"}
     result["enabled"] = bool(result["enabled"])
     result["use_substream"] = bool(result["use_substream"])
+    result["vehicle_confidence_threshold"] = result.get("vehicle_confidence_threshold")  # Empty: the default
+    result["effective_vehicle_confidence_threshold"] = effective_vehicle_threshold(result["vehicle_confidence_threshold"], result["confidence_threshold"])
     result["provider"] = str(runtime["provider"]) if runtime else "CPU"
     result["model_id"] = str(runtime["model_id"]) if runtime else MODEL_ID
     model = next((item for item in model_options() if item["id"] == result["model_id"]), None)
@@ -519,7 +533,7 @@ class DetectionManager:
         config = effective_camera_config(camera_id)
         task = self.tasks.get(camera_id)
         signature = None if config is None else (
-            bool(config["enabled"]), float(config["analysis_fps"]), float(config["confidence_threshold"]),
+            bool(config["enabled"]), float(config["analysis_fps"]), float(config["confidence_threshold"]), float(config["effective_vehicle_confidence_threshold"]),
             bool(config["use_substream"]), config["zones_json"], config["config_source"],
             config["provider"], config["model_id"], config["model_version"],
         )
@@ -659,8 +673,11 @@ class DetectionManager:
                                 self.capacity.note_late(camera_id)
                             await self._db(set_camera_state, camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
                         infer_started = time.monotonic()
-                        observations = await asyncio.to_thread(detector.infer, frame, float(config["confidence_threshold"]))
+                        person_threshold, vehicle_threshold = float(config["confidence_threshold"]), float(config["effective_vehicle_confidence_threshold"])
+                        observations = await asyncio.to_thread(detector.infer, frame, min(person_threshold, vehicle_threshold))
+                        observations = [item for item in observations if item["label"] == "vehicle" or item["confidence"] >= person_threshold]
                         self.capacity.note_inference(time.monotonic() - infer_started)
+                    observations = keep_confident_vehicles(observations, vehicle_threshold)
                     observations = [item for item in observations if point_in_zones(item["box"], zones)]
                     await asyncio.to_thread(attributes.describe, frame, observations, attribute_model)
                     at = self.clock()

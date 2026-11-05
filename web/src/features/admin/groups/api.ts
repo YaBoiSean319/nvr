@@ -9,7 +9,7 @@ export interface GroupSchedule { group_id: string; configured: boolean; timezone
 export interface GroupRetention { group_id: string; configured: boolean; retention_days: number; policy_source: string }
 export interface GroupStorage { group_id: string; volume_id: string; configured_volumes: string[] }
 export interface GroupAi {
-  group_id: string; configured: boolean; enabled: boolean; analysis_fps: number; confidence_threshold: number; use_substream: boolean; zones: Zone[];
+  group_id: string; configured: boolean; enabled: boolean; analysis_fps: number; confidence_threshold: number; vehicle_confidence_threshold: number | null; effective_vehicle_confidence_threshold: number; use_substream: boolean; zones: Zone[];
   camera_count: number; inherited_camera_count: number;
 }
 
@@ -26,5 +26,5 @@ export const deleteGroupRetention = (id: string) => api<void>(`${at(id)}/retenti
 export const getGroupStorage = (id: string, signal?: AbortSignal) => api<GroupStorage>(`${at(id)}/storage-volume`, { signal });
 export const putGroupStorage = (id: string, volume_id: string | null) => api<GroupStorage>(`${at(id)}/storage-volume`, { method: "PUT", body: { volume_id } });
 export const getGroupAi = (id: string, signal?: AbortSignal) => api<GroupAi>(`${at(id)}/ai`, { signal });
-export const putGroupAi = (id: string, body: Pick<GroupAi, "enabled" | "analysis_fps" | "confidence_threshold" | "use_substream" | "zones">) =>
+export const putGroupAi = (id: string, body: Pick<GroupAi, "enabled" | "analysis_fps" | "confidence_threshold" | "vehicle_confidence_threshold" | "use_substream" | "zones">) =>
   api<GroupAi>(`${at(id)}/ai`, { method: "PUT", body });

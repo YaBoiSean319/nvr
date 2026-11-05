@@ -56,6 +56,8 @@ export interface CameraAi {
   enabled: boolean;
   analysis_fps: number;
   confidence_threshold: number;
+  vehicle_confidence_threshold: number | null;
+  effective_vehicle_confidence_threshold: number;
   use_substream: boolean;
   zones: Zone[];
   config_source: string;
@@ -96,7 +98,7 @@ export const getRetention = (id: string, signal?: AbortSignal) => api<CameraRete
 export const putRetention = (id: string, retention_days: number) => api<CameraRetention>(`${at(id)}/retention`, { method: "PUT", body: { retention_days } });
 export const deleteRetention = (id: string) => api<void>(`${at(id)}/retention`, { method: "DELETE" });
 export const getAi = (id: string, signal?: AbortSignal) => api<CameraAi>(`${at(id)}/ai`, { signal });
-export const putAi = (id: string, body: Pick<CameraAi, "enabled" | "analysis_fps" | "confidence_threshold" | "use_substream" | "zones"> & { inherit_group: boolean }) =>
+export const putAi = (id: string, body: Pick<CameraAi, "enabled" | "analysis_fps" | "confidence_threshold" | "vehicle_confidence_threshold" | "use_substream" | "zones"> & { inherit_group: boolean }) =>
   api<CameraAi>(`${at(id)}/ai`, { method: "PUT", body });
 export const getAiCoverage = (id: string, signal?: AbortSignal) => api<AiCoverage>(`${at(id)}/ai/coverage`, { signal });
 export const updateRecording = (id: string, body: { recording_enabled?: boolean; recording_mode?: ScheduleMode; motion_pre_roll_seconds?: number; motion_post_roll_seconds?: number; audio_enabled?: boolean }) =>
