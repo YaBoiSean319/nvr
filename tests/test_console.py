@@ -309,7 +309,7 @@ class TokenTests(ConsoleCase):
             self.assertNotIn(self.b_token.encode(), blob)
         text = json.dumps([self.admin.get("/api/console").json(), self.admin.get("/api/console/status").json(), self.full.get("/api/console/status").json(),
                            self.admin.get("/api/admin/access-grants").json()])
-        for secret in (self.a_token, self.b_token, self.a_token.split("_")[-1]):
+        for secret in (self.a_token, self.b_token, self.a_token.split("_", 2)[-1]):
             self.assertNotIn(secret, text)
 
     def test_the_console_cannot_change_anything_at_a_site(self):
