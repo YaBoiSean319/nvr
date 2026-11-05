@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { frameAt, holdFor, pictureRect, trail, type TrackPoint } from "./overlay";
+import { holdFor, interpolatedFrameAt, pictureRect, trail, type TrackPoint } from "./overlay";
 import { useOverlayFrames } from "./useOverlayData";
 import { useClockTime, usePlaybackStore } from "./store";
 
@@ -15,7 +15,7 @@ export function TrackOverlay({ cameraId, video, path, visible }: { cameraId: str
   const frames = useOverlayFrames(cameraId, true);
   const times = useMemo(() => frames.map(frame => frame.at), [frames]);
   const hold = useMemo(() => holdFor(times), [times]);
-  const frame = visible ? frameAt(frames, time, hold, times) : null;
+  const frame = visible ? interpolatedFrameAt(frames, time, hold, times) : null;
   const wrapper = useRef<HTMLDivElement>(null);
   const [rect, setRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
 

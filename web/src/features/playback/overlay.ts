@@ -52,6 +52,32 @@ export function frameAt(frames: OverlayFrame[], time: number, hold?: number, tim
   return time - frame.at <= (hold ?? holdFor(times)) ? frame : null;
 }
 
+type Box = TrackPoint["box"];
+
+const lerp = (from: number, to: number, progress: number) => from + (to - from) * progress;
+
+/**
+ * The frame to draw at ``time``, with each followed object placed between where it was in this analysed frame and where it is in the next one,
+ * as far through as the clock is. The detections are analysed a few times a second at most, so drawing each box where it was last seen leaves it
+ * behind a moving person by up to a whole interval; playback has the later detection too, so the box can be where the person was at this moment.
+ * An object that is not in the next frame (it left, or was hidden), a gap that is not an ordinary interval, and a box with no track stay as stored.
+ */
+export function interpolatedFrameAt(frames: OverlayFrame[], time: number, hold?: number, times = frames.map(frame => frame.at)): OverlayFrame | null {
+  const frame = frameAt(frames, time, hold, times);
+  if (!frame) return null;
+  const following = frames[lastAtOrBefore(times, time) + 1];
+  const limit = hold ?? holdFor(times);
+  if (!following || following.at <= frame.at || following.at - frame.at > limit || time <= frame.at) return frame;
+  const progress = Math.min(1, (time - frame.at) / (following.at - frame.at));
+  const boxes = frame.boxes.map(item => {
+    const later = item.track_id ? following.boxes.find(candidate => candidate.track_id === item.track_id && candidate.label === item.label) : undefined;
+    if (!later) return item;
+    const box: Box = { x: lerp(item.box.x, later.box.x, progress), y: lerp(item.box.y, later.box.y, progress), width: lerp(item.box.width, later.box.width, progress), height: lerp(item.box.height, later.box.height, progress) };
+    return { ...item, box };
+  });
+  return { at: frame.at, boxes };
+}
+
 export interface TrailSegment { from: { x: number; y: number }; to: { x: number; y: number }; opacity: number; at: number }
 
 export const TRAIL_MS = 12_000;

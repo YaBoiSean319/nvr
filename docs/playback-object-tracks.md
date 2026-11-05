@@ -4,7 +4,7 @@ Playback can draw the objects the AI worker found over the video, and follow one
 
 ## Using it
 
-- **Boxes** (button, or **B**) shows a box on each person and vehicle in the stored detections for the time on the shared playback clock. It is off every time you open Playback.
+- **Boxes** (button, or **B**) shows a box on each person and vehicle in the stored detections for the time on the shared playback clock. It is off every time you open Playback. Detections are analysed a few times a second at most (every two seconds by default), so between two stored detections a box moves from where its object was to where it is in the next one, as far through as the clock is; an object that is not in the next detection stays where it was last seen.
 - Click a box to **follow** that object: its path so far is drawn as a trail that fades with age (the last 12 seconds), and **◀ Object** / **Object ▶** (or **[** and **]**) jump the clock to the object's previous or next stored appearance. A jump crosses any gap where the object was hidden for a few seconds, because it is the same track. **Stop following** (or clicking the box again) ends it. A box with a dashed outline has no track (the worker did not follow it), so it cannot be followed.
 - The message under the controls says when there is no earlier or later appearance, or when it is outside the searched range.
 
