@@ -57,6 +57,20 @@ test("boxes are off by default, toggle from the keyboard, and are not remembered
   await expect(overlay(page)).toHaveCount(0);
 });
 
+/**
+ * Where the person's box should be (percent from the left) at this offset: the analysed frame at or before it, moved toward the next analysed frame's
+ * position by how far through the interval the clock is; as stored when the person is not in the next frame.
+ */
+function personLeft(seeded, offset) {
+  const index = seeded.frames.filter(frame => frame <= offset).length - 1;
+  const from = seeded.frames[index];
+  const to = seeded.frames[index + 1];
+  const start = seeded.person_x[String(from)];
+  if (start === undefined) return null;
+  const end = to === undefined ? undefined : seeded.person_x[String(to)];
+  return (end === undefined ? start : start + (end - start) * (offset - from) / (to - from)) * 100;
+}
+
 test("boxes follow the stored detections of the shared clock at 1x and while frame stepping", async ({ page }) => {
   const { anchor, seeded } = await open(page);
   await page.keyboard.press("b");
@@ -70,9 +84,11 @@ test("boxes follow the stored detections of the shared clock at 1x and while fra
   const person = page.locator(`.track-box[data-track-id="${seeded.person}"]`);
   await expect(person).toHaveAttribute("data-at", String(anchor + 4000));
   const left = async () => parseFloat(await person.evaluate(element => element.style.left));
-  expect(await left()).toBeCloseTo(seeded.person_x["4"] * 100, 1);
+  // 5 s is halfway from the 4 s frame (10% from the left) to the 6 s frame (22%): the box is on the person now, not where the person was a second ago.
+  expect(personLeft(seeded, (await clockTime(page) - anchor) / 1000)).toBeCloseTo(16, 5);
+  expect(await left()).toBeCloseTo(personLeft(seeded, (await clockTime(page) - anchor) / 1000), 0);
 
-  // Stepping frame by frame (15 fps) across the 6 s analysed frame: at every step the boxes are the latest analysed frame at or before the clock.
+  // Stepping frame by frame (15 fps) across the 6 s analysed frame: at every step the boxes belong to the latest analysed frame at or before the clock (and sit between it and the next).
   const next = controls(page).getByRole("button", { name: "Next frame" });
   const seen = [];
   await tile(page).click();
@@ -87,7 +103,7 @@ test("boxes follow the stored detections of the shared clock at 1x and while fra
   expect(new Set(seen).size).toBe(2); // It crossed from the 4 s frame to the 6 s frame, and only there
   expect(seen[0]).toBe(anchor + 4000);
   expect(seen[seen.length - 1]).toBe(anchor + 6000);
-  expect(await left()).toBeCloseTo(seeded.person_x["6"] * 100, 1);
+  expect(await left()).toBeCloseTo(personLeft(seeded, (await clockTime(page) - anchor) / 1000), 0);
 
   // At 1x: play from here, stop once the clock has passed the 8 s frame, and the boxes are that frame's.
   await controls(page).getByRole("button", { name: "Play" }).click();
@@ -95,7 +111,7 @@ test("boxes follow the stored detections of the shared clock at 1x and while fra
   await controls(page).getByRole("button", { name: "Pause" }).click();
   const paused = await clockTime(page);
   await expect.poll(async () => (await boxes(page).first().getAttribute("data-at")) ?? "none").toBe(String(anchor + 1000 * expectedFrame(seeded.frames, (paused - anchor) / 1000)));
-  expect(await left()).toBeCloseTo(seeded.person_x["8"] * 100, 1);
+  expect(await left()).toBeCloseTo(personLeft(seeded, (paused - anchor) / 1000), 0);
 
   // While the person is hidden (the 10 s frame) only the vehicle is drawn.
   await seekBy(page, 5);
