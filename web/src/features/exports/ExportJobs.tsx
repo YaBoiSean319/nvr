@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ApiError } from "@/api/client";
 import { useCameras, useCancelExport, useDisplaySettings, useExportJobs, useRetryExport } from "@/api/queries";
 import type { ExportJob } from "@/api/types";
@@ -5,6 +6,7 @@ import { formatRelative } from "@/lib/time";
 import { formatSiteDateTime } from "@/lib/zonedTime";
 
 const SHOWN = 20;
+const FINISHED_SHOWN = 3; // Of the jobs that are done (ready, expired, cancelled), the newest few; the rest are one press away
 
 function describe(job: ExportJob): string {
   switch (job.status) {
@@ -29,7 +31,13 @@ export function ExportJobs() {
   const names = new Map((cameras.data ?? []).map(camera => [camera.id, camera.name]));
   const failure = cancel.error ?? retry.error;
   const when = (iso: string) => (display.data ? formatSiteDateTime(Date.parse(iso), display.data, false) : iso);
-  const list = [...(jobs.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, SHOWN);
+  const [allFinished, setAllFinished] = useState(false);
+  const newest = [...(jobs.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, SHOWN);
+  // What needs a look comes first (running, waiting, failed); finished work follows, newest first.
+  const needsAttention = (job: ExportJob) => job.status === "queued" || job.status === "running" || job.status === "failed";
+  const finished = newest.filter(job => !needsAttention(job));
+  const hidden = allFinished ? 0 : Math.max(0, finished.length - FINISHED_SHOWN);
+  const list = [...newest.filter(needsAttention), ...(allFinished ? finished : finished.slice(0, FINISHED_SHOWN))];
 
   if (jobs.isPending) return <p className="muted">Loading export jobs…</p>;
   if (!list.length) return <p className="muted">No exports yet. Mark a range in Playback to export footage.</p>;
@@ -68,6 +76,7 @@ export function ExportJobs() {
           );
         })}
       </ul>
+      {hidden ? <p><button type="button" className="button" onClick={() => setAllFinished(true)}>Show {hidden} older finished export{hidden === 1 ? "" : "s"}</button></p> : null}
     </>
   );
 }

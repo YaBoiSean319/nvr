@@ -68,7 +68,7 @@ test("administrators see every destination and status opens with the keyboard", 
   const drawer = page.getByRole("dialog", { name: "Operational status" });
   await expect(drawer).toBeVisible();
   await expect(drawer.getByRole("heading", { name: "Recording" })).toBeVisible();
-  await expect(drawer.getByRole("heading", { name: "Live video" })).toBeVisible();
+  await expect(drawer.getByRole("tab", { name: /Live video/ })).toBeVisible(); // One section at a time: this one is open, the others are a tab away
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
   await expect(recording).toBeFocused();

@@ -1,9 +1,10 @@
-import { useEffect } from "react";
+import * as Tabs from "@radix-ui/react-tabs";
+import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router";
 import { create } from "zustand";
 import { ApiError } from "@/api/client";
 import { useAcknowledgeIncident, useCameras, useConsoleStatus, useExportJobs, useFailoverStatus, useOpenIncidents, type ConsoleSite, type FailoverStatus } from "@/api/queries";
-import type { Camera } from "@/api/types";
+import type { Camera, Incident } from "@/api/types";
 import { Drawer } from "@/components/Drawer";
 import { AlarmsInbox } from "@/features/alarms/AlarmsInbox";
 import { useAlarms } from "@/features/alarms/api";
@@ -166,24 +167,38 @@ function MaintenanceSection({ focused, onClose }: { focused: boolean; onClose: (
   );
 }
 
-function StatusDetails({ summary, focus, sites, failover, onClose }: { summary: StatusSummary; focus: Section | null; sites: ConsoleSite[]; failover: FailoverStatus | undefined; onClose: () => void }) {
+const INCIDENTS_SHOWN = 8;
+
+/** The open incidents: who needs a look first, a filter, one button for the lot, and the rest behind "Show more". */
+function IncidentsPanel({ open, focused }: { open: Incident[]; focused: boolean }) {
   const acknowledge = useAcknowledgeIncident();
+  const [filter, setFilter] = useState<"all" | "active" | "acknowledged">("all");
+  const [all, setAll] = useState(false);
+  const active = open.filter(incident => incident.state === "active");
+  const acknowledged = open.filter(incident => incident.state === "acknowledged");
+  const shown = (filter === "active" ? active : filter === "acknowledged" ? acknowledged : [...active, ...acknowledged])
+    .sort((a, b) => (a.state === b.state ? b.last_seen_at.localeCompare(a.last_seen_at) : a.state === "active" ? -1 : 1));
+  const visible = all ? shown : shown.slice(0, INCIDENTS_SHOWN);
+  const acknowledgeAll = () => { void Promise.allSettled(active.map(incident => acknowledge.mutateAsync(incident.id))); };
   return (
-    <div className="status-details">
-      <section aria-labelledby="status-recording" data-focused={focus === "recording"}>
-        <h3 id="status-recording">Recording</h3>
-        <CameraList cameras={[...summary.recording.failing, ...summary.recording.uncertain]} empty="Every enabled camera is recording as its policy expects." />
-      </section>
-      <section aria-labelledby="status-video" data-focused={focus === "video"}>
-        <h3 id="status-video">Live video</h3>
-        <CameraList cameras={summary.video.cameras} empty="Every recorded camera has delivered fresh video recently. Freshness is measured for cameras with recording enabled." />
-      </section>
-      <section aria-labelledby="status-incidents" data-focused={focus === "incidents"}>
-        <h3 id="status-incidents">Incidents</h3>
-        {acknowledge.error ? <p className="notice" data-tone="bad" role="alert">{acknowledge.error instanceof ApiError ? acknowledge.error.detail : "Could not acknowledge the incident."}</p> : null}
-        {summary.incidents.open.length ? (
-          <ul className="status-list">
-            {summary.incidents.open.map(incident => (
+    <section aria-labelledby="status-incidents" data-focused={focused}>
+      <h3 id="status-incidents">Incidents</h3>
+      {acknowledge.error ? <p className="notice" data-tone="bad" role="alert">{acknowledge.error instanceof ApiError ? acknowledge.error.detail : "Could not acknowledge the incident."}</p> : null}
+      {open.length ? (
+        <>
+          <div className="status-toolbar">
+            <p className="status-counts" role="status">{active.length} active · {acknowledged.length} acknowledged</p>
+            <div role="group" aria-label="Show incidents" className="status-filter">
+              {(["all", "active", "acknowledged"] as const).map(value => (
+                <button key={value} type="button" className="button" aria-pressed={filter === value} onClick={() => { setFilter(value); setAll(false); }}>
+                  {value === "all" ? "All" : value === "active" ? "Active" : "Acknowledged"}
+                </button>
+              ))}
+            </div>
+            {active.length > 1 ? <button type="button" className="button" onClick={acknowledgeAll} disabled={acknowledge.isPending}>Acknowledge all {active.length} active</button> : null}
+          </div>
+          <ul className="status-list" aria-label="Open incidents">
+            {visible.map(incident => (
               <li key={incident.id}>
                 <strong>{incident.summary}</strong>
                 <span className="muted">
@@ -198,43 +213,99 @@ function StatusDetails({ summary, focus, sites, failover, onClose }: { summary: 
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="muted">No active incidents.</p>
-        )}
-      </section>
-      {sites.length ? (
-        <section aria-labelledby="status-sites" data-focused={focus === "sites"}>
-          <h3 id="status-sites">Sites</h3>
-          <ul className="status-list">
-            {sites.map(site => (
-              <li key={site.id}>
-                <strong>{site.name}</strong>
-                <span className="muted">
-                  {site.state === "ok" ? "Reachable" : site.state === "refused" ? "Refused the console's token" : site.state === "disabled" ? "Off" : "Unreachable"}
-                  {" · last contact "}{site.last_contact_at ? formatRelative(site.last_contact_at) : "never"}
-                  {site.camera_count !== null ? ` · ${site.camera_count} cameras` : ""}{site.open_alarms ? ` · ${site.open_alarms} open alarms` : ""}
-                </span>
-              </li>
-            ))}
-          </ul>
+          {!all && shown.length > INCIDENTS_SHOWN ? <p><button type="button" className="button" onClick={() => setAll(true)}>Show {shown.length - INCIDENTS_SHOWN} more</button></p> : null}
+          {!shown.length ? <p className="muted">No {filter} incidents.</p> : null}
+        </>
+      ) : (
+        <p className="muted">No active incidents.</p>
+      )}
+    </section>
+  );
+}
+
+type TabInfo = { id: Section; label: string; count: number; tone: Tone };
+
+/** One section of the status at a time: tabs with a count each, opened on the one that was asked for. */
+function StatusDetails({ summary, focus, sites, failover, onClose }: { summary: StatusSummary; focus: Section | null; sites: ConsoleSite[]; failover: FailoverStatus | undefined; onClose: () => void }) {
+  const maintenance = useMaintenance().data;
+  const windows = (maintenance?.windows ?? []).filter(window => window.state !== "ended");
+  const downSites = sites.filter(site => site.state === "unreachable" || site.state === "refused");
+  const tabs: TabInfo[] = [
+    { id: "incidents", label: "Incidents", count: summary.incidents.open.length, tone: summary.incidents.tone },
+    { id: "recording", label: "Recording", count: summary.recording.failing.length + summary.recording.uncertain.length, tone: summary.recording.tone },
+    { id: "video", label: "Live video", count: summary.video.cameras.length, tone: summary.video.tone },
+    { id: "jobs", label: "Exports", count: summary.jobs.active.length + summary.jobs.failed.length, tone: summary.jobs.tone },
+    { id: "maintenance", label: "Maintenance", count: windows.length, tone: windows.length ? "warn" : "neutral" },
+    ...(sites.length ? [{ id: "sites" as const, label: "Sites", count: downSites.length, tone: (downSites.length ? "bad" : "good") as Tone }] : []),
+    ...(failover && failover.role !== "off" ? [{ id: "failover" as const, label: "Failover", count: 0, tone: failoverTone(failover) }] : []),
+  ];
+  const [chosen, setChosen] = useState<Section>(focus ?? "incidents");
+  // Asking for another section while this is open (an export finishing, a link) moves to it.
+  useEffect(() => { if (focus) setChosen(focus); }, [focus]);
+  const current = tabs.some(tab => tab.id === chosen) ? chosen : tabs[0]!.id;
+  return (
+    <Tabs.Root className="status-details" value={current} onValueChange={value => setChosen(value as Section)}>
+      <Tabs.List className="status-tabs" aria-label="Status sections">
+        {tabs.map(tab => (
+          <Tabs.Trigger key={tab.id} value={tab.id} className="status-tab">
+            <span className="status-dot" data-tone={tab.tone} aria-hidden="true" />
+            {tab.label}
+            {tab.count ? <span className="tab-count" data-tone={tab.tone}>{tab.count}</span> : null}
+          </Tabs.Trigger>
+        ))}
+      </Tabs.List>
+      <Tabs.Content value="incidents"><IncidentsPanel open={summary.incidents.open} focused={focus === "incidents"} /></Tabs.Content>
+      <Tabs.Content value="recording">
+        <section aria-labelledby="status-recording" data-focused={focus === "recording"}>
+          <h3 id="status-recording">Recording</h3>
+          <CameraList cameras={[...summary.recording.failing, ...summary.recording.uncertain]} empty="Every enabled camera is recording as its policy expects." />
         </section>
+      </Tabs.Content>
+      <Tabs.Content value="video">
+        <section aria-labelledby="status-video" data-focused={focus === "video"}>
+          <h3 id="status-video">Live video</h3>
+          <CameraList cameras={summary.video.cameras} empty="Every recorded camera has delivered fresh video recently. Freshness is measured for cameras with recording enabled." />
+        </section>
+      </Tabs.Content>
+      <Tabs.Content value="jobs">
+        <section aria-labelledby="status-jobs" data-focused={focus === "jobs"}>
+          <h3 id="status-jobs">Export jobs</h3>
+          <ExportJobs />
+        </section>
+      </Tabs.Content>
+      <Tabs.Content value="maintenance"><MaintenanceSection focused={focus === "maintenance"} onClose={onClose} /></Tabs.Content>
+      {sites.length ? (
+        <Tabs.Content value="sites">
+          <section aria-labelledby="status-sites" data-focused={focus === "sites"}>
+            <h3 id="status-sites">Sites</h3>
+            <ul className="status-list">
+              {sites.map(site => (
+                <li key={site.id}>
+                  <strong>{site.name}</strong>
+                  <span className="muted">
+                    {site.state === "ok" ? "Reachable" : site.state === "refused" ? "Refused the console's token" : site.state === "disabled" ? "Off" : "Unreachable"}
+                    {" · last contact "}{site.last_contact_at ? formatRelative(site.last_contact_at) : "never"}
+                    {site.camera_count !== null ? ` · ${site.camera_count} cameras` : ""}{site.open_alarms ? ` · ${site.open_alarms} open alarms` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </Tabs.Content>
       ) : null}
       {failover && failover.role !== "off" ? (
-        <section aria-labelledby="status-failover" data-focused={focus === "failover"}>
-          <h3 id="status-failover">Failover</h3>
-          <p>{failover.headline}</p>
-          <p className="muted">
-            {failover.role === "standby" ? `Last heard from the primary ${failover.last_contact_at ? formatRelative(failover.last_contact_at) : "never"}` : `Last answer from the standby ${failover.last_contact_at ? formatRelative(failover.last_contact_at) : "never"}`}
-            {failover.role === "standby" ? ` · configuration copied ${failover.last_sync_at ? formatRelative(failover.last_sync_at) : "never"}` : ""}
-            {failover.last_error ? ` · ${failover.last_error}` : ""}{failover.last_sync_error ? ` · ${failover.last_sync_error}` : ""}
-          </p>
-        </section>
+        <Tabs.Content value="failover">
+          <section aria-labelledby="status-failover" data-focused={focus === "failover"}>
+            <h3 id="status-failover">Failover</h3>
+            <p>{failover.headline}</p>
+            <p className="muted">
+              {failover.role === "standby" ? `Last heard from the primary ${failover.last_contact_at ? formatRelative(failover.last_contact_at) : "never"}` : `Last answer from the standby ${failover.last_contact_at ? formatRelative(failover.last_contact_at) : "never"}`}
+              {failover.role === "standby" ? ` · configuration copied ${failover.last_sync_at ? formatRelative(failover.last_sync_at) : "never"}` : ""}
+              {failover.last_error ? ` · ${failover.last_error}` : ""}{failover.last_sync_error ? ` · ${failover.last_sync_error}` : ""}
+            </p>
+          </section>
+        </Tabs.Content>
       ) : null}
-      <MaintenanceSection focused={focus === "maintenance"} onClose={onClose} />
-      <section aria-labelledby="status-jobs" data-focused={focus === "jobs"}>
-        <h3 id="status-jobs">Export jobs</h3>
-        <ExportJobs />
-      </section>
-    </div>
+    </Tabs.Root>
   );
 }
