@@ -172,6 +172,7 @@ test("Recording & storage: volume health, backup status and an on-demand backup"
     await route.fulfill({ response, json: { ...body, enabled: false, disabled_reason: "Set NVR_BACKUP_PASSPHRASE to enable encrypted configuration backups." } });
   });
   await page.reload();
+  await page.getByRole("tab", { name: "Backups" }).click();
   await expect(backups).toContainText("Backups are disabled: Set NVR_BACKUP_PASSPHRASE");
   await expect(backups.getByRole("button", { name: "Back up now" })).toBeDisabled();
 });
