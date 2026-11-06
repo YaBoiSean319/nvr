@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -52,6 +53,8 @@ from .store import connect
 logger = logging.getLogger("nvr.rules")
 
 WRONG_WAY_DISTANCE = 0.1
+# An object counts as still while its centre stays within this share of the frame of where it stopped.
+STILL_RADIUS = 0.03
 TAMPER_KINDS = ("covered", "moved", "defocused")
 FULL_FRAME = '{"x":0,"y":0,"width":1,"height":1}'
 DIRECTIONS = {"right": (1.0, 0.0), "left": (-1.0, 0.0), "down": (0.0, 1.0), "up": (0.0, -1.0)}
@@ -193,7 +196,26 @@ def _wrong_way(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoi
     return moments
 
 
-_CONDITIONS = {"zone_entry": _zone_entries, "line_crossing": _line_crossings, "loitering": _loitering, "wrong_way": _wrong_way}
+def _inactivity(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoint]:
+    """The first moment an object has stayed put (inside the zone, if there is one) for the set time; it can fire again only after the object has moved."""
+    zone, still_for = condition.get("zone"), timedelta(seconds=condition["still_seconds"])
+    moments: list[PathPoint] = []
+    anchor: PathPoint | None = None
+    reported = False
+    for point in path:
+        if zone is not None and not _inside(zone, point):
+            anchor, reported = None, False
+            continue
+        if anchor is None or math.hypot(point.x - anchor.x, point.y - anchor.y) > STILL_RADIUS:
+            anchor, reported = point, False
+            continue
+        if not reported and point.at - anchor.at >= still_for:
+            moments.append(point)
+            reported = True
+    return moments
+
+
+_CONDITIONS = {"zone_entry": _zone_entries, "line_crossing": _line_crossings, "loitering": _loitering, "wrong_way": _wrong_way, "inactivity": _inactivity}
 
 
 def condition_moments(rule: Rule, path: list[PathPoint]) -> list[PathPoint]:
