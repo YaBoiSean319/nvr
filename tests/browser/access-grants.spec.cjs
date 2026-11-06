@@ -1,9 +1,9 @@
 // Real-browser journeys for camera access grants (#119).
-const { test, expect, seedFixtures, signInAs, signInNext } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInAs, signInNext, settingsLink } = require("./helpers.cjs");
 
 async function openCameraAccess(page) {
   await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
-  await page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Users & access" }).click();
+  await (await settingsLink(page, "Users & access")).click();
   return page.getByRole("region", { name: "Camera access" });
 }
 

@@ -1,9 +1,9 @@
 // Real-browser journey for the viewing audit report (#120).
-const { test, expect, seedFixtures, signInAs, signInNext } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInAs, signInNext, settingsLink } = require("./helpers.cjs");
 
 async function openAudit(page) {
   await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
-  await page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Viewing audit" }).click();
+  await (await settingsLink(page, "Viewing audit")).click();
 }
 
 test("what an operator watches, exports and snapshots shows in the report by person and by camera, as CSV, and retention can be set", async ({ page, browser, baseURL }) => {

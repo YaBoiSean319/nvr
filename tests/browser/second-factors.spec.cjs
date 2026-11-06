@@ -1,6 +1,6 @@
 // Real-browser journeys for passkeys, authenticator apps and recovery codes (#118).
 const crypto = require("node:crypto");
-const { test, expect, FIXTURE_PASSWORD, seedFixtures, signInNext } = require("./helpers.cjs");
+const { test, expect, FIXTURE_PASSWORD, seedFixtures, signInNext, settingsLink } = require("./helpers.cjs");
 
 const nav = page => page.getByRole("navigation", { name: "Workspaces" });
 
@@ -169,7 +169,7 @@ test("when required, someone without a second factor must set one up first; an a
   await own.getByRole("button", { name: "Close" }).click();
 
   await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
-  await page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Users & access" }).click();
+  await (await settingsLink(page, "Users & access")).click();
   const policy = page.getByRole("region", { name: "Sign-in security" });
   await policy.getByLabel("Second factor for local accounts").selectOption("administrators");
   await expect(policy.getByRole("status")).toContainText("required for administrators");

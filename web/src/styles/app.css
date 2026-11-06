@@ -574,7 +574,16 @@
 
 /* --- settings ------------------------------------------------------------------------ */
 .settings-workspace { height: 100%; display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 0; }
-.settings-nav { display: grid; align-content: start; gap: 2px; padding: var(--n-space-3) var(--n-space-2); border-right: 1px solid var(--n-line); background: var(--n-panel); overflow-y: auto; }
+.settings-side { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; border-right: 1px solid var(--n-line); background: var(--n-panel); }
+.settings-find { margin: var(--n-space-3) var(--n-space-2) 0; }
+.settings-nav { display: grid; align-content: start; gap: 2px; padding: var(--n-space-3) var(--n-space-2); overflow-y: auto; }
+.settings-group { display: grid; gap: 2px; }
+.settings-group > summary { cursor: pointer; padding: 6px var(--n-space-3); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; color: var(--n-muted); border-radius: var(--n-radius-small); }
+.settings-group > summary:hover { color: var(--n-text); background: var(--n-raised); }
+.settings-group[open] > summary { color: var(--n-text); }
+.settings-group .section-link { margin-left: var(--n-space-2); }
+.settings-none { margin: var(--n-space-2) var(--n-space-3); }
+.settings-picker { display: none; }
 .settings-page { min-height: 0; overflow-y: auto; padding: var(--n-space-4); display: grid; align-content: start; gap: var(--n-space-3); }
 .settings-title { margin: 0; font-size: 20px; }
 .settings-stack { display: grid; gap: var(--n-space-3); max-width: 900px; }
@@ -596,7 +605,12 @@
 .webhook-list { list-style: none; padding: 0; gap: var(--n-space-3); }
 @media (max-width: 760px) {
   .settings-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .settings-nav { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--n-line); padding: var(--n-space-1) var(--n-space-2); }
+  .settings-side { display: grid; grid-template-rows: none; gap: var(--n-space-2); border-right: 0; border-bottom: 1px solid var(--n-line); padding: var(--n-space-2); }
+  .settings-find { margin: 0; }
+  .settings-nav { display: none; }
+  .settings-nav:has(.settings-none), .settings-find:not(:placeholder-shown) ~ .settings-nav { display: grid; max-height: 40vh; padding: 0; }
+  .settings-find:not(:placeholder-shown) ~ .settings-picker { display: none; }
+  .settings-picker { display: block; }
   .settings-page { padding: var(--n-space-3); }
 }
 
