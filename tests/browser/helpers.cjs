@@ -192,7 +192,8 @@ async function settingsLink(page, label) {
   const nav = page.getByRole("navigation", { name: "Settings categories" });
   const link = nav.getByRole("link", { name: label });
   await nav.waitFor(); // The groups are right from the first render, so look only once it is there
-  if (!(await link.isVisible())) await nav.locator("details").filter({ has: page.getByRole("link", { name: label }) }).locator("summary").click();
+  // A link inside a folded group is not in the accessibility tree, so the group is found by the link's text instead.
+  if (!(await link.isVisible())) await nav.locator("details").filter({ has: page.locator("a", { hasText: label }) }).locator("summary").click();
   return link;
 }
 

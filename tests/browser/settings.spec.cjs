@@ -295,7 +295,7 @@ test("categories are grouped under headings, only the open group lists its links
   await expect(page.getByRole("heading", { level: 1, name: "Camera hardening" })).toBeVisible();
   await expect(nav.getByRole("link", { name: "Camera hardening" })).toBeVisible();
   // Every one of the 22 categories is in exactly one group.
-  for (const summary of await nav.locator("details:not([open]) summary").all()) await summary.click();
+  while (await nav.locator("details:not([open])").count()) await nav.locator("details:not([open]) summary").first().click(); // Each click removes one from the list
   await expect(nav.getByRole("link")).toHaveCount(22);
   // The old address of the AI settings still works, under its new name.
   await page.goto("/settings/integrations");
