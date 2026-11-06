@@ -22,15 +22,22 @@ archives=/var/cache/apt/archives
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+mirrors=()
+if [ -r /etc/apt/apt-mirrors.txt ]; then
+  while read -r first _; do [ -n "$first" ] && mirrors+=("${first%/}"); done < /etc/apt/apt-mirrors.txt
+fi
+mirrors+=(http://archive.ubuntu.com/ubuntu)
+
 for attempt in 1 2 3; do
   echo "::group::Install $package, attempt $attempt"
   if sudo timeout -k 10s 120s apt-get "${apt_opts[@]}" update \
      && sudo apt-get "${apt_opts[@]}" install --no-install-recommends -y --print-uris "$package" 2>/dev/null \
         | sed -n "s/^'\([^']*\)' \([^ ]*\) .*/\1 \2/p" > "$work/uris"; then
-    if [ "$attempt" -gt 1 ]; then
-      # The runner's mirror was too slow: use the main archive for this attempt (and the security archive for what it serves).
-      sed -i -E 's#^http://azure\.archive\.ubuntu\.com/ubuntu/#http://archive.ubuntu.com/ubuntu/#' "$work/uris"
-    fi
+    # On the runners apt addresses packages as mirror+file:/etc/apt/apt-mirrors.txt/..., which only apt understands: turn that into a real URL on one of the
+    # mirrors the runner lists (the first on attempt 1, the next on each retry, the main Ubuntu archive last).
+    mirror="${mirrors[$(( (attempt - 1) % ${#mirrors[@]} ))]}"
+    sed -i -E "s#^mirror\+file:/etc/apt/apt-mirrors\.txt/#${mirror}/#" "$work/uris"
+    echo "fetching from $mirror"
     echo "$(wc -l < "$work/uris") packages to fetch"
     # Eight at a time, each with its own time limit; a package already in the cache is skipped.
     sudo xargs -P 8 -L 1 bash -c '
@@ -38,6 +45,7 @@ for attempt in 1 2 3; do
       [ -s "'"$archives"'/$name" ] && exit 0
       curl -fsSL --retry 3 --connect-timeout 20 --max-time 240 -o "'"$archives"'/$name.part" "$url" && mv "'"$archives"'/$name.part" "'"$archives"'/$name"
     ' < "$work/uris" || echo "some downloads failed; apt will fetch what is missing"
+    echo "$(while read -r _ name; do [ -s "$archives/$name" ] && echo ok; done < "$work/uris" | wc -l) of $(wc -l < "$work/uris") packages fetched in parallel"
     if sudo timeout -k 10s 300s apt-get "${apt_opts[@]}" install --no-install-recommends -y "$package"; then
       echo "::endgroup::"
       "$probe" -version >/dev/null 2>&1 || command -v "$probe" >/dev/null
