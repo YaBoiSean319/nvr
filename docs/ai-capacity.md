@@ -23,7 +23,7 @@ The search is bounded by what the hardware could plausibly carry (8 cameras a co
 
 **Which cameras are analysed first:** those with an enabled rule, fall detection or plate reading, then the rest by name. A camera that is waiting says why ("Waiting: this machine is at its limit (CPU)").
 
-**Settings > Integrations** shows what it is doing now: how many of the wanting cameras are analysed, what the limit is and what is holding it, and the CPU, model and memory it measured.
+**Settings > AI > AI analysis** shows what it is doing now: how many of the wanting cameras are analysed, what the limit is and what is holding it, and the CPU, model and memory it measured.
 
 ## A fixed number
 
@@ -39,4 +39,4 @@ It does not lower a camera's analysis rate instead of dropping it, does not spre
 
 ## Not yet checked on real hardware
 
-How many cameras it settles on, and that the worker is not killed, on the 8 vCPU / 16 GB VM with 34 cameras. Look at Settings > Integrations a few minutes after start, and again after an hour.
+How many cameras it settles on, and that the worker is not killed, on the 8 vCPU / 16 GB VM with 34 cameras. Look at Settings > AI > AI analysis a few minutes after start, and again after an hour.
