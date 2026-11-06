@@ -135,11 +135,26 @@ test("Users & access: a metrics token scrapes /metrics and nothing else, and a s
   await outside.dispose();
 });
 
+test("Recording & storage shows one section at a time, chosen from tabs", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openSettings(page, "Recording & storage");
+  await expect(page.getByRole("tab", { name: "Volumes" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("region", { name: "Storage volumes" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Configuration backups" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Backups" }).click();
+  await expect(page.getByRole("region", { name: "Configuration backups" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Storage volumes" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Backups" }).press("ArrowLeft");
+  await expect(page.getByRole("tab", { name: "Retention" })).toBeFocused();
+});
+
 test("Recording & storage: volume health, backup status and an on-demand backup", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);
   await openSettings(page, "Recording & storage");
   await expect(page.getByRole("region", { name: "Storage volumes" })).toContainText("archive");
+  await page.getByRole("tab", { name: "Backups" }).click();
   const backups = page.getByRole("region", { name: "Configuration backups" });
   // A fresh fixture has no backup run today, so the background worker may already have taken
   // the day's scheduled catch-up backup (it checks every 30 seconds); either state is correct.
