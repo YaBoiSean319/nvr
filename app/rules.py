@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
+from . import occupancy
 from .alarms import PLATE_LABEL_PREFIX, create_alarm
 from .scheduling import mode_at
 from .store import connect
@@ -253,6 +254,49 @@ def _camera_groups(db: sqlite3.Connection, camera_id: str) -> set[str]:
     return {row[0] for row in db.execute(CAMERA_GROUPS_SQL, (camera_id, camera_id))}
 
 
+def _occupancy_moments(db: sqlite3.Connection, rules: list[Rule], after_id: int, up_to_id: int) -> list[tuple[Rule, str, datetime]]:
+    """Where an occupancy rule's count has stayed over its limit, on the cameras that had new detections in this pass."""
+    watching = [rule for rule in rules if rule.condition_type == "occupancy"]
+    if not watching:
+        return []
+    newest = {row["camera_id"]: _parse(row["newest"]) for row in db.execute(
+        "SELECT camera_id,MAX(detected_at) AS newest FROM ai_detections WHERE id>? AND id<=? GROUP BY camera_id", (after_id, up_to_id))}
+    moments = []
+    for camera_id, latest in newest.items():
+        groups = _camera_groups(db, camera_id)
+        for rule in watching:
+            if not rule.watches_camera(camera_id, groups):
+                continue
+            try:
+                start, end = occupancy.window_for(rule.condition, latest)
+                for at in occupancy.exceedances(occupancy.window_rows(db, camera_id, rule.classes, start, end), rule.condition):
+                    if at >= rule.active_from and rule.scheduled(at):
+                        moments.append((rule, camera_id, at))
+            except Exception:  # noqa: BLE001 - one unreadable rule must not stop the others
+                logger.exception("Rule %s could not be evaluated; it is skipped", rule.id)
+    return moments
+
+
+def _replay_occupancy(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    with connect() as db:
+        cameras = db.execute("SELECT id,name FROM cameras ORDER BY name,id").fetchall()
+        events = []
+        for camera in cameras:
+            if not rule.watches_camera(camera["id"], _camera_groups(db, camera["id"])):
+                continue
+            rows = occupancy.window_rows(db, camera["id"], rule.classes, start - timedelta(seconds=rule.condition["for_seconds"] + occupancy.WINDOW_MARGIN), end)
+            last = None
+            for at in occupancy.exceedances(rows, rule.condition):
+                if not (start <= at < end) or at < rule.active_from or not rule.scheduled(at):
+                    continue
+                if last is not None and at - last < max(rule.cooldown, occupancy.MIN_COOLDOWN):
+                    continue
+                last = at
+                events.append({"camera_id": camera["id"], "camera_name": camera["name"], "track_id": None, "label": "occupancy", "occurred_at": at.isoformat(),
+                               "box": rule.condition.get("zone") or occupancy.FULL_FRAME})
+    return sorted(events, key=lambda event: event["occurred_at"])
+
+
 def process_pending(batch_size: int = BATCH_SIZE) -> int:
     """Evaluate rules over detections stored since the last pass; return how many were evaluated.
 
@@ -271,7 +315,7 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
             if track is None:
                 continue
             groups = _camera_groups(db, track["camera_id"])
-            watching = [rule for rule in rules if rule.watches(track["camera_id"], groups, track["label"])
+            watching = [rule for rule in rules if rule.condition_type != "occupancy" and rule.watches(track["camera_id"], groups, track["label"])
                         and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND track_id=?", (rule.id, track_id)).fetchone() is None]
             if not watching:
                 continue
@@ -284,6 +328,8 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
                     continue
                 if moments:
                     pending.append((rule, track, moments))
+
+        occupied = _occupancy_moments(db, rules, cursor, fresh[-1]["id"])
 
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -307,6 +353,16 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
                     ).rowcount
                     if inserted:
                         create_alarm(db, event_id)
+            for rule, camera_id, at in occupied:
+                cooldown = max(rule.cooldown, occupancy.MIN_COOLDOWN)
+                if db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                              (rule.id, camera_id, (at - cooldown).isoformat(), (at + cooldown).isoformat())).fetchone():
+                    continue
+                event_id = str(uuid.uuid4())
+                box = json.dumps(rule.condition.get("zone") or occupancy.FULL_FRAME, separators=(",", ":"))
+                if db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                               (event_id, rule.id, rule.name, camera_id, f"occupancy-{rule.id}-{int(at.timestamp())}", None, "occupancy", "occupancy", at.isoformat(), box)).rowcount:
+                    create_alarm(db, event_id)
             db.execute("UPDATE rules_cursor SET last_detection_id=? WHERE singleton_id=1", (fresh[-1]["id"],))
         except BaseException:
             db.execute("ROLLBACK")
@@ -501,6 +557,8 @@ def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
         return _replay_plate(rule, start, end)
     if rule.condition_type == "fall":
         return _replay_fall(rule, start, end)
+    if rule.condition_type == "occupancy":
+        return _replay_occupancy(rule, start, end)
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
         tracks = db.execute(
@@ -510,7 +568,7 @@ def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
         candidates = []
         for track in tracks:
             camera_groups = groups.setdefault(track["camera_id"], _camera_groups(db, track["camera_id"]))
-            if not rule.watches(track["camera_id"], camera_groups, track["label"]):
+            if rule.condition_type == "occupancy" or not rule.watches(track["camera_id"], camera_groups, track["label"]):
                 continue
             # The whole track, as the worker sees it; only moments inside the window count.
             moments = eligible_moments(rule, _track_path(db, track["id"]), since=start, until=end)

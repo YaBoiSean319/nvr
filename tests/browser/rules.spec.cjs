@@ -118,6 +118,25 @@ test("an inactivity rule asks how long an object must stay still, in the whole f
   expect(saved.map(rule => [rule.name, rule.condition.type, rule.condition.still_seconds, rule.condition.zone])).toEqual([["Still too long", "inactivity", 120, null]]);
 });
 
+test("an occupancy rule asks for a count and how long it must stay over", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  await page.goto("/cameras/rules");
+  await workspace(page).getByRole("button", { name: "New rule" }).click();
+  await editor(page).getByLabel("Name").fill("Dining room full");
+  await editor(page).getByRole("checkbox", { name: "Group: Operations" }).check();
+  await editor(page).getByLabel("When an object").selectOption("occupancy");
+  await expect(editor(page).getByLabel("More than (number present)")).toHaveValue("5");
+  await editor(page).getByLabel("More than (number present)").fill("");
+  await expect(settings(page).getByRole("alert")).toHaveText("Enter the number above which the rule fires (1 or more).");
+  await editor(page).getByLabel("More than (number present)").fill("8");
+  await editor(page).getByRole("checkbox", { name: "Only count objects inside a zone" }).check();
+  await editor(page).getByRole("button", { name: "Save" }).click();
+  await expect(settings(page).getByRole("status")).toBeVisible();
+  const saved = await rules(page);
+  expect(saved.map(rule => [rule.name, rule.condition.type, rule.condition.limit, rule.condition.for_seconds, rule.condition.zone !== null])).toEqual([["Dining room full", "occupancy", 8, 30, true]]);
+});
+
 test("operators do not see Rules and cannot open it", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page, "camera-operator");
