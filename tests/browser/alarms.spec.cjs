@@ -48,6 +48,25 @@ test("an operator handles an alarm and another signed-in user sees each step wit
   await admin.close();
 });
 
+test("the alarm's buttons do not move while its picture and clip load", async ({ page }) => {
+  seedFixtures(3, { alarm: true });
+  // Hold the snapshot back, as a slow connection would: the buttons under it must already be where they will end up.
+  let release = () => {};
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route("**/snapshot?*", async route => { await held; await route.continue(); });
+  await signInNext(page);
+  await alarmChip(page).click();
+  await inbox(page).getByRole("list", { name: "Alarms" }).getByRole("button", { name: /^Gate entry: Vehicle on Camera 001/ }).click();
+  await expect(detail(page)).toBeVisible();
+  const button = detail(page).getByRole("button", { name: "Open in Playback" });
+  const before = await button.boundingBox();
+  release();
+  await expect(detail(page).getByRole("img", { name: /^Snapshot from/ })).toHaveJSProperty("complete", true);
+  await page.waitForTimeout(300);
+  const after = await button.boundingBox();
+  expect(after.y).toBeCloseTo(before.y, 0);
+});
+
 test("Open in Playback lands on the alarm time with the camera selected", async ({ page }) => {
   const fixtures = seedFixtures(3, { alarm: true });
   // If the page does not reach Playback, say what it did instead: where it went, what it logged and which requests failed (CI keeps no other trace in its log).
