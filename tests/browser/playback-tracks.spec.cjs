@@ -216,3 +216,14 @@ test("previous and next appearance land on the object's stored detections, acros
   await group.getByRole("button", { name: "Stop following" }).click();
   await expect(group.getByRole("button", { name: /Object ▶/ })).toHaveCount(0);
 });
+
+test("a motion mark says what the AI found in it, and stays unmarked where the AI was not analysing", async ({ page }) => {
+  await open(page);
+  const marks = page.locator(".timeline-row [data-mark='motion']");
+  await expect(marks).toHaveCount(2);
+  // Motion at 40 s: the AI was analysing the camera and saw no person or vehicle. Motion at 160 s: it was not analysing then.
+  await expect(page.locator(".timeline-row [data-mark='motion'][data-ai='nothing']")).toHaveCount(1);
+  await expect(page.locator(".timeline-row [data-mark='motion'][data-ai='nothing']")).toHaveAttribute("title", /AI saw no person or vehicle/);
+  await expect(page.locator(".timeline-row [data-mark='motion'][data-ai='unknown']")).toHaveCount(1);
+  await expect(page.locator(".timeline-row [data-mark='motion'][data-ai='unknown']")).not.toHaveAttribute("title", /AI saw/);
+});

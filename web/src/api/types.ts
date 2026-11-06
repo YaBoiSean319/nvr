@@ -267,7 +267,7 @@ export interface TimelineCamera {
   video_codec: string | null;
   segments: { id: number; starts_at: string; ends_at: string; size_bytes: number; media_url: string; source: "live" | "backfill" | "failover"; archived?: number }[];
   gaps: { starts_at: string; ends_at: string; state: GapState; reason: string; reason_code: GapReason; backfill: { state: string; message: string } | null; failover?: { message: string } }[];
-  motion_events: { id: string; source_event_at: string; status: string }[];
+  motion_events: { id: string; source_event_at: string; status: string; ai?: { classes: string[]; checked: boolean } }[];
   ai_detections: { id: string; label: "person" | "vehicle"; confidence: number; first_seen_at: string; last_seen_at: string }[];
   ai_unanalyzed: { state: string; starts_at: string; ends_at: string | null; detail: string }[];
   /** Outside events (doors, sensors, buttons) an administrator mapped to this camera. */

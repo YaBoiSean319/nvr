@@ -33,8 +33,10 @@ def seed(anchor: str) -> dict[str, object]:
     person, vehicle = str(uuid.uuid4()), str(uuid.uuid4())
     at = lambda seconds: (start + timedelta(seconds=seconds)).isoformat()  # noqa: E731
     with connect() as db:
-        for table in ("ai_detections", "ai_tracks"):
+        for table in ("ai_detections", "ai_tracks", "ai_coverage"):
             db.execute(f"DELETE FROM {table} WHERE camera_id=?", (camera_id,))
+        # The AI was analysing this camera from a minute before the footage to 100 s after its start (the fixture's motion at 40 s falls inside, the motion at 160 s does not).
+        db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,?,?,?,?)", (camera_id, "analyzed", at(-60), at(100), ""))
         for track, label, seen in ((person, "person", PERSON_AT), (vehicle, "vehicle", FRAMES)):
             db.execute("INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES(?,?,?,?,?,'fixture','1','CPU')",
                        (track, camera_id, label, at(seen[0]), at(seen[-1])))

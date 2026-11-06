@@ -26,6 +26,18 @@ interface Props {
  * Aligned camera rows under one time axis. The pane is bounded: rows scroll inside it,
  * never the page. Click or drag to seek; zoom and pan change only what is visible.
  */
+/** What the AI found in a motion clip: its classes, nothing, or unknown when it was not analysing the camera throughout. */
+function motionFinding(ai: { classes: string[]; checked: boolean } | undefined): "found" | "nothing" | "unknown" {
+  if (!ai || !ai.checked) return "unknown";
+  return ai.classes.length ? "found" : "nothing";
+}
+
+function motionNote(ai: { classes: string[]; checked: boolean } | undefined): string {
+  const finding = motionFinding(ai);
+  if (finding === "found") return ` · AI saw ${ai!.classes.join(" and ")}`;
+  return finding === "nothing" ? " · AI saw no person or vehicle" : "";
+}
+
 export function Timeline({ settings, range, cameraIds, cameras, timeline, loading }: Props) {
   const stored = usePlaybackStore(store => store.window);
   const exportMarks = usePlaybackStore(store => store.marks);
@@ -202,7 +214,8 @@ function Track({ row, window, settings }: { row: TimelineCamera; window: TimeWin
       {row.motion_events.map(event => {
         const position = percent(at(event.source_event_at), window);
         return position >= 0 && position <= 100
-          ? <span key={`m${event.id}`} className="timeline-point" data-mark="motion" title={`Motion at ${formatSiteTime(at(event.source_event_at), settings, true)}`} style={{ left: `${position}%` }} />
+          ? <span key={`m${event.id}`} className="timeline-point" data-mark="motion" data-ai={motionFinding(event.ai)}
+                  title={`Motion at ${formatSiteTime(at(event.source_event_at), settings, true)}${motionNote(event.ai)}`} style={{ left: `${position}%` }} />
           : null;
       })}
       {row.ai_detections.map(detection => {

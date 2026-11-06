@@ -102,6 +102,24 @@ class SynchronizedPlaybackTests(unittest.TestCase):
         self.assertEqual([(item["state"], item["detail"]) for item in first["ai_unanalyzed"]], [("failed", "Detector unavailable")])
         self.assertEqual((second["ai_detections"], second["ai_unanalyzed"]), ([], []))
 
+    def test_motion_clips_say_what_the_ai_found_in_them(self):
+        request = {"camera_ids": self.cameras, "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:04:00Z"}
+        event = lambda: self.client.post("/api/playback/timeline", json=request).json()["cameras"][1]["motion_events"][0]["ai"]  # noqa: E731
+        # The AI records only the time it was analysing, so a camera it never watched is not "nothing happened".
+        self.assertEqual(event(), {"classes": [], "checked": False})
+        with connect() as db:
+            db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,ends_at,detail) VALUES(?,?,?,?,?)",
+                       (self.cameras[1], "analyzed", "2026-10-20T11:00:00+00:00", None, ""))
+        self.assertEqual(event(), {"classes": [], "checked": True})
+        with connect() as db:
+            db.execute("INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES(?,?,?,?,?,'fixture','1','CPU')",
+                       (str(uuid.uuid4()), self.cameras[1], "person", "2026-10-20T12:00:45+00:00", "2026-10-20T12:00:55+00:00"))
+        self.assertEqual(event(), {"classes": ["person"], "checked": True})
+        # Analysis that stopped part-way through the clip leaves it unchecked.
+        with connect() as db:
+            db.execute("UPDATE ai_coverage SET ends_at=?", ("2026-10-20T12:01:00+00:00",))
+        self.assertEqual(event()["checked"], False)
+
     def test_timeline_rejects_unknown_camera_and_oversized_window(self):
         unknown = self.client.post("/api/playback/timeline", json={
             "camera_ids": [str(uuid.uuid4())], "start": "2026-10-20T12:00:00Z", "end": "2026-10-20T12:01:00Z",
