@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame labeler</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 0; background: #14171c; color: #e8ebef; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; }
+  p { margin: 0; color: #aab2bd; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button, select, label.button { font: inherit; color: inherit; background: #262c35; border: 1px solid #3a424e; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  button:hover, label.button:hover { background: #313944; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  input[type=file] { display: none; }
+  #stage { position: relative; justify-self: start; max-width: 100%; touch-action: none; }
+  canvas { max-width: 100%; border: 1px solid #3a424e; background: #000; cursor: crosshair; display: block; }
+  #status { color: #aab2bd; min-height: 1.4em; }
+  kbd { background: #262c35; border: 1px solid #3a424e; border-radius: 4px; padding: 0 5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Frame labeler</h1>
+  <p>Draw a box around every person in each picture. Choose "wheelchair" (or another tag) for the people the detector struggles with. Nothing leaves this computer.</p>
+  <div class="bar">
+    <label class="button">Choose pictures<input id="pictures" type="file" accept="image/*" multiple></label>
+    <label class="button">Load labels<input id="load" type="file" accept="application/json,.json"></label>
+    <button id="save" type="button" disabled>Save labels.json</button>
+  </div>
+  <div class="bar">
+    <button id="prev" type="button" disabled>◀ Previous</button>
+    <span id="where" role="status">No pictures yet</span>
+    <button id="next" type="button" disabled>Next ▶</button>
+    <label>New boxes are <select id="tag" aria-label="Tag for new boxes"><option>person</option><option>wheelchair</option><option>walker</option><option>seated</option></select></label>
+    <label>Selected box is <select id="selected-tag" aria-label="Tag of the selected box" disabled><option>person</option><option>wheelchair</option><option>walker</option><option>seated</option></select></label>
+    <button id="delete" type="button" disabled>Delete selected box</button>
+  </div>
+  <div id="stage"><canvas id="canvas" width="640" height="360" role="img" aria-label="The picture being labelled; drag to draw a box around a person"></canvas></div>
+  <p id="status"></p>
+  <p>Keys: <kbd>←</kbd> <kbd>→</kbd> move between pictures, <kbd>Delete</kbd> removes the selected box. A picture you have looked at and left without boxes is saved as "nobody here".</p>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const canvas = $("canvas"), context = canvas.getContext("2d");
+const state = { files: [], images: new Map(), labels: new Map(), seen: new Set(), index: -1, selected: -1, drag: null };
+const COLORS = { person: "#4ade80", wheelchair: "#fbbf24", walker: "#60a5fa", seated: "#f472b6" };
+
+const current = () => (state.index >= 0 ? state.files[state.index] : null);
+const boxes = () => (current() ? state.labels.get(current().name) ?? [] : []);
+
+async function image(file) {
+  if (!state.images.has(file.name)) {
+    const bitmap = await createImageBitmap(file);
+    state.images.set(file.name, bitmap);
+  }
+  return state.images.get(file.name);
+}
+
+async function show(index) {
+  if (index < 0 || index >= state.files.length) return;
+  state.index = index;
+  state.selected = -1;
+  const file = state.files[index];
+  state.seen.add(file.name);
+  if (!state.labels.has(file.name)) state.labels.set(file.name, []);
+  const bitmap = await image(file);
+  const width = Math.min(bitmap.width, 1080);
+  canvas.width = width;
+  canvas.height = Math.round(width * bitmap.height / bitmap.width); // The canvas has the picture's shape, so a box in the canvas is a box in the picture
+  draw();
+  update();
+}
+
+function draw() {
+  const file = current();
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (!file) return;
+  context.drawImage(state.images.get(file.name), 0, 0, canvas.width, canvas.height);
+  boxes().forEach((item, index) => {
+    const [x, y, w, h] = item.box;
+    context.lineWidth = index === state.selected ? 4 : 2;
+    context.strokeStyle = COLORS[item.tag] ?? "#ffffff";
+    context.strokeRect(x * canvas.width, y * canvas.height, w * canvas.width, h * canvas.height);
+    context.fillStyle = context.strokeStyle;
+    context.font = "13px system-ui";
+    context.fillText(item.tag, x * canvas.width + 3, y * canvas.height + 14);
+  });
+  if (state.drag) {
+    const { x0, y0, x1, y1 } = state.drag;
+    context.setLineDash([6, 4]);
+    context.strokeStyle = "#ffffff";
+    context.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+    context.setLineDash([]);
+  }
+}
+
+function update() {
+  const count = boxes().length;
+  $("where").textContent = current() ? `${state.index + 1} of ${state.files.length} · ${current().name} · ${count} ${count === 1 ? "person" : "people"}` : "No pictures yet";
+  $("prev").disabled = state.index <= 0;
+  $("next").disabled = state.index < 0 || state.index >= state.files.length - 1;
+  $("save").disabled = !state.files.length;
+  $("delete").disabled = state.selected < 0;
+  $("selected-tag").disabled = state.selected < 0;
+  if (state.selected >= 0) $("selected-tag").value = boxes()[state.selected].tag;
+  $("status").textContent = state.files.length ? `${state.seen.size} of ${state.files.length} pictures looked at` : "";
+}
+
+function point(event) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: (event.clientX - rect.left) * canvas.width / rect.width, y: (event.clientY - rect.top) * canvas.height / rect.height };
+}
+
+canvas.addEventListener("pointerdown", event => {
+  if (!current()) return;
+  canvas.setPointerCapture(event.pointerId);
+  const { x, y } = point(event);
+  state.drag = { x0: x, y0: y, x1: x, y1: y };
+});
+canvas.addEventListener("pointermove", event => {
+  if (!state.drag) return;
+  Object.assign(state.drag, { x1: point(event).x, y1: point(event).y });
+  draw();
+});
+canvas.addEventListener("pointerup", event => {
+  if (!state.drag) return;
+  const { x0, y0 } = state.drag;
+  const { x, y } = point(event);
+  state.drag = null;
+  const w = Math.abs(x - x0), h = Math.abs(y - y0);
+  const list = boxes();
+  if (w < 6 && h < 6) {
+    // A click, not a drag: choose the smallest box under it.
+    const hits = list.map((item, index) => ({ item, index })).filter(({ item }) => x / canvas.width >= item.box[0] && x / canvas.width <= item.box[0] + item.box[2] && y / canvas.height >= item.box[1] && y / canvas.height <= item.box[1] + item.box[3]);
+    state.selected = hits.length ? hits.sort((a, b) => a.item.box[2] * a.item.box[3] - b.item.box[2] * b.item.box[3])[0].index : -1;
+  } else {
+    list.push({ box: [Math.min(x, x0) / canvas.width, Math.min(y, y0) / canvas.height, w / canvas.width, h / canvas.height], tag: $("tag").value });
+    state.selected = list.length - 1;
+  }
+  draw();
+  update();
+});
+
+$("pictures").addEventListener("change", async event => {
+  state.files = [...event.target.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  state.images.clear();
+  await show(0);
+});
+$("load").addEventListener("change", async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const data = JSON.parse(await file.text());
+  for (const [name, items] of Object.entries(data.frames ?? {})) {
+    state.labels.set(name, items.map(item => ({ box: item.box, tag: item.tag ?? "person" })));
+    state.seen.add(name);
+  }
+  draw();
+  update();
+});
+$("prev").addEventListener("click", () => show(state.index - 1));
+$("next").addEventListener("click", () => show(state.index + 1));
+$("delete").addEventListener("click", () => { boxes().splice(state.selected, 1); state.selected = -1; draw(); update(); });
+$("selected-tag").addEventListener("change", event => { if (state.selected >= 0) { boxes()[state.selected].tag = event.target.value; draw(); } });
+$("save").addEventListener("click", () => {
+  const frames = {};
+  for (const name of [...state.seen].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))) {
+    frames[name] = (state.labels.get(name) ?? []).map(item => ({ box: item.box.map(value => Math.round(value * 10000) / 10000), tag: item.tag }));
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([JSON.stringify({ frames }, null, 1)], { type: "application/json" }));
+  link.download = "labels.json";
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+window.addEventListener("keydown", event => {
+  if (event.target instanceof HTMLSelectElement) return;
+  if (event.key === "ArrowLeft") show(state.index - 1);
+  else if (event.key === "ArrowRight") show(state.index + 1);
+  else if ((event.key === "Delete" || event.key === "Backspace") && state.selected >= 0) $("delete").click();
+});
+</script>
+</body>
+</html>
