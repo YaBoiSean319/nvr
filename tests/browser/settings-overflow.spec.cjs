@@ -39,7 +39,10 @@ test("no Settings page lets text or a table run past its card", async ({ page })
       await page.getByLabel("Cameras in row 1").fill("10");
       await expect(page.locator('tr[data-metric="disk_footage"]')).toBeVisible({ timeout: 15_000 });
     }
-    if (category === "recording") await expect(page.getByRole("table", { name: "Retention forecast by camera" })).toBeVisible({ timeout: 15_000 });
+    if (category === "recording") {
+      await page.getByRole("tab", { name: "Forecast" }).click();
+      await expect(page.getByRole("table", { name: "Retention forecast by camera" })).toBeVisible({ timeout: 15_000 });
+    }
     await page.waitForTimeout(300);
     for (const item of await page.evaluate(overflowing)) problems.push(`${category} at ${width}px: ${item}`);
   }

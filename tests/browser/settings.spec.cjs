@@ -135,11 +135,35 @@ test("Users & access: a metrics token scrapes /metrics and nothing else, and a s
   await outside.dispose();
 });
 
+test("going back to Settings from a category keeps the groups you had open", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openSettings(page, "Recording & storage");
+  await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/\/settings\/general$/);
+  await expect(page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Recording & storage" })).toBeVisible();
+});
+
+test("Recording & storage shows one section at a time, chosen from tabs", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openSettings(page, "Recording & storage");
+  await expect(page.getByRole("tab", { name: "Volumes" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("region", { name: "Storage volumes" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Configuration backups" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Backups" }).click();
+  await expect(page.getByRole("region", { name: "Configuration backups" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Storage volumes" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Backups" }).press("ArrowLeft");
+  await expect(page.getByRole("tab", { name: "Retention" })).toBeFocused();
+});
+
 test("Recording & storage: volume health, backup status and an on-demand backup", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);
   await openSettings(page, "Recording & storage");
   await expect(page.getByRole("region", { name: "Storage volumes" })).toContainText("archive");
+  await page.getByRole("tab", { name: "Backups" }).click();
   const backups = page.getByRole("region", { name: "Configuration backups" });
   // A fresh fixture has no backup run today, so the background worker may already have taken
   // the day's scheduled catch-up backup (it checks every 30 seconds); either state is correct.
@@ -157,6 +181,7 @@ test("Recording & storage: volume health, backup status and an on-demand backup"
     await route.fulfill({ response, json: { ...body, enabled: false, disabled_reason: "Set NVR_BACKUP_PASSPHRASE to enable encrypted configuration backups." } });
   });
   await page.reload();
+  await page.getByRole("tab", { name: "Backups" }).click();
   await expect(backups).toContainText("Backups are disabled: Set NVR_BACKUP_PASSPHRASE");
   await expect(backups.getByRole("button", { name: "Back up now" })).toBeDisabled();
 });
