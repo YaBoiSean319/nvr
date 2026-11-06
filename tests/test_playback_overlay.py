@@ -78,6 +78,39 @@ class OverlayFrameTests(OverlayCase):
             self.assertEqual(anonymous.get(f"/api/playback/overlay/tracks/{self.person}").status_code, 401)
 
 
+class OverlayPoseTests(OverlayCase):
+    def attach(self, track: str, seconds: int, pose: str) -> None:
+        with connect() as db:
+            db.execute("UPDATE ai_detections SET pose_json=? WHERE track_id=? AND detected_at=?", (pose, track, (self.at + timedelta(seconds=seconds)).isoformat()))
+
+    def boxes_of(self, track: str) -> dict[int, dict]:
+        return {round((datetime.fromisoformat(frame["at"]) - self.at).total_seconds()): box for frame in self.overlay().json()["frames"] for box in frame["boxes"] if box["track_id"] == track}
+
+    def test_a_stored_pose_rides_with_its_box_and_other_boxes_have_none(self):
+        self.attach(self.person, 6, '{"nose":[0.27,0.32],"left_shoulder":[0.25,0.4],"right_shoulder":[0.3,0.4]}')
+        person, vehicle = self.boxes_of(self.person), self.boxes_of(self.vehicle)
+        self.assertEqual(person[6]["pose"]["nose"], [0.27, 0.32])
+        self.assertNotIn("pose", person[4])  # No pose was read for this frame
+        self.assertNotIn("pose", vehicle[6])
+
+    def test_a_pose_with_a_point_inside_a_privacy_mask_is_left_out_even_when_the_box_is_clear(self):
+        self.attach(self.person, 14, '{"nose":[0.72,0.32],"left_wrist":[0.2,0.5],"left_shoulder":[0.7,0.4]}')  # A hand reaches into the masked left strip
+        self.mask(self.d1, [{"x": 0.0, "y": 0.0, "width": 0.3, "height": 1.0}])
+        box = self.boxes_of(self.person)[14]
+        self.assertEqual(box["box"]["x"], 0.70)  # The box is clear of the mask...
+        self.assertNotIn("pose", box)  # ...but the pose is not drawn
+
+    def test_a_pose_is_stored_only_with_the_points_the_model_could_see_and_only_when_enough_are_seen(self):
+        from app.tracks import pose_json, store_poses
+        pose = {"nose": (0.2512, 0.31234, 0.9), "left_shoulder": (0.2, 0.4, 0.8), "right_shoulder": (0.3, 0.4, 0.7), "left_hip": (0.2, 0.6, 0.1)}
+        self.assertEqual(json.loads(pose_json(pose)), {"nose": [0.251, 0.312], "left_shoulder": [0.2, 0.4], "right_shoulder": [0.3, 0.4]})  # The unseen hip is not kept
+        self.assertIsNone(pose_json({"nose": (0.2, 0.3, 0.9), "left_hip": (0.2, 0.6, 0.1)}))
+        with connect() as db:
+            stored = store_poses(db, self.d1, self.at + timedelta(seconds=8), {self.person: pose, self.vehicle: {"nose": (0.1, 0.1, 0.9)}})
+        self.assertEqual(stored, 1)  # The vehicle's too-sparse pose was not stored
+        self.assertEqual(self.boxes_of(self.person)[8]["pose"]["left_shoulder"], [0.2, 0.4])
+
+
 class OverlayTrackTests(OverlayCase):
     def test_a_followed_object_has_its_whole_stored_path_across_a_pause(self):
         body = self.admin.get(f"/api/playback/overlay/tracks/{self.person}").json()

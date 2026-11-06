@@ -19,6 +19,14 @@ PERSON_X = {4: 0.10, 6: 0.22, 8: 0.34, 14: 0.70, 16: 0.82}
 VEHICLE = (0.70, 0.62, 0.20, 0.22)  # x, y, width, height
 
 
+def pose_of(x: float) -> str:
+    """The body points the pose model would find for the person whose box is at ``x`` (the box is 0.10 wide and runs from 0.30 to 0.70 down the picture)."""
+    points = {"nose": (0.05, 0.33), "left_shoulder": (0.02, 0.40), "right_shoulder": (0.08, 0.40), "left_elbow": (0.0, 0.50), "right_elbow": (0.10, 0.50),
+              "left_wrist": (0.0, 0.58), "right_wrist": (0.10, 0.58), "left_hip": (0.03, 0.55), "right_hip": (0.07, 0.55),
+              "left_knee": (0.03, 0.65), "right_knee": (0.07, 0.65), "left_ankle": (0.03, 0.70), "right_ankle": (0.07, 0.70)}
+    return json.dumps({name: [round(x + dx, 4), dy] for name, (dx, dy) in points.items()}, separators=(",", ":"))
+
+
 def seed(anchor: str) -> dict[str, object]:
     start = datetime.fromisoformat(anchor)
     camera_id = _camera_id(1)
@@ -33,8 +41,8 @@ def seed(anchor: str) -> dict[str, object]:
         for seconds in FRAMES:
             if seconds in PERSON_X:
                 x = PERSON_X[seconds]
-                db.execute("INSERT INTO ai_detections(camera_id,track_id,detected_at,label,confidence,box_x,box_y,box_width,box_height,model_id,model_version,provider) "
-                           "VALUES(?,?,?,?,0.9,?,?,?,?,'fixture','1','CPU')", (camera_id, person, at(seconds), "person", x, 0.30, 0.10, 0.40))
+                db.execute("INSERT INTO ai_detections(camera_id,track_id,detected_at,label,confidence,box_x,box_y,box_width,box_height,model_id,model_version,provider,pose_json) "
+                           "VALUES(?,?,?,?,0.9,?,?,?,?,'fixture','1','CPU',?)", (camera_id, person, at(seconds), "person", x, 0.30, 0.10, 0.40, pose_of(x)))
             x, y, width, height = VEHICLE
             db.execute("INSERT INTO ai_detections(camera_id,track_id,detected_at,label,confidence,box_x,box_y,box_width,box_height,model_id,model_version,provider) "
                        "VALUES(?,?,?,?,0.8,?,?,?,?,'fixture','1','CPU')", (camera_id, vehicle, at(seconds), "vehicle", x, y, width, height))

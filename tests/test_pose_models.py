@@ -61,6 +61,14 @@ class CropAndDecodeTests(unittest.TestCase):
         self.assertGreater(visibility, 0.99)
         self.assertEqual(set(found), set(pose_models.POINTS))
 
+    def test_the_arms_are_read_for_drawing_but_not_for_the_fall_decision(self):
+        landmarks = np.zeros((39, 5), dtype=np.float32)
+        landmarks[:, 3] = 5.0
+        found = pose_models.decode(landmarks.reshape(-1), 0.9, rows=720, columns=1280, left=0.0, top=0.0, side=256.0, names=pose_models.DRAWN_POINTS)
+        self.assertEqual(set(found), set(pose_models.DRAWN_POINTS))
+        self.assertTrue({"left_elbow", "right_elbow", "left_wrist", "right_wrist"} <= set(found))
+        self.assertEqual(set(pose_models.POINTS), set(pose_models.DRAWN_POINTS) - {"left_elbow", "right_elbow", "left_wrist", "right_wrist"})  # The decision keeps its nine
+
     def test_a_crop_the_model_doubts_holds_a_person_gives_nothing(self):
         self.assertIsNone(pose_models.decode(np.zeros(195), 0.1, 720, 1280, 0, 0, 256))
 

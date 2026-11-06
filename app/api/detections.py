@@ -1,6 +1,7 @@
 """Structured detections and tracks for a camera and time range."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
@@ -106,6 +107,16 @@ def _hidden_by_mask(row: Any, zones: list[dict[str, float]]) -> bool:
     return any(left < zone["x"] + zone["width"] and right > zone["x"] and top < zone["y"] + zone["height"] and bottom > zone["y"] for zone in zones)
 
 
+def _pose_for(row: Any, zones: list[dict[str, float]]) -> dict[str, list[float]] | None:
+    """A person's stored body points, unless any of them is inside a privacy-masked area (the box can miss a mask that an outstretched arm reaches)."""
+    if not row["pose_json"]:
+        return None
+    pose = json.loads(row["pose_json"])
+    if any(zone["x"] <= x <= zone["x"] + zone["width"] and zone["y"] <= y <= zone["y"] + zone["height"] for zone in zones for x, y in pose.values()):
+        return None
+    return pose
+
+
 def _overlay_zones(user: Any, camera_id: str, at: datetime, unmasked: bool) -> list[dict[str, float]]:
     try:
         return privacy.zones_for(user, camera_id, unmasked=unmasked, recorded_at=at)
@@ -147,7 +158,11 @@ def playback_overlay(
             continue
         if not frames or frames[-1]["at"] != row["detected_at"]:
             frames.append({"at": row["detected_at"], "boxes": []})
-        frames[-1]["boxes"].append(_point(row))
+        item = _point(row)
+        pose = _pose_for(row, zones)  # Body points the pose model saw, for drawing a skeleton; only for people on cameras with fall detection
+        if pose:
+            item["pose"] = pose
+        frames[-1]["boxes"].append(item)
     return {"camera_id": camera_id, "start": start_text, "end": end_text, "frames": frames, "truncated": len(rows) == OVERLAY_LIMIT,
             "unanalyzed": unanalyzed, "coverage_note": COVERAGE_NOTE}
 

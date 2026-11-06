@@ -679,6 +679,10 @@
 .track-overlay { position: absolute; pointer-events: none; }
 .track-trail { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
 .track-trail line { stroke: var(--n-accent); stroke-width: 3; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.track-skeleton { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.track-skeleton line { stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.track-skeleton .halo { stroke: rgba(0, 0, 0, 0.7); stroke-width: 6; }
+.track-skeleton .bone { stroke: #6ee7b7; stroke-width: 3; }
 .track-box {
   position: absolute; box-sizing: border-box; padding: 0; border: 2px solid #fff; border-radius: 2px; background: transparent;
   color: #fff; font: inherit; pointer-events: auto; cursor: pointer; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.6);

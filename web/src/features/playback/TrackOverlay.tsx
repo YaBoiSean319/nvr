@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { holdFor, interpolatedFrameAt, pictureRect, trail, type TrackPoint } from "./overlay";
+import { holdFor, interpolatedFrameAt, pictureRect, skeletonLines, trail, type TrackPoint } from "./overlay";
 import { useOverlayFrames } from "./useOverlayData";
 import { useClockTime, usePlaybackStore } from "./store";
 
@@ -12,6 +12,8 @@ const LABEL: Record<string, string> = { person: "Person", vehicle: "Vehicle" };
 export function TrackOverlay({ cameraId, video, path, visible }: { cameraId: string; video: RefObject<HTMLVideoElement | null>; path: TrackPoint[]; visible: boolean }) {
   const time = useClockTime();
   const tracked = usePlaybackStore(store => store.tracked);
+  const overlayOn = usePlaybackStore(store => store.overlayOn);
+  const skeletonOn = usePlaybackStore(store => store.skeletonOn);
   const frames = useOverlayFrames(cameraId, true);
   const times = useMemo(() => frames.map(frame => frame.at), [frames]);
   const hold = useMemo(() => holdFor(times), [times]);
@@ -51,7 +53,17 @@ export function TrackOverlay({ cameraId, video, path, visible }: { cameraId: str
           ))}
         </svg>
       ) : null}
-      {frame?.boxes.map((item, index) => {
+      {skeletonOn && frame ? (
+        <svg className="track-skeleton" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+          {frame.boxes.map((item, index) => (item.pose ? (
+            <g key={item.track_id ?? `pose-${index}`} data-track-id={item.track_id ?? undefined} data-label={item.label}>
+              {skeletonLines(item.pose).map(line => <line key={`halo-${line.key}`} className="halo" x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2} />)}
+              {skeletonLines(item.pose).map(line => <line key={line.key} className="bone" data-bone={line.key} x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2} />)}
+            </g>
+          ) : null))}
+        </svg>
+      ) : null}
+      {overlayOn ? frame?.boxes.map((item, index) => {
         const chosen = Boolean(item.track_id) && item.track_id === tracked?.id;
         const name = `${LABEL[item.label] ?? item.label}${item.track_id ? "" : " (not followed)"}`;
         return (
@@ -69,7 +81,7 @@ export function TrackOverlay({ cameraId, video, path, visible }: { cameraId: str
             <span className="track-box-label">{name}</span>
           </button>
         );
-      })}
+      }) : null}
     </div>
   );
 }

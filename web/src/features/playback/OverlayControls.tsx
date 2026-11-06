@@ -5,12 +5,13 @@ import { neighbour, type Direction } from "./overlay";
 import { useTrackPath } from "./useOverlayData";
 import { usePlaybackStore } from "./store";
 
-/** Turn the detection boxes on and off (B), and step the followed object's stored appearances ([ and ]). */
+/** Turn the detection boxes (B) and the body outlines (K) on and off, and step the followed object's stored appearances ([ and ]). */
 export function OverlayControls({ ready }: { ready: boolean }) {
   const on = usePlaybackStore(store => store.overlayOn);
+  const skeleton = usePlaybackStore(store => store.skeletonOn);
   const tracked = usePlaybackStore(store => store.tracked);
   const { points: path, loading } = useTrackPath(tracked?.id ?? null, tracked?.cameraId ?? null);
-  const { setOverlayOn, trackObject, setMessage } = usePlaybackStore.getState();
+  const { setOverlayOn, setSkeletonOn, trackObject, setMessage } = usePlaybackStore.getState();
 
   function step(direction: Direction) {
     if (!tracked) return;
@@ -40,6 +41,10 @@ export function OverlayControls({ ready }: { ready: boolean }) {
         key.preventDefault();
         if (key.repeat) return;
         setOverlayOn(!usePlaybackStore.getState().overlayOn);
+      } else if (key.key.toLowerCase() === "k") {
+        key.preventDefault();
+        if (key.repeat) return;
+        setSkeletonOn(!usePlaybackStore.getState().skeletonOn);
       } else if ((key.key === "[" || key.key === "]") && usePlaybackStore.getState().tracked) {
         key.preventDefault();
         step(key.key === "[" ? "previous" : "next");
@@ -52,6 +57,7 @@ export function OverlayControls({ ready }: { ready: boolean }) {
   return (
     <span className="overlay-controls" role="group" aria-label="Object tracks">
       <button type="button" className="button" disabled={!ready} aria-pressed={on} title="Show detection boxes (B)" onClick={() => setOverlayOn(!on)}>Boxes</button>
+      <button type="button" className="button" disabled={!ready} aria-pressed={skeleton} title="Show body outlines where the pose was read (K)" onClick={() => setSkeletonOn(!skeleton)}>Skeleton</button>
       {on && tracked ? (
         <>
           <button type="button" className="button" title="Previous appearance of the followed object ([)" onClick={() => step("previous")}>◀ Object</button>
