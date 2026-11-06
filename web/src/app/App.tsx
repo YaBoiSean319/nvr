@@ -63,8 +63,8 @@ function router(me: Me) {
               { path: "*", element: <NotFound /> },
             ],
           },
-          { path: "settings", element: <AdminRoute me={me}><Navigate to="/settings/general" replace /></AdminRoute> },
-          { path: "settings/:category", element: <AdminRoute me={me}><SettingsWorkspace /></AdminRoute> },
+          // One route for "/settings" too (it redirects to General inside the page), so going back to Settings from a category keeps the page and its open groups.
+          { path: "settings/:category?", element: <AdminRoute me={me}><SettingsWorkspace /></AdminRoute> },
           { path: "*", element: <NotFound /> },
         ],
       },

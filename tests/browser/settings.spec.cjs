@@ -135,6 +135,15 @@ test("Users & access: a metrics token scrapes /metrics and nothing else, and a s
   await outside.dispose();
 });
 
+test("going back to Settings from a category keeps the groups you had open", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openSettings(page, "Recording & storage");
+  await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/\/settings\/general$/);
+  await expect(page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Recording & storage" })).toBeVisible();
+});
+
 test("Recording & storage shows one section at a time, chosen from tabs", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);
