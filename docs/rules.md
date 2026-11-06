@@ -83,7 +83,7 @@ A rule body:
 
 Actions are returned with an `id` and a `target`, never their `url` or `signing_secret`. Send an action back with its `id` to keep its saved secrets, and leave an action out to remove it. `GET /api/rules/{id}/deliveries` lists the rule's action deliveries, newest first.
 
-The other conditions are `{"type": "zone_entry", "zone": {"x", "y", "width", "height"}}`, `{"type": "loitering", "zone": {...}, "dwell_seconds": 30}` and `{"type": "wrong_way", "zone": {...}, "direction": "right"}`. Creating, changing and deleting a rule is recorded in the audit log. Deleting a rule keeps its past events, which still carry the rule's name.
+The other conditions are `{"type": "zone_entry", "zone": {"x", "y", "width", "height"}}`, `{"type": "loitering", "zone": {...}, "dwell_seconds": 30}` `{"type": "inactivity", "zone": {...} or null, "still_seconds": 300}` and `{"type": "wrong_way", "zone": {...}, "direction": "right"}`. An inactivity rule fires once when an object's centre has stayed within 3% of the frame of where it stopped for `still_seconds` (10 to 86400), anywhere in the frame or only inside the zone; the clock restarts when the object moves, and the rule can fire again after that. It uses the tracks the AI worker already stores, so it adds no model and no load. Creating, changing and deleting a rule is recorded in the audit log. Deleting a rule keeps its past events, which still carry the rule's name.
 
 ## Reliability
 

@@ -99,6 +99,25 @@ test("unsaved rule edits are protected and invalid rules cannot be saved", async
   expect(saved.map(rule => [rule.name, rule.condition.type, rule.condition.dwell_seconds, rule.group_ids.length])).toEqual([["Gate dwell", "loitering", 60, 1]]);
 });
 
+test("an inactivity rule asks how long an object must stay still, in the whole frame or a zone", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  await page.goto("/cameras/rules");
+  await workspace(page).getByRole("button", { name: "New rule" }).click();
+  await editor(page).getByLabel("Name").fill("Still too long");
+  await editor(page).getByRole("checkbox", { name: "Group: Operations" }).check();
+  await editor(page).getByLabel("When an object").selectOption("inactivity");
+  await expect(editor(page).getByLabel("Without moving for at least (seconds)")).toHaveValue("300");
+  await editor(page).getByLabel("Without moving for at least (seconds)").fill("5");
+  await expect(settings(page).getByRole("alert")).toHaveText("Enter at least 10 seconds for how long an object must stay still.");
+  await editor(page).getByLabel("Without moving for at least (seconds)").fill("120");
+  await expect(page.getByRole("checkbox", { name: "Only count stillness inside a zone" })).not.toBeChecked();
+  await editor(page).getByRole("button", { name: "Save" }).click();
+  await expect(settings(page).getByRole("status")).toBeVisible();
+  const saved = await rules(page);
+  expect(saved.map(rule => [rule.name, rule.condition.type, rule.condition.still_seconds, rule.condition.zone])).toEqual([["Still too long", "inactivity", 120, null]]);
+});
+
 test("operators do not see Rules and cannot open it", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page, "camera-operator");

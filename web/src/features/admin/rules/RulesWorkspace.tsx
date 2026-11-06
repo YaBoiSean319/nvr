@@ -204,6 +204,12 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                        onChange={event => setCondition({ ...condition, dwell_seconds: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
               </label>
             ) : null}
+            {condition.type === "inactivity" ? (
+              <label className="field"><span>Without moving for at least (seconds)</span>
+                <input type="number" min={10} max={86400} value={Number.isNaN(condition.still_seconds) ? "" : condition.still_seconds}
+                       onChange={event => setCondition({ ...condition, still_seconds: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
+              </label>
+            ) : null}
             {condition.type === "wrong_way" ? (
               <label className="field"><span>Expected direction</span>
                 <select value={condition.direction} onChange={event => setCondition({ ...condition, direction: event.target.value as TravelDirection })}>
@@ -260,6 +266,16 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
               {condition.type === "line_crossing" ? (
                 <LineEditor cameraId={previewCamera} line={condition.line} direction={condition.direction} label="Rule line"
                             onChange={line => setCondition({ ...condition, line })} />
+              ) : condition.type === "inactivity" ? (
+                <>
+                  <label className="check"><input type="checkbox" checked={condition.zone !== null}
+                                                  onChange={event => setCondition({ ...condition, zone: event.target.checked ? { x: 0.25, y: 0.25, width: 0.5, height: 0.5 } : null })} /> Only count stillness inside a zone</label>
+                  {condition.zone ? (
+                    <ZoneEditor cameraId={previewCamera} zones={[condition.zone]} max={1} label="Rule zone" emptyHint="Draw the zone the rule watches."
+                                onChange={zones => zones[0] && setCondition({ ...condition, zone: zones[0] })} />
+                  ) : null}
+                  <p className="muted field-hint">Fires once when a person or vehicle has stayed within a small patch of the frame for the whole time. It can fire again only after the object has moved.</p>
+                </>
               ) : (
                 <ZoneEditor cameraId={previewCamera} zones={[condition.zone]} max={1} label="Rule zone" emptyHint="Draw the zone the rule watches."
                             onChange={zones => zones[0] && setCondition({ ...condition, zone: zones[0] })} />

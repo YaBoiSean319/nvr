@@ -13,6 +13,7 @@ export type Condition =
   | { type: "zone_entry"; zone: Zone }
   | { type: "line_crossing"; line: Line; direction: CrossingDirection }
   | { type: "loitering"; zone: Zone; dwell_seconds: number }
+  | { type: "inactivity"; zone: Zone | null; still_seconds: number }
   | { type: "wrong_way"; zone: Zone; direction: TravelDirection }
   | { type: "tamper"; kinds: TamperKind[] }
   | { type: "external_event"; source_ids: string[]; types: string[]; subjects: string[] }
@@ -104,6 +105,7 @@ export const CONDITION_LABEL: Record<Condition["type"], string> = {
   zone_entry: "Enters a zone",
   line_crossing: "Crosses a line",
   loitering: "Stays in a zone",
+  inactivity: "Has not moved for a while",
   wrong_way: "Moves the wrong way",
   tamper: "Camera is covered, moved or defocused",
   external_event: "An outside event (door, sensor, button)",
@@ -121,8 +123,9 @@ export function switchCondition(current: Condition, type: Condition["type"]): Co
   if (type === "fall") return { type };
   if (type === "plate") return { type, watch_list_id: current.type === "plate" ? current.watch_list_id : "" };
   if (type === "tamper") return { type, kinds: current.type === "tamper" ? current.kinds : [...TAMPER_KINDS] };
-  const zone = "zone" in current ? current.zone : DEFAULT_ZONE;
+  const zone = ("zone" in current && current.zone) || DEFAULT_ZONE;
   if (type === "line_crossing") return { type, line: current.type === "line_crossing" ? current.line : { x1: 0.5, y1: 0.1, x2: 0.5, y2: 0.9 }, direction: "both" };
+  if (type === "inactivity") return { type, zone: current.type === "inactivity" ? current.zone : null, still_seconds: current.type === "inactivity" ? current.still_seconds : 300 };
   if (type === "loitering") return { type, zone, dwell_seconds: current.type === "loitering" ? current.dwell_seconds : 30 };
   if (type === "wrong_way") return { type, zone, direction: current.type === "wrong_way" ? current.direction : "right" };
   return { type, zone };
@@ -154,6 +157,7 @@ export function definitionProblem(definition: RuleDefinition): string | null {
     if (!definition.condition.watch_list_id) return "Choose the watch list the rule uses.";
   } else if (!definition.classes.length) return "Choose people, vehicles or both.";
   if (definition.condition.type === "loitering" && !(definition.condition.dwell_seconds >= 1)) return "Enter how many seconds an object must stay.";
+  if (definition.condition.type === "inactivity" && !(definition.condition.still_seconds >= 10)) return "Enter at least 10 seconds for how long an object must stay still.";
   if (!(definition.cooldown_seconds >= 0)) return "Enter a cooldown of 0 seconds or more.";
   if (definition.schedule && !definition.schedule.intervals.length) return "Add a schedule interval, or make the rule always active.";
   for (const action of definition.actions) {

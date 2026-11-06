@@ -64,6 +64,13 @@ class Loitering(BaseModel):
     dwell_seconds: int = Field(ge=1, le=3600)
 
 
+class Inactivity(BaseModel):
+    """An object that has not moved for this long, anywhere in the frame or inside a zone (a person on the floor or in a chair that is not theirs)."""
+    type: Literal["inactivity"]
+    zone: Zone | None = None
+    still_seconds: int = Field(ge=10, le=86400)
+
+
 class WrongWay(BaseModel):
     type: Literal["wrong_way"]
     zone: Zone
@@ -105,7 +112,7 @@ class Fall(BaseModel):
     type: Literal["fall"]
 
 
-Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, WrongWay, Tamper, ExternalEvent, Plate, Fall], Field(discriminator="type")]
+Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, Inactivity, WrongWay, Tamper, ExternalEvent, Plate, Fall], Field(discriminator="type")]
 
 
 class ScheduleInterval(BaseModel):
