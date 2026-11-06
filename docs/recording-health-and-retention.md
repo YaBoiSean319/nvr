@@ -29,3 +29,7 @@ Storage space comes before the retention policy. A recorder fills its disks by d
 - Beside each setting the page shows the headroom and the free space now, whether footage is being deleted to keep it, how much was deleted in the last 24 hours, the age of the oldest footage kept against the longest retention policy on the volume, and any shortfall.
 - Deletions are counted in the day's retention deletion record like any other, so the coverage and playback show the footage as removed.
 - Footage removed this way can be younger than its retention policy: the retention forecast shows which cameras cannot be held for their policy at their write rate.
+
+## Sections of Settings › Recording & storage
+
+The page shows one section at a time, chosen from the tabs along its top: Volumes, Headroom, Disk health, Forecast, Retention (the default and the alarm footage period) and Backups. The tabs work with the arrow keys. The page opens on Volumes each time.

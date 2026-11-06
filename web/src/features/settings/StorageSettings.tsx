@@ -5,6 +5,7 @@ import { TabFooter } from "@/features/admin/TabFooter";
 import { alarmKeys } from "@/features/alarms/api";
 import { failureText, useTabDraft } from "@/features/admin/tabDraft";
 import { formatRelative } from "@/lib/time";
+import { SectionPanel, SectionTabs } from "./SectionTabs";
 
 interface Headroom {
   headroom_bytes: number; headroom_is_default: boolean; headroom_default_bytes: number; below_headroom: boolean; removing_oldest_footage: boolean;
@@ -98,6 +99,11 @@ function HeadroomCard({ volume, onSaved }: { volume: Volume; onSaved: () => void
 }
 
 /** Storage volumes and their health, the retention default, and configuration backups. */
+const SECTIONS = [
+  { id: "volumes", label: "Volumes" }, { id: "headroom", label: "Headroom" }, { id: "disks", label: "Disk health" },
+  { id: "forecast", label: "Forecast" }, { id: "retention", label: "Retention" }, { id: "backups", label: "Backups" },
+];
+
 export function StorageSettings() {
   const client = useQueryClient();
   const storage = useQuery({ queryKey: ["storage"], queryFn: ({ signal }) => api<{ volumes: Volume[]; minimum_free_bytes: number }>("/api/storage", { signal }), refetchInterval: 30_000 });
@@ -139,7 +145,8 @@ export function StorageSettings() {
   const status = backups.data;
   const active = status?.runs.find(run => run.status === "queued" || run.status === "running");
   return (
-    <div className="settings-stack">
+    <SectionTabs label="Storage sections" tabs={SECTIONS}>
+      <SectionPanel id="volumes">
       <section className="field-group" aria-label="Storage volumes">
         <h2 className="field-heading">Storage volumes</h2>
         {storage.data ? (
@@ -161,6 +168,8 @@ export function StorageSettings() {
         <p className="muted field-hint">Volumes are configured on the NVR host. Assign a policy group to a volume in Groups &amp; Policies.</p>
       </section>
 
+      </SectionPanel>
+      <SectionPanel id="headroom">
       <section className="field-group" aria-label="Storage headroom">
         <h2 className="field-heading">Storage headroom</h2>
         <p className="muted field-hint">
@@ -170,6 +179,8 @@ export function StorageSettings() {
         {(storage.data?.volumes ?? []).filter(volume => volume.headroom).map(volume => <HeadroomCard key={`${volume.id}:${volume.headroom.headroom_bytes}`} volume={volume} onSaved={() => void client.invalidateQueries({ queryKey: ["storage"] })} />)}
       </section>
 
+      </SectionPanel>
+      <SectionPanel id="disks">
       <section className="field-group" aria-label="Disk health">
         <h2 className="field-heading">Disk health</h2>
         <p className="muted field-hint">
@@ -202,6 +213,8 @@ export function StorageSettings() {
         </div>
       </section>
 
+      </SectionPanel>
+      <SectionPanel id="forecast">
       <section className="field-group" aria-label="Retention forecast">
         <h2 className="field-heading">Retention forecast</h2>
         {forecast.data ? (
@@ -232,11 +245,16 @@ export function StorageSettings() {
         ) : <p className="muted">{forecast.error ? failureText(forecast.error) : "Loading…"}</p>}
       </section>
 
+      </SectionPanel>
+      <SectionPanel id="retention">
       <section className="field-group" aria-label="Retention default">
         <h2 className="field-heading">Retention default</h2>
         <p>Footage is kept for 30 days unless a group or camera sets its own retention. Held, playing and exporting footage is never removed early.</p>
       </section>
 
+      <AlarmFootage />
+      </SectionPanel>
+      <SectionPanel id="backups">
       <section className="field-group" aria-label="Configuration backups">
         <h2 className="field-heading">Configuration backups</h2>
         {status ? (
@@ -268,8 +286,8 @@ export function StorageSettings() {
           </>
         ) : <p className="muted">{backups.error ? failureText(backups.error) : "Loading…"}</p>}
       </section>
-      <AlarmFootage />
-    </div>
+      </SectionPanel>
+    </SectionTabs>
   );
 }
 

@@ -77,6 +77,7 @@ test("only administrators delete alarms, and the alarm footage period is a setti
   seedFixtures(2, { alarm: true });
   await signInNext(page);
   await page.goto("/settings/recording");
+  await page.getByRole("tab", { name: "Retention" }).click();
   const footage = page.getByRole("form", { name: "Alarm footage" });
   await footage.getByLabel("Days to keep after resolution").fill("45");
   await footage.getByRole("button", { name: "Save" }).click();

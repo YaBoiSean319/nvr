@@ -12,6 +12,7 @@ test("disk health says 'not available' when the disk cannot be read, and a faili
   seedFixtures(1);
   await signInNext(page);
   await openStorage(page);
+  await page.getByRole("tab", { name: "Disk health" }).click();
   const health = page.getByRole("region", { name: "Disk health" });
   await expect(health).toContainText("Disk health is not available");
 
@@ -24,6 +25,7 @@ test("disk health says 'not available' when the disk cannot be read, and a faili
   smartReading("failing");
   await page.reload();
   await openStorage(page);
+  await page.getByRole("tab", { name: "Disk health" }).click();
   const row = page.getByRole("region", { name: "Disk health" }).getByRole("row", { name: /default/ });
   await expect(row).toContainText("Failing");
   await expect(row).toContainText("Fixture HDD 4TB");
@@ -35,6 +37,7 @@ test("disk health says 'not available' when the disk cannot be read, and a faili
   smartReading("healthy");
   await page.reload();
   await openStorage(page);
+  await page.getByRole("tab", { name: "Disk health" }).click();
   await expect(page.getByRole("region", { name: "Disk health" }).getByRole("row", { name: /default/ })).toContainText("No problems reported");
   expect((await (await page.request.get("/api/incidents")).json()).incidents.filter(item => item.fault_type === "disk_health" && item.fault_active)).toEqual([]);
 });
@@ -44,6 +47,7 @@ test("a camera that will not keep its policy is shown in Settings and on its Rec
   await signInNext(page);
   writeHistory(1, 20); // 20 TB a day: more than any disk holds for 30 days.
   await openStorage(page);
+  await page.getByRole("tab", { name: "Forecast" }).click();
   const forecast = page.getByRole("region", { name: "Retention forecast" });
   const table = forecast.getByRole("table", { name: "Retention forecast by camera" });
   await expect(table.getByRole("row", { name: /Camera 001/ })).toContainText(/can hold about \d+ days at the current write rate, below its 30-day policy/);
@@ -66,6 +70,7 @@ test("an administrator sets a volume's storage headroom and sees what it is doin
   seedFixtures(1);
   await signInNext(page);
   await openStorage(page);
+  await page.getByRole("tab", { name: "Headroom" }).click();
   const section = page.getByRole("region", { name: "Storage headroom" });
   await expect(section).toContainText("storage space comes before the retention policy");
   const card = section.getByRole("article", { name: "Headroom for default" });
