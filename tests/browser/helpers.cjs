@@ -115,6 +115,13 @@ function seedOverlayTracks(anchor) {
   return JSON.parse(result.stdout);
 }
 
+/** Eleven open incidents and eight export jobs, for the status panel journeys. */
+function seedStatus() {
+  const result = spawnSync("python", ["-m", "tests.browser.seed_status"], { cwd: process.cwd(), env: { PATH: process.env.PATH, ...FIXTURE_ENVIRONMENT }, encoding: "utf8", timeout: 60_000 });
+  assert.equal(result.status, 0, `seeding the status panel failed: ${result.stderr || result.stdout}`);
+  return JSON.parse(result.stdout);
+}
+
 /** Give fixture camera `camera` a camera address, an ONVIF login and/or an ONVIF device address, for the hardening checks. */
 function weakenCamera(camera, { ip, onvifUser, onvifPassword, device } = {}) {
   const args = ["-m", "tests.browser.seed_hardening", "--camera", String(camera)];
@@ -187,4 +194,4 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedTiering, seedTracking, seedDigest, seedHealth, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedTiering, seedTracking, seedDigest, seedHealth, seedStatus, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

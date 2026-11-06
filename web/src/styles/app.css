@@ -85,7 +85,20 @@
 .drawer-body { overflow-y: auto; padding: var(--n-space-4); }
 .drawer-footer { padding: var(--n-space-3) var(--n-space-4); border-top: 1px solid var(--n-line); display: flex; justify-content: flex-end; gap: var(--n-space-2); }
 
-.status-details { display: grid; gap: var(--n-space-5); }
+.status-details { display: grid; gap: var(--n-space-3); align-content: start; }
+/* The tabs stay at the top of the drawer while a long section scrolls under them. */
+.status-tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; position: sticky; top: calc(-1 * var(--n-space-4)); z-index: 1; margin: calc(-1 * var(--n-space-4)) calc(-1 * var(--n-space-4)) 0; padding: var(--n-space-2) var(--n-space-3); background: var(--n-panel); border-bottom: 1px solid var(--n-line); }
+.status-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 var(--n-space-2); border: 0; border-radius: var(--n-radius-small); background: transparent; color: var(--n-muted); font: inherit; font-weight: 550; white-space: nowrap; cursor: pointer; }
+.status-tab:hover { color: var(--n-text); background: var(--n-raised); }
+.status-tab[data-state="active"] { color: var(--n-text); background: var(--n-soft); }
+.status-tab:focus-visible { outline: 2px solid var(--n-focus); outline-offset: 1px; }
+.tab-count { min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--n-raised); color: var(--n-text); font-size: 12px; text-align: center; }
+.tab-count[data-tone="bad"] { background: color-mix(in srgb, #e5484d 30%, var(--n-panel)); }
+.tab-count[data-tone="warn"] { background: color-mix(in srgb, #f5a524 30%, var(--n-panel)); }
+.status-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--n-space-2); }
+.status-counts { margin: 0; color: var(--n-muted); font-size: 13px; flex: 1 1 100%; }
+.status-filter { display: inline-flex; gap: 2px; }
+.status-filter .button[aria-pressed="true"] { background: var(--n-soft); }
 .status-details h3 { margin: 0 0 var(--n-space-2); font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--n-muted); }
 .status-details section[data-focused="true"] h3 { color: var(--n-text); }
 .status-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--n-space-2); }
