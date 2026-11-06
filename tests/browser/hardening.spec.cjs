@@ -1,12 +1,12 @@
 // Real-browser journey for the camera hardening report (#124).
-const { test, expect, seedFixtures, signInNext, weakenCamera } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInNext, weakenCamera, settingsLink } = require("./helpers.cjs");
 
 const nav = page => page.getByRole("navigation", { name: "Workspaces" });
 const STRONG = "Zq9-long-unique-passphrase";
 
 async function openHardening(page) {
   await nav(page).getByRole("link", { name: "Settings" }).click();
-  await page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Camera hardening" }).click();
+  await (await settingsLink(page, "Camera hardening")).click();
 }
 
 test("the hardening report finds each weakness, takes an acknowledgement with a reason, and shows the finding again when its condition changes", async ({ page }) => {

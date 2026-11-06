@@ -1,5 +1,5 @@
 // Real-browser journeys for the Settings workspace (#103), driven from the keyboard.
-const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInNext, settingsLink } = require("./helpers.cjs");
 
 // A valid 1×1 PNG.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
@@ -13,7 +13,7 @@ async function press(locator, key = "Enter") {
 
 async function openSettings(page, category) {
   await press(page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }));
-  await press(page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: category }));
+  await press(await settingsLink(page, category));
   await expect(page.getByRole("heading", { level: 1, name: category })).toBeVisible();
 }
 
@@ -29,7 +29,7 @@ test("General: a server-rendered preview, an explicit save and a guarded leave",
   await expect(page.getByTestId("display-preview")).toHaveText("2026-10-21 12:05:06");
 
   // Leaving with unsaved changes asks first; Cancel stays.
-  await press(page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Diagnostics" }));
+  await press(await settingsLink(page, "Diagnostics"));
   const guard = page.getByRole("dialog", { name: "Unsaved changes" });
   await press(guard.getByRole("button", { name: "Cancel" }));
   await expect(form.getByLabel("Time zone")).toHaveValue("America/New_York");
@@ -190,10 +190,10 @@ test("Notifications: webhooks with secrets shown once, a test delivery, and a he
   await expect(heartbeat).toContainText("Not configured");
 });
 
-test("Integrations and Diagnostics save for real", async ({ page }) => {
+test("AI analysis and Diagnostics save for real", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);
-  await openSettings(page, "Integrations");
+  await openSettings(page, "AI analysis");
   const runtime = page.getByRole("form", { name: "AI runtime" });
   // Automatic is the default, with no number to set; a fixed number can be any whole number, not only up to sixteen.
   await expect(runtime.getByRole("radio", { name: /^Automatic/ })).toBeChecked();
@@ -211,7 +211,7 @@ test("Integrations and Diagnostics save for real", async ({ page }) => {
   await expect(runtime.getByRole("status").last()).toHaveText("Saved.");
   expect((await (await page.request.get("/api/ai/settings")).json()).max_active_cameras).toBe(6);
 
-  await press(page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Diagnostics" }));
+  await press(await settingsLink(page, "Diagnostics"));
   const diagnostics = page.getByRole("region", { name: "Support diagnostics" });
   await diagnostics.getByLabel("Capture for").fill("2");
   await press(diagnostics.getByRole("button", { name: "Start capturing" }));
@@ -277,4 +277,61 @@ test("Remote access: how the page was reached, no warnings on the local network,
   expect(saved).toEqual({ mfa_policy: "off", remote_mfa: true });
   // Turning it on while connected from the local network does not ask this session for anything.
   await expect(page.getByRole("heading", { level: 1, name: "Remote access" })).toBeVisible();
+});
+
+test("categories are grouped under headings, only the open group lists its links, and every category is two clicks away", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await page.goto("/settings/general");
+  const nav = page.getByRole("navigation", { name: "Settings categories" });
+  await expect(nav.locator("summary")).toHaveText(["Site", "People & access", "Recording & storage", "Alerts", "AI", "System"]);
+  // Only the group of the page being looked at is open.
+  await expect(nav.getByRole("link", { name: "Appearance & branding" })).toBeVisible();
+  await expect(nav.getByRole("link", { name: "Camera hardening" })).toBeHidden();
+  // One click opens a group, a second goes to the category, and the group stays open.
+  await nav.locator("summary", { hasText: "People & access" }).click();
+  await expect(nav.getByRole("link", { name: "Camera hardening" })).toBeVisible();
+  await nav.getByRole("link", { name: "Camera hardening" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Camera hardening" })).toBeVisible();
+  await expect(nav.getByRole("link", { name: "Camera hardening" })).toBeVisible();
+  // Every one of the 22 categories is in exactly one group.
+  for (const summary of await nav.locator("details:not([open]) summary").all()) await summary.click();
+  await expect(nav.getByRole("link")).toHaveCount(22);
+  // The old address of the AI settings still works, under its new name.
+  await page.goto("/settings/integrations");
+  await expect(page.getByRole("heading", { level: 1, name: "AI analysis" })).toBeVisible();
+});
+
+test("a setting can be found by typing what it is about, and Enter opens the first match", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await page.goto("/settings/general");
+  const find = page.getByRole("searchbox", { name: "Find a setting" });
+  const nav = page.getByRole("navigation", { name: "Settings categories" });
+  await find.fill("microsoft");
+  await expect(nav.getByRole("link")).toHaveText(["Email alerts"]); // Found by a word that is not in its name
+  await find.fill("zzzz");
+  await expect(nav.getByRole("status")).toContainText("No setting matches");
+  await find.fill("ai model");
+  await expect(nav.getByRole("link")).toHaveText(["AI analysis"]);
+  await find.press("Enter");
+  await expect(page.getByRole("heading", { level: 1, name: "AI analysis" })).toBeVisible();
+  await expect(find).toHaveValue(""); // Cleared once it has taken you there
+});
+
+test("on a phone the categories are one picker, not a strip to scroll", async ({ page }) => {
+  seedFixtures(1);
+  await page.setViewportSize({ width: 390, height: 800 });
+  await signInNext(page);
+  await page.goto("/settings/general");
+  const picker = page.getByRole("combobox", { name: "Settings category" });
+  await expect(picker).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Settings categories" })).toBeHidden();
+  expect((await picker.boundingBox()).y).toBeLessThan(250); // Near the top, no scrolling past a list to reach the page
+  await picker.selectOption("tiering");
+  await expect(page.getByRole("heading", { level: 1, name: "Storage tiering" })).toBeVisible();
+  // Typing finds a category here too.
+  await page.getByRole("searchbox", { name: "Find a setting" }).fill("email");
+  await expect(page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Email alerts" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

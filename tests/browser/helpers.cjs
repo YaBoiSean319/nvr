@@ -187,4 +187,13 @@ async function signInAs(browser, baseURL, username) {
   await expect(page.getByRole("navigation", { name: "Workspaces" })).toBeVisible();
   return { context, page };
 }
-module.exports = { test: base, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedTiering, seedTracking, seedDigest, seedHealth, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };
+/** The link for a Settings category, opening its group in the navigation first when it is folded away. */
+async function settingsLink(page, label) {
+  const nav = page.getByRole("navigation", { name: "Settings categories" });
+  const link = nav.getByRole("link", { name: label });
+  await nav.waitFor(); // The groups are right from the first render, so look only once it is there
+  if (!(await link.isVisible())) await nav.locator("details").filter({ has: page.getByRole("link", { name: label }) }).locator("summary").click();
+  return link;
+}
+
+module.exports = { test: base, settingsLink, expect, FIXTURE_PASSWORD, seedFixtures, raiseAlarm, feedTamper, writeHistory, smartReading, weakenCamera, seedSearchTracks, seedPlates, seedFailover, seedTiering, seedTracking, seedDigest, seedHealth, seedOverlayTracks, signInNext, signInAs, trackLiveSockets, median, percentile, writeAcceptanceMeasurements };

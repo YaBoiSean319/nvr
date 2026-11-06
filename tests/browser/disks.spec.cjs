@@ -1,11 +1,11 @@
 // Real-browser journeys for disk health and the retention forecast (#123).
-const { test, expect, seedFixtures, signInNext, writeHistory, smartReading } = require("./helpers.cjs");
+const { test, expect, seedFixtures, signInNext, writeHistory, smartReading, settingsLink } = require("./helpers.cjs");
 
 const nav = page => page.getByRole("navigation", { name: "Workspaces" });
 
 async function openStorage(page) {
   await nav(page).getByRole("link", { name: "Settings" }).click();
-  await page.getByRole("navigation", { name: "Settings categories" }).getByRole("link", { name: "Recording & storage" }).click();
+  await (await settingsLink(page, "Recording & storage")).click();
 }
 
 test("disk health says 'not available' when the disk cannot be read, and a failing disk raises an incident", async ({ page }) => {
