@@ -21,8 +21,10 @@ test("the panel opens on the section of the chip pressed, shows one section at a
   await panel.getByRole("tab", { name: /^Exports/ }).click();
   await expect(panel.getByRole("heading", { name: "Export jobs" })).toBeVisible();
   await expect(panel.getByRole("heading", { name: "Incidents" })).toHaveCount(0);
-  await panel.getByRole("tab", { name: /^Exports/ }).press("ArrowLeft");
-  await expect(panel.getByRole("tab", { name: /^Incidents/ })).toBeFocused();
+  await panel.getByRole("tab", { name: /^Incidents/ }).click();
+  await panel.getByRole("tab", { name: /^Incidents/ }).press("ArrowRight");
+  await expect(panel.getByRole("tab", { name: /^Recording/ })).toBeFocused();
+  await expect(panel.getByRole("heading", { name: "Recording" })).toBeVisible();
 });
 
 test("incidents: the active ones first, a filter, the rest behind a button, and all the active ones acknowledged at once", async ({ page }) => {
