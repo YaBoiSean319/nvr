@@ -71,6 +71,14 @@ class Inactivity(BaseModel):
     still_seconds: int = Field(ge=10, le=86400)
 
 
+class Occupancy(BaseModel):
+    """More than ``limit`` people (or vehicles) in the frame, or in a zone, for ``for_seconds`` (a room over capacity, a queue that has grown)."""
+    type: Literal["occupancy"]
+    zone: Zone | None = None
+    limit: int = Field(ge=1, le=1000)
+    for_seconds: int = Field(default=10, ge=1, le=3600)
+
+
 class WrongWay(BaseModel):
     type: Literal["wrong_way"]
     zone: Zone
@@ -112,7 +120,7 @@ class Fall(BaseModel):
     type: Literal["fall"]
 
 
-Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, Inactivity, WrongWay, Tamper, ExternalEvent, Plate, Fall], Field(discriminator="type")]
+Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, Inactivity, Occupancy, WrongWay, Tamper, ExternalEvent, Plate, Fall], Field(discriminator="type")]
 
 
 class ScheduleInterval(BaseModel):

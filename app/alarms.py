@@ -59,7 +59,7 @@ def _notify(db: sqlite3.Connection, alarm_id: str, event_type: str, actor_id: in
 
 
 PLATE_LABEL_PREFIX = "plate:"  # A licence plate alarm's label is this and the plate
-LABEL_TEXT = {"person": "Person", "vehicle": "Vehicle", "covered": "Camera covered", "moved": "Camera moved", "defocused": "Camera defocused", "fall": "Person fell"}
+LABEL_TEXT = {"person": "Person", "vehicle": "Vehicle", "covered": "Camera covered", "moved": "Camera moved", "defocused": "Camera defocused", "fall": "Person fell", "occupancy": "Over the occupancy limit"}
 
 
 def label_text(label: object) -> str:
