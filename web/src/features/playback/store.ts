@@ -51,6 +51,8 @@ interface PlaybackState {
   exportOpen: boolean;
   /** Detection boxes over the video: off until asked for, and never remembered between visits. */
   overlayOn: boolean;
+  /** Body outlines (shoulders, arms, hips, legs) for people the pose model was run on: off until asked for, and never remembered. */
+  skeletonOn: boolean;
   /** The object whose path is drawn as a trail and whose appearances can be stepped through. */
   tracked: { id: string; cameraId: string } | null;
   /** The attribute search drawer, which shares its place beside Playback with the export drawer. */
@@ -83,6 +85,7 @@ interface PlaybackState {
   clearMarks: () => void;
   setExportOpen: (open: boolean) => void;
   setOverlayOn: (on: boolean) => void;
+  setSkeletonOn: (on: boolean) => void;
   trackObject: (tracked: { id: string; cameraId: string } | null) => void;
   setAttributeSearchOpen: (open: boolean) => void;
   setPlateSearchOpen: (open: boolean) => void;
@@ -109,6 +112,7 @@ const initial = {
   marks: { in: null, out: null },
   exportOpen: false,
   overlayOn: false,
+  skeletonOn: false,
   tracked: null,
   attributeSearchOpen: false,
   plateSearchOpen: false,
@@ -174,6 +178,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       return { marks, exportOpen: state.exportOpen || completed, attributeSearchOpen: state.attributeSearchOpen && !completed, plateSearchOpen: state.plateSearchOpen && !completed };
     }),
   clearMarks: () => set({ marks: { in: null, out: null } }),
+  setSkeletonOn: skeletonOn => set({ skeletonOn }),
   setOverlayOn: overlayOn => set(state => ({ overlayOn, tracked: overlayOn ? state.tracked : null })),
   trackObject: tracked => set({ tracked }),
   setExportOpen: exportOpen => set(state => ({ exportOpen, attributeSearchOpen: exportOpen ? false : state.attributeSearchOpen, plateSearchOpen: exportOpen ? false : state.plateSearchOpen })),

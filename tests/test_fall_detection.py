@@ -25,12 +25,16 @@ class ScriptedReader:
     def __init__(self) -> None:
         self.calls = 0
 
-    def pose(self, frame, box):
+    def pose_full(self, frame, box):
+        """What the worker asks for: the body points of the decision and the arms, which are only drawn."""
         self.calls += 1
         aspect = 16 / 9  # The camera's shape, as the worker uses
         centre = frame[int((box["y"] + box["height"] / 2) * frame.shape[0]), int((box["x"] + box["width"] / 2) * frame.shape[1])]
         red = int(centre[2]) > 150 and int(centre[1]) < 100
-        return pose(85 if red and box["x"] > 0.25 else 5, aspect=aspect)
+        found = pose(85 if red and box["x"] > 0.25 else 5, aspect=aspect)
+        for side in ("left", "right"):
+            found[f"{side}_elbow"] = found[f"{side}_wrist"] = found[f"{side}_shoulder"]
+        return found
 
 
 class WorkerTests(SceneTestCase):
@@ -76,9 +80,21 @@ class WorkerTests(SceneTestCase):
             self.assertGreater(db.execute("SELECT COUNT(*) FROM ai_detections").fetchone()[0], 0)  # Analysis still ran
             self.assertEqual(db.execute("SELECT COUNT(*) FROM fall_events").fetchone()[0], 0)
 
+    def test_the_body_points_are_kept_with_each_detection_for_playback_to_draw_but_the_decision_still_uses_its_nine(self):
+        reader = ScriptedReader()
+        with patch.object(pose_models, "load_reader", return_value=reader):
+            self.analyse_footage()
+        with connect() as db:
+            kept = [json.loads(row[0]) for row in db.execute("SELECT pose_json FROM ai_detections WHERE pose_json IS NOT NULL")]
+            people = db.execute("SELECT COUNT(*) FROM ai_detections WHERE label='person'").fetchone()[0]
+        self.assertGreater(len(kept), 0)
+        self.assertLessEqual(len(kept), people)
+        self.assertTrue(all({"left_shoulder", "left_hip", "left_elbow", "right_wrist"} <= set(points) for points in kept))
+        self.assertTrue(all(len(point) == 2 for points in kept for point in points.values()))
+
     def test_a_pose_reader_that_fails_never_stops_analysis(self):
         class Broken:
-            def pose(self, frame, box):
+            def pose_full(self, frame, box):
                 raise RuntimeError("the model fell over")
 
         with patch.object(pose_models, "load_reader", return_value=Broken()):

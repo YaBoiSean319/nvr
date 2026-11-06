@@ -184,6 +184,26 @@ def purge_expired_detections(db: sqlite3.Connection, camera_id: str, before: dat
     ).rowcount
 
 
+POSE_VISIBLE = 0.3  # The least visibility at which a body point is kept (the same as fall detection's)
+
+
+def pose_json(pose: dict[str, tuple[float, float, float]]) -> str | None:
+    """A pose as stored: only the points the model could see, as [x, y] in fractions of the picture, to three places. None when it saw too few to draw."""
+    kept = {name: [round(point[0], 3), round(point[1], 3)] for name, point in pose.items() if point[2] >= POSE_VISIBLE}
+    return json.dumps(kept, separators=(",", ":")) if len(kept) >= 3 else None
+
+
+def store_poses(db: sqlite3.Connection, camera_id: str, at: datetime, poses: dict[str, dict[str, tuple[float, float, float]]]) -> int:
+    """Attach each tracked person's body points to the detection stored for that analysed frame (the pose is read after the detection is saved)."""
+    stamp = at.astimezone(timezone.utc).isoformat()
+    stored = 0
+    for track_id, pose in poses.items():
+        text = pose_json(pose)
+        if text is not None:
+            stored += db.execute("UPDATE ai_detections SET pose_json=? WHERE camera_id=? AND track_id=? AND detected_at=?", (text, camera_id, track_id, stamp)).rowcount
+    return stored
+
+
 def detection_view(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"], "camera_id": row["camera_id"], "track_id": row["track_id"], "detected_at": row["detected_at"],

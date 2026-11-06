@@ -40,6 +40,7 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
   const [gapReason, setGapReason] = useState<string | null>(null);
   const { setActive, enlarge, unenlarge, remove } = usePlaybackStore.getState();
   const overlayOn = usePlaybackStore(store => store.overlayOn);
+  const skeletonOn = usePlaybackStore(store => store.skeletonOn);
   const tracked = usePlaybackStore(store => store.tracked);
   const { points: path } = useTrackPath(tracked?.cameraId === id ? tracked.id : null, id);
 
@@ -125,7 +126,7 @@ export function PlaybackTile({ id, name, camera, active, enlarged, hidden }: {
          data-segment-start={segmentStart ?? undefined} data-camera-id={id} hidden={hidden}
          onClick={() => setActive(id)} onDoubleClick={() => (enlarged ? unenlarge() : enlarge(id))}>
       <video ref={video} className="tile-video" muted playsInline preload="auto" />
-      {overlayOn ? <TrackOverlay cameraId={id} video={video} path={path} visible={phase === "ready"} /> : null}
+      {overlayOn || skeletonOn ? <TrackOverlay cameraId={id} video={video} path={path} visible={phase === "ready"} /> : null}
       <div className="tile-top">
         <span className="tile-name" title={name}>{name}</span>
       </div>

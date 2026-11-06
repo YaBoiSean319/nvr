@@ -44,6 +44,8 @@ SHIPPED = (BUNDLE,)
 
 # The body points fall detection uses, by name, at their place among the model's 33 landmarks.
 POINTS = {"nose": 0, "left_shoulder": 11, "right_shoulder": 12, "left_hip": 23, "right_hip": 24, "left_knee": 25, "right_knee": 26, "left_ankle": 27, "right_ankle": 28}
+# Those and the arms, for drawing a skeleton. Fall detection keeps to POINTS: its decision looks at how wide the body is, and arms held out would change that.
+DRAWN_POINTS = {**POINTS, "left_elbow": 13, "right_elbow": 14, "left_wrist": 15, "right_wrist": 16}
 
 
 def sha256_of(path: Path) -> str:
@@ -101,7 +103,7 @@ def _sigmoid(value: np.ndarray | float) -> np.ndarray | float:
     return 1.0 / (1.0 + np.exp(-value))
 
 
-def decode(landmarks: np.ndarray, score: float, rows: int, columns: int, left: float, top: float, side: float) -> dict[str, tuple[float, float, float]] | None:
+def decode(landmarks: np.ndarray, score: float, rows: int, columns: int, left: float, top: float, side: float, names: dict[str, int] | None = None) -> dict[str, tuple[float, float, float]] | None:
     """The body points from the model's output, as (x, y, visibility) in fractions of the frame; None when the model doubts a person is there.
 
     ``landmarks`` is the 195 numbers (39 landmarks of x, y, z, visibility, presence): x and y in the 256-pixel crop, visibility a logit."""
@@ -109,7 +111,7 @@ def decode(landmarks: np.ndarray, score: float, rows: int, columns: int, left: f
         return None
     points = np.asarray(landmarks, dtype=np.float32).reshape(-1, 5)
     found: dict[str, tuple[float, float, float]] = {}
-    for name, index in POINTS.items():
+    for name, index in (names or POINTS).items():
         x, y, _, visibility, _ = points[index]
         found[name] = (float(np.clip((left + x / INPUT_SIZE * side) / columns, -0.5, 1.5)), float(np.clip((top + y / INPUT_SIZE * side) / rows, -0.5, 1.5)), float(_sigmoid(visibility)))
     return found
@@ -129,12 +131,18 @@ class PoseReader:
         self._score = next(output for output in outputs if list(output.shape) == [1, 1])
 
     def pose(self, frame: np.ndarray, box: dict[str, float]) -> dict[str, tuple[float, float, float]] | None:
+        """The body points fall detection decides on."""
+        found = self.pose_full(frame, box)
+        return None if found is None else {name: point for name, point in found.items() if name in POINTS}
+
+    def pose_full(self, frame: np.ndarray, box: dict[str, float]) -> dict[str, tuple[float, float, float]] | None:
+        """Those and the arms too, for drawing."""
         rows, columns = frame.shape[:2]
         crop, left, top, side = square_crop(frame, box)
         tensor = (resize_bilinear(crop[:, :, ::-1], INPUT_SIZE, INPUT_SIZE) / 255.0).astype(np.float32)[None]
         outputs = self.model(tensor)
         # The pose score is already a probability (about 0 for an empty picture); the landmarks' visibility is a logit, which ``decode`` turns into one.
-        return decode(np.asarray(outputs[self._landmarks]), float(np.asarray(outputs[self._score]).reshape(-1)[0]), rows, columns, left, top, side)
+        return decode(np.asarray(outputs[self._landmarks]), float(np.asarray(outputs[self._score]).reshape(-1)[0]), rows, columns, left, top, side, DRAWN_POINTS)
 
 
 def load_reader(provider: str = "CPU") -> PoseReader | None:

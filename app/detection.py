@@ -642,9 +642,9 @@ class DetectionManager:
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         from . import attributes
         from . import clip
-        from . import falls, plates, privacy
+        from . import falls, plates, pose_models, privacy
         from . import similar
-        from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe
+        from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe, store_poses
 
         attribute_model = await self._attribute_model(str(config["provider"]))
         reid_model = await self._reid_model(str(config["provider"]))
@@ -732,11 +732,17 @@ class DetectionManager:
                                       if item["label"] == "person" and not plates.overlaps_privacy_zone(item["box"], fall_zones)][:falls.MAX_PEOPLE_PER_FRAME]
                             boxes = {track_id: item["box"] for track_id, item in people}
                             raised = []
+                            drawn: dict[str, dict[str, tuple[float, float, float]]] = {}
                             for track_id, item in people:
-                                pose = await asyncio.to_thread(fall_reader.pose, picture, item["box"])
+                                full = await asyncio.to_thread(fall_reader.pose_full, picture, item["box"])
+                                pose = None if full is None else {name: point for name, point in full.items() if name in pose_models.POINTS}  # The decision uses these; the arms are only for drawing
+                                if full is not None:
+                                    drawn[track_id] = full
                                 found = fall_detector.update(track_id, moment, pose, centre=(item["box"]["x"] + item["box"]["width"] / 2, item["box"]["y"] + item["box"]["height"] / 2))
                                 if found:
                                     raised.append(found)
+                            if drawn:
+                                await self._db(_with_db, store_poses, camera_id, at, drawn)  # So Playback can draw the skeleton; a failure here never stops detection
                             raised += fall_detector.tick(moment, set(boxes))
                             fall_detector.forget({track.id for track in tracker.active}, moment)
                             for found in raised:

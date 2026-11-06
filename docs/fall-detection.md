@@ -30,6 +30,10 @@ The AI worker already finds and follows each person. For a camera with fall dete
 
 A body wider than tall counts as low 10° sooner than the angle above. Frames in between "upright" and "low", or where the body points cannot be seen, neither start nor end a fall; only an upright frame clears one.
 
+## Body outlines in Playback
+
+The body points the pose model finds for each person (nose, shoulders, elbows, wrists, hips, knees and ankles; only those it could see, to three decimal places of the picture) are kept with that person's detection, so **Playback > Skeleton** can draw them. They are kept and deleted exactly like the detection they belong to (retention, footage deletion), are never read for anyone inside a privacy mask, and are left out of Playback when any of them lies in a masked area. The fall decision still uses only its nine points (the arms are for drawing). This costs no extra analysis: the points were already being read.
+
 ## What it needs from the cameras
 
 - A view where people are **large enough to see** and not mostly hidden. The AI worker analyses a small copy of the picture (448 × 256), so a person far from the camera is only a few dozen pixels tall and the body points are rough. Wide-angle views of corridors, lounges and dining rooms where people walk in the open suit it best; a camera on a bed behind rails, a bathroom, or a ceiling fisheye (which sees people from above) does not.

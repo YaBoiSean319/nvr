@@ -121,6 +121,32 @@ test("boxes follow the stored detections of the shared clock at 1x and while fra
   if (!seeded.person_at.includes(frame)) await expect(boxes(page).first()).toHaveAttribute("data-label", "vehicle");
 });
 
+test("the skeleton draws the person's body outline from the stored pose, between detections, and the vehicle has none", async ({ page }) => {
+  const { seeded } = await open(page);
+  const skeleton = overlay(page).locator(".track-skeleton");
+  await expect(skeleton).toHaveCount(0); // Off until asked for
+  await seekBy(page, 5);
+  await page.keyboard.press("k");
+  await expect(skeleton).toHaveCount(1);
+  // The person has a pose; the parked vehicle does not: one outline of 13 lines (neck, shoulders, torso sides, hips, four arm and four leg lines).
+  await expect(skeleton.locator("g")).toHaveCount(1);
+  await expect(skeleton.locator("g").first()).toHaveAttribute("data-label", "person");
+  await expect(skeleton.locator("line.bone")).toHaveCount(13);
+  // 5 s is halfway from the 4 s frame (box at 10% from the left) to the 6 s frame (22%): the left shoulder (2% right of the box) is at 18%, and the right one (8%) at 24%.
+  const shoulders = skeleton.locator('line.bone[data-bone="left_shoulder-right_shoulder"]');
+  await expect(shoulders).toHaveAttribute("x1", /^0\.18/);
+  await expect(shoulders).toHaveAttribute("x2", /^0\.24/);
+  // Boxes are separate: still off, and turning them on leaves the outline where it is.
+  await expect(boxes(page)).toHaveCount(0);
+  await page.keyboard.press("b");
+  await expect(boxes(page)).toHaveCount(2);
+  await expect(skeleton.locator("line.bone")).toHaveCount(13);
+  await page.keyboard.press("k");
+  await expect(skeleton).toHaveCount(0);
+  await expect(boxes(page)).toHaveCount(2);
+  expect(seeded.person_x["4"]).toBe(0.1);
+});
+
 test("following an object draws its stored path as a fading trail, across a pause", async ({ page }) => {
   const { seeded } = await open(page);
   await page.keyboard.press("b");

@@ -2,7 +2,9 @@
  * Boxes and trails over playback, from the detections the AI worker stored, never from live inference.
  * Everything here is pure: the playback clock's time goes in, what to draw comes out.
  */
-export interface OverlayBox { track_id: string | null; label: string; confidence: number; box: { x: number; y: number; width: number; height: number } }
+/** Body points the pose model saw, by name, as [x, y] in fractions of the picture. */
+export type Pose = Record<string, [number, number]>;
+export interface OverlayBox { track_id: string | null; label: string; confidence: number; box: { x: number; y: number; width: number; height: number }; pose?: Pose }
 export interface OverlayFrame { at: number; boxes: OverlayBox[] }
 export interface TrackPoint { at: number; run?: number; box: { x: number; y: number; width: number; height: number } }
 
@@ -56,6 +58,40 @@ type Box = TrackPoint["box"];
 
 const lerp = (from: number, to: number, progress: number) => from + (to - from) * progress;
 
+/** Each point the person has in both poses moves toward its later place; a point seen in only one stays where it was. */
+function blendPose(from: Pose, to: Pose, progress: number): Pose {
+  const blended: Pose = {};
+  for (const [name, point] of Object.entries(from)) {
+    const later = to[name];
+    blended[name] = later ? [lerp(point[0], later[0], progress), lerp(point[1], later[1], progress)] : point;
+  }
+  return blended;
+}
+
+/** The lines of a body outline: pairs of named points, and the neck from the nose to the middle of the shoulders. */
+const BONES: [string, string][] = [
+  ["left_shoulder", "right_shoulder"], ["left_shoulder", "left_hip"], ["right_shoulder", "right_hip"], ["left_hip", "right_hip"],
+  ["left_shoulder", "left_elbow"], ["left_elbow", "left_wrist"], ["right_shoulder", "right_elbow"], ["right_elbow", "right_wrist"],
+  ["left_hip", "left_knee"], ["left_knee", "left_ankle"], ["right_hip", "right_knee"], ["right_knee", "right_ankle"],
+];
+
+export interface BoneLine { x1: number; y1: number; x2: number; y2: number; key: string }
+
+/** The lines to draw for one person's pose: a bone only where both of its ends were seen. */
+export function skeletonLines(pose: Pose): BoneLine[] {
+  const lines: BoneLine[] = [];
+  for (const [a, b] of BONES) {
+    const from = pose[a];
+    const to = pose[b];
+    if (from && to) lines.push({ x1: from[0], y1: from[1], x2: to[0], y2: to[1], key: `${a}-${b}` });
+  }
+  const left = pose.left_shoulder;
+  const right = pose.right_shoulder;
+  const nose = pose.nose;
+  if (nose && left && right) lines.push({ x1: nose[0], y1: nose[1], x2: (left[0] + right[0]) / 2, y2: (left[1] + right[1]) / 2, key: "neck" });
+  return lines;
+}
+
 /**
  * The frame to draw at ``time``, with each followed object placed between where it was in this analysed frame and where it is in the next one,
  * as far through as the clock is. The detections are analysed a few times a second at most, so drawing each box where it was last seen leaves it
@@ -73,7 +109,7 @@ export function interpolatedFrameAt(frames: OverlayFrame[], time: number, hold?:
     const later = item.track_id ? following.boxes.find(candidate => candidate.track_id === item.track_id && candidate.label === item.label) : undefined;
     if (!later) return item;
     const box: Box = { x: lerp(item.box.x, later.box.x, progress), y: lerp(item.box.y, later.box.y, progress), width: lerp(item.box.width, later.box.width, progress), height: lerp(item.box.height, later.box.height, progress) };
-    return { ...item, box };
+    return item.pose && later.pose ? { ...item, box, pose: blendPose(item.pose, later.pose, progress) } : { ...item, box };
   });
   return { at: frame.at, boxes };
 }
