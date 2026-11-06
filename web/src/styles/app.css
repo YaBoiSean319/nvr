@@ -115,7 +115,8 @@
 .alarm-detail header h3 { margin: 0; font-size: 15px; }
 .alarm-detail header p { margin: 2px 0 0; }
 .alarm-detail > .button:first-child { justify-self: start; }
-.alarm-snapshot, .alarm-clip { width: 100%; max-height: 260px; object-fit: contain; border-radius: var(--n-radius); background: #000; }
+/* The picture and the clip hold their space before they load, so the buttons under them do not move while someone is reaching for one. */
+.alarm-snapshot, .alarm-clip { width: 100%; aspect-ratio: 16 / 9; max-height: 260px; object-fit: contain; border-radius: var(--n-radius); background: #000; }
 .alarm-form { display: flex; flex-wrap: wrap; align-items: end; gap: var(--n-space-2); }
 .alarm-form .field { flex: 1 1 200px; }
 .alarm-form textarea { min-height: 56px; resize: vertical; }
