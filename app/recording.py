@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import uuid
@@ -42,6 +43,42 @@ def recordings_path() -> Path:
 
 def motion_buffer_path() -> Path:
     return Path(os.environ.get("NVR_MOTION_BUFFER_PATH", "/tmp/nvr-motion-buffer")).resolve()
+
+
+STREAM_LOG_LINES_PER_MINUTE = 20
+
+
+async def log_stream_warnings(stream: asyncio.StreamReader, camera_id: str, now=None) -> None:
+    """Pass FFmpeg's warnings about the camera's stream (missed RTP packets, timestamps going backwards, a stream that restarted) to the log, a few a minute.
+
+    They were thrown away, so when footage repeated or skipped there was nothing to say why. Only the first lines of each minute are kept and the rest are
+    counted, so a camera that is failing does not fill the log; the camera is named, never its address (FFmpeg's lines can contain it, so it is removed).
+    """
+    import time
+    clock = now or time.monotonic
+    log = logging.getLogger("nvr.recording")
+    window_start, written, held = clock(), 0, 0
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        moment = clock()
+        if moment - window_start >= 60:
+            if held:
+                log.warning("camera %s: %d more FFmpeg stream warnings held back in the last minute", camera_id, held)
+            window_start, written, held = moment, 0, 0
+        if written >= STREAM_LOG_LINES_PER_MINUTE:
+            held += 1
+            continue
+        written += 1
+        text = line.decode("utf-8", "replace").strip()
+        log.warning("camera %s: FFmpeg: %s", camera_id, _strip_addresses(text)[:300])
+    if held:
+        log.warning("camera %s: %d more FFmpeg stream warnings held back", camera_id, held)
+
+
+def _strip_addresses(text: str) -> str:
+    return re.sub(r"(rtsps?|rtp|tcp|udp|https?)://\S+", r"\1://<address>", text)
 
 
 def safe_stream_url(raw: str) -> str:
@@ -504,6 +541,7 @@ class RecordingManager:
                        ("connecting" if row["motion_service_url"] else "unsupported", "waiting" if fallback_enabled else "disabled", camera_id))
         event_task: asyncio.Task[None] | None = None
         progress_task: asyncio.Task[None] | None = None
+        stderr_task: asyncio.Task[None] | None = None
         fallback_task: asyncio.Task[None] | None = None
         proc: asyncio.subprocess.Process | None = None
         source_state = {"value": "connecting" if row["motion_service_url"] else "unsupported"}
@@ -512,7 +550,7 @@ class RecordingManager:
             list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
             audio_args = audio_recording_args(bool(row["audio_enabled"]))
             args = [
-                executable, "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
+                executable, "-hide_banner", "-nostats", "-loglevel", "warning", "-progress", "pipe:1",
                 "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
                 "-i", "pipe:0", "-map", "0:v:0", *audio_args, "-c:v", "copy",
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", str(list_size),
@@ -520,9 +558,10 @@ class RecordingManager:
                 "-hls_segment_filename", str(spool / "segment-%06d.ts"), str(spool / "live.m3u8"),
             ]
             proc = await asyncio.create_subprocess_exec(
-                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             progress_task = asyncio.create_task(camera_health.watch_progress(proc.stdout, camera_id), name=f"progress-{camera_id}")
+            stderr_task = asyncio.create_task(log_stream_warnings(proc.stderr, camera_id), name=f"ffmpeg-log-{camera_id}")
             if proc.stdin is None:
                 raise OSError("Unable to pass stream source to FFmpeg")
             proc.stdin.write(_manifest_bytes(source))
@@ -580,6 +619,9 @@ class RecordingManager:
             if progress_task:
                 progress_task.cancel()
                 await asyncio.gather(progress_task, return_exceptions=True)
+            if stderr_task:
+                stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
             if event_task:
                 event_task.cancel()
                 await asyncio.gather(event_task, return_exceptions=True)

@@ -397,5 +397,44 @@ class MotionTests(unittest.TestCase):
         self.assertEqual([segment.name for segment in segments], ["segment-000001.ts"])
 
 
+class StreamWarningLogTests(unittest.TestCase):
+    def run_lines(self, lines, clock):
+        from app.recording import log_stream_warnings
+
+        async def body():
+            reader = asyncio.StreamReader()
+            for line in lines:
+                reader.feed_data((line + "\n").encode())
+            reader.feed_eof()
+            await log_stream_warnings(reader, "camera-1", clock)
+
+        with self.assertLogs("nvr.recording", level="WARNING") as captured:
+            asyncio.run(body())
+        return [record.getMessage() for record in captured.records]
+
+    def test_warnings_are_logged_with_the_camera_and_without_its_address(self):
+        messages = self.run_lines(["[rtsp @ 0x1] method DESCRIBE failed for rtsp://user:secret@10.1.2.3:554/stream1", "RTP: missed 3 packets"], lambda: 0.0)
+        self.assertEqual(messages[1], "camera camera-1: FFmpeg: RTP: missed 3 packets")
+        joined = " ".join(messages)
+        self.assertNotIn("secret", joined)
+        self.assertNotIn("10.1.2.3", joined)
+        self.assertIn("rtsp://<address>", joined)
+
+    def test_only_the_first_lines_of_a_minute_are_kept_and_the_rest_are_counted(self):
+        from app.recording import STREAM_LOG_LINES_PER_MINUTE
+
+        messages = self.run_lines([f"warning {number}" for number in range(STREAM_LOG_LINES_PER_MINUTE + 7)], lambda: 0.0)
+        self.assertEqual(len(messages), STREAM_LOG_LINES_PER_MINUTE + 1)
+        self.assertEqual(messages[-1], "camera camera-1: 7 more FFmpeg stream warnings held back")
+
+    def test_a_new_minute_starts_again_and_reports_what_the_last_one_held_back(self):
+        from app.recording import STREAM_LOG_LINES_PER_MINUTE
+
+        times = iter([0.0] + [1.0] * (STREAM_LOG_LINES_PER_MINUTE + 3) + [61.0, 62.0])
+        messages = self.run_lines([f"early {number}" for number in range(STREAM_LOG_LINES_PER_MINUTE + 3)] + ["late"], lambda: next(times))
+        self.assertIn("camera camera-1: 3 more FFmpeg stream warnings held back in the last minute", messages)
+        self.assertEqual(messages[-1], "camera camera-1: FFmpeg: late")
+
+
 if __name__ == "__main__":
     unittest.main()
