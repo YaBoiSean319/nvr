@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
 from app import console
-from app import external_events, privacy, viewing_audit
+from app import clip_labels, external_events, privacy, viewing_audit
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -77,6 +77,12 @@ def synchronized_playback_timeline(
                 "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
                 "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
                 (camera_id, end_text, start_text))]
+            padded_start, padded_end = (start - timedelta(minutes=1)).isoformat(), (end + timedelta(minutes=1)).isoformat()
+            clip_labels.label_events(events, [dict(row) for row in db.execute(
+                "SELECT label,first_seen_at,last_seen_at FROM ai_tracks WHERE camera_id=? AND first_seen_at<? AND last_seen_at>=?",
+                (camera_id, padded_end, padded_start))], [dict(row) for row in db.execute(
+                "SELECT starts_at,ends_at FROM ai_coverage WHERE camera_id=? AND state='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?)",
+                (camera_id, padded_end, padded_start))])
             building_events = [{"id": row["id"], "type": row["type"], "label": external_events.label(row["type"]), "subject": row["subject"], "message": row["message"],
                                 "occurred_at": row["occurred_at"], "source_name": row["source_name"]} for row in db.execute(
                 "SELECT e.id,e.type,e.subject,e.message,e.occurred_at,e.source_name FROM external_events e JOIN external_event_cameras k ON k.event_id=e.id "

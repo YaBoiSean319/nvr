@@ -334,6 +334,8 @@
 [data-mark="unanalyzed"] { top: auto; height: 3px; background: var(--n-muted); }
 .timeline-legend [data-mark="unanalyzed"] { height: 3px; }
 [data-mark="motion"] { background: var(--n-warn); }
+/* Motion the AI watched all the way through and found no person or vehicle in: still there, but quieter. */
+[data-mark="motion"][data-ai="nothing"] { opacity: 0.4; }
 [data-mark="ai"] { background: var(--n-accent); }
 [data-mark="event"] { background: var(--n-bad, #c0392b); }
 

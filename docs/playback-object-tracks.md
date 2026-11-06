@@ -37,3 +37,9 @@ Overlays are drawn in the browser only. Exports are cut from the recordings and 
 - One request returns up to 5000 stored detections (the browser asks a minute at a time); a busier stretch is cut and flagged `truncated`.
 - A trail bridges any pause in the object's stored points, however long, because it is the same track; the tracker decides how long a track survives being hidden.
 - Burning boxes into an export was not built: exports never contain overlays, and there is no option to include them.
+
+## What the AI found in a motion clip
+
+Each motion mark on the Playback timeline says what the AI found in the time its clip covers. The AI worker already follows people and vehicles on every camera it analyses, so the label comes from those tracks with no extra work: hover a mark to read "AI saw person and vehicle", or "AI saw no person or vehicle". A mark with nothing found is drawn fainter, so the clips worth a look stand out.
+
+The AI records only the time it was analysing a camera, so "nothing found" is said only when one analysed interval covers the whole clip (a few seconds either side count, because a person is tracked a moment before or after the camera's motion). If the AI was off, paused, delayed or failed for any part of the clip, or never ran on the camera, the mark carries no AI note and looks as it always did: silence there would not mean nothing happened. The timeline response carries this as `ai: {"classes": [...], "checked": true|false}` on each `motion_events` entry.
