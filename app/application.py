@@ -38,7 +38,7 @@ from .home_assistant import HomeAssistantManager
 from .digests import DigestManager
 from .rule_actions import RuleActionManager
 from .rules import RulesManager
-from .principal import COOKIE_NAME, current_user, depends_on, scope_for, secure_cookie
+from .principal import COOKIE_NAME, CurrentUser, current_user, depends_on, scope_for, secure_cookie
 from .store import initialize
 from . import updates
 from .version import APP_VERSION
@@ -122,7 +122,8 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
                 if name in started:
                     await started[name].stop()
 
-    app = FastAPI(title="Workplace NVR", version=APP_VERSION, lifespan=lifespan)
+    # The schema is served below to signed-in callers only; no interactive docs pages (#273).
+    app = FastAPI(title="Workplace NVR", version=APP_VERSION, lifespan=lifespan, openapi_url=None, docs_url=None, redoc_url=None)
 
     @app.exception_handler(RequestValidationError)
     async def validation_failed(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -157,6 +158,12 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     app.add_middleware(network.TrustedProxyMiddleware)  # Outermost: everything below sees the scheme and host a trusted proxy reports
     for router in api.ROUTERS:
         app.include_router(router)
+
+    @app.get("/openapi.json", include_in_schema=False)
+    def openapi_document(_: CurrentUser) -> dict[str, object]:
+        """The API map, with the scope each operation needs: for a signed-in person or a token with the read scope, never anonymously."""
+        return app.openapi()
+
     # Last: the interface's client-route catch-all must never shadow an API route.
     app.include_router(web_interface.router)
     app.openapi = lambda: _openapi_with_scopes(app)

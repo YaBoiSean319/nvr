@@ -26,7 +26,7 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "same-origin",
 }
 # Paths owned by the server, never by client routing.
-SERVER_PREFIXES = ("api/", "assets/", "sw.js", "manifest.webmanifest")
+SERVER_PREFIXES = ("api/", "assets/", "sw.js", "manifest.webmanifest", "openapi.json", "docs", "redoc")
 _LEADING_SEPARATORS = re.compile(r"^[\s/\\\x00-\x1f\x7f]+")
 
 

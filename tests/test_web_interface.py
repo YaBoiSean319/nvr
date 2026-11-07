@@ -71,7 +71,10 @@ class WebInterfaceTests(unittest.TestCase):
             self.assertEqual(missing.status_code, 404)
             self.assertEqual(missing.headers["content-type"], "application/json")
             self.assertEqual(self.client.get("/healthz").status_code, 200)
-            self.assertEqual(self.client.get("/openapi.json").status_code, 200)
+            # The API map is for people and tokens that are signed in (#273); the page is never served in its place.
+            self.assertEqual(self.client.get("/openapi.json").status_code, 401)
+            for path in ("/docs", "/docs/oauth2-redirect", "/redoc"):
+                self.assertEqual(self.client.get(path).status_code, 404, path)
 
     def test_legacy_interface_assets_are_gone(self):
         with patch.object(web_interface, "DIST_DIRECTORY", self.dist):

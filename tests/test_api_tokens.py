@@ -184,6 +184,14 @@ class APITokenTests(unittest.TestCase):
         self.assertNotIn("x-required-scope", schema["paths"]["/api/setup/status"]["get"])
         self.assertIn("`read` scope", schema["paths"]["/api/cameras"]["get"]["description"])
 
+    def test_openapi_needs_a_session_or_a_read_token(self):
+        _, secret = self._create("read")
+        self.assertEqual(self._bearer("GET", "/openapi.json", secret).status_code, 200)
+        _, metrics_only = self._create("metrics")
+        self.assertEqual(self._bearer("GET", "/openapi.json", metrics_only).status_code, 403)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get("/openapi.json").status_code, 401)
+
 
 if __name__ == "__main__":
     unittest.main()
