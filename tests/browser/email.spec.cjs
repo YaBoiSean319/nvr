@@ -84,8 +84,10 @@ test("a slow settings response does not wipe what is already being typed", async
   const connection = page.getByRole("region", { name: "Microsoft 365 connection" });
   await connection.getByLabel("Tenant ID or domain").fill("contoso.onmicrosoft.com");
   await connection.getByLabel("Application (client) ID").fill("11111111-2222-3333-4444-555555555555");
+  const answered = page.waitForResponse(response => response.url().endsWith("/api/admin/email") && response.request().method() === "GET");
   release();
-  await expect(page.getByRole("region", { name: "Emails about NVR problems" })).toBeVisible();
+  await answered;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 300)))); // Let the page apply the answer.
   await expect(connection.getByLabel("Tenant ID or domain")).toHaveValue("contoso.onmicrosoft.com");
   await expect(connection.getByRole("button", { name: "Connect with Microsoft" })).toBeEnabled();
 });
