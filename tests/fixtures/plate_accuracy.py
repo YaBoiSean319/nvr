@@ -25,6 +25,7 @@ LEVELS: tuple[tuple[str, dict[str, Any]], ...] = (
     ("Blur (radius 5), noise 35", {"noise": 35.0, "blur": 5}),
     ("Low contrast (25%), noise 35", {"noise": 35.0, "contrast": 0.25}),
     ("Blur 4, low contrast 35%, noise 60, 2 px off", {"noise": 60.0, "blur": 4, "contrast": 0.35, "shift": 2}),
+    ("Blur 4, low contrast 35%, noise 60, 6 px off", {"noise": 60.0, "blur": 4, "contrast": 0.35, "shift": 6}),  # Harsh again now that large crops are averaged before they are read
 )
 
 

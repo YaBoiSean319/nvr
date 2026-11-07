@@ -55,7 +55,8 @@ class PipelineTests(unittest.TestCase):
         levels = dict(plate_accuracy.measure(self.reader, texts))
         self.assertEqual(levels["Clean"]["exact_percent"], 100.0)
         self.assertLess(levels["Plate 4 px off, noise 35"]["exact_percent"], levels["Plate 2 px off, noise 35"]["exact_percent"])
-        self.assertLess(levels["Blur 4, low contrast 35%, noise 60, 2 px off"]["exact_percent"], 60.0)
+        self.assertLess(levels["Blur 4, low contrast 35%, noise 60, 6 px off"]["exact_percent"], 60.0)
+        self.assertLessEqual(levels["Blur 4, low contrast 35%, noise 60, 6 px off"]["exact_percent"], levels["Blur 4, low contrast 35%, noise 60, 2 px off"]["exact_percent"])
         for row in levels.values():
             self.assertGreaterEqual(row["lookalike_tolerant"], row["exact"])  # Forgiving look-alikes can only find more
 
