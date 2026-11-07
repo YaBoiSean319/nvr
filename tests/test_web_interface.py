@@ -56,6 +56,15 @@ class WebInterfaceTests(unittest.TestCase):
                 response = self.client.get(old, follow_redirects=False)
                 self.assertEqual((response.status_code, response.headers["location"]), (308, new), old)
 
+    def test_the_preview_redirect_never_leaves_the_nvr(self):
+        # "//host" and "\\host" are read by browsers as another site (#271).
+        with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
+            for old in ("/next//evil.example", "/next//evil.example/login", "/next/%2F%2Fevil.example", "/next/%5Cevil.example",
+                        "/next/%5C%5Cevil.example", "/next/%2F%5Cevil.example", "/next/%09/evil.example"):
+                location = self.client.get(old, follow_redirects=False).headers["location"]
+                self.assertTrue(location.startswith("/") and location[1:2] not in ("/", "\\"), (old, location))
+                self.assertNotIn("\t", location)
+
     def test_api_and_service_paths_are_never_answered_with_the_page(self):
         with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
             missing = self.client.get("/api/does-not-exist")

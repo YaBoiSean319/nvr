@@ -8,6 +8,7 @@ unknown /api paths still answer with JSON 404s. The former /next preview paths r
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -26,6 +27,7 @@ SECURITY_HEADERS = {
 }
 # Paths owned by the server, never by client routing.
 SERVER_PREFIXES = ("api/", "assets/", "sw.js", "manifest.webmanifest")
+_LEADING_SEPARATORS = re.compile(r"^[\s/\\\x00-\x1f\x7f]+")
 
 
 def _page() -> FileResponse:
@@ -39,6 +41,8 @@ def _page() -> FileResponse:
 @router.get("/next/{path:path}", include_in_schema=False)
 def preview_redirect(request: Request, path: str = "") -> RedirectResponse:
     query = f"?{request.url.query}" if request.url.query else ""
+    # Always a path on this NVR: "//host", "/\host" or "/<tab>/host" would send the browser to another site (#271).
+    path = _LEADING_SEPARATORS.sub("", path)
     return RedirectResponse(f"/{path}{query}", status_code=308)
 
 
