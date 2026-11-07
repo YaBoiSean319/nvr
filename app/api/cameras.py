@@ -22,7 +22,7 @@ from app.health import recording_health
 from app.onvif_client import normalise_host
 from app.onvif_stream import list_camera_stream_profiles, placeholder_stream_url, resolve_camera_stream
 from app import capabilities as camera_capabilities, diagnostics
-from app.retention import coverage_summary, effective_retention
+from app.retention import effective_retention
 from app.api.policies import effective_schedule_view
 
 router = APIRouter()
@@ -406,7 +406,6 @@ def list_cameras(user: CurrentUser) -> dict[str, object]:
             retention_days, retention_source = effective_retention(db, row["id"])
             camera["retention_days"] = retention_days
             camera["retention_policy_source"] = retention_source
-            camera["retention_coverage"] = coverage_summary(db, row["id"])
             camera["recording_health"] = recording_health(
                 enabled=bool(row["enabled"]), recording_enabled=bool(row["recording_enabled"]),
                 mode=row["recording_mode"], effective_mode=str(schedule["effective_recording_mode"]),

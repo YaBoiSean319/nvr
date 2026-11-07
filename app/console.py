@@ -301,9 +301,6 @@ def console_camera(link: SiteLink, camera: dict[str, Any]) -> dict[str, Any]:
     view = scrub(rewrite(link.id, {key: camera[key] for key in CAMERA_FIELDS if key in camera}))
     view.update({"id": prefixed(link.id, camera["id"]), "group_name": link.name, "site": {"id": link.id, "name": link.name},
                  "camera_ip": None, "device_service_url": None, "onvif_profile_token": None, "live_substream_profile_token": None, "stream_url": "", "storage_volume_id": None})
-    coverage = camera.get("retention_coverage")
-    if isinstance(coverage, dict):
-        view["retention_coverage"] = scrub(coverage)
     return view
 
 
