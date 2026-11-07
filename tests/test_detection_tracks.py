@@ -116,6 +116,46 @@ class DetectionTrackTests(SceneTestCase):
         detail = self.client.get(f"/api/ai/tracks/{tracks[0]['id']}").json()
         self.assertEqual(len(detail["detections"]), 15)
 
+    def test_a_frame_is_stored_on_one_connection_in_one_transaction(self):
+        # Three connections and four to six commits per analysed frame, on every camera, were the cost of storing one (#279).
+        import sqlite3
+        from unittest.mock import patch
+        from app import detection
+        from app.tracks import Tracker
+
+        statements: list[str] = []
+        opened: list[int] = []
+        real = sqlite3.connect
+
+        def watching(*args, **kwargs):
+            connection = real(*args, **kwargs)
+            opened.append(1)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        observations = [{"label": "person", "confidence": 0.9, "box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.4}}]
+        model = {"model_id": "fixture", "model_version": "1", "provider": "CPU"}
+        with patch("sqlite3.connect", watching):
+            track_ids = detection._store_frame(self.camera_id, observations, datetime.now(timezone.utc), Tracker(), None, model)
+        self.assertEqual(len(track_ids), 1)
+        self.assertEqual(len(opened), 1, "one connection")
+        self.assertEqual(len([item for item in statements if item.strip().upper().startswith("BEGIN")]), 1)
+        self.assertEqual(len([item for item in statements if item.strip().upper() == "COMMIT"]), 1)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM ai_coverage WHERE camera_id=?", (self.camera_id,)).fetchone()["state"], "analyzed")
+
+    def test_a_frame_that_cannot_be_stored_is_not_recorded_as_analysed(self):
+        from unittest.mock import patch
+        from app import detection
+        from app.tracks import Tracker
+
+        model = {"model_id": "fixture", "model_version": "1", "provider": "CPU"}
+        with patch("app.tracks.record_detections", side_effect=RuntimeError("disk full")):
+            with self.assertRaises(RuntimeError):
+                detection._store_frame(self.camera_id, [], datetime.now(timezone.utc), Tracker(), None, model)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ai_coverage WHERE camera_id=?", (self.camera_id,)).fetchone()[0], 0)
+
     def test_tracking_continues_after_footage_under_an_active_track_is_deleted(self):
         from app.tracks import Tracker, record_detections
 

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -254,38 +255,51 @@ def record_observations(
     model_version: str | None = None,
     provider: str = "CPU",
 ) -> int:
+    with connect() as db:
+        return _record_observations(db, camera_id, observations, at, model_id, model_version, provider)
+
+
+def _record_observations(
+    db: sqlite3.Connection,
+    camera_id: str,
+    observations: Iterable[dict[str, Any]],
+    at: datetime | None = None,
+    model_id: str = MODEL_ID,
+    model_version: str | None = None,
+    provider: str = "CPU",
+) -> int:
+    """``record_observations`` on a connection the caller owns, so a frame can be stored in one transaction (#279)."""
     when = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     stamp = when.isoformat()
     version = model_version or MODEL_VERSION
     count = 0
-    with connect() as db:
-        for item in observations:
-            candidates = db.execute(
-                "SELECT id,box_json FROM ai_observations WHERE camera_id=? AND label=? AND model_id=? AND model_version=? AND provider=? AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 100",
-                (camera_id, item["label"], model_id, version, provider, (when - timedelta(seconds=5)).isoformat()),
-            ).fetchall()
-            previous = max(
-                (candidate for candidate in candidates if box_iou(json.loads(candidate["box_json"]), item["box"]) >= 0.2),
-                key=lambda candidate: box_iou(json.loads(candidate["box_json"]), item["box"]),
-                default=None,
+    for item in observations:
+        candidates = db.execute(
+            "SELECT id,box_json FROM ai_observations WHERE camera_id=? AND label=? AND model_id=? AND model_version=? AND provider=? AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 100",
+            (camera_id, item["label"], model_id, version, provider, (when - timedelta(seconds=5)).isoformat()),
+        ).fetchall()
+        previous = max(
+            (candidate for candidate in candidates if box_iou(json.loads(candidate["box_json"]), item["box"]) >= 0.2),
+            key=lambda candidate: box_iou(json.loads(candidate["box_json"]), item["box"]),
+            default=None,
+        )
+        if previous:
+            db.execute("UPDATE ai_observations SET confidence=max(confidence,?),box_json=?,last_seen_at=? WHERE id=?",
+                       (item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, previous["id"]))
+        else:
+            observation_id = str(uuid.uuid4())
+            db.execute(
+                "INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version,provider) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (observation_id, camera_id, item["label"], item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, stamp, MODEL_WIDTH, MODEL_HEIGHT, model_id, version, provider),
             )
-            if previous:
-                db.execute("UPDATE ai_observations SET confidence=max(confidence,?),box_json=?,last_seen_at=? WHERE id=?",
-                           (item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, previous["id"]))
-            else:
-                observation_id = str(uuid.uuid4())
-                db.execute(
-                    "INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version,provider) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (observation_id, camera_id, item["label"], item["confidence"], json.dumps(item["box"], separators=(",", ":")), stamp, stamp, MODEL_WIDTH, MODEL_HEIGHT, model_id, version, provider),
-                )
-                event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "nvr-ai-observation:" + observation_id))
-                from .webhooks import enqueue_event
-                enqueue_event(db, "ai.detection", {
-                    "event_id": event_id, "event_type": "ai.detection", "occurred_at": stamp,
-                    "observation_id": observation_id, "camera_id": camera_id, "label": item["label"],
-                    "confidence": item["confidence"], "box": item["box"], "model_id": model_id, "model_version": version, "provider": provider,
-                })
-                count += 1
+            event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "nvr-ai-observation:" + observation_id))
+            from .webhooks import enqueue_event
+            enqueue_event(db, "ai.detection", {
+                "event_id": event_id, "event_type": "ai.detection", "occurred_at": stamp,
+                "observation_id": observation_id, "camera_id": camera_id, "label": item["label"],
+                "confidence": item["confidence"], "box": item["box"], "model_id": model_id, "model_version": version, "provider": provider,
+            })
+            count += 1
     return count
 
 
@@ -298,39 +312,44 @@ def mark_analysis_interrupted(reason: str) -> None:
 
 
 def set_camera_state(camera_id: str, state: str, error: str | None = None, at: datetime | None = None) -> None:
-    stamp = (at or datetime.now(timezone.utc)).isoformat()
     with connect() as db:
-        db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
-        row = db.execute("SELECT status FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
-        if row is None:
-            return
-        db.execute("UPDATE ai_camera_settings SET status=?,last_attempt_at=?,last_success_at=CASE WHEN ?='analyzed' THEN ? ELSE last_success_at END,last_error=?,updated_at=? WHERE camera_id=?",
-                   (state, stamp, state, stamp, error, stamp, camera_id))
-        active = db.execute("SELECT id,state FROM ai_coverage WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
-        if state == "disabled":
-            if active:
-                db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
-            return
-        coverage_state = state if state in {"analyzed", "delayed", "failed", "unanalyzed"} else "unanalyzed"
-        if active and active["state"] == coverage_state:
-            db.execute("UPDATE ai_coverage SET detail=? WHERE id=?", (error or "", active["id"]))
-        else:
-            if active:
-                db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
-            db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,detail) VALUES(?,?,?,?)", (camera_id, coverage_state, stamp, error or ""))
-        if state in {"failed", "delayed", "analyzed"}:
-            from .incidents import sync_incident
-            camera = db.execute("SELECT name FROM cameras WHERE id=?", (camera_id,)).fetchone()
-            if camera:
-                sync_incident(
-                    db,
-                    incident_key=f"ai_analysis:{camera_id}",
-                    camera_id=camera_id,
-                    fault_type="ai_analysis",
-                    summary=f"AI analysis {state}: {camera['name']}" + (f" — {error}" if error else ""),
-                    active=state in {"failed", "delayed"},
-                    details={"analysis_state": state, "reason": error},
-                )
+        _set_camera_state(db, camera_id, state, error, at)
+
+
+def _set_camera_state(db: sqlite3.Connection, camera_id: str, state: str, error: str | None = None, at: datetime | None = None) -> None:
+    """``set_camera_state`` on a connection the caller owns (#279)."""
+    stamp = (at or datetime.now(timezone.utc)).isoformat()
+    db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
+    row = db.execute("SELECT status FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+    if row is None:
+        return
+    db.execute("UPDATE ai_camera_settings SET status=?,last_attempt_at=?,last_success_at=CASE WHEN ?='analyzed' THEN ? ELSE last_success_at END,last_error=?,updated_at=? WHERE camera_id=?",
+               (state, stamp, state, stamp, error, stamp, camera_id))
+    active = db.execute("SELECT id,state FROM ai_coverage WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
+    if state == "disabled":
+        if active:
+            db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
+        return
+    coverage_state = state if state in {"analyzed", "delayed", "failed", "unanalyzed"} else "unanalyzed"
+    if active and active["state"] == coverage_state:
+        db.execute("UPDATE ai_coverage SET detail=? WHERE id=?", (error or "", active["id"]))
+    else:
+        if active:
+            db.execute("UPDATE ai_coverage SET ends_at=? WHERE id=?", (stamp, active["id"]))
+        db.execute("INSERT INTO ai_coverage(camera_id,state,starts_at,detail) VALUES(?,?,?,?)", (camera_id, coverage_state, stamp, error or ""))
+    if state in {"failed", "delayed", "analyzed"}:
+        from .incidents import sync_incident
+        camera = db.execute("SELECT name FROM cameras WHERE id=?", (camera_id,)).fetchone()
+        if camera:
+            sync_incident(
+                db,
+                incident_key=f"ai_analysis:{camera_id}",
+                camera_id=camera_id,
+                fault_type="ai_analysis",
+                summary=f"AI analysis {state}: {camera['name']}" + (f" — {error}" if error else ""),
+                active=state in {"failed", "delayed"},
+                details={"analysis_state": state, "reason": error},
+            )
 
 
 def _camera_source(camera_id: str, use_substream: bool) -> str:
@@ -393,15 +412,32 @@ def _with_db(write: Any, *args: Any) -> Any:
         return write(db, *args)
 
 
+def _plate_refresh(camera_id: str) -> tuple[bool, float, Any]:
+    """The plate settings for a camera and the region chosen in Settings. Blocking, so the analysis loop runs it in a database thread (#279)."""
+    from . import plates
+    with connect() as db:
+        wanted, minimum = plates.plate_settings(db, camera_id)
+        return wanted, minimum, (plates.plate_region(db) if wanted else None)
+
+
+def _fall_refresh(camera_id: str, at: datetime) -> tuple[Any, ...]:
+    """The fall settings for a camera, its picture's aspect and its privacy masks. Blocking, so the analysis loop runs it in a database thread (#279)."""
+    from . import falls, privacy
+    with connect() as db:
+        on, sensitivity, stay_down = falls.fall_settings(db, camera_id)
+        return (on, sensitivity, stay_down, falls.camera_aspect(db, camera_id) if on else 16 / 9, privacy.server_zones(db, camera_id, at) if on else [])
+
+
 def _store_frame(camera_id: str, observations: list[dict[str, Any]], at: datetime, tracker: Any, frame: Any, model: dict[str, str]) -> list[str]:
     """Store one analysed frame: the camera's state, its detections and the tracks they belong to. Blocking, so callers run it in a thread."""
     from .tracks import record_detections
-    # Analysed coverage starts no later than the detections it contains.
-    set_camera_state(camera_id, "analyzed", at=at)
-    record_observations(camera_id, observations, at, **model)
+    # One connection and one transaction for the frame: the camera's state, its observations and its detections. Analysed coverage starts no
+    # later than the detections it contains, and a frame that cannot be stored is not recorded as analysed (#279).
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            _set_camera_state(db, camera_id, "analyzed", at=at)
+            _record_observations(db, camera_id, observations, at, **model)
             track_ids = record_detections(db, camera_id, observations, at, tracker, frame=frame, **model)
         except BaseException:
             db.execute("ROLLBACK")
@@ -642,7 +678,7 @@ class DetectionManager:
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         from . import attributes
         from . import clip
-        from . import falls, plates, pose_models, privacy
+        from . import falls, plates, pose_models
         from . import similar
         from .tracks import Tracker, encode_jpeg, store_keyframe, store_poses
 
@@ -688,9 +724,7 @@ class DetectionManager:
                     # A camera designated for plates gives each vehicle a few attempts at its plate; reading never holds up analysis.
                     if time.monotonic() - scanner_checked >= plates.SETTINGS_REFRESH:  # Not self.clock(): the analysis clock stamps the frames and must be read once per frame
                         scanner_checked = time.monotonic()
-                        with connect() as db:
-                            wanted, minimum = plates.plate_settings(db, camera_id)
-                            region = plates.plate_region(db) if wanted else None
+                        wanted, minimum, region = await self._db(_plate_refresh, camera_id)
                         # The region chosen in Settings is looked at on every refresh, so a change takes effect without a restart.
                         plate_reader = await self._plate_reader(str(config["provider"]), region) if wanted and region else None
                         if not wanted or plate_reader is None:
@@ -712,10 +746,7 @@ class DetectionManager:
                     # A camera with fall detection on has each person's body points read and watched; a fall raises the alarm. This never holds up analysis for long and never stops it.
                     if time.monotonic() - fall_checked >= falls.SETTINGS_REFRESH:
                         fall_checked = time.monotonic()
-                        with connect() as db:
-                            fall_on, sensitivity, stay_down = falls.fall_settings(db, camera_id)
-                            fall_aspect = falls.camera_aspect(db, camera_id) if fall_on else 16 / 9
-                            fall_zones = privacy.server_zones(db, camera_id, at) if fall_on else []
+                        fall_on, sensitivity, stay_down, fall_aspect, fall_zones = await self._db(_fall_refresh, camera_id, at)
                         fall_reader = await self._pose_reader(str(config["provider"])) if fall_on else None
                         if fall_reader is None:
                             fall_detector = None
