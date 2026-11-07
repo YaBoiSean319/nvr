@@ -1,0 +1,45 @@
+# Face watch (#253)
+
+Find a face in Playback, select it, and be alerted when that face is seen again: for example when someone who has been trespassed returns to campus, in the way a licence plate on a deny list raises an alert. This page is the design and what is built so far.
+
+**Status.** Part 1 (this page's models and engine, `app/face_models.py`) is in. Not yet built: storing the watch list, reading faces on the cameras that are switched on, the alert rule, and selecting a face in Playback (parts 2 to 4 below). Nothing recognises anyone until they are, and then only on cameras an administrator switches on.
+
+## Models and their licences
+
+| Job | Model | Licence | Source |
+|---|---|---|---|
+| Find faces (and five landmarks on each) | YuNet `face_detection_yunet_2023mar` | MIT (Shiqi Yu) | OpenCV Zoo |
+| Turn an aligned face into 128 numbers | SFace `face_recognition_sface_2021dec` | Apache-2.0 | OpenCV Zoo |
+
+Both are ONNX files read directly by OpenVINO, downloaded in the image build with pinned SHA-256 checksums (`Dockerfile`, kept in step with `app/face_models.py` by a test) and checked again before use. Neither licence needs anyone's permission or payment, including for commercial use, which is the rule this project follows.
+
+**Not used:** InsightFace's popular ArcFace and `buffalo_l` weights. The code is MIT but its pretrained models are for non-commercial research only (commercial use needs a licence from them).
+
+**What the licences do not cover.** The licence on a model file is not a statement about the pictures it was trained on, and neither OpenCV Zoo model says what that was (SFace's paper describes public research face datasets). If that matters to you, it is a question for your counsel, as is the next section.
+
+## Before it is switched on: this is a legal question
+
+Recognising people by their faces is regulated in many places (biometric privacy laws, workplace and care-home rules, rules about notice and consent), and what is allowed depends on where the cameras are, who is filmed (staff, residents, visitors) and what is done with a match. This document is not legal advice. The owner has decided to enable the feature; the points below are what the design does to keep that decision reversible and accountable, and they are things counsel will ask about:
+
+- **Off by default, per camera.** A camera looks for faces only when an administrator switches it on for that camera.
+- **Only people someone chose to put on the list.** Faces are compared with the watch list and nothing else; faces that match nothing are not kept.
+- **Each entry says why and for how long.** A reason is required; an expiry date is optional but offered.
+- **An audit trail.** Who added, changed and removed each entry, and who viewed matches.
+- **Administrators only**, and privacy masks are respected (a face inside a masked area is not read).
+- **What is stored.** The numbers that describe a face (the embedding) and a small picture of the face the entry was made from, so a person can check who an entry is. Deleting an entry deletes both.
+
+## Measured with the real models
+
+On a handful of public pictures, as a check that the code uses the models correctly (it is not a measure of accuracy on your cameras, which only your footage can give):
+
+- Six different people in one photograph: every pair scored 0.33 cosine similarity or less (highest 0.327; SFace's own recommended match threshold is 0.363).
+- The same person in the same photograph mirrored, halved in size, darkened, heavily JPEG-compressed or cropped: 0.94 to 0.97; overexposed by half again: 0.69.
+- A face is called a match at **0.45** by default (stricter than SFace's 0.363, because a match raises an alarm), adjustable.
+- Cameras differ from portraits: distance, angle, light and a small face lower the similarity of the same person, so a watch will miss some returns. A face narrower than 32 pixels in the picture it is read from is not used at all.
+
+## Plan
+
+1. **Models and engine** (built): `app/face_models.py`.
+2. **Watch list**: a table of entries (name or label, reason, optional expiry, embeddings, the small picture, who added it), the sightings, and the administrator API with audit entries. Adding an entry from a picture.
+3. **Looking for faces**: on cameras switched on, a scanner like the licence-plate one finds faces on people the AI already tracks, compares them with the list, and raises an alarm through a new rule condition ("a watched face is seen"), with the usual schedule, cooldown, actions and test mode.
+4. **Playback and Settings**: select a face in Playback (the NVR finds the faces in the frame being shown and you click one to add it to the list), Settings › Faces to manage the list, switch cameras on and set the match threshold.
