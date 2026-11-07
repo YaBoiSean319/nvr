@@ -66,6 +66,17 @@ test("the service worker never stores API, media or snapshot responses", async (
   for (const entry of paths) expect(entry, "only the shell and hashed assets are cached").toMatch(/^nvr-shell-[0-9a-f]{16} (\/|\/assets\/\S+)$/);
 });
 
+test("the service worker keeps the pages that load on demand, so a page never opened still opens offline", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await controlled(page);
+  // The build lists every file it makes (#281); the pages that load on demand are not named in the page itself.
+  const listing = await page.evaluate(async () => Object.values(await (await fetch("/assets/chunks.json", { cache: "reload" })).json()).flatMap(entry => [entry.file, ...(entry.css || [])]));
+  expect(listing.filter(file => file.endsWith(".js")).length, "the interface is split into more than one script").toBeGreaterThan(3);
+  const cached = new Set((await cachedPaths(page)).map(entry => entry.split(" ")[1]));
+  for (const file of listing) expect(cached, `/${file} is kept by the worker`).toContain(`/${file}`);
+});
+
 test("a new release replaces a cached shell instead of showing a stale interface", async ({ page }) => {
   seedFixtures(1);
   // An earlier release's cache, as an installed app would still have it.

@@ -12,24 +12,29 @@ import { LiveWorkspace } from "@/features/live/LiveWorkspace";
 import { useLiveStore } from "@/features/live/store";
 import { CamerasInventory, CamerasShell } from "@/features/admin/cameras/CamerasWorkspace";
 import { useCamerasStore } from "@/features/admin/cameras/store";
-import { FleetHealth } from "@/features/admin/cameras/FleetHealth";
-import { AddCameras } from "@/features/admin/cameras/add/AddCameras";
-import { GroupsWorkspace } from "@/features/admin/groups/GroupsWorkspace";
-import { RulesWorkspace } from "@/features/admin/rules/RulesWorkspace";
-import { SettingsWorkspace } from "@/features/settings/SettingsWorkspace";
-import { DigestsList, DigestView } from "@/features/digests/DigestsWorkspace";
-import { InsightsWorkspace } from "@/features/insights/InsightsWorkspace";
-import { CasesList, CaseView } from "@/features/cases/CasesWorkspace";
-import { PlaybackWorkspace } from "@/features/playback/PlaybackWorkspace";
 import { usePlaybackStore } from "@/features/playback/store";
 import { useUnmaskedStore } from "@/features/privacy/store";
-import { MaintenanceWorkspace } from "@/features/maintenance/MaintenanceWorkspace";
 import { Shell } from "@/features/shell/Shell";
+import { lazyPage, Page } from "@/app/lazyPage";
 import { applyTheme, reapplyBranding, storedTheme } from "@/lib/appearance";
 import { deviceLabel } from "@/features/alarms/pushDevice";
 import { isNativeApp } from "@/native/platform";
 import { refreshNativePush, watchNotificationTaps } from "@/native/push";
 import { rememberThisPhone } from "@/native/session";
+
+// Everything except the first screen (Live) and the shell loads when it is first opened (#281).
+const PlaybackWorkspace = lazyPage(() => import("@/features/playback/PlaybackWorkspace"), "PlaybackWorkspace");
+const InsightsWorkspace = lazyPage(() => import("@/features/insights/InsightsWorkspace"), "InsightsWorkspace");
+const DigestsList = lazyPage(() => import("@/features/digests/DigestsWorkspace"), "DigestsList");
+const DigestView = lazyPage(() => import("@/features/digests/DigestsWorkspace"), "DigestView");
+const CasesList = lazyPage(() => import("@/features/cases/CasesWorkspace"), "CasesList");
+const CaseView = lazyPage(() => import("@/features/cases/CasesWorkspace"), "CaseView");
+const FleetHealth = lazyPage(() => import("@/features/admin/cameras/FleetHealth"), "FleetHealth");
+const MaintenanceWorkspace = lazyPage(() => import("@/features/maintenance/MaintenanceWorkspace"), "MaintenanceWorkspace");
+const AddCameras = lazyPage(() => import("@/features/admin/cameras/add/AddCameras"), "AddCameras");
+const GroupsWorkspace = lazyPage(() => import("@/features/admin/groups/GroupsWorkspace"), "GroupsWorkspace");
+const RulesWorkspace = lazyPage(() => import("@/features/admin/rules/RulesWorkspace"), "RulesWorkspace");
+const SettingsWorkspace = lazyPage(() => import("@/features/settings/SettingsWorkspace"), "SettingsWorkspace");
 
 function AdminRoute({ me, children }: { me: Me; children: ReactNode }) {
   return me.role === "administrator" ? <>{children}</> : <AdministratorOnly />;
@@ -44,27 +49,27 @@ function router(me: Me) {
         children: [
           { index: true, element: <Navigate to="/live" replace /> },
           { path: "live/*", element: <LiveWorkspace /> },
-          { path: "playback/*", element: <PlaybackWorkspace /> },
-          { path: "insights", element: <InsightsWorkspace /> },
-          { path: "digests", element: <DigestsList /> },
-          { path: "digests/:digestId", element: <DigestView /> },
-          { path: "cases", element: <CasesList /> },
-          { path: "cases/:caseId", element: <CaseView /> },
+          { path: "playback/*", element: <Page><PlaybackWorkspace /></Page> },
+          { path: "insights", element: <Page><InsightsWorkspace /></Page> },
+          { path: "digests", element: <Page><DigestsList /></Page> },
+          { path: "digests/:digestId", element: <Page><DigestView /></Page> },
+          { path: "cases", element: <Page><CasesList /></Page> },
+          { path: "cases/:caseId", element: <Page><CaseView /></Page> },
           {
             path: "cameras",
             element: <CamerasShell admin={me.role === "administrator"}><Outlet /></CamerasShell>,
             children: [
               { index: true, element: <CamerasInventory /> },
-              { path: "health", element: <FleetHealth /> },
-              { path: "maintenance", element: <MaintenanceWorkspace /> },
-              { path: "add", element: <AdminRoute me={me}><AddCameras /></AdminRoute> },
-              { path: "groups", element: <AdminRoute me={me}><GroupsWorkspace /></AdminRoute> },
-              { path: "rules", element: <AdminRoute me={me}><RulesWorkspace /></AdminRoute> },
+              { path: "health", element: <Page><FleetHealth /></Page> },
+              { path: "maintenance", element: <Page><MaintenanceWorkspace /></Page> },
+              { path: "add", element: <AdminRoute me={me}><Page><AddCameras /></Page></AdminRoute> },
+              { path: "groups", element: <AdminRoute me={me}><Page><GroupsWorkspace /></Page></AdminRoute> },
+              { path: "rules", element: <AdminRoute me={me}><Page><RulesWorkspace /></Page></AdminRoute> },
               { path: "*", element: <NotFound /> },
             ],
           },
           // One route for "/settings" too (it redirects to General inside the page), so going back to Settings from a category keeps the page and its open groups.
-          { path: "settings/:category?", element: <AdminRoute me={me}><SettingsWorkspace /></AdminRoute> },
+          { path: "settings/:category?", element: <AdminRoute me={me}><Page><SettingsWorkspace /></Page></AdminRoute> },
           { path: "*", element: <NotFound /> },
         ],
       },
