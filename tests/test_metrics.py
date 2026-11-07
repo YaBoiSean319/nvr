@@ -402,13 +402,25 @@ class ForwardCase(MetricsCase):
         forwarder.start()
         handler = logforward.ForwardHandler(forwarder)
         self.logger.addHandler(handler)
-        self.cleanups.append(lambda: (self.logger.removeHandler(handler), forwarder.stop()))
+        self.cleanups.append(lambda: (self.logger.removeHandler(handler), forwarder.stop(wait=5)))
         return forwarder
 
     def collector(self, context: ssl.SSLContext | None = None) -> Collector:
         collector = Collector(context)
         self.cleanups.append(collector.stop)
         return collector
+
+
+class StopTests(ForwardCase):
+    def test_stop_can_wait_for_the_sender_thread_to_finish(self):
+        # A sender still reading the database when a test's temporary directory is removed made "directory not empty" failures in whichever test came last.
+        collector = self.collector()
+        forwarder = self.forward(f"syslog+tcp://127.0.0.1:{collector.port}")
+        self.logger.warning("one record")
+        collector.wait_for("one record")
+        self.assertTrue(forwarder._thread.is_alive())
+        forwarder.stop(wait=5)
+        self.assertFalse(forwarder._thread.is_alive())
 
 
 class SyslogTests(ForwardCase):
@@ -526,7 +538,7 @@ class OtlpTests(ForwardCase):
         forwarder.start()
         handler = logforward.ForwardHandler(forwarder)
         self.logger.addHandler(handler)
-        self.cleanups.append(lambda: (self.logger.removeHandler(handler), forwarder.stop()))
+        self.cleanups.append(lambda: (self.logger.removeHandler(handler), forwarder.stop(wait=5)))
         self.logger.error("needs a token")
         collector.wait_for("needs a token")
         self.assertEqual(collector.posts[0][1]["Authorization"], "Bearer collector-token")
@@ -690,7 +702,7 @@ class NeverBlockingTests(ForwardCase):
         previous = root.level
         root.addHandler(handler)
         root.setLevel(logging.DEBUG)
-        self.cleanups += [listener.close, lambda: (root.removeHandler(handler), root.setLevel(previous), forwarder.stop())]
+        self.cleanups += [listener.close, lambda: (root.removeHandler(handler), root.setLevel(previous), forwarder.stop(wait=5))]
         return forwarder
 
     def test_requests_that_log_are_served_at_the_same_speed_while_the_collector_is_jammed(self):
@@ -778,7 +790,7 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(len(root.handlers), len(before) + 1)
             self.assertEqual((forwarder.process, forwarder.level, forwarder.entries.maxsize), ("recorder", logging.WARNING, 10))
         finally:
-            forwarder.stop()
+            forwarder.stop(wait=5)
             root.handlers[:] = before
 
     def test_the_supervisor_and_each_worker_install_it(self):
