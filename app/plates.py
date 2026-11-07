@@ -330,12 +330,6 @@ def _on_list(db: sqlite3.Connection, list_id: str, plate: str, now: datetime) ->
     return watch["kind"], on_list
 
 
-def list_matches(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool | None:
-    """Whether a plate is on the watch list; None when there is no such list."""
-    found = _on_list(db, list_id, plate, now or datetime.now(timezone.utc))
-    return None if found is None else found[1]
-
-
 def rule_fires(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool:
     """Whether a read of this plate raises a rule on the list: a deny list's plate is on it, an allow list's plate is not."""
     found = _on_list(db, list_id, plate, now or datetime.now(timezone.utc))

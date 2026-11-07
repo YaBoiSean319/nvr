@@ -9,7 +9,6 @@ import { InventoryTable } from "./InventoryTable";
 import { matches, revealing } from "./inventory";
 import { useCamerasStore } from "./store";
 
-export type CamerasSection = "inventory" | "add" | "groups" | "rules";
 
 /** Section navigation shared by Cameras, Add Cameras, Groups & Policies and Rules. */
 function Sections({ admin }: { admin: boolean }) {

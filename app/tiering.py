@@ -229,10 +229,6 @@ def tiered_row(relative_path: str) -> sqlite3.Row | None:
         return db.execute("SELECT id,camera_id,relative_path,tier_id,tier_key,tier_sha256,size_bytes FROM recording_segments WHERE relative_path=? AND tier_id IS NOT NULL", (relative_path,)).fetchone()
 
 
-def is_cold(relative_path: str) -> bool:
-    return tiered_row(relative_path) is not None
-
-
 def cold_path(relative_path: str) -> Path | None:
     """Where a tiered segment can be read from: its file on a local tier, or its verified copy in the cache. None when it has not moved."""
     row = tiered_row(relative_path)

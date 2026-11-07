@@ -42,14 +42,6 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _soap(action: str, body: str) -> bytes:
-    return f'''<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="{SOAP}" xmlns:tds="{DEVICE}" xmlns:trt="{MEDIA}" xmlns:tt="{SCHEMA}">
- <s:Header><s:Action s:mustUnderstand="1">{action}</s:Action></s:Header>
- <s:Body>{body}</s:Body>
-</s:Envelope>'''.encode("utf-8")
-
-
 def _parse_response(data: bytes) -> ET.Element:
     if not data or len(data) > MAX_RESPONSE_BYTES:
         raise ValueError("ONVIF response size is invalid")

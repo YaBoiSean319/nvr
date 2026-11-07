@@ -451,10 +451,6 @@ async def combine_alarms(local: dict[str, Any] | None, context: Context) -> dict
     return {"alarms": alarms[: kwargs["limit"]], "counts": counts, "rules": rules, "sites": [site_status(link) for link in context.links]}
 
 
-def _empty_alarms() -> dict[str, Any]:
-    return {"alarms": [], "counts": {key: 0 for key in ("new", "acknowledged", "assigned", "resolved")}, "rules": []}
-
-
 async def split_timeline(kwargs: dict[str, Any]) -> tuple[dict[str, Any], Context]:
     user, payload = kwargs["user"], kwargs["payload"]
     context = Context(kwargs, user)
