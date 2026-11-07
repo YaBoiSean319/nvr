@@ -70,3 +70,22 @@ test("an administrator connects Microsoft 365 with a code and a link, and sends 
   await expect(problems).toContainText("3 alert emails were held back by the hourly limit");
   expect(sent[0]).toMatchObject({ tenant_id: "contoso.onmicrosoft.com" });
 });
+
+test("a slow settings response does not wipe what is already being typed", async ({ page }) => {
+  seedFixtures(1);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route("**/api/admin/email", async route => {
+    await gate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ state: "none", limits: { per_rule_per_hour: 20, per_hour: 100 } }) });
+  });
+  await signInNext(page);
+  await page.goto("/settings/email");
+  const connection = page.getByRole("region", { name: "Microsoft 365 connection" });
+  await connection.getByLabel("Tenant ID or domain").fill("contoso.onmicrosoft.com");
+  await connection.getByLabel("Application (client) ID").fill("11111111-2222-3333-4444-555555555555");
+  release();
+  await expect(page.getByRole("region", { name: "Emails about NVR problems" })).toBeVisible();
+  await expect(connection.getByLabel("Tenant ID or domain")).toHaveValue("contoso.onmicrosoft.com");
+  await expect(connection.getByRole("button", { name: "Connect with Microsoft" })).toBeEnabled();
+});
