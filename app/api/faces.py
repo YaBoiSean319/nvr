@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timezone
 from typing import Any
 
@@ -120,12 +121,13 @@ def list_watch(_: Administrator) -> dict[str, Any]:
 async def find(payload: FindRequest, user: Administrator) -> dict[str, Any]:
     """The faces in a camera's recorded picture at a moment, so one can be chosen for the list."""
     try:
-        _, found = await faces.find_faces(payload.camera_id, payload.at)
+        frame, found = await faces.find_faces(payload.camera_id, payload.at)
     except faces.FaceError as error:
         _raise(error)
+    jpeg = await asyncio.to_thread(faces.frame_jpeg, frame)
     with connect() as db:
         faces.audit(db, int(user["id"]), "face_search_viewed", payload.camera_id, {"at": payload.at.astimezone(timezone.utc).isoformat(), "faces": len(found)})
-    return {"camera_id": payload.camera_id, "at": payload.at.astimezone(timezone.utc).isoformat(), "faces": [{key: value for key, value in item.items() if key != "_face"} for item in found]}
+    return {"camera_id": payload.camera_id, "at": payload.at.astimezone(timezone.utc).isoformat(), "picture": base64.b64encode(jpeg).decode() if jpeg else None, "faces": [{key: value for key, value in item.items() if key != "_face"} for item in found]}
 
 
 @router.post("/api/faces/watch", status_code=201)
@@ -228,3 +230,25 @@ def set_camera(camera_id: str, payload: CameraRequest, user: Administrator) -> d
                    (camera_id, int(payload.enabled)))
         faces.audit(db, int(user["id"]), "face_camera_switched", camera_id, {"enabled": payload.enabled})
     return {"camera_id": camera_id, "enabled": payload.enabled}
+
+
+@router.get("/api/faces/sightings")
+def sightings(user: Administrator, limit: int = 50) -> dict[str, Any]:
+    """The most recent matches, newest first; looking at them is itself audited."""
+    limit = max(1, min(limit, 200))
+    with connect() as db:
+        rows = db.execute(
+            "SELECT s.id,s.entry_id,e.name AS entry_name,s.camera_id,c.name AS camera_name,s.track_id,s.seen_at,s.similarity,(s.picture IS NOT NULL) AS has_picture "
+            "FROM face_sightings s JOIN face_watch_entries e ON e.id=s.entry_id JOIN cameras c ON c.id=s.camera_id ORDER BY s.seen_at DESC,s.id DESC LIMIT ?", (limit,)).fetchall()
+        faces.audit(db, int(user["id"]), "face_sightings_viewed", "all", {"shown": len(rows)})
+    return {"sightings": [{**dict(row), "has_picture": bool(row["has_picture"])} for row in rows]}
+
+
+@router.get("/api/faces/sightings/{sighting_id}/picture")
+def sighting_picture(sighting_id: str, user: Administrator) -> Response:
+    with connect() as db:
+        row = db.execute("SELECT picture,entry_id FROM face_sightings WHERE id=?", (sighting_id,)).fetchone()
+        if row is None or row["picture"] is None:
+            raise HTTPException(status_code=404, detail="No picture for that sighting")
+        faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
+    return Response(bytes(row["picture"]), media_type="image/jpeg", headers={"Cache-Control": "no-store"})

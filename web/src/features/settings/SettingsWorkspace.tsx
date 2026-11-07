@@ -15,6 +15,7 @@ import { HardeningSettings } from "./HardeningSettings";
 import { IntegrationsSettings } from "./IntegrationsSettings";
 import { NotificationsSettings } from "./NotificationsSettings";
 import { PlatesSettings } from "./PlatesSettings";
+import { FacesSettings } from "./FacesSettings";
 import { FallsSettings } from "./FallsSettings";
 import { PrivacySettings } from "./PrivacySettings";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
@@ -43,6 +44,7 @@ const CATEGORIES = {
   failover: { label: "Failover", page: FailoverSettings },
   plates: { label: "Licence plates", page: PlatesSettings },
   falls: { label: "Fall detection", page: FallsSettings },
+  faces: { label: "Face watch", page: FacesSettings },
   sites: { label: "Sites (console)", page: SitesSettings },
   integrations: { label: "AI analysis", page: IntegrationsSettings },
   updates: { label: "Updates", page: UpdatesSettings },
@@ -57,7 +59,7 @@ const GROUPS: { label: string; items: Category[] }[] = [
   { label: "People & access", items: ["access", "remote", "audit", "hardening"] },
   { label: "Recording & storage", items: ["recording", "tiering", "capacity", "coverage", "failover"] },
   { label: "Alerts", items: ["notifications", "email", "digests", "events"] },
-  { label: "AI", items: ["integrations", "plates", "falls"] },
+  { label: "AI", items: ["integrations", "plates", "falls", "faces"] },
   { label: "System", items: ["sites", "updates", "diagnostics"] },
 ];
 
@@ -82,6 +84,7 @@ const KEYWORDS: Record<Category, string> = {
   integrations: "ai model device cameras analysed cap confidence detection people vehicles",
   plates: "licence license plate number region",
   falls: "fall detection pose sensitivity",
+  faces: "face faces recognition trespass trespassed banned watch list person return",
   sites: "console multi site remote nvr",
   updates: "version upgrade release",
   diagnostics: "support bundle logs capture",
