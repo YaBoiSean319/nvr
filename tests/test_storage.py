@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.principal import administrator, current_user
+from app import storage
 from app.storage import camera_recordings_dir
 from app.store import connect, initialize
 
@@ -62,6 +63,48 @@ class StorageApiTests(unittest.TestCase):
             self.assertEqual(camera_recordings_dir(self.camera).parent,Path(os.environ["NVR_RECORDINGS_PATH"])/"archive")
         unassign=self.client.put(f"/api/camera-groups/{self.group}/storage-volume",json={"volume_id":"missing"})
         self.assertEqual(unassign.status_code,422)
+
+
+class ProbeReuseTests(unittest.TestCase):
+    """The write test creates, writes and fsyncs a file on each volume; displaying the status must not repeat it on every request (#280)."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.previous = {key: os.environ.get(key) for key in ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_STORAGE_VOLUMES")}
+        os.environ["NVR_DB_PATH"] = str(Path(self.temporary.name) / "state.sqlite3")
+        os.environ["NVR_RECORDINGS_PATH"] = str(Path(self.temporary.name) / "recordings")
+        os.environ.pop("NVR_STORAGE_VOLUMES", None)
+        Path(os.environ["NVR_RECORDINGS_PATH"]).mkdir()
+        initialize()
+        storage._probes.clear()
+
+    def tearDown(self):
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        storage._probes.clear()
+        self.temporary.cleanup()
+
+    def test_a_recent_probe_is_reused_and_a_fresh_one_is_still_the_default(self):
+        with patch.object(storage, "_probe_writable", wraps=storage._probe_writable) as probe:
+            storage.storage_status(max_age=60)
+            storage.storage_status(max_age=60)
+            storage.storage_status(max_age=60)
+            self.assertEqual(probe.call_count, 1, "displayed three times, tested once")
+            storage.storage_status()  # The recorder's loop: always a fresh test, so a failing disk is noticed within its own interval
+            self.assertEqual(probe.call_count, 2)
+            storage.storage_status(max_age=60)  # ...and what it found is what the next display shows
+            self.assertEqual(probe.call_count, 2)
+
+    def test_an_old_probe_is_repeated(self):
+        storage.storage_status(max_age=60)
+        key, (taken, result) = next(iter(storage._probes.items()))
+        storage._probes[key] = (taken - 61, result)
+        with patch.object(storage, "_probe_writable", wraps=storage._probe_writable) as probe:
+            storage.storage_status(max_age=60)
+            self.assertEqual(probe.call_count, 1)
 
 
 if __name__=="__main__":

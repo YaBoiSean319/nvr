@@ -144,7 +144,7 @@ def _ai(out: _Output, db: sqlite3.Connection, scrub: logforward.Scrubber) -> Non
 
 def _storage(out: _Output) -> None:
     """Reading volume health writes and removes a small probe file on each volume, which is also how the write latency is measured."""
-    volumes = storage.storage_status()["volumes"]
+    volumes = storage.storage_status(max_age=storage.PROBE_REUSE_SECONDS)["volumes"]
     for name, kind, help_text, value in (
         ("nvr_storage_free_bytes", "gauge", "Free space on each recording volume.", lambda v: v["free_bytes"]),
         ("nvr_storage_capacity_bytes", "gauge", "Capacity of each recording volume.", lambda v: v["capacity_bytes"]),

@@ -25,7 +25,7 @@ import httpx
 
 from . import access, coverage, rule_actions, search
 from .credentials import decrypt, encrypt
-from .store import connect
+from .store import connect, has_row
 from .webhooks import validate_target_url
 
 logger = logging.getLogger("nvr.digests")
@@ -557,6 +557,8 @@ def recover_inflight() -> None:
 def _claim() -> dict[str, Any] | None:
     now = _iso(_now())
     with connect() as db:
+        if not has_row(db, "SELECT 1 FROM digest_deliveries WHERE status='queued' AND next_attempt_at<=? LIMIT 1", (now,)):
+            return None
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute("SELECT d.*,a.settings_json,a.secret_ciphertext,a.enabled AS action_enabled FROM digest_deliveries d LEFT JOIN digest_actions a ON a.id=d.action_id "

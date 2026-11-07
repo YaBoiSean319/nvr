@@ -45,6 +45,13 @@ def connect() -> sqlite3.Connection:
     return db
 
 
+def has_row(db: sqlite3.Connection, sql: str, params: tuple[object, ...] = ()) -> bool:
+    """Whether a query finds anything, read without a transaction. The background loops that claim queued work ask this before
+    ``BEGIN IMMEDIATE``, so an idle loop never takes the database's one write lock (#280). The query may be wider than the claim's own; it
+    must never be narrower, or work would wait."""
+    return db.execute(sql, params).fetchone() is not None
+
+
 def initialize() -> None:
     from app.migrations import migrate
 

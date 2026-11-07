@@ -18,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .credentials import decrypt, encrypt
-from .store import connect
+from .store import connect, has_row
 
 EVENT_TYPES = {
     "recording.failure",
@@ -248,6 +248,8 @@ def recover_inflight() -> None:
 def claim_due_delivery() -> dict[str, Any] | None:
     now = _now()
     with connect() as db:
+        if not has_row(db, "SELECT 1 FROM webhook_deliveries WHERE status='queued' AND next_attempt_at<=? LIMIT 1", (now,)):
+            return None
         db.execute("BEGIN IMMEDIATE")
         row = db.execute(
             "SELECT d.*,e.target_url_ciphertext,e.signing_secret_ciphertext,e.allow_private,e.enabled AS endpoint_enabled "

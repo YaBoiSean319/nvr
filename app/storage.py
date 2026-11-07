@@ -146,7 +146,24 @@ def _probe_writable(path: Path) -> tuple[bool, float | None]:
     return True, round((time.monotonic() - started) * 1000, 1)
 
 
-def storage_status() -> dict[str, object]:
+_probes: dict[str, tuple[float, tuple[bool, float | None]]] = {}
+PROBE_REUSE_SECONDS = 60.0
+
+
+def _probe_cached(path: Path, max_age: float) -> tuple[bool, float | None]:
+    """The write test of a volume, reusing one younger than ``max_age`` seconds. The recorder's own loop asks for a fresh one every time."""
+    key = str(path)
+    found = _probes.get(key)
+    if max_age > 0 and found is not None and time.monotonic() - found[0] < max_age:
+        return found[1]
+    result = _probe_writable(path)
+    _probes[key] = (time.monotonic(), result)
+    return result
+
+
+def storage_status(max_age: float = 0.0) -> dict[str, object]:
+    """Every volume's state. A write test (create, write and fsync a file) is part of it; ``max_age`` lets a caller that only displays the
+    result reuse a test that recent instead of repeating it on each request or scrape (#280). The default is a fresh test."""
     volumes = configured_volumes()
     with connect() as db:
         cameras = db.execute("SELECT c.id,c.name,c.recording_status,c.last_error,g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id").fetchall()
@@ -156,7 +173,7 @@ def storage_status() -> dict[str, object]:
         try:
             path=volume_path(name)
             exists=path.is_dir()
-            writable,write_latency=_probe_writable(path) if exists else (False,None)
+            writable,write_latency=_probe_cached(path,max_age) if exists else (False,None)
             usage=shutil.disk_usage(path) if exists else None
             free=usage.free if usage else None
             capacity=usage.total if usage else None
