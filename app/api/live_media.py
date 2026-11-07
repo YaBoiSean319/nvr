@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSock
 from fastapi.responses import StreamingResponse
 
 from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_TRANSCODES, MAX_LIVE_VIEWERS
+from app import live_variant
 from app.live_hub import LiveHub, Viewer
 from app.principal import Administrator, CurrentUser, current_user, requires_scope
 from app.store import connect
@@ -69,6 +70,15 @@ def _acquire_live_view(camera_id: str) -> bool:
         status_data = _live_camera_status.setdefault(camera_id, {"viewers": 0, "last_frame_at": None})
         status_data["viewers"] = int(status_data["viewers"]) + 1
         return True
+
+
+def mark_camera_fresh(camera_id: str) -> None:
+    """A frame of the camera's live stream just went out: what the live status reports as fresh. Streams held ready (``app/live_ready.py``) call this too, so a viewer
+    who joins one finds its status current."""
+    with _live_view_lock:
+        status_data = _live_camera_status.get(camera_id)
+        if status_data:
+            status_data["last_frame_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def _release_live_view(camera_id: str) -> None:
@@ -301,7 +311,7 @@ def live_camera(
     return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
-HEVC_NAMES = {"hevc", "h265", "hev1", "hvc1"}
+HEVC_NAMES = live_variant.HEVC_NAMES
 
 # Close codes for the live WebSocket. 44xx mirror the HTTP status they stand for.
 CLOSE_UNAUTHORIZED, CLOSE_FORBIDDEN, CLOSE_NOT_FOUND, CLOSE_ARCHIVED = 4401, 4403, 4404, 4410
@@ -383,13 +393,9 @@ async def live_stream(
         return
     guard = privacy.StreamGuard(principal, camera_id, unmasked)
     # A masked camera is transcoded with the mask drawn in (H.264, so any camera codec plays).
-    video_filter = privacy.drawbox_filter(zones) if zones else None
-    profile = "sub" if quality == "low" and camera["live_substream_url_ciphertext"] else "main"
-    codec = (camera["video_codec"] or "").lower()
-    camera_is_hevc = codec in HEVC_NAMES
-    hevc_copy = camera_is_hevc and hevc and profile == "main" and not video_filter
-    # A masked picture is converted anyway (to H.264). The low-quality stream's codec is not recorded, so for an H.265 camera it is always converted unless passed on as H.265.
-    transcode = camera_is_hevc and not hevc_copy and not video_filter
+    variant = live_variant.choose(camera, zones, quality, hevc)
+    video_filter, profile, codec, camera_is_hevc = variant.video_filter, variant.profile, variant.codec, variant.camera_is_hevc
+    hevc_copy, transcode = variant.hevc_copy, variant.transcode
     if not video_filter and profile == "main" and codec and codec not in {"h264", "avc", "avc1"} and not camera_is_hevc:
         await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback,
                                                      "detail": f"{codec.upper()} video cannot be played directly; use the fallback stream"})
@@ -403,7 +409,7 @@ async def live_stream(
     if not _acquire_live_view(camera_id):
         await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
         return
-    include_audio = bool(camera["audio_enabled"])
+    include_audio = variant.include_audio
     conversion_key = (camera_id, profile, "audio" if include_audio else "video", "h264", hashlib.sha256(source.encode()).hexdigest()[:16])
     if transcode and not _acquire_transcode(conversion_key):
         _release_live_view(camera_id)
@@ -414,18 +420,12 @@ async def live_stream(
     viewer = Viewer()
 
     def mark_fresh() -> None:
-        with _live_view_lock:
-            status_data = _live_camera_status.get(camera_id)
-            if status_data:
-                status_data["last_frame_at"] = datetime.now(timezone.utc).isoformat()
+        mark_camera_fresh(camera_id)
 
-    # The source fingerprint keeps a changed stream URL (rotation, new profile) from
-    # joining a stream that is still connected to the old one.
-    fingerprint = hashlib.sha256(f"{source}|{video_filter or ''}".encode()).hexdigest()[:16]
-    mode = "masked" if video_filter else "h264" if transcode else "hevc" if hevc_copy else "direct"
-    joined_running = (running := hub.streams.get((camera_id, profile, "audio" if include_audio else "video", mode, fingerprint))) is not None and running.ready.is_set() and not running.failed
-    stream = hub.join((camera_id, profile, "audio" if include_audio else "video", mode, fingerprint),
-                      source, include_audio, viewer, mark_fresh, video_filter, transcode, hevc_copy)
+    stream_key = live_variant.key_of(camera_id, variant, source)
+    joined_running = (running := hub.streams.get(stream_key)) is not None and running.ready.is_set() and not running.failed
+    stream = hub.join(stream_key, source, include_audio, viewer, mark_fresh, video_filter, transcode, hevc_copy)
+    mode = variant.mode
     wait: dict[str, object] = {"camera_id": camera_id, "at": datetime.now(timezone.utc).isoformat(), "profile": profile, "mode": mode, "joined_running": joined_running}
     receiver = asyncio.create_task(websocket.receive())
     getter: asyncio.Task | None = None
