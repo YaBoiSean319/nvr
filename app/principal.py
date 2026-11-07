@@ -140,9 +140,9 @@ def current_user(request: HTTPConnection) -> Principal:
             "FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
             (token_digest(raw), datetime.now(timezone.utc).isoformat()),
         ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
-    principal = _principal(row, remote=network.request_is_remote(request) if row["remote_mfa"] else False)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+        principal = _principal(row, remote=network.request_is_remote(request) if row["remote_mfa"] else False, db=db)  # One connection for the session and the access it grants
     if principal.mfa_enrolment_required and not _enrolment_route(request.scope.get("route")):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Set up a second factor to continue")
     return _within_access(request, principal)
@@ -215,10 +215,9 @@ def _enrolment_route(route: object) -> bool:
     return path in {"/api/auth/me", "/api/auth/logout", "/api/me/security"} or path.startswith("/api/me/security/")
 
 
-def _principal(row: sqlite3.Row, remote: bool = False) -> Principal:
+def _principal(row: sqlite3.Row, remote: bool = False, *, db: sqlite3.Connection) -> Principal:
     owes = required_for(row["mfa_policy"], row["role"], local=row["provider_issuer"] is None, remote_policy=bool(row["remote_mfa"]), remote=remote) and row["factor_count"] == 0
-    with connect() as db:
-        access = resolve_access(db, int(row["id"]), row["role"])
+    access = resolve_access(db, int(row["id"]), row["role"])
     return Principal(id=row["id"], username=row["username"], role=row["role"], mfa_enrolment_required=owes, access=access)
 
 
