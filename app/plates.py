@@ -51,7 +51,7 @@ DETECTION_THRESHOLD = 0.5
 MAX_PLATE_LENGTH = 12
 MIN_PLATE_LENGTH = 2
 MAX_PATTERN_LENGTH = 16
-SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT = 1280, 720
+DETECTOR_VIEW_WIDTH = 1280  # The detector looks at the frame at no more than this width (as it always did); the plate is read from the full-size frame.
 ATTEMPT_INTERVAL = 3.0  # Seconds between snapshots for the same camera.
 MAX_ATTEMPTS = 4  # Snapshots tried for one vehicle before giving up on it.
 SETTINGS_REFRESH = 30.0
@@ -166,7 +166,25 @@ def decode_plate(output: np.ndarray, symbols: tuple[str, ...], blank: int | None
     return "".join(text), (float(np.mean(kept)) if kept else 0.0)
 
 
+def _box_shrink(image: np.ndarray, factor_y: int, factor_x: int) -> np.ndarray:
+    """The picture with every factor_y x factor_x block of pixels averaged into one (the edge that does not fill a block is dropped)."""
+    if factor_y <= 1 and factor_x <= 1:
+        return image
+    rows, columns = image.shape[0] - image.shape[0] % factor_y, image.shape[1] - image.shape[1] % factor_x
+    blocks = image[:rows, :columns].reshape(rows // factor_y, factor_y, columns // factor_x, factor_x, image.shape[2])
+    return (blocks.sum(axis=(1, 3), dtype=np.uint32) // (factor_y * factor_x)).astype(np.uint8)
+
+
+def detector_view(frame: np.ndarray) -> np.ndarray:
+    """The frame the plate detector looks at: the frame itself up to DETECTOR_VIEW_WIDTH wide (exactly as before full-size snapshots), and a wider one
+    averaged down to that size, so a 4K snapshot gives the detector the same picture a 1280-wide one did while the plate is still read from the full-size frame."""
+    factor = -(-frame.shape[1] // DETECTOR_VIEW_WIDTH)
+    return _box_shrink(frame, factor, factor) if factor > 1 else frame
+
+
 def _resize(image: np.ndarray, height: int, width: int) -> np.ndarray:
+    # A crop at least twice the target size is averaged down first, so thin strokes of a large, sharp plate are not lost to skipped pixels.
+    image = _box_shrink(image, image.shape[0] // height if image.shape[0] >= 2 * height else 1, image.shape[1] // width if image.shape[1] >= 2 * width else 1)
     rows = np.minimum((np.arange(height) * image.shape[0] / height).astype(int), image.shape[0] - 1)
     columns = np.minimum((np.arange(width) * image.shape[1] / width).astype(int), image.shape[1] - 1)
     return image[rows][:, columns]
@@ -211,7 +229,7 @@ class PlateReader:
     def read(self, frame: np.ndarray) -> list[Plate]:
         height, width = frame.shape[:2]
         plates: list[Plate] = []
-        for detected, (x1, y1, x2, y2) in self._detect(frame):
+        for detected, (x1, y1, x2, y2) in self._detect(detector_view(frame)):
             left, right, top, bottom = int(x1 * width), max(int(x1 * width) + 1, int(round(x2 * width))), int(y1 * height), max(int(y1 * height) + 1, int(round(y2 * height)))
             crop = frame[top:bottom, left:right]
             if crop.size == 0:
@@ -479,15 +497,32 @@ class PlateScanner:
         self.done &= live
 
 
-async def ffmpeg_snapshot(source: str, width: int = SNAPSHOT_WIDTH, height: int = SNAPSHOT_HEIGHT, timeout: float = 12.0) -> np.ndarray | None:
-    """One full-size BGR frame of a camera's stream, or None when it could not be had."""
+def decode_bmp(data: bytes) -> np.ndarray | None:
+    """A 24-bit BMP (what ffmpeg writes for a bgr24 frame) as a BGR array of its own size, or None when it is not one."""
+    if len(data) < 54 or data[:2] != b"BM":
+        return None
+    offset = int.from_bytes(data[10:14], "little")
+    width = int.from_bytes(data[18:22], "little", signed=True)
+    height = int.from_bytes(data[22:26], "little", signed=True)
+    if int.from_bytes(data[28:30], "little") != 24 or width <= 0 or height == 0:
+        return None
+    rows, row_bytes = abs(height), (width * 3 + 3) // 4 * 4
+    if len(data) < offset + rows * row_bytes:
+        return None
+    pixels = np.frombuffer(data, dtype=np.uint8, count=rows * row_bytes, offset=offset).reshape(rows, row_bytes)[:, :width * 3].reshape(rows, width, 3)
+    return pixels[::-1] if height > 0 else pixels  # a positive height is stored bottom row first
+
+
+async def ffmpeg_snapshot(source: str, timeout: float = 12.0) -> np.ndarray | None:
+    """One frame of a camera's stream at the stream's own size (BGR), or None when it could not be had."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
     arguments = [ffmpeg, "-v", "error", "-threads", "1"]
     if source.startswith("rtsp"):
         arguments += ["-rtsp_transport", "tcp"]
-    arguments += ["-i", source, "-frames:v", "1", "-vf", f"scale={width}:{height}", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+    # BMP is uncompressed, so it costs no encoding time and carries its own size: the frame is not scaled, whatever the camera's resolution or shape.
+    arguments += ["-i", source, "-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1"]
     process = await asyncio.create_subprocess_exec(*arguments, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
         data, _ = await asyncio.wait_for(process.communicate(), timeout)
@@ -495,7 +530,7 @@ async def ffmpeg_snapshot(source: str, width: int = SNAPSHOT_WIDTH, height: int 
         process.kill()
         await process.wait()
         return None
-    return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3) if len(data) == width * height * 3 else None
+    return decode_bmp(data)
 
 
 # --- accuracy on a labelled sample ------------------------------------------------------------------------------------------------------------
