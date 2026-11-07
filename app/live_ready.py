@@ -35,6 +35,7 @@ RECENT_LINGER_SECONDS = 600.0
 MAX_READY_STREAMS = 24
 CHECK_SECONDS = 15.0
 RETRY_FIRST_SECONDS, RETRY_MAX_SECONDS = 15.0, 300.0
+_warned: set[str] = set()  # Cameras already reported as having an unusable address
 
 
 def get_mode(db: sqlite3.Connection) -> str:
@@ -60,8 +61,11 @@ def wanted(db: sqlite3.Connection) -> list[tuple[tuple[str, ...], dict[str, Any]
             source = decrypt(camera["live_substream_url_ciphertext"] if variant.profile == "sub" else camera["stream_url_ciphertext"])
             safe_stream_url(source)
         except Exception:  # noqa: BLE001 - one camera with a bad address must not stop the others being held
-            logger.warning("Live video for camera %s cannot be held ready: its stream address is unusable", camera["id"])
+            if camera["id"] not in _warned:  # Said once, not on every pass
+                _warned.add(camera["id"])
+                logger.warning("Live video for camera %s cannot be held ready: its stream address is unusable", camera["id"])
             continue
+        _warned.discard(camera["id"])
         result.append((live_variant.key_of(camera["id"], variant, source),
                        {"source": source, "include_audio": variant.include_audio, "video_filter": variant.video_filter,
                         "transcode": variant.transcode, "hevc_copy": variant.hevc_copy}))
