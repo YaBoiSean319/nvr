@@ -21,7 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.convertors import Convertor, register_url_convertor
 from urllib.parse import quote
 
-from app import console, network, viewing_audit
+from app import console, viewing_audit
 from app.api import live_media
 from app.audit import record
 from app.credentials import encrypt

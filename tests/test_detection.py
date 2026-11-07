@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.credentials import encrypt
-from app.detection import DetectionManager, MODEL_ID, MODEL_VERSION, effective_vehicle_threshold, keep_confident_vehicles, point_in_zones, record_observations
+from app.detection import DetectionManager, MODEL_ID, effective_vehicle_threshold, keep_confident_vehicles, point_in_zones, record_observations
 from app.main import app
 from app.principal import administrator, current_user
 from app.store import connect, initialize

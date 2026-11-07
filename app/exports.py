@@ -857,7 +857,6 @@ class ExportManager:
             for camera in per_camera:
                 if job_id in self._cancelled:
                     raise ExportCancelled()
-                camera_segments = camera["segments"]
                 spans = camera["spans"]
                 actual, missing = _interval_metadata(start, end, [
                     {"starts_at": span["source_start"].isoformat(), "ends_at": span["source_end"].isoformat()}

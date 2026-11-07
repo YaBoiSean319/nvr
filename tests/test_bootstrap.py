@@ -261,7 +261,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/cameras").json()["cameras"],[])
 
     def test_camera_import_apply_groups_successful_rows_and_reports_probe_failure(self):
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock
         self.client.post("/api/setup/admin",json={"username":"local-admin","password":TEST_PASSWORD})
         text=("name,stream_url,recording_mode,group_name\n"
               "North,rtsp://198.51.100.10/stream,disabled,North Wing\n"
@@ -439,7 +439,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(query["redirect_uri"],["https://nvr.example.test/api/auth/oidc/callback"])
             observed["challenge"]=query["code_challenge"][0]
             observed["nonce"]=query["nonce"][0]
-            wrong_state=self.client.get(f"https://testserver.local/api/auth/oidc/callback?code=valid&state=incorrect",follow_redirects=False)
+            wrong_state=self.client.get("https://testserver.local/api/auth/oidc/callback?code=valid&state=incorrect",follow_redirects=False)
             self.assertEqual(wrong_state.status_code,401)
             valid=self.client.get(f"https://testserver.local/api/auth/oidc/callback?code=valid&state={query['state'][0]}",follow_redirects=False)
             self.assertEqual(valid.status_code,303,valid.text)

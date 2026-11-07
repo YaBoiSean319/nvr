@@ -1,0 +1,9 @@
+# Only the linter is configured here; the application is run from requirements.txt.
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["web", "mobile", "node_modules"]
+
+[tool.ruff.lint]
+# Small on purpose: things that are wrong, not style. F is pyflakes (unused imports and variables, undefined names); B904 keeps the cause of a
+# re-raised error explicit; B006 catches mutable default arguments. The "# noqa: BLE001" comments that explain broad excepts are kept as documentation.
+select = ["F", "B904", "B006"]

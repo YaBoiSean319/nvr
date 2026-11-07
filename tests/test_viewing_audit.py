@@ -15,7 +15,6 @@ from app import viewing_audit
 from app.credentials import encrypt
 from app.store import connect
 from tests.test_access_grants import GrantCase, START
-from tests.test_support import TEST_PASSWORD
 
 FFMPEG = shutil.which("ffmpeg")
 

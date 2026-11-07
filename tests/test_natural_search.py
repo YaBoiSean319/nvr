@@ -5,7 +5,6 @@ import json
 import socket
 import tempfile
 import unittest
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock

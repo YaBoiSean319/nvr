@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from .discovery import IP_RANGE_PORTS
 from .onvif_client import OnvifClient, OnvifError, normalise_host
-from .onvif_profiles import MediaProfile, choose_profiles
+from .onvif_profiles import choose_profiles
 
 SOAP = "http://www.w3.org/2003/05/soap-envelope"
 DEVICE = "http://www.onvif.org/ver10/device/wsdl"

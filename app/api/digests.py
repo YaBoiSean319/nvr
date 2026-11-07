@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app import access, digests
+from app import digests
 from app.api.rules import ActionDefinition
 from app.principal import Administrator, CurrentUser
 from app.store import connect

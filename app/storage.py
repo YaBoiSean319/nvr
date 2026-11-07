@@ -149,7 +149,6 @@ def _probe_writable(path: Path) -> tuple[bool, float | None]:
 def storage_status() -> dict[str, object]:
     volumes = configured_volumes()
     with connect() as db:
-        groups = db.execute("SELECT id,name,storage_volume_id FROM camera_groups").fetchall()
         cameras = db.execute("SELECT c.id,c.name,c.recording_status,c.last_error,g.storage_volume_id FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id").fetchall()
     result=[]
     minimum_free=int(os.environ.get("NVR_STORAGE_PRESSURE_FREE_BYTES","1073741824"))

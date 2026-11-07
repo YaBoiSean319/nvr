@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import json
 import secrets
-import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta, timezone

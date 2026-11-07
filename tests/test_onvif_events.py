@@ -147,7 +147,6 @@ class SubscriptionTests(SubscriptionCase):
     async def test_a_camera_that_subscribes_but_fails_every_pull_is_never_called_healthy(self):
         camera = self.camera(behaviours={"PullMessages": "fault"})
         _, _, statuses = await self.start(camera)
-        details: list[str] = []
         await self.until(lambda: "unavailable" in statuses)
         self.assertNotIn("healthy", statuses)
 

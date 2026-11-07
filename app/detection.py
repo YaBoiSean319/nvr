@@ -644,7 +644,7 @@ class DetectionManager:
         from . import clip
         from . import falls, plates, pose_models, privacy
         from . import similar
-        from .tracks import Tracker, encode_jpeg, record_detections, store_keyframe, store_poses
+        from .tracks import Tracker, encode_jpeg, store_keyframe, store_poses
 
         attribute_model = await self._attribute_model(str(config["provider"]))
         reid_model = await self._reid_model(str(config["provider"]))

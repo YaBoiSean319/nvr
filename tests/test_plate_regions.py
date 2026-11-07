@@ -2,7 +2,6 @@
 and how the AI worker follows it."""
 from __future__ import annotations
 
-import asyncio
 import os
 import tempfile
 import unittest
@@ -13,7 +12,6 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from app import plate_models, plates
-from app.application import create_app
 from app.migrations import m0045_plate_region
 from app.security import hash_password
 from app.store import connect

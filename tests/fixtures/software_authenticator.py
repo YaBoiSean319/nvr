@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from app import cbor
-from app.webauthn import b64url, unb64url
+from app.webauthn import b64url
 
 UP, UV, AT = 0x01, 0x04, 0x40
 

@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import json
 import typing
 import logging
 import re
@@ -25,14 +24,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
-from urllib.parse import quote
 
 import httpx
 from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
-from .access import SITE_SEPARATOR as SEP, site_of
-from .credentials import decrypt, encrypt
+from .access import SITE_SEPARATOR as SEP
+from .credentials import decrypt
 from .store import connect
 from .webhooks import validate_target_url
 

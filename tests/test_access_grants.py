@@ -16,7 +16,7 @@ from app import access, alarms, privacy
 from app.application import create_app
 from app.credentials import encrypt
 from app.principal import administrator, current_user, depends_on
-from app.security import hash_password, new_session_token, token_digest
+from app.security import hash_password
 from app.store import connect
 from tests.test_support import TEST_PASSWORD
 

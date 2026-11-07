@@ -320,7 +320,7 @@ class ExportJobTests(unittest.TestCase):
         # Decode one frame during camera A's frozen interval: its image remains
         # red, while shared time (10:00:02) advances past last capture (10:00:01).
         frame = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", "2.5", "-i", str(rendered), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True, timeout=20).stdout
-        width, height = 1920, 1080
+        width = 1920
         def pixel(x: int, y: int) -> tuple[int, int, int]:
             index = (y * width + x) * 3
             return tuple(frame[index:index + 3])
