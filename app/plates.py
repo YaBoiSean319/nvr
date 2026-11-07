@@ -484,13 +484,14 @@ async def ffmpeg_snapshot(source: str, width: int = SNAPSHOT_WIDTH, height: int 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
-    arguments = [ffmpeg, "-v", "error", "-threads", "1"]
-    if source.startswith("rtsp"):
-        arguments += ["-rtsp_transport", "tcp"]
-    arguments += ["-i", source, "-frames:v", "1", "-vf", f"scale={width}:{height}", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
-    process = await asyncio.create_subprocess_exec(*arguments, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    from .recording import _PROTOCOLS, _manifest_bytes  # Here, not at the top: recording pulls in much more than plates needs
+
+    # The address carries the camera's login, so it goes to FFmpeg over stdin like the recorder's, never in a process listing (#272).
+    arguments = [ffmpeg, "-v", "error", "-threads", "1", "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS, "-i", "pipe:0",
+                 "-frames:v", "1", "-vf", f"scale={width}:{height}", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+    process = await asyncio.create_subprocess_exec(*arguments, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
-        data, _ = await asyncio.wait_for(process.communicate(), timeout)
+        data, _ = await asyncio.wait_for(process.communicate(_manifest_bytes(source)), timeout)
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()
