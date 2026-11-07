@@ -237,9 +237,10 @@ class RegionReader:
 
     def read(self, frame: np.ndarray) -> list[Any]:
         from .plates import Plate, normalise, valid_plate
+        from .plates import detector_view
         height, width = frame.shape[:2]
         plates = []
-        for detected, (x1, y1, x2, y2) in self.detect(frame):
+        for detected, (x1, y1, x2, y2) in self.detect(detector_view(frame)):
             left, right = int(x1 * width), max(int(x1 * width) + 1, int(round(x2 * width)))
             top, bottom = int(y1 * height), max(int(y1 * height) + 1, int(round(y2 * height)))
             crop = frame[top:bottom, left:right]

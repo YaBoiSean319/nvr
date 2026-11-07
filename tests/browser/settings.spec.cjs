@@ -135,6 +135,21 @@ test("Users & access: a metrics token scrapes /metrics and nothing else, and a s
   await outside.dispose();
 });
 
+test("live video start-up: the choice is saved, audited and kept", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  await openSettings(page, "General");
+  const form = page.getByRole("form", { name: "Live video" });
+  await expect(form.getByRole("radio", { name: /Ready for every camera/ })).toBeChecked();  // The default: frictionless
+  await form.getByRole("radio", { name: /Only while someone is watching/ }).check();
+  await expect(form.getByRole("button", { name: "Save" })).toBeEnabled();
+  await form.getByRole("button", { name: "Save" }).click();
+  await expect(form.getByRole("status")).toContainText("Saved.");
+  expect((await (await page.request.get("/api/live-ready")).json()).mode).toBe("off");
+  await page.reload();
+  await expect(page.getByRole("form", { name: "Live video" }).getByRole("radio", { name: /Only while someone is watching/ })).toBeChecked();
+});
+
 test("going back to Settings from a category keeps the groups you had open", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);

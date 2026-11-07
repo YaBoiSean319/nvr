@@ -233,9 +233,20 @@ class RedactionCase(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()
 
+    def advance(self, review_id: str, timeout: float = 60.0) -> None:
+        """Analyse the queued reviews and wait until this one has settled. The application's own export manager polls for queued reviews too, so it can have picked this
+        one up a moment before this call: ``advance_reviews`` then finds nothing queued, and the review is still being analysed by the other task until it finishes."""
+        asyncio.run(redaction.advance_reviews())
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self.client.get(f"/api/redaction/reviews/{review_id}").json().get("state")
+            if state not in ("queued", "analysing"):
+                return
+            time.sleep(0.1)
+
     def analysed(self, review: dict | None = None) -> dict:
         review = review or self.review()
-        asyncio.run(redaction.advance_reviews())
+        self.advance(review["id"])
         result = self.client.get(f"/api/redaction/reviews/{review['id']}")
         self.assertEqual(result.status_code, 200, result.text)
         self.assertEqual(result.json()["state"], "ready", result.json())
@@ -407,7 +418,7 @@ class ReviewTests(RedactionCase):
     def test_an_analysis_that_cannot_read_the_footage_fails_with_a_reason(self):
         review = self.review()
         self.media.unlink()
-        asyncio.run(redaction.advance_reviews())
+        self.advance(review["id"])
         failed = self.client.get(f"/api/redaction/reviews/{review['id']}").json()
         self.assertEqual(failed["state"], "failed")
         self.assertIn("unavailable", failed["error"])
@@ -481,7 +492,7 @@ class ExportTests(RedactionCase):
         self.record(self.camera, faces=False, name="plain.mp4", start="2026-10-20T10:01:00+00:00")
         start, end = "2026-10-20T10:01:00Z", "2026-10-20T10:01:03Z"
         review = self.review(start=start, end=end)
-        asyncio.run(redaction.advance_reviews())
+        self.advance(review["id"])
         moving = {"camera_id": self.camera, "start": 0.0, "end": 3.0, "keyframes": [
             {"t": 0.0, "x": 100 / FRAME_WIDTH, "y": 300 / FRAME_HEIGHT, "width": 80 / FRAME_WIDTH, "height": 80 / FRAME_HEIGHT},
             {"t": 3.0, "x": 1000 / FRAME_WIDTH, "y": 300 / FRAME_HEIGHT, "width": 80 / FRAME_WIDTH, "height": 80 / FRAME_HEIGHT}]}

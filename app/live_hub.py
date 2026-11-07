@@ -207,6 +207,13 @@ class Viewer:
             self.queue.put_nowait(None)
 
 
+class SinkViewer(Viewer):
+    """A viewer that only keeps a stream open: it takes nothing from the stream, so nothing queues up behind it."""
+
+    def offer(self, item: object) -> None:
+        return None
+
+
 class LiveStream:
     def __init__(self, key: tuple[str, ...], source: str, include_audio: bool,
                  on_fragment: Callable[[], None] | None = None, video_filter: str | None = None,
@@ -230,6 +237,8 @@ class LiveStream:
         self.process: asyncio.subprocess.Process | None = None
         self.task: asyncio.Task[None] | None = None
         self.linger: asyncio.TimerHandle | None = None
+        # How long the stream stays open after its last viewer leaves; None means LINGER_SECONDS.
+        self.linger_seconds: float | None = None
         self.connections = 0
         # How long this stream took to start, from the moment it was asked for: the stages a viewer who started it waited through (ms).
         self.timing: dict[str, int] = {}
@@ -261,7 +270,7 @@ class LiveStream:
     def remove(self, viewer: Viewer, on_idle: Callable[[], None]) -> None:
         self.viewers.discard(viewer)
         if not self.viewers and self.linger is None:
-            self.linger = asyncio.get_running_loop().call_later(LINGER_SECONDS, on_idle)
+            self.linger = asyncio.get_running_loop().call_later(LINGER_SECONDS if self.linger_seconds is None else self.linger_seconds, on_idle)
 
     def _broadcast(self, item: object) -> None:
         for viewer in list(self.viewers):
@@ -371,6 +380,8 @@ class LiveHub:
 
     def __init__(self) -> None:
         self.streams: dict[tuple[str, ...], LiveStream] = {}
+        # Set from Settings (see app/live_ready.py): None keeps the short default.
+        self.linger_seconds: float | None = None
         self.starts: collections.deque[dict[str, object]] = collections.deque(maxlen=STARTS_KEPT)
 
     def record_start(self, entry: dict[str, object]) -> None:
@@ -386,6 +397,7 @@ class LiveHub:
         stream = self.streams.get(key)
         if stream is None or stream.failed:
             stream = LiveStream(key, source, include_audio, on_fragment, video_filter, transcode, hevc_copy)
+            stream.linger_seconds = self.linger_seconds
             self.streams[key] = stream
             stream.start()
         stream.add(viewer)
@@ -406,7 +418,7 @@ class LiveHub:
         await asyncio.gather(*(stream.stop() for stream in streams), return_exceptions=True)
 
     def snapshot(self) -> list[dict[str, object]]:
-        return [{"key": list(stream.key), "viewers": len(stream.viewers), "camera_connections": stream.connections,
+        return [{"key": list(stream.key), "viewers": sum(1 for viewer in stream.viewers if not isinstance(viewer, SinkViewer)), "held_ready": any(isinstance(viewer, SinkViewer) for viewer in stream.viewers), "camera_connections": stream.connections,
                  "ready": stream.init is not None, "failed": stream.failed, "transcoded": stream.transcode,
                  "accelerated": stream.accelerated} for stream in self.streams.values()]
 

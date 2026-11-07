@@ -14,17 +14,15 @@ for (const [name, path] of [["Insights", "/insights"], ["Digests", "/digests"], 
     await page.mouse.move(600, 150);
     await page.mouse.wheel(0, 5000);
     await expect.poll(() => main.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
-    // The end of the page is reached: the last thing on it is inside the window.
-    // (A page that finishes loading after the first scroll gets longer, so keep scrolling until it stops moving.)
+    // The end of the page is reached and the last thing on it is inside the window. Both are checked together on every pass: a page that finishes loading after the
+    // scroll gets longer, so measuring the last element once, after the scroll had stopped moving, could be done against a page that had grown since.
     await expect.poll(async () => {
       await page.mouse.wheel(0, 5000);
-      return main.evaluate(element => Math.round(element.scrollHeight - element.clientHeight - element.scrollTop));
-    }, { timeout: 15_000 }).toBeLessThanOrEqual(1);
-    const last = await main.evaluate(element => {
-      const page = element.firstElementChild;
-      const bottom = page.lastElementChild.getBoundingClientRect().bottom;
-      return bottom <= window.innerHeight + 1;
-    });
-    expect(last).toBe(true);
+      return main.evaluate(element => {
+        const remaining = Math.round(element.scrollHeight - element.clientHeight - element.scrollTop);
+        const bottom = element.firstElementChild.lastElementChild.getBoundingClientRect().bottom;
+        return remaining <= 1 && bottom <= window.innerHeight + 1;
+      });
+    }, { timeout: 15_000 }).toBe(true);
   });
 }

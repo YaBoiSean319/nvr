@@ -63,7 +63,7 @@ const GROUPS: { label: string; items: Category[] }[] = [
 
 /** Other words someone might type to find a category, besides its name. */
 const KEYWORDS: Record<Category, string> = {
-  general: "date time zone clock format display",
+  general: "date time zone clock format display live video start-up ready stream wait keep open",
   appearance: "branding logo colour color theme name",
   privacy: "mask notices consent",
   access: "users passwords roles tokens passkeys two factor grants api",
