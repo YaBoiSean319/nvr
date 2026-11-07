@@ -31,6 +31,8 @@ function summary(rule: Rule): string {
     ? "plate reads"
     : rule.condition.type === "fall"
     ? "people who have fallen"
+    : rule.condition.type === "face"
+    ? (rule.condition.entry_ids.length ? `${rule.condition.entry_ids.length} watched face(s)` : "any watched face")
     : rule.classes.map(item => CLASS_LABEL[item].toLowerCase()).join(" and ");
   return `${CONDITION_LABEL[rule.condition.type]} · ${subject}${rule.enabled ? "" : " · disabled"}`;
 }
@@ -94,6 +96,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
   const groups = useCameraGroups();
   const display = useDisplaySettings();
   const plateLists = usePlateAdmin();
+  const faceEntries = useQuery({ queryKey: ["face-watch-entries"], queryFn: ({ signal }) => api<{ entries: { id: string; name: string; enabled: boolean; expired: boolean }[] }>("/api/faces/watch", { signal }), retry: false });
   const eventSources = useQuery({ queryKey: ["admin", "event-sources"], queryFn: ({ signal }) => api<{ sources: { id: string; name: string }[] }>("/api/event-sources", { signal }).then(result => result.sources) });
   const published = useMemo(() => (rule ? definitionOf(rule) : newRule()), [rule]);
   const [deleting, setDeleting] = useState(false);
@@ -186,7 +189,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
         <fieldset className="field-group">
           <legend>Condition</legend>
           <div className="field-row">
-            <label className="field"><span>{condition.type === "tamper" || condition.type === "external_event" || condition.type === "plate" || condition.type === "fall" ? "When" : "When an object"}</span>
+            <label className="field"><span>{condition.type === "tamper" || condition.type === "external_event" || condition.type === "plate" || condition.type === "fall" || condition.type === "face" ? "When" : "When an object"}</span>
               <select value={condition.type} onChange={event => setCondition(switchCondition(condition, event.target.value as Condition["type"]))}>
                 {(Object.keys(CONDITION_LABEL) as Condition["type"][]).map(type => <option key={type} value={type}>{CONDITION_LABEL[type]}</option>)}
               </select>
@@ -240,6 +243,17 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
                   {(plateLists.data?.watch_lists ?? []).map(list => <option key={list.id} value={list.id}>{list.name} ({list.kind})</option>)}
                 </select>
               </label>
+            </fieldset>
+          ) : condition.type === "face" ? (
+            <fieldset className="plain">
+              <legend className="field-heading">Watched faces</legend>
+              <p className="muted field-hint">Fires when a face on the face watch list is recognised on one of this rule's cameras. Tick entries to limit the rule to them; tick none for any entry. Turn face watch on for each camera under Settings, Faces. It can miss faces and match the wrong person: check every alert before acting on it.</p>
+              <div className="check-list">
+                {(faceEntries.data?.entries ?? []).map(entry => (
+                  <label key={entry.id}><input type="checkbox" checked={condition.entry_ids.includes(entry.id)}
+                                               onChange={event => setCondition({ ...condition, entry_ids: event.target.checked ? [...condition.entry_ids, entry.id] : condition.entry_ids.filter(id => id !== entry.id) })} /> {entry.name}{!entry.enabled ? " (off)" : entry.expired ? " (expired)" : ""}</label>
+                ))}
+              </div>
             </fieldset>
           ) : condition.type === "fall" ? (
             <fieldset className="plain">

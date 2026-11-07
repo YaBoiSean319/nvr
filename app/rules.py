@@ -528,6 +528,50 @@ def fire_fall(db: sqlite3.Connection, camera_id: str, track_id: str, at: datetim
     return fired
 
 
+def _face_wanted(rule: Rule, entry_id: str) -> bool:
+    """Whether a ``face`` rule asks about this watch entry: its ``entry_ids`` list names the people it is for, and an empty one means anyone on the list."""
+    wanted = rule.condition.get("entry_ids") or []
+    return not wanted or entry_id in wanted
+
+
+def fire_face(db: sqlite3.Connection, camera_id: str, track_id: str, entry_id: str, at: datetime, box: dict[str, float]) -> int:
+    """Raise an alarm for each ``face`` rule that watches the camera and asks about this entry, inside the caller's transaction."""
+    groups = _camera_groups(db, camera_id)
+    fired = 0
+    for rule in load_rules(db):
+        if rule.condition_type != "face" or not rule.watches_camera(camera_id, groups) or not _face_wanted(rule, entry_id) or at < rule.active_from or not rule.scheduled(at):
+            continue
+        if rule.cooldown and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND camera_id=? AND occurred_at>? AND occurred_at<? LIMIT 1",
+                                        (rule.id, camera_id, (at - rule.cooldown).isoformat(), (at + rule.cooldown).isoformat())).fetchone():
+            continue
+        event_id = str(uuid.uuid4())
+        inserted = db.execute("INSERT OR IGNORE INTO rule_events(id,rule_id,rule_name,camera_id,track_id,detection_id,label,condition_type,occurred_at,box_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                              (event_id, rule.id, rule.name, camera_id, track_id, None, "face", "face", at.isoformat(), json.dumps(box, separators=(",", ":")))).rowcount
+        if inserted:
+            create_alarm(db, event_id)
+            fired += 1
+    return fired
+
+
+def _replay_face(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """The sightings of [start, end) the rule would have fired on, from those kept."""
+    with connect() as db:
+        rows = db.execute(
+            "SELECT s.entry_id,s.track_id,s.camera_id,s.seen_at,s.box_json,c.name AS camera_name FROM face_sightings s JOIN cameras c ON c.id=s.camera_id "
+            "WHERE s.seen_at>=? AND s.seen_at<? ORDER BY s.seen_at,s.id", (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat())).fetchall()
+        groups = {row["camera_id"]: _camera_groups(db, row["camera_id"]) for row in rows}
+    events, last, tracks = [], {}, set()
+    for row in rows:
+        at = _parse(row["seen_at"])
+        if (not rule.watches_camera(row["camera_id"], groups[row["camera_id"]]) or not _face_wanted(rule, row["entry_id"]) or at < rule.active_from or not rule.scheduled(at)
+                or row["track_id"] in tracks or (rule.cooldown and row["camera_id"] in last and abs(at - last[row["camera_id"]]) < rule.cooldown)):
+            continue
+        tracks.add(row["track_id"])
+        last[row["camera_id"]] = at
+        events.append({"camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": row["track_id"], "label": "face", "occurred_at": at.isoformat(), "box": json.loads(row["box_json"])})
+    return events
+
+
 def _replay_fall(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
     """The falls of [start, end) the rule would have fired on, from those kept."""
     with connect() as db:
@@ -559,6 +603,8 @@ def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
         return _replay_fall(rule, start, end)
     if rule.condition_type == "occupancy":
         return _replay_occupancy(rule, start, end)
+    if rule.condition_type == "face":
+        return _replay_face(rule, start, end)
     start_text, end_text = start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
     with connect() as db:
         tracks = db.execute(
