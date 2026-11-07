@@ -19,6 +19,7 @@ from .api import web_interface
 from .backup import BackupManager
 from .detection import DetectionManager
 from .live_hub import LiveHub
+from .live_ready import LiveReadyKeeper
 from .exports import ExportManager
 from .heartbeat import HeartbeatManager
 from .recording import RecordingManager
@@ -94,6 +95,8 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         started = {}
         heartbeat = None
         app.state.live_hub = LiveHub()
+        keeper = LiveReadyKeeper(app.state.live_hub)
+        app.state.live_ready = keeper
         # Which graphics acceleration works here is found out in the background, so starting is not held up by test encodes.
         app.state.acceleration_probe = asyncio.create_task(asyncio.to_thread(acceleration.refresh), name="acceleration-probe")
         try:
@@ -113,8 +116,12 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
                     started[name] = manager
             if supervised():
                 heartbeat = asyncio.create_task(liveness.heartbeat_forever("web"), name="web-heartbeat")
+            if start_workers:
+                # The live streams are shared in this process, so this is where they are held ready, supervised or not.
+                await keeper.start()
             yield
         finally:
+            await keeper.stop()
             await app.state.live_hub.close()
             if heartbeat:
                 heartbeat.cancel()
