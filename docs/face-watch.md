@@ -2,7 +2,7 @@
 
 Find a face in Playback, select it, and be alerted when that face is seen again: for example when someone who has been trespassed returns to campus, in the way a licence plate on a deny list raises an alert. This page is the design and what is built so far.
 
-**Status.** Part 1 (this page's models and engine, `app/face_models.py`) is in. Not yet built: storing the watch list, reading faces on the cameras that are switched on, the alert rule, and selecting a face in Playback (parts 2 to 4 below). Nothing recognises anyone until they are, and then only on cameras an administrator switches on.
+**Status.** Parts 1 and 2 are in: the models and engine (`app/face_models.py`), and the watch list with its switches and administrator API (`app/faces.py`, `app/api/faces.py`). Not yet built: reading faces on the cameras that are switched on, the alert rule, and the screens (parts 3 and 4 below). **Nothing looks for anyone's face yet**; the list can be filled in and the switches set through the API, and every camera is off.
 
 ## Models and their licences
 
@@ -37,9 +37,23 @@ On a handful of public pictures, as a check that the code uses the models correc
 - A face is called a match at **0.45** by default (stricter than SFace's 0.363, because a match raises an alarm), adjustable.
 - Cameras differ from portraits: distance, angle, light and a small face lower the similarity of the same person, so a watch will miss some returns. A face narrower than 32 pixels in the picture it is read from is not used at all.
 
+## The watch list (part 2)
+
+All of it is administrators only, and every change is in the audit log (who, what, and for entries the name and reason).
+
+| What | How |
+|---|---|
+| See the faces in a recorded picture | `POST /api/faces/find` `{camera_id, at}` returns each face's box, size and whether it can be used (a face inside a privacy mask cannot) |
+| Put a face on the list | `POST /api/faces/watch` `{camera_id, at, point or box, name, reason, expires_at?}`; with `entry_id` it adds another picture of someone already on the list (a second picture makes a return likelier to be noticed) |
+| Change or remove an entry | `PATCH` / `DELETE /api/faces/watch/{id}`; removing deletes its numbers and its picture |
+| Switch cameras on or off | `GET /api/faces/cameras`, `PUT /api/faces/cameras/{id}` `{enabled}`; every camera is off until switched on |
+| How alike two faces must be | `PUT /api/faces/settings` `{match_threshold}` between 0.25 and 0.9 (default 0.45) |
+
+A name and a reason are required for every entry. An entry that has expired or been switched off is not compared with anything. The face is chosen from the recorded picture at a moment (the NVR finds the faces in it and you pick one), never uploaded.
+
 ## Plan
 
 1. **Models and engine** (built): `app/face_models.py`.
-2. **Watch list**: a table of entries (name or label, reason, optional expiry, embeddings, the small picture, who added it), the sightings, and the administrator API with audit entries. Adding an entry from a picture.
+2. **Watch list** (built): entries with a reason and optional expiry, their embeddings and a small picture, the per-camera switches, the threshold, and the administrator API with audit entries.
 3. **Looking for faces**: on cameras switched on, a scanner like the licence-plate one finds faces on people the AI already tracks, compares them with the list, and raises an alarm through a new rule condition ("a watched face is seen"), with the usual schedule, cooldown, actions and test mode.
 4. **Playback and Settings**: select a face in Playback (the NVR finds the faces in the frame being shown and you click one to add it to the list), Settings › Faces to manage the list, switch cameras on and set the match threshold.

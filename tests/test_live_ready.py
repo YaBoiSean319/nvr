@@ -76,11 +76,15 @@ class WantedTests(Case):
             self.camera(f"x{number:02}", f"Extra {number:02}")
         self.assertEqual(len(self.wanted()), live_ready.MAX_READY_STREAMS)
 
-    def test_a_camera_with_an_unusable_address_is_skipped_not_fatal(self):
+    def test_a_camera_with_an_unusable_address_is_skipped_not_fatal_and_reported_once(self):
         self.camera("a", "Alpha")
         with connect() as db:
             db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES('z','Zulu',?)", (encrypt("file:///etc/passwd"),))
-        self.assertEqual([key[0] for key, _ in self.wanted()], ["a"])
+        live_ready._warned.discard("z")
+        with self.assertLogs("nvr.live.ready", level="WARNING") as logged:
+            self.assertEqual([key[0] for key, _ in self.wanted()], ["a"])
+            self.assertEqual([key[0] for key, _ in self.wanted()], ["a"])  # A second pass
+        self.assertEqual(len(logged.records), 1)
 
 
 class KeeperTests(Case):
