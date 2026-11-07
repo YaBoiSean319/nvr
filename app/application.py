@@ -38,6 +38,7 @@ from .home_assistant import HomeAssistantManager
 from .digests import DigestManager
 from .rule_actions import RuleActionManager
 from .rules import RulesManager
+from .routes import all_routes
 from .principal import COOKIE_NAME, CurrentUser, current_user, depends_on, scope_for, secure_cookie
 from .store import initialize
 from . import updates
@@ -183,7 +184,7 @@ def _openapi_with_scopes(app: FastAPI) -> dict[str, object]:
             "description": "Scoped API token created by an administrator. Scopes: read, media, export, metrics, admin (admin implies all).",
         },
     }
-    for route in app.routes:
+    for route in all_routes(app):
         if not isinstance(route, APIRoute) or not route.include_in_schema or not depends_on(route.dependant, current_user):
             continue
         for method in route.methods:
