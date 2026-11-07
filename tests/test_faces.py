@@ -91,6 +91,11 @@ class FindAndAddTests(Case):
         self.assertNotIn("_face", body["faces"][0])
         self.assertEqual(self.audit_actions(), ["face_search_viewed"])
 
+    def test_find_returns_the_picture_to_choose_a_face_on(self):
+        import base64
+        picture = self.client.post("/api/faces/find", json={"camera_id": self.camera, "at": AT}).json()["picture"]
+        self.assertEqual(base64.b64decode(picture)[:2], b"\xff\xd8")
+
     def test_a_face_chosen_by_point_becomes_an_entry_with_its_numbers_and_a_picture(self):
         response = self.add(expires_at="2026-12-01T00:00:00+00:00")
         self.assertEqual(response.status_code, 201, response.text)
@@ -232,6 +237,22 @@ class SwitchTests(Case):
         self.assertEqual(self.audit_actions(), ["face_settings_updated"])
 
 
+class SightingTests(Case):
+    def test_recent_matches_are_listed_with_their_pictures_and_viewing_is_audited(self):
+        entry = self.add().json()
+        with connect() as db:
+            db.execute("INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES('t1',?,'person','2026-11-06T12:00:00+00:00','2026-11-06T12:00:00+00:00','m','1','cpu')", (self.camera,))
+            for number, seen in (("s1", "2026-11-06T12:00:05+00:00"), ("s2", "2026-11-06T12:30:00+00:00")):
+                db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture) VALUES(?,?,?,?,?,0.8,'{}',?)",
+                           (number, entry["id"], self.camera, "t1", seen, b"\xff\xd8jpeg" if number == "s1" else None))
+        body = self.client.get("/api/faces/sightings").json()["sightings"]
+        self.assertEqual([(item["id"], item["entry_name"], item["camera_name"], item["has_picture"]) for item in body],
+                         [("s2", "Visitor A", "Front gate", False), ("s1", "Visitor A", "Front gate", True)])
+        self.assertEqual(self.client.get("/api/faces/sightings/s1/picture").content, b"\xff\xd8jpeg")
+        self.assertEqual(self.client.get("/api/faces/sightings/s2/picture").status_code, 404)
+        self.assertEqual(self.audit_actions()[-2:], ["face_sightings_viewed", "face_sighting_picture_viewed"])
+
+
 class AccessTests(Case):
     def test_only_administrators_reach_any_of_it(self):
         entry = self.add().json()
@@ -240,7 +261,7 @@ class AccessTests(Case):
                  ("post", "/api/faces/watch", {"camera_id": self.camera, "at": AT, "point": {"x": 0.2, "y": 0.3}, "name": "x", "reason": "y"}),
                  ("patch", f"/api/faces/watch/{entry['id']}", {"enabled": False}), ("delete", f"/api/faces/watch/{entry['id']}", None),
                  ("get", f"/api/faces/watch/{entry['id']}/picture", None), ("get", "/api/faces/cameras", None), ("put", f"/api/faces/cameras/{self.camera}", {"enabled": True}),
-                 ("put", "/api/faces/settings", {"match_threshold": 0.5})]
+                 ("put", "/api/faces/settings", {"match_threshold": 0.5}), ("get", "/api/faces/sightings", None), ("get", "/api/faces/sightings/s1/picture", None)]
         for method, path, body in calls:
             response = getattr(self.client, method)(path, **({"json": body} if body is not None else {}))
             self.assertEqual(response.status_code, 403, (method, path, response.text))

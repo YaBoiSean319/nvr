@@ -10,6 +10,7 @@ import asyncio
 import json
 import shutil
 import sqlite3
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -198,6 +199,21 @@ def choose(found: list[dict[str, Any]], box: dict[str, float] | None, point: dic
     if not under:
         raise FaceError(422, "No face was found where you chose; try another picture of them")
     return min(under, key=lambda item: (item["_face"].box[2] - item["_face"].box[0]) * (item["_face"].box[3] - item["_face"].box[1]))
+
+
+def frame_jpeg(frame: np.ndarray, width: int = 960) -> bytes | None:
+    """The whole picture as a JPEG no wider than `width`, for choosing a face on it."""
+    ffmpeg = shutil.which("ffmpeg")
+    if frame.ndim != 3 or frame.size == 0 or not ffmpeg:
+        return None
+    height, columns = frame.shape[:2]
+    try:
+        result = subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{columns}x{height}", "-i", "pipe:0",
+                                 "-vf", f"scale='min({width},iw)':-2:flags=bicubic", "-frames:v", "1", "-q:v", "4", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                                input=np.ascontiguousarray(frame, dtype=np.uint8).tobytes(), capture_output=True, timeout=10, check=False)
+    except subprocess.TimeoutExpired:
+        return None
+    return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None
 
 
 def picture_of(frame: np.ndarray, face: face_models.Face) -> bytes | None:

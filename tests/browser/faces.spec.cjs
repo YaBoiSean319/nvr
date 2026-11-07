@@ -1,0 +1,118 @@
+// Real-browser journeys for the face watch (#253): the Settings page (switches, threshold, list) and choosing a face in Playback. The face models are not installed in this environment,
+// so finding faces in a recording is answered by the test; everything else is the real API, including what is stored and audited.
+const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
+
+const PICTURE = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const section = (page, name) => page.getByRole("region", { name });
+
+test("an administrator switches a camera on, sets the threshold, and sees why nothing can be added without the models", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  await page.goto("/settings/faces");
+  await expect(section(page, "Looking for faces")).toContainText("It is an aid, not proof");
+  await expect(section(page, "Looking for faces")).toContainText("The face models are not installed in this image");
+  await expect(section(page, "Watch list")).toContainText("Nobody is on the list");
+
+  const camera = page.getByRole("checkbox", { name: "Look for watched faces on Camera 001" });
+  await expect(camera).not.toBeChecked();
+  await camera.click();
+  await expect(camera).toBeChecked();
+  await page.reload();
+  await expect(page.getByRole("checkbox", { name: "Look for watched faces on Camera 001" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Look for watched faces on Camera 002" })).not.toBeChecked();
+
+  await page.getByRole("slider", { name: "Match threshold" }).fill("0.6");
+  await page.getByRole("button", { name: "Save threshold" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved." })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("slider", { name: "Match threshold" })).toHaveValue("0.6");
+});
+
+test("a face chosen in Playback is added with a name and reason, and the person can be switched off and deleted", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const sent = [];
+  await page.route("**/api/faces/find", route => route.fulfill({ json: {
+    camera_id: "x", at: new Date().toISOString(), picture: PICTURE,
+    faces: [{ box: { x: 0.1, y: 0.1, width: 0.2, height: 0.3 }, score: 0.95, pixels: [80, 90], usable: true, reason: null },
+            { box: { x: 0.6, y: 0.1, width: 0.2, height: 0.3 }, score: 0.9, pixels: [70, 80], usable: false, reason: "This face is inside a privacy mask" }] } }));
+  await page.route("**/api/faces/watch", async route => {
+    if (route.request().method() !== "POST") return route.fallback();
+    sent.push(route.request().postDataJSON());
+    return route.fulfill({ status: 201, json: { id: "e1", name: "Visitor A", reason: "Trespassed", expires_at: null, expired: false, enabled: true, embeddings: 1, has_picture: false, created_by: "admin", created_at: new Date().toISOString(), updated_at: new Date().toISOString() } });
+  });
+
+  await page.goto("/playback");
+  await page.getByRole("button", { name: /^Camera 001/ }).click();
+  await page.getByRole("button", { name: "Find a face…" }).click();
+  const panel = page.getByRole("complementary", { name: "Face watch" });
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "Look at the playhead" }).click();
+  await expect(panel).toContainText("2 faces found");
+  await expect(panel.getByRole("button", { name: /^Face 2, not usable: This face is inside a privacy mask/ })).toBeDisabled();
+
+  await panel.getByRole("button", { name: "Face 1", exact: true }).click();
+  const form = panel.getByRole("form", { name: "Add this face" });
+  const add = form.getByRole("button", { name: "Add to the face watch list" });
+  await expect(add).toBeDisabled(); // A name and a reason are required
+  await form.getByLabel("Name or label").fill("Visitor A");
+  await expect(add).toBeDisabled();
+  await form.getByLabel("Why they are on the list").fill("Trespassed");
+  await add.click();
+  await expect(panel.getByRole("status").filter({ hasText: "Visitor A is on the face watch list" })).toBeVisible();
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({ name: "Visitor A", reason: "Trespassed", box: { x: 0.1, y: 0.1, width: 0.2, height: 0.3 } });
+  expect(sent[0].entry_id).toBeUndefined();
+});
+
+test("a person on the list can be switched off and deleted, and the page says how much is removed", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const now = new Date().toISOString();
+  let entries = [{ id: "e1", name: "Visitor A", reason: "Trespassed 1 November", expires_at: null, expired: false, enabled: true, embeddings: 2, has_picture: false, created_by: "admin", created_at: now, updated_at: now }];
+  const patches = [];
+  await page.route("**/api/faces/watch", route => (route.request().method() === "GET" ? route.fulfill({ json: { entries, match_threshold: 0.45 } }) : route.fallback()));
+  await page.route("**/api/faces/watch/e1", async route => {
+    if (route.request().method() === "PATCH") {
+      patches.push(route.request().postDataJSON());
+      entries = [{ ...entries[0], ...route.request().postDataJSON() }];
+      return route.fulfill({ json: entries[0] });
+    }
+    entries = [];
+    return route.fulfill({ status: 204 });
+  });
+  await page.goto("/settings/faces");
+  const entry = page.getByRole("listitem", { name: "Watched face Visitor A" });
+  await expect(entry).toContainText("Trespassed 1 November");
+  await expect(entry).toContainText("2 pictures");
+  await entry.getByRole("checkbox", { name: "Look for this person" }).click(); // It changes when the server has answered
+  await expect(entry).toContainText("switched off");
+  expect(patches).toEqual([{ enabled: false }]);
+  await entry.getByRole("button", { name: "Delete…" }).click();
+  await entry.getByRole("button", { name: /^Yes, delete Visitor A/ }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Deleted, with their pictures" })).toBeVisible();
+  await expect(section(page, "Watch list")).toContainText("Nobody is on the list");
+});
+
+test("the rule editor offers the face condition, with the people on the list to choose from", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const now = new Date().toISOString();
+  const entry = (id, name, extra = {}) => ({ id, name, reason: "Trespassed", expires_at: null, expired: false, enabled: true, embeddings: 1, has_picture: false, created_by: "admin", created_at: now, updated_at: now, ...extra });
+  await page.route("**/api/faces/watch", route => route.fulfill({ json: { entries: [entry("e1", "Visitor A"), entry("e2", "Visitor B", { enabled: false })], match_threshold: 0.45 } }));
+  await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Cameras" }).click();
+  await page.getByRole("navigation", { name: "Camera administration" }).getByRole("link", { name: "Rules" }).click();
+  await page.getByRole("button", { name: "New rule" }).click();
+  const editor = page.getByRole("region", { name: /^Rule: / });
+  await editor.getByLabel("Name").fill("Trespassers");
+  await editor.getByRole("checkbox", { name: "Camera 001" }).check();
+  await editor.getByLabel("When an object").selectOption("face");
+  await expect(editor).toContainText("Fires when a face on the face watch list is recognised");
+  await expect(editor.getByRole("checkbox", { name: "Visitor B (off)" })).toBeVisible();
+  await editor.getByRole("checkbox", { name: "Visitor A" }).check();
+  const saved = page.waitForResponse(response => response.url().endsWith("/api/rules") && response.request().method() === "POST");
+  await editor.getByRole("button", { name: "Save" }).click();
+  const body = (await saved).request().postDataJSON();
+  expect(body.condition).toEqual({ type: "face", entry_ids: ["e1"] });
+  await expect(editor.getByRole("status")).toContainText("Saved.");
+});
