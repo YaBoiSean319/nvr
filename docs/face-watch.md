@@ -2,7 +2,7 @@
 
 Find a face in Playback, select it, and be alerted when that face is seen again: for example when someone who has been trespassed returns to campus, in the way a licence plate on a deny list raises an alert. This page is the design and what is built so far.
 
-**Status.** Parts 1 and 2 are in: the models and engine (`app/face_models.py`), and the watch list with its switches and administrator API (`app/faces.py`, `app/api/faces.py`). Not yet built: reading faces on the cameras that are switched on, the alert rule, and the screens (parts 3 and 4 below). **Nothing looks for anyone's face yet**; the list can be filled in and the switches set through the API, and every camera is off.
+**Status.** Parts 1–3 are in: the models and engine (`app/face_models.py`), the watch list with its switches and administrator API (`app/faces.py`, `app/api/faces.py`), and the scanner (`app/face_scan.py`) with the `face` rule condition. A camera that is switched on, while the list has an enabled entry, reads faces on people the detector follows; only matches are kept (a small picture, the similarity and the box, in `face_sightings`) and raise the rule's alarm. Not yet built: the screens (part 4 below), so entries are added and cameras switched on through the API. Every camera is off until an administrator switches it on.
 
 ## Models and their licences
 
