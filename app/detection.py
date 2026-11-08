@@ -659,6 +659,18 @@ class DetectionManager:
                 self._plate_readers[key] = reader
         return reader
 
+    async def _face_reader(self, provider: str) -> Any:
+        """The face detector and recogniser, loaded once for every camera that looks for faces on this provider (None when they are not installed)."""
+        from . import face_models
+        if not hasattr(self, "_face_readers"):
+            self._face_readers: dict[str, Any] = {}
+        reader = self._face_readers.get(provider)
+        if reader is None:  # A failed load is not remembered, so installing the models works without a restart.
+            reader = await asyncio.to_thread(face_models.load_reader, provider)
+            if reader is not None:
+                self._face_readers[provider] = reader
+        return reader
+
     async def _reid_model(self, provider: str) -> Any:
         """The person re-identification model, loaded once for every camera that uses this provider (None when it is not installed)."""
         from . import similar
@@ -678,7 +690,7 @@ class DetectionManager:
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
         from . import attributes
         from . import clip
-        from . import falls, plates, pose_models
+        from . import face_scan, falls, plates, pose_models
         from . import similar
         from .tracks import Tracker, encode_jpeg, store_keyframe, store_poses
 
@@ -693,6 +705,7 @@ class DetectionManager:
                 tracker = Tracker()
                 keyframed: set[str] = set()
                 scanner, scanner_reader, scanner_checked = None, None, float("-inf")
+                face_scanner, face_scanner_reader, face_checked = None, None, float("-inf")
                 fall_detector, fall_reader, fall_checked = None, None, float("-inf")
                 seen_frame = False
                 frames_seen = 0
@@ -741,6 +754,30 @@ class DetectionManager:
                         scanner.forget({track.id for track in tracker.active})
                         if scanner.due():
                             task = asyncio.create_task(scanner.scan(), name=f"plates-{camera_id}")
+                            plate_tasks.add(task)
+                            task.add_done_callback(plate_tasks.discard)
+                    # A camera switched on for the face watch gives each person a few attempts at a face that matches someone on the list; reading never holds up analysis.
+                    if time.monotonic() - face_checked >= face_scan.SETTINGS_REFRESH:
+                        face_checked = time.monotonic()
+                        with connect() as db:
+                            face_on, face_threshold = face_scan.scanning(db, camera_id)
+                        face_reader = await self._face_reader(str(config["provider"])) if face_on else None
+                        if face_reader is None:
+                            face_scanner = None
+                        elif face_scanner is None or face_scanner_reader is not face_reader:
+                            face_scanner_reader = face_reader
+                            face_scanner = face_scan.FaceScanner(
+                                face_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)), face_scan.watch_list,
+                                lambda track, entry, similarity, face, picture, taken: face_scan.keep_sighting(camera_id, track, entry, similarity, face, picture, taken),
+                                threshold=face_threshold)
+                        else:
+                            face_scanner.threshold = face_threshold
+                    if face_scanner is not None:
+                        for track_id, item in zip(track_ids, observations):
+                            face_scanner.seen(track_id, str(item["label"]), item["box"])
+                        face_scanner.forget({track.id for track in tracker.active})
+                        if face_scanner.due():
+                            task = asyncio.create_task(face_scanner.scan(), name=f"faces-{camera_id}")
                             plate_tasks.add(task)
                             task.add_done_callback(plate_tasks.discard)
                     # A camera with fall detection on has each person's body points read and watched; a fall raises the alarm. This never holds up analysis for long and never stops it.

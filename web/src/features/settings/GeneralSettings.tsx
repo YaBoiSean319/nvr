@@ -6,6 +6,7 @@ import { api } from "@/api/client";
 import type { DisplaySettings } from "@/api/types";
 import { TabFooter } from "@/features/admin/TabFooter";
 import { failureText, useTabDraft } from "@/features/admin/tabDraft";
+import { LiveReadySettings } from "./LiveReadySettings";
 
 const DATE_FORMATS: { value: DisplaySettings["date_format"]; label: string }[] = [
   { value: "friendly", label: "Oct 21, 2026" }, { value: "long", label: "October 21, 2026" }, { value: "iso", label: "2026-10-21" },
@@ -102,6 +103,7 @@ export function GeneralSettings() {
         </fieldset>
         <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} blocked={preview.error ?? null} />
       </form>
+      <LiveReadySettings />
       <section className="field-group settings-block" aria-label="System status">
         <h2 className="field-heading">System status</h2>
         {system.data ? (

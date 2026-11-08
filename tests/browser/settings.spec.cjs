@@ -135,6 +135,21 @@ test("Users & access: a metrics token scrapes /metrics and nothing else, and a s
   await outside.dispose();
 });
 
+test("live video start-up: the choice is saved, audited and kept", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  await openSettings(page, "General");
+  const form = page.getByRole("form", { name: "Live video" });
+  await expect(form.getByRole("radio", { name: /Ready for every camera/ })).toBeChecked();  // The default: frictionless
+  await form.getByRole("radio", { name: /Only while someone is watching/ }).check();
+  await expect(form.getByRole("button", { name: "Save" })).toBeEnabled();
+  await form.getByRole("button", { name: "Save" }).click();
+  await expect(form.getByRole("status")).toContainText("Saved.");
+  expect((await (await page.request.get("/api/live-ready")).json()).mode).toBe("off");
+  await page.reload();
+  await expect(page.getByRole("form", { name: "Live video" }).getByRole("radio", { name: /Only while someone is watching/ })).toBeChecked();
+});
+
 test("going back to Settings from a category keeps the groups you had open", async ({ page }) => {
   seedFixtures(1);
   await signInNext(page);
@@ -319,9 +334,9 @@ test("categories are grouped under headings, only the open group lists its links
   await nav.getByRole("link", { name: "Camera hardening" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Camera hardening" })).toBeVisible();
   await expect(nav.getByRole("link", { name: "Camera hardening" })).toBeVisible();
-  // Every one of the 22 categories is in exactly one group.
+  // Every one of the 23 categories is in exactly one group.
   while (await nav.locator("details:not([open])").count()) await nav.locator("details:not([open]) summary").first().click(); // Each click removes one from the list
-  await expect(nav.getByRole("link")).toHaveCount(22);
+  await expect(nav.getByRole("link")).toHaveCount(23);
   // The old address of the AI settings still works, under its new name.
   await page.goto("/settings/integrations");
   await expect(page.getByRole("heading", { level: 1, name: "AI analysis" })).toBeVisible();

@@ -32,7 +32,8 @@ export function EmailSettings() {
 
   useEffect(() => {
     if (data && !loaded) {
-      setForm({ tenant_id: data.tenant_id ?? "", client_id: data.client_id ?? "", sender: data.sender ?? "" });
+      // Saved values fill only what has not been typed yet: a slow response must not wipe what someone is already entering.
+      setForm(current => ({ tenant_id: current.tenant_id || (data.tenant_id ?? ""), client_id: current.client_id || (data.client_id ?? ""), sender: current.sender || (data.sender ?? "") }));
       setLoaded(true);
     }
   }, [data, loaded]);

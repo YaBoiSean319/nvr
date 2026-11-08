@@ -19,7 +19,8 @@ export type Condition =
   | { type: "tamper"; kinds: TamperKind[] }
   | { type: "external_event"; source_ids: string[]; types: string[]; subjects: string[] }
   | { type: "plate"; watch_list_id: string }
-  | { type: "fall" };
+  | { type: "fall" }
+  | { type: "face"; entry_ids: string[] };
 
 export interface RuleScheduleInterval { days: number[]; start: string; end: string }
 export interface RuleSchedule { timezone: string; intervals: RuleScheduleInterval[] }
@@ -113,6 +114,7 @@ export const CONDITION_LABEL: Record<Condition["type"], string> = {
   external_event: "An outside event (door, sensor, button)",
   plate: "A licence plate is read (watch list)",
   fall: "A person fell (fall detection)",
+  face: "A watched face is seen (face watch)",
 };
 
 export const TRAVEL_LABEL: Record<TravelDirection, string> = { right: "Rightwards", left: "Leftwards", down: "Downwards", up: "Upwards" };
@@ -123,6 +125,7 @@ const DEFAULT_ZONE: Zone = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };
 export function switchCondition(current: Condition, type: Condition["type"]): Condition {
   if (type === "external_event") return { type, source_ids: [], types: [], subjects: [] };
   if (type === "fall") return { type };
+  if (type === "face") return { type, entry_ids: current.type === "face" ? current.entry_ids : [] };
   if (type === "plate") return { type, watch_list_id: current.type === "plate" ? current.watch_list_id : "" };
   if (type === "tamper") return { type, kinds: current.type === "tamper" ? current.kinds : [...TAMPER_KINDS] };
   const zone = ("zone" in current && current.zone) || DEFAULT_ZONE;
@@ -154,6 +157,8 @@ export function definitionProblem(definition: RuleDefinition): string | null {
     if (!definition.condition.kinds.length) return "Choose at least one kind of tampering.";
   } else if (definition.condition.type === "external_event") {
     // Objects are not part of an outside event.
+  } else if (definition.condition.type === "face") {
+    // No entries chosen means any entry on the face watch list.
   } else if (definition.condition.type === "fall") {
     // Which cameras look for falls is set under Settings, Fall detection.
   } else if (definition.condition.type === "plate") {

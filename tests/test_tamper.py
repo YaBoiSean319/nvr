@@ -757,7 +757,10 @@ class WiringTests(TamperCase):
             with mock.patch.object(tamper.TamperManager, "sample_all", counting), mock.patch.object(tamper, "SAMPLE_SECONDS", 0.02):
                 service.manager.tamper.interval = 0.02
                 await service.start()
-                await asyncio.sleep(0.3)
+                # Wait for the samples rather than for a fixed time: on a busy machine the loop can be starved for longer than any fixed sleep.
+                deadline = asyncio.get_running_loop().time() + 15
+                while len(calls) <= 2 and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.02)
                 running = service.manager.tamper.task is not None and not service.manager.tamper.task.done()
                 await service.stop()
             self.assertTrue(running)

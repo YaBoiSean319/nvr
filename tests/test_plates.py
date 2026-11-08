@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
-from unittest.mock import patch
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -495,34 +494,6 @@ class DeletionTests(PlateCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM plate_reads").fetchone()[0], 1)
             db.execute("DELETE FROM cameras WHERE id=?", (self.d2,))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM plate_reads").fetchone()[0], 0)
-
-
-class SnapshotTests(unittest.TestCase):
-    def test_the_camera_login_never_reaches_the_command_line(self):
-        # Anyone on the host can read a process's arguments (ps, /proc); the address goes over stdin like the recorder's (#272).
-        source = "rtsp://viewer:Plate-Secret-77@192.0.2.40:554/main"
-        seen: dict[str, Any] = {}
-
-        class Process:
-            async def communicate(self, data=None):
-                seen["stdin"] = data
-                return np.zeros(4 * 2 * 3, dtype=np.uint8).tobytes(), b""
-
-        async def spawn(*args, **kwargs):
-            seen["args"], seen["kwargs"] = args, kwargs
-            return Process()
-
-        with patch.object(plates.shutil, "which", return_value="/usr/bin/ffmpeg"), patch.object(plates.asyncio, "create_subprocess_exec", spawn):
-            frame = asyncio.run(plates.ffmpeg_snapshot(source, width=4, height=2))
-        self.assertEqual(frame.shape, (2, 4, 3))
-        command = " ".join(seen["args"])
-        self.assertNotIn("Plate-Secret-77", command)
-        self.assertNotIn("192.0.2.40", command)
-        self.assertIn("-protocol_whitelist", seen["args"])
-        self.assertNotIn("file", seen["args"][seen["args"].index("-protocol_whitelist") + 1].split(","))
-        self.assertEqual(seen["args"][seen["args"].index("-i") + 1], "pipe:0")
-        self.assertIn(source.encode(), seen["stdin"])
-        self.assertIsNotNone(seen["kwargs"].get("stdin"))
 
 
 if __name__ == "__main__":

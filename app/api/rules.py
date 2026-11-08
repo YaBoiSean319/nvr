@@ -79,6 +79,17 @@ class Occupancy(BaseModel):
     for_seconds: int = Field(default=10, ge=1, le=3600)
 
 
+class Face(BaseModel):
+    """A face on the face watch list is seen (see Face watch): which cameras look for faces and who is on the list are set there. ``entry_ids`` narrows the rule to those people; empty means anyone on the list."""
+    type: Literal["face"]
+    entry_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("entry_ids")
+    @classmethod
+    def distinct(cls, value: list[str]) -> list[str]:
+        return sorted({item.strip() for item in value if item.strip()})
+
+
 class WrongWay(BaseModel):
     type: Literal["wrong_way"]
     zone: Zone
@@ -120,7 +131,7 @@ class Fall(BaseModel):
     type: Literal["fall"]
 
 
-Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, Inactivity, Occupancy, WrongWay, Tamper, ExternalEvent, Plate, Fall], Field(discriminator="type")]
+Condition = Annotated[Union[ZoneEntry, LineCrossing, Loitering, Inactivity, Occupancy, Face, WrongWay, Tamper, ExternalEvent, Plate, Fall], Field(discriminator="type")]
 
 
 class ScheduleInterval(BaseModel):
@@ -191,7 +202,7 @@ class RuleDefinition(BaseModel):
     def valid_definition(self) -> "RuleDefinition":
         if not self.camera_ids and not self.group_ids:
             raise ValueError("Choose at least one camera or group")
-        if self.condition.type in ("tamper", "external_event", "plate", "fall"):
+        if self.condition.type in ("tamper", "external_event", "plate", "fall", "face"):
             self.classes = []
         elif not self.classes:
             raise ValueError("Choose at least one object class")
