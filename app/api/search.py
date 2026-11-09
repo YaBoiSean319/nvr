@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from app import console
 from app import clip, privacy, search, semantic, similar
 from app.attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES
-from app.principal import CurrentUser
+from app.principal import CurrentUser, requires_scope
 from app.store import connect
 
 router = APIRouter()
@@ -190,6 +190,7 @@ def similar_tracks(
 
 
 @router.get("/api/ai/tracks/{track_id}/thumbnail")
+@requires_scope("media")  # A picture from a camera: the scope the federated variant and every other picture route already need (#295)
 async def track_thumbnail(track_id: str, user: CurrentUser) -> Response:
     """The frame an object was first analysed in, with the camera's privacy masks drawn over it; if a mask cannot be drawn, no picture."""
     with connect() as db:

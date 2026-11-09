@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app import plates
 from app.audit import record
-from app.principal import Administrator, CurrentUser
+from app.principal import Administrator, CurrentUser, requires_scope
 from app.store import connect
 
 router = APIRouter()
@@ -280,6 +280,7 @@ def search_plates(
 
 
 @router.get("/api/plates/reads/{read_id}/crop")
+@requires_scope("media")  # The picture a plate was read from: the media scope, like every other picture (#295)
 def read_crop(read_id: str, user: CurrentUser) -> Response:
     """The picture a plate was read from."""
     with connect() as db:
