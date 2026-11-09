@@ -464,6 +464,93 @@ class UpgradeRevokesOldDeviceSecretsTests(NativeCase):
         self.assertEqual(self.limited.post("/api/native/device-sessions", json={"device_label": "Mine"}).status_code, 201)
 
 
+class RevokedPhoneTests(NativeCase):
+    """Taking a phone away ends the browser sessions it produced, not only its ability to make more (#294)."""
+
+    def phone(self, owner=None, label: str = "Pixel") -> tuple[TestClient, dict]:
+        """A phone that has enrolled and resumed: its own client holding the cookie that came out of the resume."""
+        enrolled = (owner or self.limited).post("/api/native/device-sessions", json={"device_label": label}).json()
+        phone = TestClient(self.app)
+        resumed = phone.post("/api/native/device-sessions/resume", json={"token": enrolled["token"]})
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+        self.assertEqual(phone.get("/api/auth/me").status_code, 200)
+        return phone, {**enrolled, "current": resumed.json()["token"]}
+
+    def test_revoking_by_id_ends_the_phones_session(self):
+        phone, device = self.phone()
+        self.assertEqual(self.limited.delete(f"/api/native/device-sessions/{device['id']}").status_code, 204)
+        self.assertEqual(phone.get("/api/auth/me").status_code, 401, "the cookie the phone was given must not outlive the phone")
+        self.assertEqual(self.limited.get("/api/auth/me").status_code, 200, "the person's own browser session is untouched")
+
+    def test_the_phone_signing_itself_out_by_its_secret_ends_its_session_too(self):
+        phone, device = self.phone()
+        other, _ = self.phone(label="Spare")
+        self.assertEqual(self.limited.post("/api/native/device-sessions/revoke", json={"token": device["current"]}).status_code, 204)
+        self.assertEqual(phone.get("/api/auth/me").status_code, 401)
+        self.assertEqual(other.get("/api/auth/me").status_code, 200, "an unrelated phone of the same person stays signed in")
+
+    def test_every_session_a_phone_has_been_given_ends_together(self):
+        enrolled = self.limited.post("/api/native/device-sessions", json={"device_label": "Pixel"}).json()
+        first, second = TestClient(self.app), TestClient(self.app)
+        rotated = first.post("/api/native/device-sessions/resume", json={"token": enrolled["token"]}).json()["token"]
+        self.assertEqual(second.post("/api/native/device-sessions/resume", json={"token": rotated}).status_code, 200)
+        self.assertEqual((first.get("/api/auth/me").status_code, second.get("/api/auth/me").status_code), (200, 200))
+        self.assertEqual(self.limited.delete(f"/api/native/device-sessions/{enrolled['id']}").status_code, 204)
+        self.assertEqual((first.get("/api/auth/me").status_code, second.get("/api/auth/me").status_code), (401, 401))
+
+    def test_one_persons_revocation_cannot_reach_another_persons_phone(self):
+        theirs, device = self.phone(owner=self.full, label="Theirs")
+        self.assertEqual(self.limited.delete(f"/api/native/device-sessions/{device['id']}").status_code, 404)
+        self.assertEqual(self.limited.post("/api/native/device-sessions/revoke", json={"token": device["current"]}).status_code, 204)  # always 204, says nothing
+        self.assertEqual(theirs.get("/api/auth/me").status_code, 200)
+
+    def test_a_phone_that_is_pushed_out_by_newer_ones_loses_its_session(self):
+        old, _ = self.phone(label="Oldest")
+        for index in range(device_sessions.MAX_PER_USER):
+            self.limited.post("/api/native/device-sessions", json={"device_label": f"newer {index}"})
+        labels = [item["device_label"] for item in self.limited.get("/api/native/device-sessions").json()["sessions"]]
+        self.assertNotIn("Oldest", labels)
+        self.assertEqual(old.get("/api/auth/me").status_code, 401)
+
+    def test_resuming_and_revoking_at_the_same_time_never_leaves_a_working_session(self):
+        for _ in range(6):
+            enrolled = self.limited.post("/api/native/device-sessions", json={"device_label": "Race"}).json()
+            phone, barrier, answers = TestClient(self.app), threading.Barrier(2), {}
+
+            def resume():
+                barrier.wait()
+                answers["resume"] = phone.post("/api/native/device-sessions/resume", json={"token": enrolled["token"]}).status_code
+
+            def revoke():
+                barrier.wait()
+                answers["revoke"] = self.limited.delete(f"/api/native/device-sessions/{enrolled['id']}").status_code
+
+            threads = [threading.Thread(target=resume), threading.Thread(target=revoke)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertIn(answers["resume"], (200, 401), answers)
+            self.assertEqual(answers["revoke"], 204, answers)
+            self.assertEqual(phone.get("/api/auth/me").status_code, 401, f"a session survived the revocation: {answers}")
+
+    def test_a_revocation_is_audited_with_how_many_sessions_it_ended(self):
+        _, device = self.phone(label="Audited")
+        self.limited.delete(f"/api/native/device-sessions/{device['id']}")
+        with connect() as db:
+            row = db.execute("SELECT * FROM audit_log WHERE action='device_session_revoked' AND resource_id=?", (device["id"],)).fetchone()
+        self.assertIsNotNone(row)
+        details = json.loads(row["details_json"])
+        self.assertEqual((details["device"], details["sessions_ended"]), ("Audited", 1))
+        self.assertNotIn(device["token"], row["details_json"])
+
+    def test_sessions_open_before_the_upgrade_have_no_device_and_are_left_alone(self):
+        with connect() as db:
+            self.assertIsNone(db.execute("SELECT device_session_id FROM sessions LIMIT 1").fetchone()["device_session_id"])
+        self.phone(label="Unrelated")
+        self.assertEqual(self.limited.get("/api/auth/me").status_code, 200)
+
+
 class NothingCachedTests(NativeCase):
     def test_everything_the_app_fetches_is_marked_not_to_be_cached(self):
         native = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) NVRApp/1.0"}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
@@ -68,7 +69,11 @@ def resume_device_session(payload: ResumeRequest, response: Response) -> dict[st
     resumed = device_sessions.resume(payload.token)
     if resumed is None:
         raise HTTPException(status_code=401, detail="Sign in again")
-    start_session(response, resumed["user_id"])
+    try:
+        start_session(response, resumed["user_id"], device_session_id=resumed["id"])
+    except sqlite3.IntegrityError:
+        # The phone was taken away between the exchange and the session being made: nothing is issued.
+        raise HTTPException(status_code=401, detail="Sign in again") from None
     return {"username": resumed["username"], "role": resumed["role"], "token": resumed["token"], "expires_at": resumed["expires_at"]}
 
 

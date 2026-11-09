@@ -2,7 +2,8 @@
 
 The secret is shown once, when a signed-in session asks for it, and stored only as a digest. Using it replaces it, so a copy taken from an old backup is
 useless; the one it replaced still works for ``GRACE`` so that a phone that never heard the answer (or could not store it) is not locked out. A person can
-revoke a phone, and ending a person's sessions (a second-factor reset, a password change) ends these too. It is good for ``LIFETIME`` since it was last used.
+revoke a phone, and ending a person's sessions (a second-factor reset, a password change) ends these too. A browser session made from a device secret names its
+device (#294): taking the phone away (revoked, pushed out by newer ones, or its account removed) ends those sessions in the same statement, and is audited. It is good for ``LIFETIME`` since it was last used.
 
 The grace is a fixed deadline, set once when the replacement is first used, and the old secret can be used once inside it (#293). Replaying an old
 secret therefore cannot keep it alive, and cannot knock a phone's current secret out more than once per rotation. A thief who replays the old secret
@@ -34,6 +35,17 @@ def _audit(db, actor_id: int, action: str, session_id: str, **details: Any) -> N
                (actor_id, action, "device_session", session_id, json.dumps(details)))
 
 
+def _remove(db, user_id: int, session_id: str, action: str) -> bool:
+    """Take a device away: its secret, and (through the foreign key, in the same statement) every browser session it produced (#294). Audited with how many."""
+    row = db.execute("SELECT device_label FROM device_sessions WHERE id=? AND user_id=?", (session_id, user_id)).fetchone()
+    if row is None:
+        return False
+    ended = db.execute("SELECT COUNT(*) FROM sessions WHERE device_session_id=?", (session_id,)).fetchone()[0]
+    db.execute("DELETE FROM device_sessions WHERE id=?", (session_id,))
+    _audit(db, user_id, action, session_id, device=row["device_label"], sessions_ended=ended)
+    return True
+
+
 def create(user_id: int, label: str) -> dict[str, Any]:
     """A new device session for a signed-in person; the least recently used go once there are too many."""
     raw = PREFIX + new_session_token()
@@ -44,7 +56,7 @@ def create(user_id: int, label: str) -> dict[str, Any]:
             db.execute("DELETE FROM device_sessions WHERE expires_at<=?", (_now().isoformat(),))
             old = [row[0] for row in db.execute("SELECT id FROM device_sessions WHERE user_id=? ORDER BY COALESCE(last_used_at,created_at) DESC", (user_id,))][MAX_PER_USER - 1:]
             for stale in old:
-                db.execute("DELETE FROM device_sessions WHERE id=?", (stale,))
+                _remove(db, user_id, stale, "device_session_evicted")
             db.execute("INSERT INTO device_sessions(id,user_id,token_hash,device_label,created_at,expires_at) VALUES(?,?,?,?,?,?)",
                        (session_id, user_id, token_digest(raw), label, _now().isoformat(), expires))
             _audit(db, user_id, "device_session_created", session_id, device=label)
@@ -95,8 +107,16 @@ def listing(user_id: int) -> list[dict[str, Any]]:
 
 
 def revoke(user_id: int, session_id: str) -> bool:
+    """Remove a phone by its id. Its secret stops working and so does every browser session it was given, at once."""
     with connect() as db:
-        return db.execute("DELETE FROM device_sessions WHERE id=? AND user_id=?", (session_id, user_id)).rowcount > 0
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            removed = _remove(db, user_id, session_id, "device_session_revoked")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+    return removed
 
 
 def revoke_token(user_id: int, token: str) -> bool:
@@ -105,4 +125,12 @@ def revoke_token(user_id: int, token: str) -> bool:
         return False
     digest = token_digest(token)
     with connect() as db:
-        return db.execute("DELETE FROM device_sessions WHERE user_id=? AND (token_hash=? OR previous_hash=?)", (user_id, digest, digest)).rowcount > 0
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            found = db.execute("SELECT id FROM device_sessions WHERE user_id=? AND (token_hash=? OR previous_hash=?)", (user_id, digest, digest)).fetchone()
+            removed = _remove(db, user_id, found["id"], "device_session_revoked") if found else False
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+    return removed
