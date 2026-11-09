@@ -18,7 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import rules, search
+from . import rules, search, track_privacy
 from app.clock import parse as _parse
 
 MAX_RANGE = {"hour": timedelta(days=31), "day": search.MAX_RANGE}
@@ -128,10 +128,13 @@ def counts(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, end
         defined[camera_id].append((rule, subject(f"{kind}:{rule.id}:{camera_id}", kind, rule.name, camera_id, {"geometry": geometry, "rule_id": rule.id,
                                                                                                                "direction": rule.condition.get("direction")})))
 
+    zones = track_privacy.zones_by_camera(db, ids)  # What a privacy mask hides is not counted, followed or mapped (#296)
+    permitted, permitted_values = track_privacy.detection_visible_sql(zones, "d")
     for camera_id in ids:
         # A track that began before the range can still enter a zone or cross a line inside it, so those are found from every track that overlaps the range.
-        track_rows = db.execute("SELECT id,label,first_seen_at FROM ai_tracks WHERE camera_id=? AND last_seen_at>=? AND first_seen_at<? ORDER BY first_seen_at",
-                                (camera_id, _iso(start), _iso(end))).fetchall()
+        visible, visible_values = track_privacy.track_visible_sql(zones, alias="t", window=(_iso(start), _iso(end)))
+        track_rows = db.execute(f"SELECT t.id,t.label,t.first_seen_at FROM ai_tracks t WHERE t.camera_id=? AND t.last_seen_at>=? AND t.first_seen_at<? AND {visible} ORDER BY t.first_seen_at",
+                                (camera_id, _iso(start), _iso(end), *visible_values)).fetchall()
         tracks = [row for row in track_rows if row["label"] in labels]
         own = series[f"camera:{camera_id}"]
         for row in tracks:
@@ -146,8 +149,8 @@ def counts(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, end
         track_ids = [row["id"] for row in tracks]
         for offset in range(0, len(track_ids), CHUNK):
             part = track_ids[offset:offset + CHUNK]
-            for detection in db.execute(f"SELECT track_id,id,detected_at,box_x,box_y,box_width,box_height FROM ai_detections WHERE track_id IN ({','.join('?' * len(part))}) "
-                                        "ORDER BY track_id,detected_at,id", part):
+            for detection in db.execute(f"SELECT d.track_id,d.id,d.detected_at,d.box_x,d.box_y,d.box_width,d.box_height FROM ai_detections d WHERE d.track_id IN ({','.join('?' * len(part))}) "
+                                        f"AND {permitted} ORDER BY d.track_id,d.detected_at,d.id", (*part, *permitted_values)):
                 paths[detection["track_id"]].append(detection)
         for row in tracks:
             path = rules.path_from_rows(paths[row["id"]])
@@ -201,6 +204,9 @@ def heatmap(db: sqlite3.Connection, camera_id: str, camera_name: str, start: dat
     if label:
         clauses.append("t.label=?")
         values.append(label)
+    permitted, permitted_values = track_privacy.detection_visible_sql(track_privacy.zones_by_camera(db, [camera_id]), "d")  # A masked cell stays empty (#296)
+    clauses.append(permitted)
+    values.extend(permitted_values)
     cells = [[0] * HEAT_COLUMNS for _ in range(HEAT_ROWS)]
     for row in db.execute(
         f"SELECT min(CAST((d.box_x+d.box_width/2)*{HEAT_COLUMNS} AS INTEGER),{HEAT_COLUMNS - 1}) AS column,"

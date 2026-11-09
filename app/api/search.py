@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from app import console
-from app import clip, privacy, search, semantic, similar
+from app import clip, privacy, search, semantic, similar, track_privacy
 from app.attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -168,8 +168,8 @@ def similar_tracks(
         raise HTTPException(status_code=422, detail=f"The range must be positive and at most {search.MAX_RANGE.days} days")
     with connect() as db:
         source = db.execute("SELECT camera_id FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
-        if source is None or not user.access.can_see(source["camera_id"]):
-            raise HTTPException(status_code=404, detail="Object not found")
+        if source is None or not user.access.can_see(source["camera_id"]) or not track_privacy.whole_track_visible(db, track_id, source["camera_id"]):
+            raise HTTPException(status_code=404, detail="Object not found")  # Also an object that touches a privacy mask: its appearance is from the unmasked frames
         names = {row["id"]: row["name"] for row in db.execute("SELECT id,name FROM cameras")}
         wanted = [camera_id for camera_id in (camera_ids or names) if camera_id in names]
         searched = {camera_id: names[camera_id] for camera_id in user.access.only(wanted)}

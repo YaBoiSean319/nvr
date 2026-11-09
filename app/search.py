@@ -11,6 +11,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from . import track_privacy
 from .attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES, attribute_model_available, zone_cells
 from app.clock import parse as _parse
 
@@ -60,15 +61,24 @@ def find_tracks(db: sqlite3.Connection, camera_ids: list[str], start: datetime, 
         if value:
             clauses.append(f"t.{column}=?")
             values.append(value)
+    # Privacy masks (#296): what is behind one is not found. A search by colour, type or direction only finds tracks that touch no mask at all, since those
+    # come from the whole track; otherwise a track needs a permitted detection inside the range.
+    zones = track_privacy.zones_by_camera(db, camera_ids)
+    attribute_filter = any((upper_colour, lower_colour, vehicle_colour, vehicle_type, direction))
+    visible, visible_values = track_privacy.track_visible_sql(zones, whole=attribute_filter, alias="t", window=(_iso(start), _iso(end)))
+    clauses.append(visible)
+    values.extend(visible_values)
     if zone:
-        # The grid prefilter is cheap and never rules out a track that did pass through; the exact check on the survivors settles it.
+        # The grid prefilter is cheap and never rules out a track that did pass through; the exact check on the survivors settles it. Only a permitted
+        # detection can place a track in the zone: a zone drawn over a mask finds nothing behind it.
+        permitted, permitted_values = track_privacy.detection_visible_sql(zones, "d")
         clauses.append("(t.zone_mask & ?)!=0")
         values.append(zone_cells(zone))
-        clauses.append("EXISTS (SELECT 1 FROM ai_detections d WHERE d.track_id=t.id AND d.box_x+d.box_width/2 BETWEEN ? AND ? AND d.box_y+d.box_height/2 BETWEEN ? AND ?)")
-        values.extend([zone["x"], zone["x"] + zone["width"], zone["y"], zone["y"] + zone["height"]])
+        clauses.append(f"EXISTS (SELECT 1 FROM ai_detections d WHERE d.track_id=t.id AND d.box_x+d.box_width/2 BETWEEN ? AND ? AND d.box_y+d.box_height/2 BETWEEN ? AND ? AND {permitted})")
+        values.extend([zone["x"], zone["x"] + zone["width"], zone["y"], zone["y"] + zone["height"], *permitted_values])
     direction_sql = "DESC" if order == "desc" else "ASC"
     rows = db.execute(f"{_TRACK_COLUMNS} WHERE {' AND '.join(clauses)} ORDER BY t.first_seen_at {direction_sql},t.id {direction_sql} LIMIT ?", (*values, limit + 1)).fetchall()
-    return [_result(row) for row in rows[:limit]], len(rows) > limit
+    return track_privacy.project(db, [_result(row) for row in rows[:limit]], zones, id_key="track_id"), len(rows) > limit
 
 
 def _result(row: sqlite3.Row) -> dict[str, Any]:
@@ -93,7 +103,9 @@ def tracks_by_ids(db: sqlite3.Connection, track_ids: list[str]) -> list[dict[str
     """The search-result view of these tracks, in the order given (a track that no longer exists is left out)."""
     if not track_ids:
         return []
-    found = {row["id"]: _result(row) for row in db.execute(f"{_TRACK_COLUMNS} WHERE t.id IN ({','.join('?' * len(track_ids))})", track_ids)}
+    rows = db.execute(f"{_TRACK_COLUMNS} WHERE t.id IN ({','.join('?' * len(track_ids))})", track_ids).fetchall()
+    shown = track_privacy.project(db, [_result(row) for row in rows], track_privacy.zones_by_camera(db, {row["camera_id"] for row in rows}), id_key="track_id")
+    found = {view["track_id"]: view for view in shown}
     return [found[track_id] for track_id in track_ids if track_id in found]
 
 

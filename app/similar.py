@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from . import track_privacy
 from .attributes import MIN_REGION_PIXELS, _crop_image
 
 COLOUR_MODEL_ID = "appearance-colour-v1"
@@ -172,6 +173,11 @@ def find_similar(db: sqlite3.Connection, track_id: str, camera_ids: list[str], s
     limit = max(1, min(limit, MAX_RESULTS))
     where = (f"e.model_id=? AND e.dim=? AND t.label=? AND t.id!=? AND t.camera_id IN ({','.join('?' * len(camera_ids))}) AND t.last_seen_at>=? AND t.first_seen_at<?")
     values: list[Any] = [source["model_id"], source["dim"], source["label"], track_id, *camera_ids, _iso(start), _iso(end)]
+    # Compared by appearance, which comes from the unmasked frames: a track that touches a privacy mask is not a candidate, since it being "alike" would say
+    # what is behind the mask (#296).
+    visible, visible_values = track_privacy.track_visible_sql(track_privacy.zones_by_camera(db, camera_ids), whole=True, alias="t")
+    where += f" AND {visible}"
+    values.extend(visible_values)
     vector = bytes(source["vector"])
     if use_extension is not False and load_extension(db):
         rows = db.execute(

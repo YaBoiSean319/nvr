@@ -32,6 +32,19 @@ Only an administrator, signed in themselves (never through an API token), can se
 
 The reason is recorded in the audit log (`privacy_unmasked_view_granted`). Unmasked viewing is recorded too (`privacy_unmasked_viewed`, at most once a minute per camera), and so is its end (`privacy_unmasked_view_ended`). Operators can never get unmasked media: asking for it is refused with `403` on every route.
 
+## What the AI saw behind a mask
+
+A mask hides what the AI found there as well as the picture (#296). The rule is the playback overlay's: a detection whose box touches a masked area at all is hidden.
+
+- **Raw detections, tracks and a track's detail** leave those detections out, in the query itself, so `limit` and `truncated` never depend on what was hidden. A track with no permitted detection is not listed and its detail is a `404`, the same as a track that never existed.
+- **A partly hidden track** shows only its permitted detections. Its detection count, first and last seen and best confidence are worked out from those alone, and its attributes (colours, vehicle type, direction) are withheld, because they may have come from frames the mask hides. Nothing says how many detections were hidden.
+- **Search by colour, vehicle type or direction, the natural-language search, and find-similar** only consider tracks that touch no mask at all: they rank or match on the whole track and on its picture, which is the unmasked frame, so where a partly hidden track ranked would say what is behind the mask. A track that touches a mask cannot be the source of a find-similar either. A search zone drawn over a masked area finds nothing behind it.
+- **Counts, crossing paths and the heatmap** in Insights, the timeline's list of what the AI saw, and the labels on motion marks are made from permitted detections only.
+- The masks used are those that apply to the camera's oldest footage (the widest set), so a track is never shown because a mask was narrowed later or because the camera began masking its own picture.
+- These routes have no `unmasked` option. An administrator's reason-gated unmasked viewing is for the picture in Playback and Live, and only their own session can use it.
+
+Not yet covered, and listed on the ticket: the daily digests' counts, the box kept with an alarm, and rule events.
+
 ## API
 
 | Method | Path | Who | What |
