@@ -153,6 +153,8 @@ jobs:
         run: |
           npm ci --prefix web --no-audit --no-fund
           npm run build --prefix web
+      - name: Check for unused frontend code
+        run: npm run unused --prefix web
       - name: Test browser harness configuration
         run: node --test tests-js/*.test.cjs
       - name: Validate Compose configuration
