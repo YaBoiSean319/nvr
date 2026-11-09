@@ -1,6 +1,7 @@
 """Licence plates: the cameras that read them, watch lists (allow and deny), search by full or partial plate, and the plate crops."""
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -8,7 +9,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 
-from app import plates
+from app import plates, track_privacy
 from app.audit import record
 from app.principal import Administrator, CurrentUser, requires_scope
 from app.store import connect
@@ -284,7 +285,16 @@ def search_plates(
 def read_crop(read_id: str, user: CurrentUser) -> Response:
     """The picture a plate was read from."""
     with connect() as db:
-        row = db.execute("SELECT camera_id,crop FROM plate_reads WHERE id=?", (read_id,)).fetchone()
+        row = db.execute("SELECT camera_id,crop,box_json FROM plate_reads WHERE id=?", (read_id,)).fetchone()
+        zones = track_privacy.zones_by_camera(db, [row["camera_id"]]).get(row["camera_id"], []) if row is not None else []
     if row is None or row["crop"] is None or not user.access.can_see(row["camera_id"]):
         raise HTTPException(status_code=404, detail="Plate picture not found")
+    if zones:
+        # A mask added since the read still covers it. If the read's place cannot be compared with the mask, the picture is not shown (#297).
+        try:
+            box = json.loads(row["box_json"])
+        except (TypeError, ValueError):
+            box = None
+        if not track_privacy.box_usable(box) or track_privacy.box_touches(box, zones):
+            raise HTTPException(status_code=404, detail="Plate picture not found")
     return Response(bytes(row["crop"]), media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})

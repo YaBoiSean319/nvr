@@ -379,6 +379,13 @@ def search(db: sqlite3.Connection, text: str, *, camera_ids: Iterable[str] | Non
     if end:
         clauses.append("r.read_at<?")
         params.append(end)
+    # A privacy mask added after a read still covers it (#297): a read whose box touches one, or whose box cannot be compared with one, is not found.
+    # The mask is checked in the query, so the limit never counts what was hidden.
+    from . import track_privacy
+    everywhere = list(camera_ids) if camera_ids is not None else [row[0] for row in db.execute("SELECT id FROM cameras")]
+    visible, visible_params = track_privacy.box_json_visible_sql(track_privacy.zones_by_camera(db, everywhere), "r")
+    clauses.append(visible)
+    params.extend(visible_params)
     direction = "ASC" if order == "asc" else "DESC"
     return db.execute(
         "SELECT r.id,r.camera_id,r.track_id,r.plate,r.confidence,r.read_at,r.box_json,r.crop IS NOT NULL AS has_crop,c.name AS camera_name "
@@ -387,7 +394,16 @@ def search(db: sqlite3.Connection, text: str, *, camera_ids: Iterable[str] | Non
 
 def read_view(row: sqlite3.Row) -> dict[str, Any]:
     return {"id": row["id"], "camera_id": row["camera_id"], "camera_name": row["camera_name"], "track_id": row["track_id"], "plate": row["plate"],
-            "confidence": row["confidence"], "read_at": row["read_at"], "box": json.loads(row["box_json"]), "has_crop": bool(row["has_crop"])}
+            "confidence": row["confidence"], "read_at": row["read_at"], "box": _stored_box(row["box_json"]), "has_crop": bool(row["has_crop"])}
+
+
+def _stored_box(text: str | None) -> dict[str, float] | None:
+    """The box a read was made at, or None for legacy text that is not one (it is hidden on a masked camera and merely unplaced on any other)."""
+    try:
+        box = json.loads(text) if text else None
+    except ValueError:
+        return None
+    return box if isinstance(box, dict) else None
 
 
 # --- the worker's side ------------------------------------------------------------------------------------------------------------------------

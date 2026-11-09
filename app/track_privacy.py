@@ -58,6 +58,38 @@ def detection_visible_sql(zones: Zones, alias: str = "d") -> tuple[str, list[Any
     return "(" + " OR ".join(parts) + ")", params
 
 
+_BOX_KEYS = ("x", "y", "width", "height")
+
+
+def box_usable(box: Any) -> bool:
+    """Whether a stored box can be compared with a mask: an object with all four numbers."""
+    return isinstance(box, dict) and all(isinstance(box.get(key), (int, float)) and not isinstance(box.get(key), bool) for key in _BOX_KEYS)
+
+
+def box_json_visible_sql(zones: Zones, alias: str = "r", column: str = "box_json") -> tuple[str, list[Any]]:
+    """SQL that is true for a row whose box, kept as JSON text in ``column``, a person may see: its camera has no mask, or the box touches none.
+
+    A box that is not valid JSON, or lacks any of its four numbers, cannot be compared with a mask, so on a camera that has one it is not shown (fail
+    closed). The checks are nested ``CASE``s because SQLite evaluates those lazily: ``json_extract`` on text that is not JSON is an error."""
+    if not zones:
+        return "1", []
+    col = f"{alias}.{column}"
+
+    def number(key: str) -> str:
+        return f"json_extract({col},'$.{key}')"
+
+    usable = f"json_type({col})='object' AND " + " AND ".join(f"json_type({col},'$.{key}') IN ('integer','real')" for key in _BOX_KEYS)
+    parts = [f"{alias}.camera_id NOT IN ({','.join('?' * len(zones))})"]
+    params: list[Any] = list(zones)
+    for camera_id, areas in zones.items():
+        overlap = " OR ".join(f"({number('x')} < ? AND {number('x')} + {number('width')} > ? AND {number('y')} < ? AND {number('y')} + {number('height')} > ?)" for _ in areas)
+        parts.append(f"({alias}.camera_id=? AND CASE WHEN json_valid({col}) THEN (CASE WHEN {usable} THEN NOT ({overlap}) ELSE 0 END) ELSE 0 END)")
+        params.append(camera_id)
+        for z in areas:
+            params.extend([z["x"] + z["width"], z["x"], z["y"] + z["height"], z["y"]])
+    return "(" + " OR ".join(parts) + ")", params
+
+
 def track_visible_sql(zones: Zones, *, whole: bool = False, alias: str = "t", window: tuple[str, str] | None = None) -> tuple[str, list[Any]]:
     """SQL for ``ai_tracks`` rows a person may see: a track on an unmasked camera, or on a masked one with a permitted detection.
 

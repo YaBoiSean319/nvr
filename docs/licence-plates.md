@@ -12,7 +12,7 @@ Cameras designated for it read the licence plates of the vehicles they see. Each
 
 For each vehicle track on a designated camera the AI worker takes a few attempts, three seconds apart and at most four per vehicle until a plate is kept: a full-size picture of the camera is taken from its main stream at the stream's own resolution (not scaled, and whatever its shape), the detector finds plates in it (it looks at a copy no wider than 1280 pixels, averaged down from a larger frame, so detection behaves as it always did), the recogniser reads each plate crop cut from the full-size picture (a crop at least twice the recogniser's input is averaged down first, so a sharp 4K plate is not read through skipped pixels), and a plate that sits on a tracked vehicle (its centre inside the vehicle's box, grown by 15%) is stored with that track. A plate off every tracked vehicle is not kept. Reading never holds up detection: it runs beside it, one picture at a time per camera.
 
-- **Privacy masks.** A plate whose box touches an area the NVR masks is not kept, so a masked area never yields a plate or a picture.
+- **Privacy masks.** A plate whose box touches an area the NVR masks is not kept, so a masked area never yields a plate or a picture. A mask added later still covers reads already kept: when a read or its picture is asked for, a read whose box touches a mask (or whose box cannot be compared with one) is left out of search and its picture is a `404`.
 - **One read per plate per vehicle.** Seeing the same plate again on the same track keeps the most confident read and its picture. Two different readings of one car are two reads.
 - **Plates are compared in a normal form**: upper case, letters and digits only (`ab-12 cde` is `AB12CDE`), at most 12 characters. A read must have at least 2.
 
@@ -88,7 +88,7 @@ prints the share of plates read, right as a whole, right ignoring look-alikes, a
 
 ## Limits
 
-- A privacy mask added after plates were read does not remove the reads already kept (it applies from then on).
+- A privacy mask added after plates were read does not delete the reads already kept, but hides them: they come back if the mask is removed or no longer touches them. The check is made each time (#297), against the widest mask that has applied to the camera.
 - A recogniser that takes a second `seq_ind` input is given one (0 for the first position, 1 after), as the Open Model Zoo recognisers expect; like the rest of the real-model contract, this was written from the model documentation and not run against the real files.
 - Recognition depends on the camera: resolution on the plate, angle, shutter speed, infrared glare, dirt and the plate style. Fast vehicles and plates under about 100 pixels wide read poorly. Place plate cameras for it (low angle, tight view, fast shutter).
 - A plate is looked for a few times as a vehicle appears, not continuously: a vehicle whose plate was never in view in those attempts has no read.
