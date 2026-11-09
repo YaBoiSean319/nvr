@@ -27,6 +27,7 @@ from typing import Any
 from . import access as access_rules, viewing_audit
 from .storage import segment_available
 from .store import connect
+from app.clock import now as _now, parse as _parse
 
 MAX_TITLE = 200
 MAX_TEXT = 5000
@@ -50,17 +51,8 @@ class CaseError(Exception):
         self.status = status
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def audit(db: sqlite3.Connection, case_id: str, actor_id: int | None, action: str, **detail: Any) -> None:

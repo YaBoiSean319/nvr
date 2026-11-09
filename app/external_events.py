@@ -26,6 +26,7 @@ from typing import Any
 from . import mqtt, rule_actions, rules
 from .credentials import decrypt, encrypt
 from .store import connect
+from app.clock import now as _now, parse as _parse
 
 logger = logging.getLogger("nvr.external_events")
 
@@ -58,17 +59,8 @@ class EventRefused(Exception):
         self.status, self.reason = status, reason
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def label(type_: str) -> str:

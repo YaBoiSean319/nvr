@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES, attribute_model_available, zone_cells
+from app.clock import parse as _parse
 
 MAX_RANGE = timedelta(days=92)
 MAX_LIMIT = 200
@@ -44,11 +45,6 @@ def parse_zone(value: str) -> dict[str, float]:
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def find_tracks(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: datetime, *, label: str | None = None, upper_colour: str | None = None,

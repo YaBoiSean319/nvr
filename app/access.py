@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Iterable
+from app.clock import now as _now
 
 
 SITE_SEPARATOR = "~"
@@ -58,10 +59,6 @@ class Access:
 
 EVERYTHING = Access()
 NOTHING = Access(frozenset(), frozenset(), frozenset())
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _roles(encoded: str | None) -> list[str]:

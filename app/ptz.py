@@ -13,7 +13,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from .audit import record
@@ -21,6 +21,7 @@ from .credentials import decrypt
 from .onvif_ptz import Capabilities, PtzClient, PtzUnsupported
 from .scheduling import mode_at
 from .store import connect
+from app.clock import now as _now
 
 LEASE_SECONDS = 60
 CAPABILITY_CACHE_SECONDS = 300
@@ -37,10 +38,6 @@ class LeaseHeld(Exception):
     def __init__(self, holder: str) -> None:
         super().__init__(f"{holder} is controlling this camera")
         self.holder = holder
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def forget_capabilities() -> None:

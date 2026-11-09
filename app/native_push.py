@@ -16,7 +16,6 @@ import re
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -26,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 from .credentials import decrypt, encrypt
 from .store import connect
+from app.clock import now as _now
 
 FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 FCM_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -42,10 +42,6 @@ _BUNDLE = re.compile(r"^[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+$")
 
 class NativePushError(ValueError):
     """A device or the credentials cannot be saved as given."""
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _b64(data: bytes) -> str:

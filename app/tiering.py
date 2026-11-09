@@ -24,7 +24,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +32,7 @@ from .credentials import decrypt, encrypt
 from .incidents import sync_incident
 from .s3 import S3Client, S3Error
 from .store import connect
+from app.clock import now as _now, parse as _parse
 
 logger = logging.getLogger("nvr.tiering")
 
@@ -49,15 +50,6 @@ EVICT_GRACE_SECONDS = 120
 
 class TierError(OSError):
     """A cold tier that cannot be used (unreachable, refused, a copy that did not match)."""
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # --- tiers ------------------------------------------------------------------------------------------------------------------------------------

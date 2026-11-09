@@ -8,20 +8,17 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
 from .security import new_session_token, token_digest
 from .store import connect
+from app.clock import now as _now
 
 LIFETIME = timedelta(days=30)
 GRACE = timedelta(minutes=2)
 MAX_PER_USER = 10
 PREFIX = "nvrd_"
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _plausible(token: str) -> bool:

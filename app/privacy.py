@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from . import acceleration
 from .access import may_view_camera
 from .credentials import decrypt
 from .store import connect
+from app.clock import now as _now
 
 MAX_ZONES = 8
 GRANT_MINUTES = 15
@@ -53,10 +54,6 @@ def _bump(camera_id: str) -> None:
 
 class UnmaskedRefused(PermissionError):
     """Unmasked footage was asked for without an active grant."""
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def validate_zones(zones: list[dict[str, Any]]) -> list[dict[str, float]]:

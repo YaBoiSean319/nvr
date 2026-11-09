@@ -19,6 +19,7 @@ import numpy as np
 
 from . import face_models, plates, privacy
 from .store import connect
+from app.clock import now as _now, parse as _parse
 
 MARGIN = 0.3  # How much of the face's own size is kept around it in the entry's picture
 MIN_IOU = 0.3  # How well a clicked box must fit a detected face to pick it
@@ -47,15 +48,6 @@ def reader() -> face_models.FaceReader:
             raise FaceError(503, "The face models could not be loaded")
         _reader = loaded
     return _reader
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # --- settings ----------------------------------------------------------------------------------------------------------------------------

@@ -10,12 +10,13 @@ import hmac
 import secrets
 import sqlite3
 import struct
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
 from .credentials import decrypt, encrypt
 from .security import token_digest
+from app.clock import now as _now
 
 POLICIES = ("off", "administrators", "all")
 TOTP_STEP_SECONDS = 30
@@ -26,10 +27,6 @@ RECOVERY_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 CHALLENGE_MINUTES = 5
 MAX_CHALLENGE_ATTEMPTS = 5
 ISSUER = "Workplace NVR"
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 # --- TOTP (RFC 6238, SHA-1, six digits, thirty seconds) ---------------------------------

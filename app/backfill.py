@@ -35,6 +35,7 @@ from .onvif_client import OnvifClient, OnvifError, Recording, Services
 from .recording import recordings_path
 from .storage import camera_recordings_dir
 from .store import connect
+from app.clock import now as _now
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +57,6 @@ STATE_WORDS = {"pending": "waiting", "running": "running", "done": "filled", "pa
 NOT_SUPPORTED = "Backfill not supported: this camera offers no ONVIF Profile G recording search and replay"
 NO_ADDRESS = "Backfill not supported: the camera has no ONVIF address"
 SUPPORTED = "The camera offers ONVIF recording search and replay"
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _parse(value: str) -> datetime:

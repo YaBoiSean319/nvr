@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import rules, search
+from app.clock import parse as _parse
 
 MAX_RANGE = {"hour": timedelta(days=31), "day": search.MAX_RANGE}
 LABELS = search.LABELS
@@ -37,11 +38,6 @@ def site_zone(db: sqlite3.Connection) -> ZoneInfo:
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def buckets(start: datetime, end: datetime, zone: ZoneInfo, unit: str) -> list[tuple[datetime, datetime]]:

@@ -47,6 +47,7 @@ from .credentials import decrypt, key_path
 from .incidents import sync_incident
 from .store import connect
 from .webhooks import validate_target_url
+from app.clock import now as _now
 
 logger = logging.getLogger("nvr.failover")
 
@@ -76,10 +77,6 @@ class PeerError(Exception):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
         self.status, self.detail = status, detail
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _stamp(value: datetime | None = None) -> str:
