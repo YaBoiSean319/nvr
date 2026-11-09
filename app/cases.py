@@ -591,6 +591,13 @@ def assemble(db: sqlite3.Connection, package: sqlite3.Row) -> None:
         name = f"clips/{len(sources) + 1:02d}-{entry['export_id']}.zip"
         entry["package_file"] = name
         sources[name] = path
+    provenance = package_provenance(db, package)
+    if masks_newer_than_footage(db, provenance["rendered_at"]):
+        _fail(db, package, "A privacy mask was set after a clip was exported, so the clip is not masked: build the package again")
+        return
+    if not all(access.can_see(camera_id) for camera_id in provenance["cameras"]):
+        _fail(db, package, "Access to a camera in the package ended before it was put together")
+        return
     notes = [entry for entry in document["items"] if entry["kind"] == "note"]
     notes_markdown = "".join(f"## {entry['added_at']} {entry['added_by'] or ''}\n\n{entry['text']}\n\n" for entry in notes) or "No notes.\n"
     generated = _iso(_now())
@@ -627,8 +634,8 @@ def assemble(db: sqlite3.Connection, package: sqlite3.Row) -> None:
         temporary.unlink(missing_ok=True)
         _fail(db, package, f"The package could not be written: {str(exc)[:160]}")
         return
-    db.execute("UPDATE case_packages SET status='ready',relative_path=?,size_bytes=?,sha256=?,completed_at=? WHERE id=?",
-               (str(target.relative_to(root)), target.stat().st_size, _sha256_file(target), _iso(_now()), package["id"]))
+    db.execute("UPDATE case_packages SET status='ready',relative_path=?,size_bytes=?,sha256=?,completed_at=?,provenance_json=? WHERE id=?",
+               (str(target.relative_to(root)), target.stat().st_size, _sha256_file(target), _iso(_now()), json.dumps(provenance, sort_keys=True), package["id"]))
     audit(db, case["id"], int(requester["id"]), "package_ready", package=package["id"], clips=len(sources), omitted=omitted)
 
 
@@ -695,6 +702,49 @@ def verify_package_bytes(content: bytes, case_id: str, package_id: str, installa
                     "error": None if valid else "one or more file checksums do not match"}
     except (zipfile.BadZipFile, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return {"checksums_valid": False, "files": [], "clips": [], "complete": False, "error": f"invalid case package: {str(exc)[:200]}"}
+
+
+class PackageRefused(Exception):
+    """A package that may not be handed out now: the status to answer with, what to say, and a short code for the audit trail."""
+
+    def __init__(self, status: int, detail: str, code: str) -> None:
+        super().__init__(detail)
+        self.status, self.detail, self.code = status, detail, code
+
+
+def package_provenance(db: sqlite3.Connection, package: sqlite3.Row) -> dict[str, Any]:
+    """The cameras in a package, when each was rendered (the earliest export of that camera's clips; the package's own start when the export is gone) and the
+    version (``updated_at``) of the mask each had then, or None for none. Kept with the package when it is built (#302)."""
+    rendered: dict[str, str] = {}
+    for row in db.execute("SELECT i.camera_id,e.created_at FROM case_package_clips p JOIN case_items i ON i.id=p.item_id LEFT JOIN exports e ON e.id=p.export_id WHERE p.package_id=?", (package["id"],)):
+        when = row["created_at"] or package["created_at"]
+        if row["camera_id"] not in rendered or _parse(when) < _parse(rendered[row["camera_id"]]):
+            rendered[row["camera_id"]] = when
+    masks: dict[str, str | None] = {}
+    for camera_id in rendered:
+        mask = db.execute("SELECT zones_json,updated_at FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
+        masks[camera_id] = mask["updated_at"] if mask and json.loads(mask["zones_json"]) else None
+    return {"cameras": sorted(rendered), "rendered_at": rendered, "masks": masks}
+
+
+def masks_newer_than_footage(db: sqlite3.Connection, rendered_at: dict[str, str]) -> list[str]:
+    """The cameras whose mask now (one that hides something) was set or changed after their footage in the package was rendered."""
+    stale = []
+    for camera_id, when in rendered_at.items():
+        mask = db.execute("SELECT zones_json,updated_at FROM privacy_masks WHERE camera_id=?", (camera_id,)).fetchone()
+        if mask and json.loads(mask["zones_json"]) and _parse(mask["updated_at"]) > _parse(when):
+            stale.append(camera_id)
+    return sorted(stale)
+
+
+def check_download(db: sqlite3.Connection, package: sqlite3.Row, user: Any) -> None:
+    """Whether this person may be given this package now (#302): every camera in it is one they may see today, and no mask has been drawn over one since it was made.
+    Raises PackageRefused. Nothing here records a download: that is for after the file is found."""
+    provenance = json.loads(package["provenance_json"]) if package["provenance_json"] else package_provenance(db, package)
+    if not all(user.access.can_see(camera_id) for camera_id in provenance["cameras"]):
+        raise PackageRefused(404, "Package not found", "access")  # All of it or none of it, and indistinguishable from a package they never had
+    if masks_newer_than_footage(db, provenance["rendered_at"]):
+        raise PackageRefused(409, "This package was made before a camera's current privacy masks; build the package again to download it masked", "mask")
 
 
 def package_cameras(db: sqlite3.Connection, package_id: str) -> list[str]:
