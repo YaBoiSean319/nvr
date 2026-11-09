@@ -395,6 +395,75 @@ class DeviceSecretReplayTests(NativeCase):
         self.assertEqual(sorted(result is not None for result in results), [False, True])
 
 
+class DeviceEnrolmentBoundaryTests(NativeCase):
+    """Only a person who is signed in can enrol a phone; automation never turns into a long-lived person credential (#292)."""
+
+    def token(self, *scopes: str) -> str:
+        created = self.admin.post("/api/admin/api-tokens", json={"name": "Automation", "scopes": list(scopes)})
+        self.assertEqual(created.status_code, 201, created.text)
+        return created.json()["secret"]
+
+    def enrolled(self) -> int:
+        with connect() as db:
+            return db.execute("SELECT COUNT(*) FROM device_sessions").fetchone()[0]
+
+    def test_an_admin_token_cannot_enrol_a_phone(self):
+        secret = self.token("admin")
+        with TestClient(self.app) as bare:  # No cookie: only the token authenticates
+            denied = bare.post("/api/native/device-sessions", json={"device_label": "Sneaky"}, headers={"Authorization": f"Bearer {secret}"})
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(self.enrolled(), 0)
+
+    def test_a_bearer_token_beside_a_valid_browser_cookie_is_still_a_token(self):
+        secret = self.token("admin")
+        # The same client holds the administrator's session cookie; the Authorization header still decides who is calling.
+        denied = self.admin.post("/api/native/device-sessions", json={"device_label": "Sneaky"}, headers={"Authorization": f"Bearer {secret}"})
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(self.enrolled(), 0)
+
+    def test_a_video_wall_cannot_enrol_a_phone(self):
+        secret = self.token("read", "media")
+        wall = TestClient(self.app)
+        self.assertEqual(wall.post("/api/wall/session", json={"token": secret}).status_code, 200)
+        denied = wall.post("/api/native/device-sessions", json={"device_label": "Wall"})
+        self.assertIn(denied.status_code, (401, 403), denied.text)
+        self.assertEqual(self.enrolled(), 0)
+
+    def test_the_token_cannot_reach_session_only_management_by_any_exchange(self):
+        # What the exchange used to give: a cookie that outlived the token and could manage tokens. The first step is now refused.
+        secret = self.token("admin")
+        with TestClient(self.app) as bare:
+            bearer = {"Authorization": f"Bearer {secret}"}
+            self.assertEqual(bare.get("/api/admin/api-tokens", headers=bearer).status_code, 403)
+            self.assertEqual(bare.post("/api/native/device-sessions", json={}, headers=bearer).status_code, 403)
+            self.assertEqual(bare.cookies.get("nvr_session"), None)
+
+    def test_a_signed_in_person_still_enrols_a_phone(self):
+        created = self.limited.post("/api/native/device-sessions", json={"device_label": "Pixel"})
+        self.assertEqual(created.status_code, 201, created.text)
+        admin_phone = self.admin.post("/api/native/device-sessions", json={"device_label": "Admin phone"})
+        self.assertEqual(admin_phone.status_code, 201, admin_phone.text)
+        self.assertEqual(self.enrolled(), 2)
+
+
+class UpgradeRevokesOldDeviceSecretsTests(NativeCase):
+    def test_every_existing_device_secret_is_ended_and_audited(self):
+        from app.migrations import m0060_revoke_device_sessions as migration
+
+        mine = self.limited.post("/api/native/device-sessions", json={"device_label": "Mine"}).json()
+        theirs = self.full.post("/api/native/device-sessions", json={"device_label": "Theirs"}).json()
+        with connect() as db:
+            migration.upgrade(db)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM device_sessions").fetchone()[0], 0)
+            audited = {row["resource_id"]: json.loads(row["details_json"]) for row in db.execute("SELECT * FROM audit_log WHERE action='device_session_revoked_by_upgrade'")}
+        self.assertEqual(set(audited), {mine["id"], theirs["id"]})
+        self.assertEqual(audited[mine["id"]]["device"], "Mine")
+        for secret in (mine["token"], theirs["token"]):
+            self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": secret}).status_code, 401)
+        # Signing in on the phone makes a new one.
+        self.assertEqual(self.limited.post("/api/native/device-sessions", json={"device_label": "Mine"}).status_code, 201)
+
+
 class NothingCachedTests(NativeCase):
     def test_everything_the_app_fetches_is_marked_not_to_be_cached(self):
         native = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) NVRApp/1.0"}

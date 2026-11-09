@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app import device_sessions, native_push
 from app.api.identity import start_session
-from app.principal import Administrator, CurrentUser
+from app.principal import Administrator, CurrentUser, SignedInPerson
 from app.store import connect
 
 router = APIRouter()
@@ -57,8 +57,8 @@ def remove_device(payload: TokenRequest, user: CurrentUser) -> Response:
 
 
 @router.post("/api/native/device-sessions", status_code=status.HTTP_201_CREATED)
-def create_device_session(payload: DeviceSessionRequest, user: CurrentUser) -> dict[str, object]:
-    """For a fully signed-in person: the secret the app keeps in the phone's secure storage. Shown once."""
+def create_device_session(payload: DeviceSessionRequest, user: SignedInPerson) -> dict[str, object]:
+    """For a fully signed-in person: the secret the app keeps in the phone's secure storage. Shown once. Never for an API token or a video wall (#292)."""
     return device_sessions.create(int(user["id"]), payload.device_label.strip())
 
 

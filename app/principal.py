@@ -154,6 +154,17 @@ def administrator(user: Annotated[Principal, Depends(current_user)]) -> Principa
     return user
 
 
+def signed_in_person(user: Annotated[Principal, Depends(current_user)]) -> Principal:
+    """A person at a keyboard: a browser session, never an API token and never a video wall.
+
+    For routes that turn what the caller holds into something longer-lived or broader (a phone's device secret): automation must not be able to
+    exchange its credential for a person's, because the new one would outlive the token's revocation (#292). A request that carries both a bearer
+    token and a session cookie is the token: the header is what ``current_user`` believes."""
+    if user.scopes is not None or user.token_id is not None or user.wall:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This is for a signed-in person, not an API token or a video wall")
+    return user
+
+
 def _token_principal(request: HTTPConnection, authorization: str) -> Principal:
     scheme, _, value = authorization.partition(" ")
     if scheme.lower() != "bearer" or not value.strip():
@@ -223,3 +234,4 @@ def _principal(row: sqlite3.Row, remote: bool = False, *, db: sqlite3.Connection
 
 CurrentUser = Annotated[Principal, Depends(current_user)]
 Administrator = Annotated[Principal, Depends(administrator)]
+SignedInPerson = Annotated[Principal, Depends(signed_in_person)]
