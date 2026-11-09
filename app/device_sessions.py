@@ -3,6 +3,10 @@
 The secret is shown once, when a signed-in session asks for it, and stored only as a digest. Using it replaces it, so a copy taken from an old backup is
 useless; the one it replaced still works for ``GRACE`` so that a phone that never heard the answer (or could not store it) is not locked out. A person can
 revoke a phone, and ending a person's sessions (a second-factor reset, a password change) ends these too. It is good for ``LIFETIME`` since it was last used.
+
+The grace is a fixed deadline, set once when the replacement is first used, and the old secret can be used once inside it (#293). Replaying an old
+secret therefore cannot keep it alive, and cannot knock a phone's current secret out more than once per rotation. A thief who replays the old secret
+inside those two minutes wins that one race, and the phone then has to sign in again; the audit log shows it as ``device_session_retried``.
 """
 from __future__ import annotations
 
@@ -66,10 +70,17 @@ def resume(token: str) -> dict[str, Any] | None:
             if row is None or row["expires_at"] <= now.isoformat():
                 db.execute("ROLLBACK")
                 return None
-            # The secret in use becomes the "previous" one for a moment; the replacement is the only one that lasts.
+            retry = digest != row["token_hash"]
+            if retry:
+                # The previous secret, presented again: a phone that never heard the answer asking once more. It works this once, nothing is extended
+                # (its deadline was fixed when it was replaced), and it is spent: the replacement it is handed is the only secret that lasts.
+                previous_hash, previous_until = None, None
+            else:
+                # The secret in use becomes the "previous" one for GRACE from now; this is the only place that deadline is set.
+                previous_hash, previous_until = digest, (now + GRACE).isoformat()
             db.execute("UPDATE device_sessions SET token_hash=?,previous_hash=?,previous_until=?,last_used_at=?,expires_at=? WHERE id=?",
-                       (token_digest(raw), digest if digest == row["token_hash"] else row["previous_hash"], (now + GRACE).isoformat(), now.isoformat(), expires, row["id"]))
-            _audit(db, int(row["user_id"]), "device_session_resumed", row["id"], device=row["device_label"])
+                       (token_digest(raw), previous_hash, previous_until, now.isoformat(), expires, row["id"]))
+            _audit(db, int(row["user_id"]), "device_session_retried" if retry else "device_session_resumed", row["id"], device=row["device_label"])
         except BaseException:
             db.execute("ROLLBACK")
             raise

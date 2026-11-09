@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from urllib.parse import parse_qs
 
 import httpx
@@ -311,6 +313,86 @@ class DeviceSessionTests(NativeCase):
         with connect() as db:
             db.execute("DELETE FROM users WHERE id=?", (self.limited_id,))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM device_sessions").fetchone()[0], 0)
+
+
+class DeviceSecretReplayTests(NativeCase):
+    """A rotated-out secret is good for one short grace period, fixed when the replacement is first used (#293)."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [datetime(2026, 11, 9, 12, 0, 0, tzinfo=timezone.utc)]
+        patcher = patch("app.device_sessions._now", lambda: self.clock[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def at(self, seconds: float) -> None:
+        self.clock[0] = datetime(2026, 11, 9, 12, 0, 0, tzinfo=timezone.utc) + timedelta(seconds=seconds)
+
+    def resume(self, secret: str) -> httpx.Response:
+        return TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": secret})
+
+    def enrol(self) -> str:
+        return self.limited.post("/api/native/device-sessions", json={"device_label": "Pixel"}).json()["token"]
+
+    def test_ordinary_rotation_keeps_working(self):
+        first = self.enrol()
+        second = self.resume(first).json()["token"]
+        self.at(10)
+        third = self.resume(second).json()["token"]
+        self.at(20)
+        self.assertEqual(self.resume(third).status_code, 200)
+
+    def test_replaying_the_old_secret_does_not_keep_it_alive(self):
+        # The reproduction: the same original secret resumed at 90, 180, 270 and 360 seconds after it was rotated (each reply restarted the window).
+        original = self.enrol()
+        self.assertEqual(self.resume(original).status_code, 200)  # rotated at t=0; the grace ends at t=120
+        self.at(90)
+        self.assertEqual(self.resume(original).status_code, 200, "a lost answer is retried inside the grace")
+        for seconds in (100, 180, 270, 360):
+            self.at(seconds)
+            self.assertEqual(self.resume(original).status_code, 401, f"still accepted {seconds} s after the rotation")
+
+    def test_the_old_secret_works_once_not_repeatedly(self):
+        original = self.enrol()
+        self.resume(original)
+        self.at(30)
+        self.assertEqual(self.resume(original).status_code, 200)
+        self.at(31)
+        self.assertEqual(self.resume(original).status_code, 401, "inside the grace, but already used for its one retry")
+
+    def test_the_old_secret_is_refused_after_its_deadline_even_if_not_replayed_before(self):
+        original = self.enrol()
+        self.resume(original)
+        self.at(121)
+        self.assertEqual(self.resume(original).status_code, 401)
+
+    def test_each_rotation_sets_its_own_deadline(self):
+        first = self.enrol()
+        second = self.resume(first).json()["token"]      # first is good until t=120
+        self.at(100)
+        third = self.resume(second).json()["token"]      # second is good until t=220; first is not extended by this
+        self.at(110)
+        self.assertEqual(self.resume(first).status_code, 401, "first was already replaced twice over")
+        self.at(150)
+        self.assertEqual(self.resume(second).status_code, 200, "second is inside the grace its own rotation set")
+        self.assertEqual(self.resume(third).status_code, 401, "...and using it for the retry replaced the current secret once")
+
+    def test_two_retries_at_once_let_exactly_one_through(self):
+        original = self.enrol()
+        self.resume(original)
+        self.at(30)
+        barrier, results = threading.Barrier(2), []
+
+        def retry():
+            barrier.wait()
+            results.append(device_sessions.resume(original))
+
+        threads = [threading.Thread(target=retry) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(result is not None for result in results), [False, True])
 
 
 class NothingCachedTests(NativeCase):
