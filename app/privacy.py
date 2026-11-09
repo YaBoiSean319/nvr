@@ -188,7 +188,8 @@ class StreamGuard:
     def __init__(self, principal: Any, camera_id: str, unmasked: bool) -> None:
         self.camera_id = camera_id
         self.user_id = int(principal.id)
-        self.reason: str | None = None  # "access" or "masks", once it has stopped being valid
+        self.principal = principal
+        self.reason: str | None = None  # "credential", "access" or "masks", once it has stopped being valid
         self._access_checked = time.monotonic()
         self.generation = generation(camera_id)
         self.until: datetime | None = None
@@ -202,6 +203,13 @@ class StreamGuard:
             return False
         if time.monotonic() - self._access_checked >= ACCESS_RECHECK_SECONDS:
             self._access_checked = time.monotonic()
+            from .principal import refresh  # Late: principal imports this package's neighbours
+
+            current = refresh(self.principal)
+            if current is None:  # Signed out, expired, revoked or removed: a quiet stream is cut as promptly as a busy one (#298)
+                self.reason = "credential"
+                return False
+            self.user_id = int(current.id)
             with connect() as db:
                 if not may_view_camera(db, self.user_id, self.camera_id):
                     self.reason = "access"

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Annotated, Callable, Literal, TypeVar
 
@@ -74,6 +74,9 @@ class Principal:
     mfa_enrolment_required: bool = False
     # The cameras and camera groups this person may see, resolved once for the request (tokens use their creator's).
     access: Access = EVERYTHING
+    # What proved who this is, so a connection that outlives its request can ask again (#298): ("session" | "wall", the cookie's digest) or ("token", the token id).
+    # Only digests and ids: never a secret.
+    credential: tuple[str, str] | None = None
 
     def __getitem__(self, key: str) -> object:
         # Routes historically received a database row; keep subscript access.
@@ -143,6 +146,7 @@ def current_user(request: HTTPConnection) -> Principal:
         if row is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
         principal = _principal(row, remote=network.request_is_remote(request) if row["remote_mfa"] else False, db=db)  # One connection for the session and the access it grants
+        principal = replace(principal, credential=("session", token_digest(raw)))
     if principal.mfa_enrolment_required and not _enrolment_route(request.scope.get("route")):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Set up a second factor to continue")
     return _within_access(request, principal)
@@ -173,7 +177,7 @@ def _token_principal(request: HTTPConnection, authorization: str) -> Principal:
         row = authenticate(value.strip())
     except TokenRejected as exc:
         raise _unauthorized(str(exc)) from exc
-    return _scoped(request, row)
+    return replace(_scoped(request, row), credential=("token", str(row["id"])))
 
 
 def wall_principal(request: HTTPConnection, raw: str) -> Principal:
@@ -189,7 +193,7 @@ def wall_principal(request: HTTPConnection, raw: str) -> Principal:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Video wall session expired")
     if getattr(request.scope.get("route"), "path", None) not in WALL_ROUTES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="A video wall can only watch cameras")
-    return _scoped(request, row, wall=True)
+    return replace(_scoped(request, row, wall=True), credential=("wall", token_digest(raw)))
 
 
 def _scoped(request: HTTPConnection, row: sqlite3.Row, *, wall: bool = False) -> Principal:
@@ -209,6 +213,34 @@ def _scoped(request: HTTPConnection, row: sqlite3.Row, *, wall: bool = False) ->
         wall=wall,
         access=access,
     )
+
+
+def refresh(principal: Principal) -> Principal | None:
+    """The same person as they stand now, for a connection that has been open a while (#298): ``None`` once the session, token or wall that
+    admitted them has ended (signed out, expired, revoked, its phone taken away, its owner removed or demoted), otherwise a principal with the
+    role and camera access they hold at this moment. A principal that carries no credential (built by hand, in a test) is returned as it is."""
+    if getattr(principal, "credential", None) is None:
+        return principal
+    kind, ref = principal.credential
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        if kind == "session":
+            row = db.execute("SELECT u.id,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?", (ref, now)).fetchone()
+            if row is None:
+                return None
+            return replace(principal, id=row["id"], role=row["role"], access=resolve_access(db, int(row["id"]), row["role"]))
+        if kind == "wall":
+            session = db.execute("SELECT api_token_id FROM wall_sessions WHERE token_hash=? AND expires_at>?", (ref, now)).fetchone()
+            if session is None:
+                return None
+            ref = session["api_token_id"]
+    try:
+        token = usable_token(ref)
+    except TokenRejected:
+        return None
+    with connect() as db:
+        access = resolve_access(db, int(token["created_by"]), token["owner_role"])
+    return replace(principal, id=token["created_by"], role=token["owner_role"], access=access)
 
 
 def _unauthorized(detail: str) -> HTTPException:
