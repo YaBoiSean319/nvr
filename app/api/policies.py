@@ -19,7 +19,7 @@ from app.store import connect
 from app.scheduling import effective_policy, validate_schedule
 from app import notices
 from app.retention import coverage_summary, effective_purpose, effective_retention
-from app.storage import assign_group_volume, configured_volumes, refresh_registry, storage_status, volume_path
+from app.storage import PROBE_REUSE_SECONDS, assign_group_volume, configured_volumes, refresh_registry, storage_status, volume_path
 from app import headroom
 from app.audit import record
 from app.incidents import sync_storage_incidents
@@ -263,7 +263,7 @@ def delete_camera_retention(camera_id: str, _: Administrator) -> Response:
 @router.get("/api/storage")
 def get_storage_status(_: Administrator) -> dict[str, object]:
     refresh_registry()
-    result = storage_status()
+    result = storage_status(max_age=PROBE_REUSE_SECONDS)
     with connect() as db:
         sync_storage_incidents(db, result["volumes"])
     return result

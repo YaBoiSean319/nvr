@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import subprocess
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 

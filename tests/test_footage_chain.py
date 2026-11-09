@@ -32,7 +32,7 @@ class FootageChainTests(SceneTestCase):
 
     def add_segment(self, index: int, starts: datetime | None = None) -> int:
         clip = self.root / self.camera_id / f"segment-{index}.mp4"
-        subprocess.run([shutil.which("ffmpeg"), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=s=160x120:r=10",
+        subprocess.run([shutil.which("ffmpeg"), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=160x120:r=10",
                         "-t", "1", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-metadata", f"comment={index}", "-y", str(clip)], check=True, timeout=30)
         starts = starts or START + timedelta(seconds=index * 2)
         with connect() as db:

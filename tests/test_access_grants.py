@@ -15,8 +15,9 @@ from fastapi.testclient import TestClient
 from app import access, alarms, privacy
 from app.application import create_app
 from app.credentials import encrypt
+from app.routes import all_routes
 from app.principal import administrator, current_user, depends_on
-from app.security import hash_password, new_session_token, token_digest
+from app.security import hash_password
 from app.store import connect
 from tests.test_support import TEST_PASSWORD
 
@@ -333,7 +334,7 @@ class RouteTests(GrantCase):
 
     def reachable(self) -> list[tuple[str, str, object]]:
         found = []
-        for route in self.app.routes:
+        for route in all_routes(self.app):
             dependant = getattr(route, "dependant", None)
             if dependant is None or not route.path.startswith("/api") or not depends_on(dependant, current_user) or depends_on(dependant, administrator):
                 continue

@@ -130,7 +130,7 @@ async def frame_at(camera_id: str, at: datetime) -> np.ndarray:
     try:
         path = await asyncio.to_thread(recording_file_path, row["relative_path"])
     except (OSError, ValueError):
-        raise FaceError(410, "That recording is unavailable")
+        raise FaceError(410, "That recording is unavailable") from None
     if not path.is_file():
         raise FaceError(410, "That recording is unavailable")
     acquire_playback(path)
@@ -144,7 +144,7 @@ async def frame_at(camera_id: str, at: datetime) -> np.ndarray:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            raise FaceError(503, "Extracting the picture took too long")
+            raise FaceError(503, "Extracting the picture took too long") from None
     finally:
         release_playback(path)
     frame = plates.decode_bmp(data)

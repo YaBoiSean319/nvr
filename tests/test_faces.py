@@ -162,7 +162,7 @@ class FindAndAddTests(Case):
 
 class ListTests(Case):
     def test_the_list_shows_expiry_and_only_live_entries_are_compared(self):
-        live = self.add(name="Live").json()
+        self.add(name="Live")
         self.add(name="Soon gone", expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
         expired = self.add(name="Expired", expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat()).json()
         off = self.add(name="Switched off").json()

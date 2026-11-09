@@ -8,7 +8,6 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 
 from app import plates
 from tests.fixtures import plate_accuracy, plate_models as models

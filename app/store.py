@@ -9,15 +9,47 @@ def database_path() -> Path:
     return Path(os.environ.get("NVR_DB_PATH", "./data/nvr.sqlite3"))
 
 
+class _Connection(sqlite3.Connection):
+    """``with connect() as db`` commits or rolls back and then closes. sqlite3's own context manager leaves the connection open until it
+    is garbage collected, so every request left two to four of them behind (#278)."""
+
+    def __exit__(self, *exc_info: object) -> bool | None:
+        try:
+            return super().__exit__(*exc_info)
+        finally:
+            self.close()
+
+
+_prepared: set[str] = set()
+
+
+def _synchronous() -> str:
+    # WAL with NORMAL never corrupts the database; a power cut can lose the last few commits, where FULL waits for the disk on every one.
+    value = os.environ.get("NVR_DB_SYNCHRONOUS", "NORMAL").strip().upper()
+    return value if value in {"OFF", "NORMAL", "FULL", "EXTRA"} else "NORMAL"
+
+
 def connect() -> sqlite3.Connection:
     path = database_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, timeout=10, isolation_level=None)
-    os.chmod(path, 0o600)
+    key = str(path)
+    if key not in _prepared or not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path, timeout=10, isolation_level=None, factory=_Connection)
+    if key not in _prepared or not path.exists():
+        os.chmod(path, 0o600)
+        _prepared.add(key)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     db.execute("PRAGMA busy_timeout = 10000")
+    db.execute(f"PRAGMA synchronous = {_synchronous()}")
     return db
+
+
+def has_row(db: sqlite3.Connection, sql: str, params: tuple[object, ...] = ()) -> bool:
+    """Whether a query finds anything, read without a transaction. The background loops that claim queued work ask this before
+    ``BEGIN IMMEDIATE``, so an idle loop never takes the database's one write lock (#280). The query may be wider than the claim's own; it
+    must never be narrower, or work would wait."""
+    return db.execute(sql, params).fetchone() is not None
 
 
 def initialize() -> None:

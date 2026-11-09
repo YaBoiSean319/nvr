@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import ms_mail
-from .store import connect
+from .store import connect, has_row
 
 INCIDENT_EMAILS_PER_HOUR = 30
 SUMMARY_AFTER = timedelta(minutes=10)  # Quiet this long after the last held email, then one summary
@@ -127,6 +127,8 @@ def queue_held_summary(now: datetime | None = None) -> bool:
 def _claim() -> sqlite3.Row | None:
     stamp = _iso(_now())
     with connect() as db:
+        if not has_row(db, "SELECT 1 FROM email_outbox WHERE status='queued' AND next_attempt_at<=? LIMIT 1", (stamp,)):
+            return None
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute("SELECT * FROM email_outbox WHERE status='queued' AND next_attempt_at<=? ORDER BY next_attempt_at,created_at LIMIT 1", (stamp,)).fetchone()

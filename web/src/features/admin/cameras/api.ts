@@ -108,7 +108,6 @@ export const configureMotion = (id: string, body: Partial<Omit<MotionSettings, "
   api<Camera>(`${at(id)}/motion-source`, { method: "POST", body });
 export const assignGroup = (id: string, group_name: string | null) =>
   api<BulkResult>("/api/cameras/bulk-update", { method: "POST", body: { camera_ids: [id], group_name } });
-export const getCoverage = (id: string, signal?: AbortSignal) => api<Record<string, unknown>>(`${at(id)}/coverage`, { signal });
 export const getMotionEvents = (id: string, signal?: AbortSignal) =>
   api<{ events: { id: string; source_event_at: string; status: string; failure_reason: string | null }[] }>(`${at(id)}/motion-events`, { signal });
 export const latestSegment = (id: string, signal?: AbortSignal) =>

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import unittest
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 

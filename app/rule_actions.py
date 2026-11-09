@@ -23,7 +23,7 @@ import httpx
 from . import email_outbox, mqtt, ms_mail
 from .alarms import label_text
 from .credentials import decrypt, encrypt
-from .store import connect
+from .store import connect, has_row
 from .webhooks import signed_headers, validate_target_url
 
 SECRET_TYPES = {"webhook", "mqtt", "slack", "teams"}
@@ -252,6 +252,8 @@ def recover_inflight() -> None:
 def _claim() -> dict[str, Any] | None:
     now = _now().isoformat()
     with connect() as db:
+        if not has_row(db, "SELECT 1 FROM rule_action_deliveries WHERE status='queued' AND next_attempt_at<=? LIMIT 1", (now,)):
+            return None
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute(

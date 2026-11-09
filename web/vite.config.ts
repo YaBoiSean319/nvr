@@ -12,6 +12,8 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: false,
     target: "es2022",
+    // Every file the build makes, so the service worker can keep the lazily loaded pages too (public/sw.js).
+    manifest: "assets/chunks.json",
   },
   server: {
     proxy: {

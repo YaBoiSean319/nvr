@@ -178,11 +178,6 @@ def zone_cells(zone: dict[str, float]) -> int:
     return mask
 
 
-def centre_in(box: dict[str, float], zone: dict[str, float]) -> bool:
-    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-    return zone["x"] <= cx <= zone["x"] + zone["width"] and zone["y"] <= cy <= zone["y"] + zone["height"]
-
-
 def direction_of(start: tuple[float, float], end: tuple[float, float]) -> str:
     dx, dy = end[0] - start[0], end[1] - start[1]
     if max(abs(dx), abs(dy)) < STATIONARY_BELOW:

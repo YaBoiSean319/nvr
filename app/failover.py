@@ -43,7 +43,7 @@ from typing import Any
 import httpx
 
 from . import backup
-from .credentials import decrypt, encrypt, key_path
+from .credentials import decrypt, key_path
 from .incidents import sync_incident
 from .store import connect
 from .webhooks import validate_target_url

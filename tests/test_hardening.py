@@ -10,7 +10,6 @@ import tempfile
 import threading
 import time
 import unittest
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock

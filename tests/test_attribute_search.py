@@ -1,7 +1,6 @@
 """Attribute search across cameras (#125): what the worker stores with each track, and finding tracks by it, with coverage."""
 from __future__ import annotations
 
-import json
 import random
 import subprocess
 import tempfile

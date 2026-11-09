@@ -59,7 +59,7 @@ class PtzDevice:
         if operation == "GetProfiles":
             return '<trt:GetProfilesResponse><trt:Profiles token="profile-main"><tt:Name>Main</tt:Name></trt:Profiles></trt:GetProfilesResponse>'
         if operation == "GetNodes":
-            fov = (f"<tt:RelativePanTiltTranslationSpace><tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationSpaceFov</tt:URI>"
+            fov = ("<tt:RelativePanTiltTranslationSpace><tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationSpaceFov</tt:URI>"
                    "</tt:RelativePanTiltTranslationSpace>") if self.fov else ""
             return ("<tptz:GetNodesResponse><tptz:PTZNode token=\"node-1\"><tt:SupportedPTZSpaces>"
                     "<tt:ContinuousPanTiltVelocitySpace><tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:URI></tt:ContinuousPanTiltVelocitySpace>"

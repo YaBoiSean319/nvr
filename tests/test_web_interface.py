@@ -56,13 +56,25 @@ class WebInterfaceTests(unittest.TestCase):
                 response = self.client.get(old, follow_redirects=False)
                 self.assertEqual((response.status_code, response.headers["location"]), (308, new), old)
 
+    def test_the_preview_redirect_never_leaves_the_nvr(self):
+        # "//host" and "\\host" are read by browsers as another site (#271).
+        with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
+            for old in ("/next//evil.example", "/next//evil.example/login", "/next/%2F%2Fevil.example", "/next/%5Cevil.example",
+                        "/next/%5C%5Cevil.example", "/next/%2F%5Cevil.example", "/next/%09/evil.example"):
+                location = self.client.get(old, follow_redirects=False).headers["location"]
+                self.assertTrue(location.startswith("/") and location[1:2] not in ("/", "\\"), (old, location))
+                self.assertNotIn("\t", location)
+
     def test_api_and_service_paths_are_never_answered_with_the_page(self):
         with patch.object(web_interface, "DIST_DIRECTORY", self.dist):
             missing = self.client.get("/api/does-not-exist")
             self.assertEqual(missing.status_code, 404)
             self.assertEqual(missing.headers["content-type"], "application/json")
             self.assertEqual(self.client.get("/healthz").status_code, 200)
-            self.assertEqual(self.client.get("/openapi.json").status_code, 200)
+            # The API map is for people and tokens that are signed in (#273); the page is never served in its place.
+            self.assertEqual(self.client.get("/openapi.json").status_code, 401)
+            for path in ("/docs", "/docs/oauth2-redirect", "/redoc"):
+                self.assertEqual(self.client.get(path).status_code, 404, path)
 
     def test_legacy_interface_assets_are_gone(self):
         with patch.object(web_interface, "DIST_DIRECTORY", self.dist):

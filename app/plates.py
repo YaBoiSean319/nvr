@@ -348,12 +348,6 @@ def _on_list(db: sqlite3.Connection, list_id: str, plate: str, now: datetime) ->
     return watch["kind"], on_list
 
 
-def list_matches(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool | None:
-    """Whether a plate is on the watch list; None when there is no such list."""
-    found = _on_list(db, list_id, plate, now or datetime.now(timezone.utc))
-    return None if found is None else found[1]
-
-
 def rule_fires(db: sqlite3.Connection, list_id: str, plate: str, now: datetime | None = None) -> bool:
     """Whether a read of this plate raises a rule on the list: a deny list's plate is on it, an allow list's plate is not."""
     found = _on_list(db, list_id, plate, now or datetime.now(timezone.utc))
@@ -513,19 +507,21 @@ def decode_bmp(data: bytes) -> np.ndarray | None:
     return pixels[::-1] if height > 0 else pixels  # a positive height is stored bottom row first
 
 
-async def ffmpeg_snapshot(source: str, timeout: float = 12.0) -> np.ndarray | None:
-    """One frame of a camera's stream at the stream's own size (BGR), or None when it could not be had."""
+async def ffmpeg_snapshot(source: str, timeout: float = 12.0, protocols: str | None = None) -> np.ndarray | None:
+    """One frame of a camera's stream at the stream's own size (BGR), or None when it could not be had. ``protocols`` is for tests that read a generated file;
+    a camera's stream is only ever opened with the recorder's network protocols."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
-    arguments = [ffmpeg, "-v", "error", "-threads", "1"]
-    if source.startswith("rtsp"):
-        arguments += ["-rtsp_transport", "tcp"]
+    from .recording import _PROTOCOLS, _manifest_bytes  # Here, not at the top: recording pulls in much more than plates needs
+
+    # The address carries the camera's login, so it goes to FFmpeg over stdin like the recorder's, never in a process listing (#272).
     # BMP is uncompressed, so it costs no encoding time and carries its own size: the frame is not scaled, whatever the camera's resolution or shape.
-    arguments += ["-i", source, "-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1"]
-    process = await asyncio.create_subprocess_exec(*arguments, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    arguments = [ffmpeg, "-v", "error", "-threads", "1", "-f", "concat", "-safe", "0", "-protocol_whitelist", protocols or _PROTOCOLS, "-i", "pipe:0",
+                 "-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1"]
+    process = await asyncio.create_subprocess_exec(*arguments, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
-        data, _ = await asyncio.wait_for(process.communicate(), timeout)
+        data, _ = await asyncio.wait_for(process.communicate(_manifest_bytes(source)), timeout)
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()

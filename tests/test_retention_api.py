@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -54,11 +56,29 @@ class RetentionApiTests(unittest.TestCase):
         summary=self.client.get("/api/cameras").json()["cameras"][0]
         self.assertEqual(summary["retention_days"],7)
         self.assertEqual(summary["retention_policy_source"],"camera")
-        self.assertIn("projected_days_at_current_activity",summary["retention_coverage"])
+        # The footage summary reads every segment, so it is on the camera's own endpoint, never in the list that is refreshed every 15 s (#277).
+        self.assertNotIn("retention_coverage",summary)
+        self.assertIn("projected_days_at_current_activity",self.client.get(f"/api/cameras/{self.camera}/retention").json())
         self.assertEqual(self.client.delete(f"/api/cameras/{self.camera}/retention").status_code,204)
         self.assertEqual(self.client.get(f"/api/cameras/{self.camera}/retention").json()["policy_source"],"group")
         self.assertEqual(self.client.delete(f"/api/camera-groups/{self.group}/retention").status_code,204)
         self.assertEqual(self.client.get(f"/api/cameras/{self.camera}/retention").json()["policy_source"],"default")
+
+    def test_the_camera_list_does_not_read_a_cameras_footage_index(self):
+        # The list is refreshed every 15 s in every open tab; reading every segment of every camera for it took 1.6 s with 16 cameras
+        # and 30 days (#277). Count the statements that touch the segment index while the list is built.
+        with connect() as db:
+            db.executemany("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,1)",
+                           [(self.camera,f"s{minute}.mp4",f"2026-01-01T00:{minute:02d}:00+00:00",f"2026-01-01T00:{minute:02d}:59+00:00") for minute in range(50)])
+        seen=[]
+        real=sqlite3.connect
+        def watching(*args,**kwargs):
+            connection=real(*args,**kwargs)
+            connection.set_trace_callback(lambda statement: seen.append(statement) if "recording_segments" in statement else None)
+            return connection
+        with patch("sqlite3.connect",watching):
+            self.assertEqual(self.client.get("/api/cameras").status_code,200)
+        self.assertEqual(seen,[])
 
 
 if __name__ == "__main__":

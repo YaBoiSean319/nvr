@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 import unittest
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 

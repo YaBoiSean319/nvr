@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import json
 import secrets
-import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -14,7 +13,7 @@ from typing import Any
 import httpx
 
 from .credentials import decrypt, encrypt
-from .store import connect
+from .store import connect, has_row
 from .webhooks import validate_target_url, url_origin
 
 MIN_INTERVAL_SECONDS = 30
@@ -93,6 +92,8 @@ def claim_due_heartbeat() -> dict[str, Any] | None:
     now = datetime.now(timezone.utc)
     now_text = now.isoformat()
     with connect() as db:
+        if not has_row(db, "SELECT 1 FROM heartbeat_configuration WHERE singleton_id=1 AND enabled=1 AND next_attempt_at<=?", (now_text,)):
+            return None
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT * FROM heartbeat_configuration WHERE singleton_id=1 AND enabled=1 AND next_attempt_at<=?", (now_text,)).fetchone()
         if row is None:

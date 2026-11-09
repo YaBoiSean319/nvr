@@ -4,12 +4,15 @@ import { ApiError } from "@/api/client";
 import { useCameras, useMe } from "@/api/queries";
 import { DraftGuard } from "../drafts";
 import { BulkDialog } from "./BulkDialog";
-import { CameraEditor, type TabContent } from "./CameraEditor";
+import { lazyPage, Page } from "@/app/lazyPage";
+import type { TabContent } from "./CameraEditor";
 import { InventoryTable } from "./InventoryTable";
 import { matches, revealing } from "./inventory";
 import { useCamerasStore } from "./store";
 
-export type CamerasSection = "inventory" | "add" | "groups" | "rules";
+// The editor (twelve tabs) loads when a camera is first selected, not with the inventory (#281).
+const CameraEditor = lazyPage(() => import("./CameraEditor"), "CameraEditor");
+
 
 /** Section navigation shared by Cameras, Add Cameras, Groups & Policies and Rules. */
 function Sections({ admin }: { admin: boolean }) {
@@ -102,7 +105,7 @@ export function CamerasInventory({ extraTabs }: { extraTabs?: TabContent }) {
                 <button type="button" className="button" onClick={() => setFilters(revealing(selected, filters))}>Show in table</button>
               </p>
             ) : null}
-            <CameraEditor key={selected.id} camera={selected} admin={admin} extraTabs={extraTabs} />
+            <Page><CameraEditor key={selected.id} camera={selected} admin={admin} extraTabs={extraTabs} /></Page>
           </>
         )}
       </div>

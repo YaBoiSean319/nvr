@@ -124,11 +124,11 @@ async def play_segment(
     try:
         path = await run_in_threadpool(recording_file_path, row["relative_path"])  # Footage on a cold tier may have to be fetched: not on the event loop
     except (OSError, ValueError):
-        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     acquire_playback(path)
     if not path.is_file():
         release_playback(path)
-        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     if zones or compat:
         # Recordings on disk are not masked: deliver a masked rendering, never the file itself. (Or, for ``compat``, the same picture as H.264.)
         try:
@@ -170,9 +170,9 @@ async def snapshot_segment(
     try:
         path = await run_in_threadpool(recording_file_path, row["relative_path"])
     except (OSError, ValueError):
-        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     if not path.is_file():
-        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     acquire_playback(path)
     offset = max(0.0, (at - start).total_seconds())
     process = None
@@ -234,9 +234,9 @@ def playback_frame_neighbor(
     try:
         path = recording_file_path(row["relative_path"])
     except (OSError, ValueError):
-        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     if not path.is_file():
-        raise HTTPException(status_code=410, detail="Recorded interval is unavailable")
+        raise HTTPException(status_code=410, detail="Recorded interval is unavailable") from None
     acquire_playback(path)
     try:
         offset = max(0.0, (at - start).total_seconds())

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import backup, updates
+from app.routes import all_routes
 from app.application import create_app
 from app.migrations import latest_version
 from app.security import hash_password
@@ -262,8 +263,8 @@ class UpdateApiTests(unittest.TestCase):
 class NoDockerTests(unittest.TestCase):
     def test_no_route_can_pull_an_image_or_restart_a_container(self):
         app = create_app(start_workers=False)
-        paths = {(route.path, tuple(sorted(route.methods or ()))) for route in app.routes if getattr(route, "path", "").startswith("/api/admin/updates")}
-        for route in app.routes:  # No route anywhere is named for pulling or restarting
+        paths = {(route.path, tuple(sorted(route.methods or ()))) for route in all_routes(app) if getattr(route, "path", "").startswith("/api/admin/updates")}
+        for route in all_routes(app):  # No route anywhere is named for pulling or restarting
             self.assertNotRegex(getattr(route, "path", ""), r"(?i)docker|restart|/pull\b|/upgrade/run")
         self.assertEqual({path for path, _ in paths}, {"/api/admin/updates", "/api/admin/updates/settings", "/api/admin/updates/check", "/api/admin/updates/prepare", "/api/admin/updates/plan"})
         for source in ("app/updates.py", "app/api/updates.py"):

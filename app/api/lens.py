@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app import dewarp

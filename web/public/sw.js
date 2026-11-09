@@ -17,8 +17,18 @@ self.addEventListener("install", event => {
     if (!isPage(page)) throw new Error("The application page is unavailable");
     // The page and every hashed file it names, so the shell also opens without the server.
     const html = await page.clone().text();
-    const assets = [...new Set(html.match(/\/assets\/[\w.-]+/g) || [])];
-    await cache.addAll(assets);
+    const assets = new Set(html.match(/\/assets\/[\w.-]+/g) || []);
+    // The pages that load on demand are not named in the page; the build lists them in a manifest. Without it the shell still installs.
+    try {
+      const listing = await fetch(new Request("/assets/chunks.json", { cache: "reload" }));
+      if (listing.ok) {
+        for (const entry of Object.values(await listing.json())) {
+          if (entry.file) assets.add(`/${entry.file}`);
+          for (const style of entry.css || []) assets.add(`/${style}`);
+        }
+      }
+    } catch (error) { /* offline pages that were never opened will need the server */ }
+    await cache.addAll([...assets]);
     await cache.put("/", page);
   })());
 });

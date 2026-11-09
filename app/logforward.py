@@ -172,8 +172,12 @@ class Forwarder:
     def start(self) -> None:
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, wait: float = 0.0) -> None:
+        """Ask the sender to finish. With ``wait`` it also waits that many seconds for the thread to end, so nothing it was doing (it reads the
+        database to scrub secrets) goes on after the caller has moved on; the process itself never waits."""
         self._stop.set()
+        if wait > 0 and self._thread.is_alive():
+            self._thread.join(wait)
 
     def flush(self, timeout: float = EXIT_FLUSH_SECONDS) -> None:
         """Give what is queued a moment to go out, as the process ends."""

@@ -39,7 +39,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from .access import may_view_camera
 from .alarms import label_text
 from .credentials import decrypt, derived_key, encrypt
-from .store import connect
+from .store import connect, has_row
 
 logger = logging.getLogger("nvr.push")
 
@@ -291,6 +291,8 @@ def _queue_for_alarm(db: sqlite3.Connection, alarm_id: str) -> int:
 # --- delivery ---------------------------------------------------------------------------
 
 def _claim(db: sqlite3.Connection) -> sqlite3.Row | None:
+    if not has_row(db, "SELECT 1 FROM push_deliveries WHERE status='queued' AND next_attempt_at<=? LIMIT 1", (_now().isoformat(),)):
+        return None
     db.execute("BEGIN IMMEDIATE")
     try:
         row = db.execute(

@@ -157,7 +157,6 @@ def forecast(db: sqlite3.Connection, now: datetime | None = None, usage: Callabl
         headroom[key] = budget - needed
         for volume_id in ids:
             disk_of[volume_id] = {"key": key, "level": level, "until": until, "budget": budget, "active": active, "rates": rates, "policies": policies}
-    names = {volume_id: [volume_id] for volume_id in volumes}
     for camera in measured:
         entry = {key: camera[key] for key in ("id", "name", "volume_id", "policy_days", "policy_source", "stored_bytes")}
         entry.update(write_bytes_per_day=round(camera["write_bytes_per_day"]), age_days=round(camera["age_days"], 2))

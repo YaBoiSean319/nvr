@@ -15,7 +15,6 @@ import app.migrations as migrations
 from app import backup
 from app.application import create_app
 from app.credentials import decrypt, encrypt
-from app.principal import COOKIE_NAME
 from app.store import connect, initialize
 from tests.test_support import TEST_PASSWORD, principal
 

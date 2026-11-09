@@ -8,12 +8,11 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 from fastapi.testclient import TestClient
 
-from app import face_models, face_scan, faces, rules
+from app import face_scan, faces, rules
 from app.main import app
 from app.principal import current_user
 from app.store import connect, initialize

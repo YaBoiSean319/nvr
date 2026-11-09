@@ -239,12 +239,6 @@ class RecordingManager:
         self.tasks.clear()
         self.task_modes.clear()
 
-    def ensure(self, camera_id: str) -> None:
-        task = self.tasks.get(camera_id)
-        if task is None or task.done():
-            self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, "continuous"), name=f"record-{camera_id}")
-            self.task_modes[camera_id] = "continuous"
-
     async def remove(self, camera_id: str) -> None:
         task = self.tasks.pop(camera_id, None)
         self.task_modes.pop(camera_id, None)

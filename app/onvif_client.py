@@ -139,10 +139,6 @@ def _netloc(host: str, port: int | None) -> str:
     return f"{shown}:{port}" if port else shown
 
 
-def _escape_attr(value: str) -> str:
-    return escape(value, {'"': "&quot;"})
-
-
 class OnvifClient:
     """One camera's ONVIF services. Make one per camera per operation; it holds what it learned (clock offset, authentication) in memory only."""
 

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from .discovery import IP_RANGE_PORTS
 from .onvif_client import OnvifClient, OnvifError, normalise_host
-from .onvif_profiles import MediaProfile, choose_profiles
+from .onvif_profiles import choose_profiles
 
 SOAP = "http://www.w3.org/2003/05/soap-envelope"
 DEVICE = "http://www.onvif.org/ver10/device/wsdl"
@@ -40,14 +40,6 @@ class OnvifStreamProfile:
 
 def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
-
-
-def _soap(action: str, body: str) -> bytes:
-    return f'''<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="{SOAP}" xmlns:tds="{DEVICE}" xmlns:trt="{MEDIA}" xmlns:tt="{SCHEMA}">
- <s:Header><s:Action s:mustUnderstand="1">{action}</s:Action></s:Header>
- <s:Body>{body}</s:Body>
-</s:Envelope>'''.encode("utf-8")
 
 
 def _parse_response(data: bytes) -> ET.Element:

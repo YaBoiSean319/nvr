@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import json
 import typing
 import logging
 import re
@@ -25,14 +24,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
-from urllib.parse import quote
 
 import httpx
 from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
-from .access import SITE_SEPARATOR as SEP, site_of
-from .credentials import decrypt, encrypt
+from .access import SITE_SEPARATOR as SEP
+from .credentials import decrypt
 from .store import connect
 from .webhooks import validate_target_url
 
@@ -301,9 +299,6 @@ def console_camera(link: SiteLink, camera: dict[str, Any]) -> dict[str, Any]:
     view = scrub(rewrite(link.id, {key: camera[key] for key in CAMERA_FIELDS if key in camera}))
     view.update({"id": prefixed(link.id, camera["id"]), "group_name": link.name, "site": {"id": link.id, "name": link.name},
                  "camera_ip": None, "device_service_url": None, "onvif_profile_token": None, "live_substream_profile_token": None, "stream_url": "", "storage_volume_id": None})
-    coverage = camera.get("retention_coverage")
-    if isinstance(coverage, dict):
-        view["retention_coverage"] = scrub(coverage)
     return view
 
 
@@ -454,10 +449,6 @@ async def combine_alarms(local: dict[str, Any] | None, context: Context) -> dict
         rules.extend(site_rules)
     alarms.sort(key=lambda item: (item["occurred_at"], item["id"]), reverse=True)
     return {"alarms": alarms[: kwargs["limit"]], "counts": counts, "rules": rules, "sites": [site_status(link) for link in context.links]}
-
-
-def _empty_alarms() -> dict[str, Any]:
-    return {"alarms": [], "counts": {key: 0 for key in ("new", "acknowledged", "assigned", "resolved")}, "rules": []}
 
 
 async def split_timeline(kwargs: dict[str, Any]) -> tuple[dict[str, Any], Context]:

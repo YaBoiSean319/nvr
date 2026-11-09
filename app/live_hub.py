@@ -17,7 +17,6 @@ import logging
 import shutil
 import struct
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Callable, Iterator
 
 from . import acceleration
@@ -185,10 +184,6 @@ class Fragmenter:
 
 
 # --- shared streams ---------------------------------------------------------------
-
-class ViewerTooSlow(Exception):
-    pass
-
 
 @dataclass(eq=False)
 class Viewer:
@@ -446,6 +441,3 @@ def summarise_starts(starts: list[dict[str, object]]) -> dict[str, object]:
                          "stages_median_ms": {stage: _percentile(ms(entries, stage), 0.5) for stage in ("spawned_ms", "init_ms", "first_keyframe_ms")}}
     return summary
 
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
