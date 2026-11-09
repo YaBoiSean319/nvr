@@ -53,8 +53,16 @@
     });
   }
 
+  // The address that counts is the one native code enrolled (#299): the saved address is only a convenience, and one that differs is not trusted.
+  function enrolledOrigin() {
+    if (!plugins.EnrolledServer) return Promise.resolve(cap && cap.isNativePlatform && cap.isNativePlatform() ? null : undefined);
+    return plugins.EnrolledServer.current().then(function (r) { return r.origin || null; }, function () { return null; });
+  }
+
   function start() {
-    get("server.url").then(function (address) {
+    Promise.all([get("server.url"), enrolledOrigin()]).then(function (found) {
+      var address = found[0], enrolled = found[1];
+      if (enrolled !== undefined && enrolled !== address) { address = null; }  // Not enrolled here: ask again rather than open whatever was saved
       if (!address) { status.hidden = true; form.hidden = false; return; }
       unlockFirst().then(function (ok) {
         if (ok) { open(address); return; }
@@ -79,10 +87,12 @@
       : fetch(address + "/api/setup/status").then(function (r) { return r.json(); }).then(function (d) { return typeof d.setup_required === "boolean"; });
     check.then(function (ok) {
       if (!ok) throw new Error("not an NVR");
-      return set("server.url", address).then(function () { open(address); });
-    }).catch(function () {
+      return set("server.url", address)
+        .then(function () { return plugins.EnrolledServer ? plugins.EnrolledServer.enrol({ url: address }) : null; })
+        .then(function () { open(address); });
+    }).catch(function (error) {
       status.hidden = true;
-      say("That address did not answer like an NVR. Check it and that this phone can reach it.");
+      say(error && error.message && /cannot be used/.test(error.message) ? error.message : "That address did not answer like an NVR. Check it and that this phone can reach it.");
     });
   });
 
