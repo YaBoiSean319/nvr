@@ -30,16 +30,11 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
   const entries = useFaceEntries();
   const list: FaceEntry[] = entries.data?.entries ?? [];
 
-  const look = useMutation({
-    mutationFn: () => api<Found>("/api/faces/find", { method: "POST", body: { camera_id: chosenCamera, at: new Date(playbackClock.time()).toISOString() } }),
-    onMutate: () => { setFound(null); setPicked(null); setMessage(null); },
-    onSuccess: setFound,
-  });
   const add = useMutation({
     mutationFn: () => {
       const face = found!.faces[picked!]!;
       const body: Record<string, unknown> = { camera_id: found!.camera_id, at: found!.at, box: face.box };
-      if (mode === "existing") body.entry_id = entryId;
+      if (mode === "existing") body.entry_id = chosenEntry;
       else {
         body.name = name.trim();
         body.reason = reason.trim();
@@ -54,8 +49,17 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
     },
   });
 
+  const look = useMutation({
+    mutationFn: () => api<Found>("/api/faces/find", { method: "POST", body: { camera_id: chosenCamera, at: new Date(playbackClock.time()).toISOString() } }),
+    onMutate: () => { setFound(null); setPicked(null); setMessage(null); add.reset(); },
+    onSuccess: setFound,
+  });
+  // A new face is a new attempt: the last failure is not shown against it.
+  const pick = (index: number) => { add.reset(); setPicked(index); };
+  // Someone deleted in Settings meanwhile is no longer the selection, and Add waits for a real one.
+  const chosenEntry = list.some(entry => entry.id === entryId) ? entryId : "";
   const submit = (event: FormEvent) => { event.preventDefault(); if (found && picked !== null) add.mutate(); };
-  const ready = picked !== null && (mode === "existing" ? entryId !== "" : name.trim() !== "" && reason.trim() !== "");
+  const ready = picked !== null && (mode === "existing" ? chosenEntry !== "" : name.trim() !== "" && reason.trim() !== "");
   return (
     <aside className="export-drawer" id="face-search" aria-label="Face watch">
       <header className="export-head">
@@ -93,7 +97,7 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
                   const chosen = picked === index;
                   return (
                     <button key={index} type="button" aria-label={`Face ${index + 1}${face.usable ? "" : `, not usable: ${face.reason ?? ""}`}`} aria-pressed={chosen} disabled={!face.usable}
-                            title={face.usable ? `Face ${index + 1}` : face.reason ?? ""} onClick={() => setPicked(index)}
+                            title={face.usable ? `Face ${index + 1}` : face.reason ?? ""} onClick={() => pick(index)}
                             style={{ position: "absolute", left: `${face.box.x * 100}%`, top: `${face.box.y * 100}%`, width: `${face.box.width * 100}%`, height: `${face.box.height * 100}%`,
                                      border: `${chosen ? 4 : 2}px ${face.usable ? "solid" : "dashed"} ${chosen ? "#2ecc71" : "#f1c40f"}`, boxShadow: chosen ? "0 0 0 2px rgba(0,0,0,0.6)" : undefined,
                                      background: chosen ? "rgba(46, 204, 113, 0.18)" : "transparent", padding: 0, cursor: face.usable ? "pointer" : "not-allowed" }} />
@@ -107,7 +111,7 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
                   <label className="check"><input type="radio" name="face-mode" checked={mode === "existing"} disabled={list.length === 0} onChange={() => setMode("existing")} /> Another picture of someone on the list</label>
                   {mode === "existing" ? (
                     <label className="attr-field"><span>Who</span>
-                      <select value={entryId} onChange={event => setEntryId(event.target.value)}>
+                      <select value={chosenEntry} onChange={event => setEntryId(event.target.value)}>
                         <option value="">Choose…</option>
                         {list.map(entry => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
                       </select>

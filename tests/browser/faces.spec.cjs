@@ -135,7 +135,7 @@ test("matches are fetched when asked for, and a save elsewhere on the page does 
   await page.getByRole("slider", { name: "Match threshold" }).fill("0.5");
   await page.getByRole("button", { name: "Save threshold" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Saved." })).toBeVisible();
-  await page.evaluate(() => { window.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange")); });
+  await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));  // What the query library listens to for a return to the window
   expect(fetched).toBe(1); // Switching a camera, saving and coming back to the window left the matches alone
 
   await section(page, "Matches found").getByRole("button", { name: "Refresh matches" }).click();
@@ -230,4 +230,41 @@ test("when faces were found but the picture could not be made, nothing can be ch
 
   await panel.getByRole("button", { name: "Look at the playhead" }).click(); // Trying again asks again
   await expect(panel.getByRole("alert")).toContainText("The picture could not be shown");
+});
+
+test("each attempt to add a face starts clean: an old error does not carry over, and a person deleted meanwhile is no longer selected", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const now = new Date().toISOString();
+  let entries = [{ id: "e1", name: "Visitor A", reason: "Trespassed", expires_at: null, expired: false, enabled: true, embeddings: 1, has_picture: false, created_by: "admin", created_at: now, updated_at: now }];
+  await page.route("**/api/faces/watch", route => (route.request().method() === "GET" ? route.fulfill({ json: { entries, match_threshold: 0.45 } }) : route.fallback()));
+  const faces = [{ box: { x: 0.1, y: 0.1, width: 0.2, height: 0.3 }, score: 0.9, pixels: [80, 90], usable: true, reason: null }, { box: { x: 0.6, y: 0.1, width: 0.2, height: 0.3 }, score: 0.9, pixels: [70, 80], usable: true, reason: null }];
+  const { panel } = await openFaceDrawer(page, { faces, addStatus: 422 });
+  const look = panel.getByRole("button", { name: "Look at the playhead" });
+  await look.click();
+  await panel.getByRole("button", { name: "Face 1", exact: true }).click();
+  const form = panel.getByRole("form", { name: "Add this face" });
+  await form.getByLabel("Name or label").fill("Visitor B");
+  await form.getByLabel("Why they are on the list").fill("Trespassed");
+  await form.getByRole("button", { name: "Add to the face watch list" }).click();
+  await expect(form.getByRole("alert")).toContainText("That did not work");
+
+  await look.click(); // Looking again clears it
+  await panel.getByRole("button", { name: "Face 2", exact: true }).click();
+  await expect(panel.getByRole("form", { name: "Add this face" }).getByRole("alert")).toHaveCount(0);
+
+  await form.getByLabel("Name or label").fill("Visitor B");
+  await form.getByLabel("Why they are on the list").fill("Trespassed");
+  await form.getByRole("button", { name: "Add to the face watch list" }).click();
+  await expect(form.getByRole("alert")).toBeVisible();
+  await panel.getByRole("button", { name: "Face 1", exact: true }).click(); // Picking a different face clears it too
+  await expect(form.getByRole("alert")).toHaveCount(0);
+
+  await form.getByRole("radio", { name: "Another picture of someone on the list" }).check();
+  await form.getByLabel("Who").selectOption("e1");
+  await expect(form.getByRole("button", { name: "Add to the face watch list" })).toBeEnabled();
+  entries = []; // Deleted in Settings in the meantime
+  await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));  // The list is read again when the window is returned to
+  await expect(form.getByLabel("Who")).toHaveValue("");
+  await expect(form.getByRole("button", { name: "Add to the face watch list" })).toBeDisabled();
 });
