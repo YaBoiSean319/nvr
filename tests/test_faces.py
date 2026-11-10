@@ -277,6 +277,42 @@ class SightingTests(Case):
         self.assertEqual(self.audit_actions().count("face_sighting_picture_viewed"), 2)
 
 
+class RuleCoverageTests(Case):
+    """The page offers the alert rule only for switched-on cameras no enabled face rule covers (#307), as Fall detection does."""
+
+    def unalerted(self) -> list[str]:
+        return self.client.get("/api/faces/cameras").json()["unalerted_camera_ids"]
+
+    def switch(self, *cameras: str) -> None:
+        for camera in cameras:
+            self.assertEqual(self.client.put(f"/api/faces/cameras/{camera}", json={"enabled": True}).status_code, 200)
+
+    def rule(self, cameras: list[str]) -> dict:
+        made = self.client.post("/api/rules", json={"name": "Watched face seen", "camera_ids": cameras, "condition": {"type": "face", "entry_ids": []}})
+        self.assertEqual(made.status_code, 201, made.text)
+        return made.json()
+
+    def test_with_no_rule_every_switched_on_camera_is_flagged_and_switched_off_ones_are_not(self):
+        self.assertEqual(self.unalerted(), [])
+        self.switch("cam-1")
+        self.assertEqual(self.unalerted(), ["cam-1"])
+
+    def test_a_rule_covering_some_cameras_leaves_the_others_flagged_and_a_camera_switched_on_later_brings_the_notice_back(self):
+        self.switch("cam-1")
+        self.rule(["cam-1"])
+        self.assertEqual(self.unalerted(), [])
+        self.switch("cam-2")
+        self.assertEqual(self.unalerted(), ["cam-2"])
+
+    def test_a_rule_covering_every_switched_on_camera_clears_the_notice_and_a_disabled_one_does_not_count(self):
+        self.switch("cam-1", "cam-2")
+        made = self.rule(["cam-1", "cam-2"])
+        self.assertEqual(self.unalerted(), [])
+        keep = {key: made[key] for key in ("name", "camera_ids", "group_ids", "condition", "classes", "schedule", "cooldown_seconds", "pop_into_live")}
+        self.client.put(f"/api/rules/{made['id']}", json={**keep, "enabled": False, "actions": []})
+        self.assertEqual(self.unalerted(), ["cam-2", "cam-1"])  # In the page's order: by camera name
+
+
 class AccessTests(Case):
     def test_only_administrators_reach_any_of_it(self):
         entry = self.add().json()

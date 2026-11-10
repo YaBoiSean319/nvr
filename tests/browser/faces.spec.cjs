@@ -141,3 +141,28 @@ test("matches are fetched when asked for, and a save elsewhere on the page does 
   await section(page, "Matches found").getByRole("button", { name: "Refresh matches" }).click();
   await expect.poll(() => fetched).toBe(2); // An explicit refresh is a request to look
 });
+
+test("the alert rule is offered once for the switched-on cameras no face rule covers, and cannot be made twice", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  const now = new Date().toISOString();
+  await page.route("**/api/faces/watch", route => route.fulfill({ json: { entries: [{ id: "e1", name: "Visitor A", reason: "Trespassed", expires_at: null, expired: false, enabled: true, embeddings: 1, has_picture: false, created_by: "admin", created_at: now, updated_at: now }], match_threshold: 0.45 } }));
+  let made = 0;
+  await page.route("**/api/rules", route => { if (route.request().method() === "POST") made += 1; return route.continue(); });
+  await page.goto("/settings/faces");
+  const create = page.getByRole("button", { name: "Create an alert rule for these cameras" });
+  await expect(create).toHaveCount(0); // No camera is looking yet
+
+  await page.getByRole("checkbox", { name: "Look for watched faces on Camera 001" }).click();
+  await expect(create).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "One camera is looking for watched faces" })).toBeVisible();
+  await create.dblclick(); // Two clicks in a row make one rule
+  await expect(create).toHaveCount(0);
+  expect(made).toBe(1);
+
+  await page.getByRole("checkbox", { name: "Look for watched faces on Camera 002" }).click(); // A camera switched on afterwards is not in that rule
+  await expect(page.getByRole("status").filter({ hasText: "One camera is looking for watched faces" })).toBeVisible();
+  await create.click();
+  await expect(create).toHaveCount(0);
+  expect(made).toBe(2);
+});

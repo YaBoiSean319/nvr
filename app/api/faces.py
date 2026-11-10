@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field, model_validator
 
 from app import face_models, faces, track_privacy
+from app import rules as rules_engine
 from app.principal import Administrator
 from app.store import connect
 
@@ -228,7 +229,12 @@ def cameras(_: Administrator) -> dict[str, Any]:
     with connect() as db:
         enabled = set(faces.cameras_enabled(db))
         rows = db.execute("SELECT id,name FROM cameras WHERE archived_at IS NULL ORDER BY name,id").fetchall()
-    return {"cameras": [{"camera_id": row["id"], "name": row["name"], "enabled": row["id"] in enabled} for row in rows], "models_available": face_models.installed()}
+        face_rules = [rule for rule in rules_engine.load_rules(db) if rule.condition_type == "face" and rule.enabled]
+        # Switched-on cameras no enabled face rule watches: a match there is stored but alerts nobody, so the page offers the rule for exactly these (#307).
+        unalerted = [row["id"] for row in rows if row["id"] in enabled
+                     and not any(rule.watches_camera(row["id"], rules_engine._camera_groups(db, row["id"])) for rule in face_rules)]
+    return {"cameras": [{"camera_id": row["id"], "name": row["name"], "enabled": row["id"] in enabled} for row in rows], "models_available": face_models.installed(),
+            "unalerted_camera_ids": unalerted}
 
 
 @router.put("/api/faces/cameras/{camera_id}")
