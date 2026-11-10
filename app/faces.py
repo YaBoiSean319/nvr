@@ -11,14 +11,13 @@ import json
 import math
 import shutil
 import sqlite3
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 
-from . import face_models, plates, privacy, track_privacy
+from . import face_models, jpeg, plates, privacy, track_privacy
 from .store import connect
 from app.clock import now as _now, parse as _parse
 
@@ -209,17 +208,7 @@ def choose(found: list[dict[str, Any]], box: dict[str, float] | None, point: dic
 
 def frame_jpeg(frame: np.ndarray, width: int = 960) -> bytes | None:
     """The whole picture as a JPEG no wider than `width`, for choosing a face on it."""
-    ffmpeg = shutil.which("ffmpeg")
-    if frame.ndim != 3 or frame.size == 0 or not ffmpeg:
-        return None
-    height, columns = frame.shape[:2]
-    try:
-        result = subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{columns}x{height}", "-i", "pipe:0",
-                                 "-vf", f"scale='min({width},iw)':-2:flags=bicubic", "-frames:v", "1", "-q:v", "4", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-                                input=np.ascontiguousarray(frame, dtype=np.uint8).tobytes(), capture_output=True, timeout=10, check=False)
-    except subprocess.TimeoutExpired:
-        return None
-    return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None
+    return jpeg.encode(frame, scale=f"scale='min({width},iw)':-2:flags=bicubic", quality=4, timeout=10)
 
 
 def picture_of(frame: np.ndarray, face: face_models.Face) -> bytes | None:
