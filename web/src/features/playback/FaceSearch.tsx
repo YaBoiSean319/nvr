@@ -10,6 +10,9 @@ import { usePlaybackStore } from "./store";
 interface Box { x: number; y: number; width: number; height: number }
 interface Found { camera_id: string; at: string; picture: string | null; faces: { box: Box; score: number; pixels: [number, number]; usable: boolean; reason: string | null }[] }
 
+/** The order to draw the faces in: biggest box first, so the smallest is on top. */
+const drawOrder = (faces: Found["faces"]) => faces.map((_, index) => index).sort((a, b) => faces[b]!.box.width * faces[b]!.box.height - faces[a]!.box.width * faces[a]!.box.height || a - b);
+
 /** Choose a face in the picture at the playhead and put that person on the face watch list (or add another picture of someone already on it). Administrators only. */
 export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras: Map<string, Camera> }) {
   const client = useQueryClient();
@@ -81,13 +84,20 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
               <p className="muted" role="status">{found.faces.length} {found.faces.length === 1 ? "face" : "faces"} found. Choose one.</p>
               <div className="face-picture" style={{ position: "relative" }}>
                 {found.picture ? <img src={`data:image/jpeg;base64,${found.picture}`} alt="The picture at the playhead" style={{ width: "100%", display: "block" }} /> : <div className="grid-empty">No picture</div>}
-                {found.faces.map((face, index) => (
-                  <button key={index} type="button" aria-label={`Face ${index + 1}${face.usable ? "" : `, not usable: ${face.reason ?? ""}`}`} aria-pressed={picked === index} disabled={!face.usable}
-                          title={face.usable ? `Face ${index + 1}` : face.reason ?? ""} onClick={() => setPicked(index)}
-                          style={{ position: "absolute", left: `${face.box.x * 100}%`, top: `${face.box.y * 100}%`, width: `${face.box.width * 100}%`, height: `${face.box.height * 100}%`,
-                                   border: `2px ${face.usable ? "solid" : "dashed"} ${picked === index ? "#2ecc71" : "#f1c40f"}`, background: "transparent", padding: 0, cursor: face.usable ? "pointer" : "not-allowed" }} />
-                ))}
+                {/* Largest first, so a smaller box inside a larger one is drawn over it and is the one under the pointer, whatever order the faces were found in. */}
+                {drawOrder(found.faces).map(index => {
+                  const face = found.faces[index]!;
+                  const chosen = picked === index;
+                  return (
+                    <button key={index} type="button" aria-label={`Face ${index + 1}${face.usable ? "" : `, not usable: ${face.reason ?? ""}`}`} aria-pressed={chosen} disabled={!face.usable}
+                            title={face.usable ? `Face ${index + 1}` : face.reason ?? ""} onClick={() => setPicked(index)}
+                            style={{ position: "absolute", left: `${face.box.x * 100}%`, top: `${face.box.y * 100}%`, width: `${face.box.width * 100}%`, height: `${face.box.height * 100}%`,
+                                     border: `${chosen ? 4 : 2}px ${face.usable ? "solid" : "dashed"} ${chosen ? "#2ecc71" : "#f1c40f"}`, boxShadow: chosen ? "0 0 0 2px rgba(0,0,0,0.6)" : undefined,
+                                     background: chosen ? "rgba(46, 204, 113, 0.18)" : "transparent", padding: 0, cursor: face.usable ? "pointer" : "not-allowed" }} />
+                  );
+                })}
               </div>
+              {picked !== null ? <p className="muted" role="status">Face {picked + 1} is chosen.</p> : null}
               {picked !== null ? (
                 <form className="attr-form" onSubmit={submit} aria-label="Add this face">
                   <label className="check"><input type="radio" name="face-mode" checked={mode === "new"} onChange={() => setMode("new")} /> A new person</label>

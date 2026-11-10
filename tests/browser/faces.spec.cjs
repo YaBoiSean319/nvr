@@ -166,3 +166,52 @@ test("the alert rule is offered once for the switched-on cameras no face rule co
   await expect(create).toHaveCount(0);
   expect(made).toBe(2);
 });
+
+/** The Playback drawer with the picture at the playhead answered by the test: `faces` as the server would list them, and the adds it is sent. */
+async function openFaceDrawer(page, { faces, picture = PICTURE, addStatus = 201 }) {
+  const sent = [];
+  const now = new Date().toISOString();
+  await page.route("**/api/faces/find", route => route.fulfill({ json: { camera_id: "x", at: now, picture, faces } }));
+  await page.route("**/api/faces/watch", async route => {
+    if (route.request().method() !== "POST") return route.fallback();
+    sent.push(route.request().postDataJSON());
+    return addStatus === 201
+      ? route.fulfill({ status: 201, json: { id: "e1", name: "Visitor A", reason: "Trespassed", expires_at: null, expired: false, enabled: true, embeddings: 1, has_picture: false, created_by: "admin", created_at: now, updated_at: now } })
+      : route.fulfill({ status: addStatus, json: { detail: "That did not work" } });
+  });
+  await page.goto("/playback");
+  await page.getByRole("button", { name: /^Camera 001/ }).click();
+  await page.getByRole("button", { name: "Find a face…" }).click();
+  const panel = page.getByRole("complementary", { name: "Face watch" });
+  await expect(panel).toBeVisible();
+  return { panel, sent };
+}
+
+test("with one face box inside another, the smaller face is the one chosen, whatever order they were found in, and it can be reached by keyboard", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const small = { x: 0.4, y: 0.4, width: 0.1, height: 0.1 };
+  const large = { x: 0.2, y: 0.2, width: 0.5, height: 0.5 };
+  // The larger box is found last, so drawn in found order it would lie over the smaller one.
+  const { panel, sent } = await openFaceDrawer(page, { faces: [{ box: small, score: 0.9, pixels: [60, 60], usable: true, reason: null }, { box: large, score: 0.8, pixels: [200, 200], usable: true, reason: null }] });
+  await panel.getByRole("button", { name: "Look at the playhead" }).click();
+  await expect(panel).toContainText("2 faces found");
+
+  const frame = await panel.locator(".face-picture").boundingBox();
+  await page.mouse.click(frame.x + frame.width * 0.45, frame.y + frame.height * 0.45); // Inside both boxes
+  await expect(panel.getByRole("button", { name: "Face 1", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(panel.getByRole("status").filter({ hasText: "Face 1 is chosen" })).toBeVisible(); // Marked before the form is filled in
+  const form = panel.getByRole("form", { name: "Add this face" });
+  await form.getByLabel("Name or label").fill("Visitor A");
+  await form.getByLabel("Why they are on the list").fill("Trespassed");
+  await form.getByRole("button", { name: "Add to the face watch list" }).click();
+  await expect(panel).toContainText("Visitor A is on the face watch list");
+  expect(sent[0].box).toEqual(small);
+
+  // Every usable face is a button that can be focused and pressed from the keyboard.
+  await panel.getByRole("button", { name: "Look at the playhead" }).click();
+  await expect(panel).toContainText("2 faces found");
+  await panel.getByRole("button", { name: "Face 2", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(panel.getByRole("button", { name: "Face 2", exact: true })).toHaveAttribute("aria-pressed", "true");
+});
