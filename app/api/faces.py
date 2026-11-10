@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
@@ -15,6 +15,7 @@ from app.principal import Administrator
 from app.store import connect
 
 router = APIRouter()
+PICTURE_AUDIT_INTERVAL = timedelta(minutes=10)
 
 
 def _raise(error: faces.FaceError) -> None:
@@ -270,5 +271,10 @@ def sighting_picture(sighting_id: str, user: Administrator) -> Response:
                 box = None
             if not track_privacy.box_usable(box) or track_privacy.box_touches(box, masks):
                 raise HTTPException(status_code=404, detail="No picture for that sighting")
-        faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
+        # A list fetches each thumbnail again whenever it is redrawn: looking at a picture is recorded, once per person and match in a while, not once per fetch (#306).
+        recent = db.execute("SELECT 1 FROM audit_log WHERE actor_id=? AND action='face_sighting_picture_viewed' AND resource_id=? AND details_json=? AND created_at>?",
+                            (int(user["id"]), row["entry_id"], json.dumps({"sighting_id": sighting_id}, separators=(",", ":")),
+                             (datetime.now(timezone.utc) - PICTURE_AUDIT_INTERVAL).strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
+        if recent is None:
+            faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
     return Response(bytes(row["picture"]), media_type="image/jpeg", headers={"Cache-Control": "no-store"})

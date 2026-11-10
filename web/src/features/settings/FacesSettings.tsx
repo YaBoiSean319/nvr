@@ -44,7 +44,8 @@ export function FacesSettings() {
   const watch = useFaceEntries();
   const cameras = useQuery({ queryKey: [...FACES_KEY, "cameras"], queryFn: ({ signal }) => api<FaceCameras>("/api/faces/cameras", { signal }) });
   const [showSightings, setShowSightings] = useState(false);
-  const sightings = useQuery({ queryKey: [...FACES_KEY, "sightings"], enabled: showSightings, staleTime: 0, queryFn: ({ signal }) => api<{ sightings: Sighting[] }>("/api/faces/sightings", { signal }) });
+  // Looking at matches is audited, so they are fetched when the person asks (the button, Refresh) and never by a save elsewhere on the page, a return to the window or a redraw (#306).
+  const sightings = useQuery({ queryKey: ["face-sightings"], enabled: showSightings, staleTime: Infinity, gcTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false, queryFn: ({ signal }) => api<{ sightings: Sighting[] }>("/api/faces/sightings", { signal }) });
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [threshold, setThreshold] = useState<number | null>(null);
@@ -134,6 +135,10 @@ export function FacesSettings() {
         {!showSightings ? (
           <button type="button" className="button" onClick={() => setShowSightings(true)}>Show recent matches</button>
         ) : (
+          <>
+          <div className="field-actions">
+            <button type="button" className="button" disabled={sightings.isFetching} onClick={() => void sightings.refetch()}>Refresh matches</button>
+          </div>
           <ul className="status-list" aria-label="Recent matches">
             {(sightings.data?.sightings ?? []).map(item => (
               <li key={item.id}>
@@ -144,6 +149,7 @@ export function FacesSettings() {
             ))}
             {sightings.data?.sightings.length === 0 ? <li className="muted">No matches yet.</li> : null}
           </ul>
+          </>
         )}
         <p className="muted field-hint">Looking at matches and their pictures is recorded in the audit log.</p>
       </section>

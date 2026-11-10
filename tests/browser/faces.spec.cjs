@@ -116,3 +116,28 @@ test("the rule editor offers the face condition, with the people on the list to 
   expect(body.condition).toEqual({ type: "face", entry_ids: ["e1"] });
   await expect(editor.getByRole("status")).toContainText("Saved.");
 });
+
+test("matches are fetched when asked for, and a save elsewhere on the page does not fetch them or write another audit row", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  let fetched = 0;
+  await page.route("**/api/faces/sightings", route => { fetched += 1; return route.continue(); });
+  await page.goto("/settings/faces");
+  await expect(section(page, "Matches found")).toBeVisible();
+  expect(fetched).toBe(0); // Nothing is fetched, or audited, just by opening the page
+
+  await section(page, "Matches found").getByRole("button", { name: "Show recent matches" }).click();
+  await expect(section(page, "Matches found").getByText("No matches yet.")).toBeVisible();
+  expect(fetched).toBe(1);
+
+  await page.getByRole("checkbox", { name: "Look for watched faces on Camera 001" }).click();
+  await expect(page.getByRole("checkbox", { name: "Look for watched faces on Camera 001" })).toBeChecked();
+  await page.getByRole("slider", { name: "Match threshold" }).fill("0.5");
+  await page.getByRole("button", { name: "Save threshold" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved." })).toBeVisible();
+  await page.evaluate(() => { window.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange")); });
+  expect(fetched).toBe(1); // Switching a camera, saving and coming back to the window left the matches alone
+
+  await section(page, "Matches found").getByRole("button", { name: "Refresh matches" }).click();
+  await expect.poll(() => fetched).toBe(2); // An explicit refresh is a request to look
+});
