@@ -165,7 +165,9 @@ class ListTests(Case):
     def test_the_list_shows_expiry_and_only_live_entries_are_compared(self):
         self.add(name="Live")
         self.add(name="Soon gone", expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
-        expired = self.add(name="Expired", expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat()).json()
+        expired = self.add(name="Expired", expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat()).json()
+        with connect() as db:  # An entry becomes expired as time passes; one cannot be made already expired (#311)
+            db.execute("UPDATE face_watch_entries SET expires_at=? WHERE id=?", ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), expired["id"]))
         off = self.add(name="Switched off").json()
         self.assertTrue(self.client.patch(f"/api/faces/watch/{off['id']}", json={"enabled": False}).json()["enabled"] is False)
         entries = {item["name"]: item for item in self.client.get("/api/faces/watch").json()["entries"]}
@@ -208,6 +210,33 @@ class ChangeTests(Case):
         self.assertEqual(self.client.get(f"/api/faces/watch/{entry['id']}/picture").status_code, 404)
         self.assertEqual(self.client.delete(f"/api/faces/watch/{entry['id']}").status_code, 404)
         self.assertEqual(self.audit_actions()[-1], "face_watch_removed")
+
+
+class ExpiryTests(Case):
+    """An expiry that is not in the future is refused, with a message that says why, when adding and when changing (#311)."""
+
+    def past(self) -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+    def test_adding_a_person_with_an_expiry_in_the_past_is_refused_and_nothing_is_created(self):
+        refused = self.add(expires_at=self.past())
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertIn("in the future", refused.text)
+        self.assertEqual(self.client.get("/api/faces/watch").json()["entries"], [])
+
+    def test_changing_an_expiry_to_a_time_in_the_past_is_refused_and_the_entry_is_unchanged(self):
+        entry = self.add(expires_at="2030-01-01T00:00:00+00:00").json()
+        refused = self.client.patch(f"/api/faces/watch/{entry['id']}", json={"expires_at": self.past()})
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertIn("in the future", refused.text)
+        self.assertEqual(self.client.get("/api/faces/watch").json()["entries"][0]["expires_at"], entry["expires_at"])
+
+    def test_a_future_expiry_is_still_accepted_when_adding_and_changing(self):
+        soon = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        entry = self.add(expires_at=soon)
+        self.assertEqual(entry.status_code, 201, entry.text)
+        later = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+        self.assertEqual(self.client.patch(f"/api/faces/watch/{entry.json()['id']}", json={"expires_at": later}).status_code, 200)
 
 
 class SwitchTests(Case):

@@ -268,3 +268,13 @@ test("each attempt to add a face starts clean: an old error does not carry over,
   await expect(form.getByLabel("Who")).toHaveValue("");
   await expect(form.getByRole("button", { name: "Add to the face watch list" })).toBeDisabled();
 });
+
+test("the expiry date field offers nothing before today", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const { panel } = await openFaceDrawer(page, { faces: [{ box: { x: 0.1, y: 0.1, width: 0.2, height: 0.3 }, score: 0.9, pixels: [80, 90], usable: true, reason: null }] });
+  await panel.getByRole("button", { name: "Look at the playhead" }).click();
+  await panel.getByRole("button", { name: "Face 1", exact: true }).click();
+  const today = await page.evaluate(() => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; });
+  await expect(panel.getByLabel("Remove from the list after (optional)")).toHaveAttribute("min", today);
+});

@@ -46,6 +46,16 @@ class FindRequest(BaseModel):
         return self
 
 
+def _check_expiry(value: datetime | None) -> None:
+    """An expiry needs a timezone and has to be ahead: an entry that is already expired is never looked for, whatever the page says about it (#311)."""
+    if value is None:
+        return
+    if value.tzinfo is None:
+        raise ValueError("The expiry must include a timezone")
+    if value <= datetime.now(timezone.utc):
+        raise ValueError("The expiry must be in the future; an entry that has already expired would never be looked for")
+
+
 class AddRequest(FindRequest):
     box: Box | None = None
     point: Point | None = None
@@ -63,8 +73,7 @@ class AddRequest(FindRequest):
                 raise ValueError("Enter a name or label for the entry")
             if not (self.reason or "").strip():
                 raise ValueError("Enter why this person is on the list")
-        if self.expires_at is not None and self.expires_at.tzinfo is None:
-            raise ValueError("The expiry must include a timezone")
+        _check_expiry(self.expires_at)
         return self
 
 
@@ -81,8 +90,7 @@ class UpdateRequest(BaseModel):
             raise ValueError("The name cannot be empty")
         if self.reason is not None and not self.reason.strip():
             raise ValueError("The reason cannot be empty")
-        if self.expires_at is not None and self.expires_at.tzinfo is None:
-            raise ValueError("The expiry must include a timezone")
+        _check_expiry(self.expires_at)
         return self
 
 

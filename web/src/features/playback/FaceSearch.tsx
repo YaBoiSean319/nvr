@@ -10,6 +10,9 @@ import { usePlaybackStore } from "./store";
 interface Box { x: number; y: number; width: number; height: number }
 interface Found { camera_id: string; at: string; picture: string | null; faces: { box: Box; score: number; pixels: [number, number]; usable: boolean; reason: string | null }[] }
 
+/** Today as the date field writes it (the person's own calendar day): nothing earlier is offered as an expiry. */
+const today = () => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; };
+
 /** The order to draw the faces in: biggest box first, so the smallest is on top. */
 const drawOrder = (faces: Found["faces"]) => faces.map((_, index) => index).sort((a, b) => faces[b]!.box.width * faces[b]!.box.height - faces[a]!.box.width * faces[a]!.box.height || a - b);
 
@@ -120,7 +123,7 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
                     <>
                       <label className="attr-field"><span>Name or label</span><input value={name} maxLength={120} onChange={event => setName(event.target.value)} /></label>
                       <label className="attr-field"><span>Why they are on the list</span><textarea value={reason} maxLength={500} rows={3} onChange={event => setReason(event.target.value)} /></label>
-                      <label className="attr-field"><span>Remove from the list after (optional)</span><input type="date" value={expires} onChange={event => setExpires(event.target.value)} /></label>
+                      <label className="attr-field"><span>Remove from the list after (optional)</span><input type="date" min={today()} value={expires} onChange={event => setExpires(event.target.value)} /></label>
                     </>
                   )}
                   {add.error ? <p className="notice" data-tone="bad" role="alert">{failureText(add.error, "The face could not be added.")}</p> : null}
