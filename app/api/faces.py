@@ -135,7 +135,7 @@ async def find(payload: FindRequest, user: Administrator) -> dict[str, Any]:
         frame, found = await faces.find_faces(payload.camera_id, payload.at)
     except faces.FaceError as error:
         _raise(error)
-    jpeg = await asyncio.to_thread(faces.frame_jpeg, frame)
+    jpeg = await asyncio.to_thread(faces.frame_jpeg, frame) if found else None  # A frame with no face is not encoded or sent: the drawer shows only that none was found (#313)
     with connect() as db:
         faces.audit(db, int(user["id"]), "face_search_viewed", payload.camera_id, {"at": payload.at.astimezone(timezone.utc).isoformat(), "faces": len(found)})
     return {"camera_id": payload.camera_id, "at": payload.at.astimezone(timezone.utc).isoformat(), "picture": base64.b64encode(jpeg).decode() if jpeg else None, "faces": [{key: value for key, value in item.items() if key != "_face"} for item in found]}

@@ -1,6 +1,7 @@
 """The face watch list (#253, part 2): who is on it, the switches, finding a face in a recording. A stand-in reader and picture source stand in for the models and the footage."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
@@ -159,6 +160,27 @@ class FindAndAddTests(Case):
 
         with patch.object(faces, "frame_at", none):
             self.assertEqual(self.client.post("/api/faces/find", json={"camera_id": self.camera, "at": AT}).status_code, 404)
+
+
+class PictureCostTests(Case):
+    """Looking for a usable moment is cheap: a frame with no face is not encoded or sent (#313)."""
+
+    def look(self) -> dict:
+        return self.client.post("/api/faces/find", json={"camera_id": self.camera, "at": AT}).json()
+
+    def test_a_frame_with_no_face_is_never_encoded(self):
+        self.found.clear()
+        with patch.object(faces, "frame_jpeg", wraps=faces.frame_jpeg) as encoder:
+            body = self.look()
+        self.assertEqual((body["faces"], body["picture"]), ([], None))
+        encoder.assert_not_called()
+
+    def test_a_frame_with_faces_is_encoded_once_and_sent_as_before(self):
+        with patch.object(faces, "frame_jpeg", wraps=faces.frame_jpeg) as encoder:
+            body = self.look()
+        self.assertEqual(len(body["faces"]), 2)
+        self.assertTrue(base64.b64decode(body["picture"]).startswith(b"\xff\xd8"))
+        encoder.assert_called_once()
 
 
 class ListTests(Case):
