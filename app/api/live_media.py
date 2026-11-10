@@ -337,6 +337,14 @@ async def _refuse(websocket: WebSocket, code: int, message: dict[str, object]) -
     await websocket.close(code=code)
 
 
+async def _ended(websocket: WebSocket, reason: str | None) -> None:
+    """An open stream whose credential or camera access ended (#298): the person is told which, and the socket closes."""
+    if reason == "credential":
+        await _refuse(websocket, CLOSE_UNAUTHORIZED, {"type": "unauthorized", "detail": "Your sign-in has ended"})
+    else:
+        await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": "Your access to this camera has ended"})
+
+
 @router.websocket("/api/cameras/{camera_id}/live/stream")
 @requires_scope("media")
 async def live_stream(
@@ -464,8 +472,8 @@ async def live_stream(
             # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once.
             done, _ = await asyncio.wait({getter, receiver}, timeout=privacy.ACCESS_RECHECK_SECONDS, return_when=asyncio.FIRST_COMPLETED)
             if not done:
-                if not guard.still_valid() and guard.reason == "access":
-                    await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": "Your access to this camera has ended"})
+                if not guard.still_valid() and guard.reason in {"access", "credential"}:
+                    await _ended(websocket, guard.reason)
                     return
                 continue
             if receiver in done:
@@ -488,8 +496,8 @@ async def live_stream(
             item = getter.result()
             getter = None
             if not guard.still_valid():
-                if guard.reason == "access":
-                    await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": "Your access to this camera has ended"})
+                if guard.reason in {"access", "credential"}:
+                    await _ended(websocket, guard.reason)
                 else:
                     await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
                 return

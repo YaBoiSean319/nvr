@@ -260,10 +260,20 @@ def delete_package(case_id: str, package_id: str, user: CurrentUser) -> dict[str
 @router.get("/api/cases/{case_id}/packages/{package_id}/download")
 @requires_scope("export")
 def download_package(case_id: str, package_id: str, user: CurrentUser) -> FileResponse:
+    refused: cases.PackageRefused | None = None
     with connect() as db:
         package = _package(db, case_id, package_id, user)
         if package["requested_by"] != int(user["id"]) and user["role"] != "administrator":
             raise HTTPException(status_code=404, detail="Package not found")  # Built with the access of the person who asked for it
+        try:
+            cases.check_download(db, package, user)
+        except cases.PackageRefused as exc:
+            refused = exc
+            cases.audit(db, case_id, int(user["id"]), "package_download_refused", package=package_id, reason=exc.code)  # Kept: raising here would roll it back
+    if refused is not None:
+        raise HTTPException(status_code=refused.status, detail=refused.detail)
+    with connect() as db:
+        package = _package(db, case_id, package_id, user)
         try:
             path = cases.package_path(package)
         except FileNotFoundError as exc:

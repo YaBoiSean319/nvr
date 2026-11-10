@@ -18,22 +18,19 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException, Request
 
 from . import network
 from .audit import record
 from .store import connect
+from app.clock import now as _now
 
 # (failures allowed before waiting starts, first wait in seconds)
 LIMITS = {"pair": (4, 2), "account": (19, 2), "address": (19, 2)}
 MAX_WAIT_SECONDS = 300
 FORGET_AFTER = timedelta(minutes=15)
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _parse(value: str) -> datetime:

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import clip
+from . import clip, track_privacy
 from .attributes import PALETTE, zone_cells
 from .search import _TRACK_COLUMNS, ZONE_PRESETS, _iso, _result
 
@@ -255,6 +255,11 @@ def rank(db: sqlite3.Connection, parsed: Parsed, camera_ids: list[str], start: d
         return {"mode": mode, "results": [], "candidates": 0, "unindexed": 0, "candidates_truncated": False}
     clauses = [f"t.camera_id IN ({','.join('?' * len(camera_ids))})", "t.last_seen_at>=?", "t.first_seen_at<?"]
     values: list[Any] = [*camera_ids, _iso(start), _iso(end)]
+    # Ranked by the track's picture and attributes, which come from the unmasked frames: a track that touches a privacy mask is not a candidate (#296),
+    # since where it ranks would say what is behind the mask.
+    visible, visible_values = track_privacy.track_visible_sql(track_privacy.zones_by_camera(db, camera_ids), whole=True, alias="t")
+    clauses.append(visible)
+    values.extend(visible_values)
     if parsed.label:
         clauses.append("t.label=?")
         values.append(parsed.label)

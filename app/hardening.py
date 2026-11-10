@@ -31,12 +31,13 @@ import socket
 import sqlite3
 import ssl
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
 from .credentials import decrypt
 from .store import connect
+from app.clock import now as _now, parse as _parse
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +98,6 @@ class Unreachable(Exception):
 
 # A check that could not be made this run: the finding it gave before, and any acknowledgement of it, are left as they were.
 KEEP: dict[str, str] = {"keep": "unknown"}
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------------------------------------------- settings
@@ -285,11 +282,6 @@ def tls_offered(host: str, kind: str) -> int | None:
     if answered:
         return None
     raise Unreachable(kind)
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------------------------------------------- the run

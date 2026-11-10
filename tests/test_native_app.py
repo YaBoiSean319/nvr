@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from urllib.parse import parse_qs
 
 import httpx
@@ -311,6 +313,242 @@ class DeviceSessionTests(NativeCase):
         with connect() as db:
             db.execute("DELETE FROM users WHERE id=?", (self.limited_id,))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM device_sessions").fetchone()[0], 0)
+
+
+class DeviceSecretReplayTests(NativeCase):
+    """A rotated-out secret is good for one short grace period, fixed when the replacement is first used (#293)."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [datetime(2026, 11, 9, 12, 0, 0, tzinfo=timezone.utc)]
+        patcher = patch("app.device_sessions._now", lambda: self.clock[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def at(self, seconds: float) -> None:
+        self.clock[0] = datetime(2026, 11, 9, 12, 0, 0, tzinfo=timezone.utc) + timedelta(seconds=seconds)
+
+    def resume(self, secret: str) -> httpx.Response:
+        return TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": secret})
+
+    def enrol(self) -> str:
+        return self.limited.post("/api/native/device-sessions", json={"device_label": "Pixel"}).json()["token"]
+
+    def test_ordinary_rotation_keeps_working(self):
+        first = self.enrol()
+        second = self.resume(first).json()["token"]
+        self.at(10)
+        third = self.resume(second).json()["token"]
+        self.at(20)
+        self.assertEqual(self.resume(third).status_code, 200)
+
+    def test_replaying_the_old_secret_does_not_keep_it_alive(self):
+        # The reproduction: the same original secret resumed at 90, 180, 270 and 360 seconds after it was rotated (each reply restarted the window).
+        original = self.enrol()
+        self.assertEqual(self.resume(original).status_code, 200)  # rotated at t=0; the grace ends at t=120
+        self.at(90)
+        self.assertEqual(self.resume(original).status_code, 200, "a lost answer is retried inside the grace")
+        for seconds in (100, 180, 270, 360):
+            self.at(seconds)
+            self.assertEqual(self.resume(original).status_code, 401, f"still accepted {seconds} s after the rotation")
+
+    def test_the_old_secret_works_once_not_repeatedly(self):
+        original = self.enrol()
+        self.resume(original)
+        self.at(30)
+        self.assertEqual(self.resume(original).status_code, 200)
+        self.at(31)
+        self.assertEqual(self.resume(original).status_code, 401, "inside the grace, but already used for its one retry")
+
+    def test_the_old_secret_is_refused_after_its_deadline_even_if_not_replayed_before(self):
+        original = self.enrol()
+        self.resume(original)
+        self.at(121)
+        self.assertEqual(self.resume(original).status_code, 401)
+
+    def test_each_rotation_sets_its_own_deadline(self):
+        first = self.enrol()
+        second = self.resume(first).json()["token"]      # first is good until t=120
+        self.at(100)
+        third = self.resume(second).json()["token"]      # second is good until t=220; first is not extended by this
+        self.at(110)
+        self.assertEqual(self.resume(first).status_code, 401, "first was already replaced twice over")
+        self.at(150)
+        self.assertEqual(self.resume(second).status_code, 200, "second is inside the grace its own rotation set")
+        self.assertEqual(self.resume(third).status_code, 401, "...and using it for the retry replaced the current secret once")
+
+    def test_two_retries_at_once_let_exactly_one_through(self):
+        original = self.enrol()
+        self.resume(original)
+        self.at(30)
+        barrier, results = threading.Barrier(2), []
+
+        def retry():
+            barrier.wait()
+            results.append(device_sessions.resume(original))
+
+        threads = [threading.Thread(target=retry) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(result is not None for result in results), [False, True])
+
+
+class DeviceEnrolmentBoundaryTests(NativeCase):
+    """Only a person who is signed in can enrol a phone; automation never turns into a long-lived person credential (#292)."""
+
+    def token(self, *scopes: str) -> str:
+        created = self.admin.post("/api/admin/api-tokens", json={"name": "Automation", "scopes": list(scopes)})
+        self.assertEqual(created.status_code, 201, created.text)
+        return created.json()["secret"]
+
+    def enrolled(self) -> int:
+        with connect() as db:
+            return db.execute("SELECT COUNT(*) FROM device_sessions").fetchone()[0]
+
+    def test_an_admin_token_cannot_enrol_a_phone(self):
+        secret = self.token("admin")
+        with TestClient(self.app) as bare:  # No cookie: only the token authenticates
+            denied = bare.post("/api/native/device-sessions", json={"device_label": "Sneaky"}, headers={"Authorization": f"Bearer {secret}"})
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(self.enrolled(), 0)
+
+    def test_a_bearer_token_beside_a_valid_browser_cookie_is_still_a_token(self):
+        secret = self.token("admin")
+        # The same client holds the administrator's session cookie; the Authorization header still decides who is calling.
+        denied = self.admin.post("/api/native/device-sessions", json={"device_label": "Sneaky"}, headers={"Authorization": f"Bearer {secret}"})
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(self.enrolled(), 0)
+
+    def test_a_video_wall_cannot_enrol_a_phone(self):
+        secret = self.token("read", "media")
+        wall = TestClient(self.app)
+        self.assertEqual(wall.post("/api/wall/session", json={"token": secret}).status_code, 200)
+        denied = wall.post("/api/native/device-sessions", json={"device_label": "Wall"})
+        self.assertIn(denied.status_code, (401, 403), denied.text)
+        self.assertEqual(self.enrolled(), 0)
+
+    def test_the_token_cannot_reach_session_only_management_by_any_exchange(self):
+        # What the exchange used to give: a cookie that outlived the token and could manage tokens. The first step is now refused.
+        secret = self.token("admin")
+        with TestClient(self.app) as bare:
+            bearer = {"Authorization": f"Bearer {secret}"}
+            self.assertEqual(bare.get("/api/admin/api-tokens", headers=bearer).status_code, 403)
+            self.assertEqual(bare.post("/api/native/device-sessions", json={}, headers=bearer).status_code, 403)
+            self.assertEqual(bare.cookies.get("nvr_session"), None)
+
+    def test_a_signed_in_person_still_enrols_a_phone(self):
+        created = self.limited.post("/api/native/device-sessions", json={"device_label": "Pixel"})
+        self.assertEqual(created.status_code, 201, created.text)
+        admin_phone = self.admin.post("/api/native/device-sessions", json={"device_label": "Admin phone"})
+        self.assertEqual(admin_phone.status_code, 201, admin_phone.text)
+        self.assertEqual(self.enrolled(), 2)
+
+
+class UpgradeRevokesOldDeviceSecretsTests(NativeCase):
+    def test_every_existing_device_secret_is_ended_and_audited(self):
+        from app.migrations import m0060_revoke_device_sessions as migration
+
+        mine = self.limited.post("/api/native/device-sessions", json={"device_label": "Mine"}).json()
+        theirs = self.full.post("/api/native/device-sessions", json={"device_label": "Theirs"}).json()
+        with connect() as db:
+            migration.upgrade(db)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM device_sessions").fetchone()[0], 0)
+            audited = {row["resource_id"]: json.loads(row["details_json"]) for row in db.execute("SELECT * FROM audit_log WHERE action='device_session_revoked_by_upgrade'")}
+        self.assertEqual(set(audited), {mine["id"], theirs["id"]})
+        self.assertEqual(audited[mine["id"]]["device"], "Mine")
+        for secret in (mine["token"], theirs["token"]):
+            self.assertEqual(TestClient(self.app).post("/api/native/device-sessions/resume", json={"token": secret}).status_code, 401)
+        # Signing in on the phone makes a new one.
+        self.assertEqual(self.limited.post("/api/native/device-sessions", json={"device_label": "Mine"}).status_code, 201)
+
+
+class RevokedPhoneTests(NativeCase):
+    """Taking a phone away ends the browser sessions it produced, not only its ability to make more (#294)."""
+
+    def phone(self, owner=None, label: str = "Pixel") -> tuple[TestClient, dict]:
+        """A phone that has enrolled and resumed: its own client holding the cookie that came out of the resume."""
+        enrolled = (owner or self.limited).post("/api/native/device-sessions", json={"device_label": label}).json()
+        phone = TestClient(self.app)
+        resumed = phone.post("/api/native/device-sessions/resume", json={"token": enrolled["token"]})
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+        self.assertEqual(phone.get("/api/auth/me").status_code, 200)
+        return phone, {**enrolled, "current": resumed.json()["token"]}
+
+    def test_revoking_by_id_ends_the_phones_session(self):
+        phone, device = self.phone()
+        self.assertEqual(self.limited.delete(f"/api/native/device-sessions/{device['id']}").status_code, 204)
+        self.assertEqual(phone.get("/api/auth/me").status_code, 401, "the cookie the phone was given must not outlive the phone")
+        self.assertEqual(self.limited.get("/api/auth/me").status_code, 200, "the person's own browser session is untouched")
+
+    def test_the_phone_signing_itself_out_by_its_secret_ends_its_session_too(self):
+        phone, device = self.phone()
+        other, _ = self.phone(label="Spare")
+        self.assertEqual(self.limited.post("/api/native/device-sessions/revoke", json={"token": device["current"]}).status_code, 204)
+        self.assertEqual(phone.get("/api/auth/me").status_code, 401)
+        self.assertEqual(other.get("/api/auth/me").status_code, 200, "an unrelated phone of the same person stays signed in")
+
+    def test_every_session_a_phone_has_been_given_ends_together(self):
+        enrolled = self.limited.post("/api/native/device-sessions", json={"device_label": "Pixel"}).json()
+        first, second = TestClient(self.app), TestClient(self.app)
+        rotated = first.post("/api/native/device-sessions/resume", json={"token": enrolled["token"]}).json()["token"]
+        self.assertEqual(second.post("/api/native/device-sessions/resume", json={"token": rotated}).status_code, 200)
+        self.assertEqual((first.get("/api/auth/me").status_code, second.get("/api/auth/me").status_code), (200, 200))
+        self.assertEqual(self.limited.delete(f"/api/native/device-sessions/{enrolled['id']}").status_code, 204)
+        self.assertEqual((first.get("/api/auth/me").status_code, second.get("/api/auth/me").status_code), (401, 401))
+
+    def test_one_persons_revocation_cannot_reach_another_persons_phone(self):
+        theirs, device = self.phone(owner=self.full, label="Theirs")
+        self.assertEqual(self.limited.delete(f"/api/native/device-sessions/{device['id']}").status_code, 404)
+        self.assertEqual(self.limited.post("/api/native/device-sessions/revoke", json={"token": device["current"]}).status_code, 204)  # always 204, says nothing
+        self.assertEqual(theirs.get("/api/auth/me").status_code, 200)
+
+    def test_a_phone_that_is_pushed_out_by_newer_ones_loses_its_session(self):
+        old, _ = self.phone(label="Oldest")
+        for index in range(device_sessions.MAX_PER_USER):
+            self.limited.post("/api/native/device-sessions", json={"device_label": f"newer {index}"})
+        labels = [item["device_label"] for item in self.limited.get("/api/native/device-sessions").json()["sessions"]]
+        self.assertNotIn("Oldest", labels)
+        self.assertEqual(old.get("/api/auth/me").status_code, 401)
+
+    def test_resuming_and_revoking_at_the_same_time_never_leaves_a_working_session(self):
+        for _ in range(6):
+            enrolled = self.limited.post("/api/native/device-sessions", json={"device_label": "Race"}).json()
+            phone, barrier, answers = TestClient(self.app), threading.Barrier(2), {}
+
+            def resume():
+                barrier.wait()
+                answers["resume"] = phone.post("/api/native/device-sessions/resume", json={"token": enrolled["token"]}).status_code
+
+            def revoke():
+                barrier.wait()
+                answers["revoke"] = self.limited.delete(f"/api/native/device-sessions/{enrolled['id']}").status_code
+
+            threads = [threading.Thread(target=resume), threading.Thread(target=revoke)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertIn(answers["resume"], (200, 401), answers)
+            self.assertEqual(answers["revoke"], 204, answers)
+            self.assertEqual(phone.get("/api/auth/me").status_code, 401, f"a session survived the revocation: {answers}")
+
+    def test_a_revocation_is_audited_with_how_many_sessions_it_ended(self):
+        _, device = self.phone(label="Audited")
+        self.limited.delete(f"/api/native/device-sessions/{device['id']}")
+        with connect() as db:
+            row = db.execute("SELECT * FROM audit_log WHERE action='device_session_revoked' AND resource_id=?", (device["id"],)).fetchone()
+        self.assertIsNotNone(row)
+        details = json.loads(row["details_json"])
+        self.assertEqual((details["device"], details["sessions_ended"]), ("Audited", 1))
+        self.assertNotIn(device["token"], row["details_json"])
+
+    def test_sessions_open_before_the_upgrade_have_no_device_and_are_left_alone(self):
+        with connect() as db:
+            self.assertIsNone(db.execute("SELECT device_session_id FROM sessions LIMIT 1").fetchone()["device_session_id"])
+        self.phone(label="Unrelated")
+        self.assertEqual(self.limited.get("/api/auth/me").status_code, 200)
 
 
 class NothingCachedTests(NativeCase):

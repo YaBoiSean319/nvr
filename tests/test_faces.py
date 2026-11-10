@@ -138,11 +138,12 @@ class FindAndAddTests(Case):
         with connect() as db:
             db.execute("INSERT INTO privacy_masks(camera_id,zones_json,updated_at) VALUES(?,?,?)", (self.camera, json.dumps([{"x": 0.05, "y": 0.1, "width": 0.3, "height": 0.5}]), AT))
         found = self.client.post("/api/faces/find", json={"camera_id": self.camera, "at": AT}).json()["faces"]
-        self.assertEqual([item["usable"] for item in found], [False, True])
-        self.assertIn("privacy mask", found[0]["reason"])
+        # A masked face is not in the answer at all (#301): its box, score and a "this is in a mask" note would each say something is there.
+        self.assertEqual([(item["box"]["x"], item["usable"]) for item in found], [(0.6, True)])
         refused = self.add()  # The point is on the masked face
         self.assertEqual(refused.status_code, 422)
-        self.assertIn("privacy mask", refused.json()["detail"])
+        self.assertIn("No face was found", refused.json()["detail"])
+        self.assertNotIn("mask", refused.json()["detail"].lower())
         self.assertEqual(self.add(point={"x": 0.65, "y": 0.3}).status_code, 201)  # The other face is fine
 
     def test_missing_models_and_missing_footage_say_so(self):

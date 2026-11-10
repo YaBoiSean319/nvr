@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from . import acceleration
 from .access import may_view_camera
 from .credentials import decrypt
 from .store import connect
+from app.clock import now as _now
 
 MAX_ZONES = 8
 GRANT_MINUTES = 15
@@ -53,10 +54,6 @@ def _bump(camera_id: str) -> None:
 
 class UnmaskedRefused(PermissionError):
     """Unmasked footage was asked for without an active grant."""
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def validate_zones(zones: list[dict[str, Any]]) -> list[dict[str, float]]:
@@ -191,7 +188,8 @@ class StreamGuard:
     def __init__(self, principal: Any, camera_id: str, unmasked: bool) -> None:
         self.camera_id = camera_id
         self.user_id = int(principal.id)
-        self.reason: str | None = None  # "access" or "masks", once it has stopped being valid
+        self.principal = principal
+        self.reason: str | None = None  # "credential", "access" or "masks", once it has stopped being valid
         self._access_checked = time.monotonic()
         self.generation = generation(camera_id)
         self.until: datetime | None = None
@@ -205,6 +203,13 @@ class StreamGuard:
             return False
         if time.monotonic() - self._access_checked >= ACCESS_RECHECK_SECONDS:
             self._access_checked = time.monotonic()
+            from .principal import refresh  # Late: principal imports this package's neighbours
+
+            current = refresh(self.principal)
+            if current is None:  # Signed out, expired, revoked or removed: a quiet stream is cut as promptly as a busy one (#298)
+                self.reason = "credential"
+                return False
+            self.user_id = int(current.id)
             with connect() as db:
                 if not may_view_camera(db, self.user_id, self.camera_id):
                     self.reason = "access"

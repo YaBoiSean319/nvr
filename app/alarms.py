@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
+from app.clock import parse as _parse
 
 CLIP_BEFORE = timedelta(seconds=10)
 CLIP_AFTER = timedelta(seconds=20)
@@ -28,11 +29,6 @@ class AlarmError(Exception):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _record(db: sqlite3.Connection, alarm_id: str, actor_id: int | None, action: str, details: dict[str, Any]) -> None:

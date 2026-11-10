@@ -26,17 +26,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .incidents import sync_incident
+from app.clock import parse as _parse
 
 WINDOW = timedelta(hours=48)
 MIN_HISTORY = timedelta(hours=6)
 WARN_DAYS = 7
 SEGMENT_SLACK = timedelta(hours=1)  # No segment is longer than this, so one that ends in the window started within an hour of it.
 TOLERANCE = 0.005  # A forecast within half a percent of the policy is the policy.
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def reserve_bytes() -> int:

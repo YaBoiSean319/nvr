@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shutil
 import sqlite3
 import subprocess
@@ -17,8 +18,9 @@ from typing import Any
 
 import numpy as np
 
-from . import face_models, plates, privacy
+from . import face_models, plates, privacy, track_privacy
 from .store import connect
+from app.clock import now as _now, parse as _parse
 
 MARGIN = 0.3  # How much of the face's own size is kept around it in the entry's picture
 MIN_IOU = 0.3  # How well a clicked box must fit a detected face to pick it
@@ -47,15 +49,6 @@ def reader() -> face_models.FaceReader:
             raise FaceError(503, "The face models could not be loaded")
         _reader = loaded
     return _reader
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # --- settings ----------------------------------------------------------------------------------------------------------------------------
@@ -153,14 +146,22 @@ async def frame_at(camera_id: str, at: datetime) -> np.ndarray:
     return np.ascontiguousarray(frame)
 
 
-def _inside(zone: dict[str, float], x: float, y: float) -> bool:
-    return zone["x"] <= x <= zone["x"] + zone["width"] and zone["y"] <= y <= zone["y"] + zone["height"]
-
-
 def _masked(zones: list[dict[str, float]], face: face_models.Face) -> bool:
-    """A face is in a privacy mask when its centre or any landmark is: the NVR does not read faces from areas an administrator chose to hide."""
+    """A face is in a privacy mask when its box touches one, the rule everywhere else (the overlay, detections, plates): the NVR does not read faces from
+    areas an administrator chose to hide."""
     x1, y1, x2, y2 = face.box
-    return any(_inside(zone, (x1 + x2) / 2, (y1 + y2) / 2) or any(_inside(zone, x, y) for x, y in face.landmarks) for zone in zones)
+    return bool(zones) and track_privacy.box_touches({"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, zones)
+
+
+def mask_frame(frame: np.ndarray, zones: list[dict[str, float]]) -> np.ndarray:
+    """A copy of the picture with every masked area painted black, which is all that may leave the server (#301)."""
+    masked = np.array(frame, copy=True)
+    rows, columns = masked.shape[:2]
+    for zone in zones:
+        top, bottom = math.floor(zone["y"] * rows), math.ceil((zone["y"] + zone["height"]) * rows)  # Round outwards: a mask never covers less than it was drawn
+        left, right = math.floor(zone["x"] * columns), math.ceil((zone["x"] + zone["width"]) * columns)
+        masked[max(0, top):min(rows, bottom), max(0, left):min(columns, right)] = 0
+    return masked
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -171,17 +172,22 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
 
 
 async def find_faces(camera_id: str, at: datetime) -> tuple[np.ndarray, list[dict[str, Any]]]:
-    """The picture at a moment and the faces in it that can be used: (picture, [{box, score, pixels, usable, reason}])."""
+    """The picture at a moment and the faces in it that can be used: (picture, [{box, score, pixels, usable, reason}]).
+
+    The picture is the masked one: every privacy-masked area is black before anything is read from it or sent anywhere, and a face that touches a mask is not in
+    the list at all, not even marked unusable (its box and score would say something is there). There is no way to ask for it unmasked here (#301)."""
     frame = await frame_at(camera_id, at)
     with connect() as db:
         zones = privacy.server_zones(db, camera_id, at.astimezone(timezone.utc))
+    frame = mask_frame(frame, zones) if zones else frame
     faces = await asyncio.to_thread(lambda: reader().faces(frame))
     found = []
     for face in faces:
-        masked = _masked(zones, face)
+        if _masked(zones, face):
+            continue
         x1, y1, x2, y2 = face.box
-        found.append({"box": {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, "score": face.score, "pixels": list(face.pixels), "usable": not masked,
-                      "reason": "This face is inside a privacy mask" if masked else None, "_face": face})
+        found.append({"box": {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, "score": face.score, "pixels": list(face.pixels), "usable": True,
+                      "reason": None, "_face": face})
     return frame, found
 
 
@@ -227,8 +233,10 @@ def picture_of(frame: np.ndarray, face: face_models.Face) -> bytes | None:
 
 
 def add_embedding(db: sqlite3.Connection, entry_id: str, face: face_models.Face, camera_id: str, at: datetime) -> None:
-    db.execute("INSERT INTO face_embeddings(entry_id,embedding,camera_id,source_at) VALUES(?,?,?,?)",
-               (entry_id, np.asarray(face.embedding, dtype=np.float32).tobytes(), camera_id, at.astimezone(timezone.utc).isoformat()))
+    x1, y1, x2, y2 = face.box
+    db.execute("INSERT INTO face_embeddings(entry_id,embedding,camera_id,source_at,box_json) VALUES(?,?,?,?,?)",
+               (entry_id, np.asarray(face.embedding, dtype=np.float32).tobytes(), camera_id, at.astimezone(timezone.utc).isoformat(),
+                json.dumps({"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}, separators=(",", ":"))))
 
 
 def create_entry(db: sqlite3.Connection, name: str, reason: str, expires_at: str | None, picture: bytes | None, user_id: int | None) -> str:

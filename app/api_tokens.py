@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from .credentials import derived_key
 from .store import connect
+from app.clock import now as _now
 
 SCOPES = ("read", "media", "export", "metrics", "admin")
 TOKEN_PREFIX = "nvrt"
@@ -155,10 +156,6 @@ def _audit(db: sqlite3.Connection, actor_id: int | None, action: str, token_id: 
         "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
         (actor_id, action, "api_token", token_id, json.dumps(details, separators=(",", ":"))),
     )
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _iso(value: datetime) -> str:

@@ -25,7 +25,7 @@ Recognising people by their faces is regulated in many places (biometric privacy
 - **Only people someone chose to put on the list.** Faces are compared with the watch list and nothing else; faces that match nothing are not kept.
 - **Each entry says why and for how long.** A reason is required; an expiry date is optional but offered.
 - **An audit trail.** Who added, changed and removed each entry, and who viewed matches.
-- **Administrators only**, and privacy masks are respected (a face inside a masked area is not read).
+- **Administrators only**, and privacy masks are respected (#301). The picture the face search returns has every masked area painted black before it leaves the server; a face whose box touches a mask is not read and is not in the answer at all (no box, score or "unusable" note, which would say something is there); choosing where it was finds nothing. There is no unmasked mode here, for a person or an API token, whatever unmasked-viewing grant they hold. An entry's picture is hidden if a mask is later drawn over where it was taken (the face's place in the frame is kept with it from this release; entries enrolled before keep their picture, since where it was cannot be known), and a sighting and its picture are hidden if a mask later covers the face's place.
 - **What is stored.** The numbers that describe a face (the embedding) and a small picture of the face the entry was made from, so a person can check who an entry is. Deleting an entry deletes both.
 
 ## Measured with the real models
@@ -43,7 +43,7 @@ All of it is administrators only, and every change is in the audit log (who, wha
 
 | What | How |
 |---|---|
-| See the faces in a recorded picture | `POST /api/faces/find` `{camera_id, at}` returns each face's box, size and whether it can be used (a face inside a privacy mask cannot) |
+| See the faces in a recorded picture | `POST /api/faces/find` `{camera_id, at}` returns the masked picture and each usable face's box and size (a face touching a privacy mask is left out) |
 | Put a face on the list | `POST /api/faces/watch` `{camera_id, at, point or box, name, reason, expires_at?}`; with `entry_id` it adds another picture of someone already on the list (a second picture makes a return likelier to be noticed) |
 | Change or remove an entry | `PATCH` / `DELETE /api/faces/watch/{id}`; removing deletes its numbers and its picture |
 | Switch cameras on or off | `GET /api/faces/cameras`, `PUT /api/faces/cameras/{id}` `{enabled}`; every camera is off until switched on |

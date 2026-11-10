@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from .store import connect
+from app.clock import now as _now
 
 MAX_EVENTS = 1000
 RETENTION_DAYS = 7
@@ -24,10 +25,6 @@ EVENT_FIELDS = {
         "elapsed_ms": (0, 60000),
     },
 }
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _capture_until(db) -> datetime | None:

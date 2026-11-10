@@ -11,11 +11,12 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from . import ms_mail
 from .store import connect, has_row
+from app.clock import now as _now
 
 INCIDENT_EMAILS_PER_HOUR = 30
 SUMMARY_AFTER = timedelta(minutes=10)  # Quiet this long after the last held email, then one summary
@@ -28,10 +29,6 @@ TITLES = {
     "retention_forecast": "Footage will not last as long as the policy says", "tiering": "Storage tiering problem", "backup": "Backup problem", "self_test": "Self-test problem",
     "failover": "Failover problem", "failover_sync": "Failover sync problem",
 }
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _iso(moment: datetime) -> str:

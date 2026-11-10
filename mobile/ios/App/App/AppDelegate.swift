@@ -62,3 +62,78 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return config
     }
 }
+
+// MARK: - The enrolled server (#299)
+// Kept in this file so the Xcode project needs no new entries: the plugin below and the view controller that registers it.
+
+import WebKit
+
+/// The one server this phone is enrolled with. The address lives in storage only native code writes, and only the bundled start screen may change it.
+/// Every top-level navigation passes through `shouldOverrideLoad`: the start screen, the enrolled origin and the identity provider's sign-in pages load,
+/// and anything else goes to the system browser instead of the view that can reach the native plugins and the Keychain.
+@objc(EnrolledServerPlugin)
+public class EnrolledServerPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "EnrolledServerPlugin"
+    public let jsName = "EnrolledServer"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "current", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "enrol", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "forget", returnType: CAPPluginReturnPromise)
+    ]
+    private static let key = "nvr.enrolled.origin"
+    private static let identityProviderHosts: Set<String> = ["login.microsoftonline.com", "login.live.com"]
+
+    static var enrolled: String? { UserDefaults.standard.string(forKey: key) }
+
+    /// scheme://host[:port], for https; plain http only for a name on the local network (the app's transport security allows nothing else).
+    static func origin(of url: URL, allowCleartext: Bool) -> String? {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), url.user == nil, url.password == nil else { return nil }
+        let local = !host.contains(".") || host.hasSuffix(".local") || host.range(of: #"^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)"#, options: .regularExpression) != nil
+        guard scheme == "https" || (allowCleartext && scheme == "http" && local) else { return nil }
+        return "\(scheme)://\(host)" + (url.port.map { ":\($0)" } ?? "")
+    }
+
+    private func fromStartScreen() -> Bool {
+        guard let shown = bridge?.webView?.url, let local = bridge?.config.localURL else { return false }
+        return shown.scheme == local.scheme && shown.host == local.host && shown.port == local.port
+    }
+
+    @objc func current(_ call: CAPPluginCall) {
+        call.resolve(["origin": EnrolledServerPlugin.enrolled as Any])
+    }
+
+    @objc func enrol(_ call: CAPPluginCall) {
+        guard fromStartScreen() else { call.reject("Only the start screen can change the server"); return }
+        guard let address = call.getString("url"), address.count <= 300, let url = URL(string: address.trimmingCharacters(in: .whitespaces)),
+              let origin = EnrolledServerPlugin.origin(of: url, allowCleartext: true) else {
+            call.reject("That address cannot be used: it must be https, or http on your own network")
+            return
+        }
+        UserDefaults.standard.set(origin, forKey: EnrolledServerPlugin.key)
+        call.resolve(["origin": origin])
+    }
+
+    @objc func forget(_ call: CAPPluginCall) {
+        guard fromStartScreen() else { call.reject("Only the start screen can change the server"); return }
+        UserDefaults.standard.removeObject(forKey: EnrolledServerPlugin.key)
+        call.resolve()
+    }
+
+    @objc public override func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber? {
+        guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else { return NSNumber(value: true) }
+        if scheme == "blob" || url.absoluteString == "about:blank" { return nil }
+        guard scheme == "https" || scheme == "http" || scheme == "capacitor" else { return NSNumber(value: true) }
+        if let local = bridge?.config.localURL, url.scheme == local.scheme, url.host == local.host, url.port == local.port { return nil }
+        if let enrolled = EnrolledServerPlugin.enrolled, EnrolledServerPlugin.origin(of: url, allowCleartext: true) == enrolled { return nil }
+        if scheme == "https", let host = url.host?.lowercased(), EnrolledServerPlugin.identityProviderHosts.contains(host) { return NSNumber(value: false) }
+        if scheme != "capacitor", navigationAction.targetFrame?.isMainFrame ?? true { UIApplication.shared.open(url, options: [:], completionHandler: nil) }
+        return NSNumber(value: true)
+    }
+}
+
+/// Capacitor's view controller with the enrolled-server plugin registered. The main storyboard names this class.
+class NvrBridgeViewController: CAPBridgeViewController {
+    override func capacitorDidLoad() {
+        bridge?.registerPluginInstance(EnrolledServerPlugin())
+    }
+}

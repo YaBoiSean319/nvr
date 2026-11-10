@@ -42,6 +42,7 @@ from .credentials import ensure_key, key_path
 from .incidents import sync_incident
 from .store import connect, database_path
 from .version import APP_VERSION
+from app.clock import parse as _parse
 
 logger = logging.getLogger("nvr.backup")
 
@@ -440,11 +441,6 @@ def _now() -> str:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # --- restore ------------------------------------------------------------------------

@@ -27,6 +27,7 @@ from . import access, coverage, rule_actions, search
 from .credentials import decrypt, encrypt
 from .store import connect, has_row
 from .webhooks import validate_target_url
+from app.clock import now as _now, parse as _parse
 
 logger = logging.getLogger("nvr.digests")
 
@@ -49,17 +50,8 @@ class DigestError(ValueError):
     """A schedule or digest request cannot be used as given."""
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def site_zone(db: sqlite3.Connection) -> ZoneInfo:

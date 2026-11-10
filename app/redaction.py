@@ -23,7 +23,7 @@ import sqlite3
 import subprocess
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -35,6 +35,7 @@ from .recording import recordings_path
 from .retention import acquire_playback, release_playback
 from .storage import recording_file_path
 from .store import connect
+from app.clock import now as _now
 
 MODEL_DIR = Path(os.environ.get("NVR_AI_REDACTION_MODEL_DIR", "/opt/nvr/models/redaction"))
 try:
@@ -297,10 +298,6 @@ def redact_clip(source: Path, target: Path, regions: dict[str, Any], camera_id: 
 
 
 # ------------------------------------------------------------------------------------------------------------------ reviews
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
 
 def _parse(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))

@@ -110,15 +110,16 @@ def _session_hours() -> int:
         return 12
 
 
-def start_session(response: Response, user_id: int) -> None:
+def start_session(response: Response, user_id: int, device_session_id: str | None = None) -> None:
+    """A browser session and its cookie. One made from a phone's device secret names that device, so removing the phone ends it (#294)."""
     raw = new_session_token()
     session_id = str(uuid.uuid4())
     expires = datetime.now(timezone.utc) + timedelta(hours=_session_hours())
     with connect() as db:
         db.execute("DELETE FROM sessions WHERE expires_at <= ?", (datetime.now(timezone.utc).isoformat(),))
         db.execute(
-            "INSERT INTO sessions(session_id, token_hash, user_id, expires_at) VALUES (?, ?, ?, ?)",
-            (session_id, token_digest(raw), user_id, expires.isoformat()),
+            "INSERT INTO sessions(session_id, token_hash, user_id, expires_at, device_session_id) VALUES (?, ?, ?, ?, ?)",
+            (session_id, token_digest(raw), user_id, expires.isoformat(), device_session_id),
         )
     response.set_cookie(
         COOKIE_NAME,

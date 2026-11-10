@@ -7,12 +7,13 @@ retention shows at once. They name cameras, never their addresses or credentials
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from html import escape
 from typing import Any
 
 from . import access
 from .retention import DEFAULT_RETENTION_DAYS, effective_purpose, effective_retention
+from app.clock import now as _now
 
 MAX_TEXT = 300
 SETTING_FIELDS = ("default_purpose", "default_legal_basis", "organisation", "contact_name", "contact_email", "contact_phone")
@@ -20,10 +21,6 @@ SETTING_FIELDS = ("default_purpose", "default_legal_basis", "organisation", "con
 
 class NoticeError(ValueError):
     """The settings or a policy cannot be saved as given."""
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def settings(db: sqlite3.Connection) -> dict[str, Any]:

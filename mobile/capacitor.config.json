@@ -3,11 +3,7 @@
   "appName": "NVR",
   "webDir": "www",
   "server": {
-    "androidScheme": "https",
-    "allowNavigation": [
-      "*"
-    ],
-    "cleartext": true
+    "androidScheme": "https"
   },
   "android": {
     "appendUserAgent": "NVRApp/1.0",
