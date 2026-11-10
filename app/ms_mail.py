@@ -16,7 +16,7 @@ import re
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -24,6 +24,7 @@ import httpx
 
 from .credentials import decrypt, encrypt
 from .store import connect
+from app.clock import now as _now
 
 LOGIN_URL = os.environ.get("NVR_MS_LOGIN_URL", "https://login.microsoftonline.com").rstrip("/")
 GRAPH_URL = os.environ.get("NVR_MS_GRAPH_URL", "https://graph.microsoft.com/v1.0").rstrip("/")
@@ -115,10 +116,6 @@ def explain(code: str | None, detail: str | None) -> str:
         hint = next((words for key, words in HINTS.items() if detail.startswith(key) or key in detail), None)
         text = f"{text} Microsoft said: {detail}" + (f" Usually: {hint}" if hint else "")
     return text
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _iso(moment: datetime) -> str:

@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
 from app import console
-from app import clip_labels, external_events, privacy, viewing_audit
+from app import clip_labels, external_events, privacy, track_privacy, viewing_audit
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
 from app.store import connect
@@ -69,18 +69,20 @@ def synchronized_playback_timeline(
                 **dict(row), "pre_roll_complete": bool(row["pre_roll_complete"]),
                 "media_url": f"/api/cameras/{camera_id}/segments/{row['segment_id']}/media" if row["segment_id"] else None,
             } for row in event_rows]
-            ai_detections = [dict(row) for row in db.execute(
-                "SELECT id,label,confidence,first_seen_at,last_seen_at FROM ai_observations "
+            masks = track_privacy.zones_by_camera(db, [camera_id]).get(camera_id, [])  # An object behind a privacy mask is not on the timeline (#296)
+            ai_detections = [{key: row[key] for key in ("id", "label", "confidence", "first_seen_at", "last_seen_at")} for row in db.execute(
+                "SELECT id,label,confidence,first_seen_at,last_seen_at,box_json FROM ai_observations "
                 "WHERE camera_id=? AND first_seen_at>=? AND first_seen_at<? ORDER BY first_seen_at LIMIT 1000",
-                (camera_id, start_text, end_text))]
+                (camera_id, start_text, end_text)) if not (masks and track_privacy.box_touches(json.loads(row["box_json"]), masks))]
             ai_unanalyzed = [dict(row) for row in db.execute(
                 "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
                 "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
                 (camera_id, end_text, start_text))]
             padded_start, padded_end = (start - timedelta(minutes=1)).isoformat(), (end + timedelta(minutes=1)).isoformat()
+            seen, seen_values = track_privacy.track_visible_sql(track_privacy.zones_by_camera(db, [camera_id]), alias="t", window=(padded_start, padded_end))
             clip_labels.label_events(events, [dict(row) for row in db.execute(
-                "SELECT label,first_seen_at,last_seen_at FROM ai_tracks WHERE camera_id=? AND first_seen_at<? AND last_seen_at>=?",
-                (camera_id, padded_end, padded_start))], [dict(row) for row in db.execute(
+                f"SELECT t.label,t.first_seen_at,t.last_seen_at FROM ai_tracks t WHERE t.camera_id=? AND t.first_seen_at<? AND t.last_seen_at>=? AND {seen}",
+                (camera_id, padded_end, padded_start, *seen_values))], [dict(row) for row in db.execute(
                 "SELECT starts_at,ends_at FROM ai_coverage WHERE camera_id=? AND state='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?)",
                 (camera_id, padded_end, padded_start))])
             building_events = [{"id": row["id"], "type": row["type"], "label": external_events.label(row["type"]), "subject": row["subject"], "message": row["message"],

@@ -21,11 +21,11 @@ from starlette.concurrency import run_in_threadpool
 from starlette.convertors import Convertor, register_url_convertor
 from urllib.parse import quote
 
-from app import console, viewing_audit
+from app import console, privacy, viewing_audit
 from app.api import live_media
 from app.audit import record
 from app.credentials import encrypt
-from app.principal import Administrator, CurrentUser, current_user, requires_scope
+from app.principal import Administrator, CurrentUser, current_user, refresh, requires_scope
 from app.store import connect
 
 router = APIRouter()
@@ -359,9 +359,25 @@ async def live_through_console(websocket: WebSocket, camera_id: str) -> None:
                 await websocket.send_bytes(data)
                 await watching.delivered()
 
-    tasks = [asyncio.create_task(to_site()), asyncio.create_task(to_viewer_audited())]
+    async def still_allowed() -> str:
+        """Returns once the viewer's sign-in has ended or they no longer hold a grant for this site (#298)."""
+        while True:
+            await asyncio.sleep(privacy.ACCESS_RECHECK_SECONDS)
+            current = await asyncio.to_thread(refresh, principal)
+            if current is None:
+                return "credential"
+            await console.registry.load()
+            try:
+                _link_for(camera_id, current)
+            except HTTPException:
+                return "access"
+
+    ended = asyncio.create_task(still_allowed())
+    tasks = [asyncio.create_task(to_site()), asyncio.create_task(to_viewer_audited()), ended]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if ended.done() and not ended.cancelled():
+            await live_media._ended(websocket, ended.result())
     finally:
         for task in tasks:
             task.cancel()

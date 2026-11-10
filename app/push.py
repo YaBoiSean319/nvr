@@ -24,7 +24,7 @@ import sqlite3
 import struct
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -40,6 +40,7 @@ from .access import may_view_camera
 from .alarms import label_text
 from .credentials import decrypt, derived_key, encrypt
 from .store import connect, has_row
+from app.clock import now as _now
 
 logger = logging.getLogger("nvr.push")
 
@@ -65,10 +66,6 @@ def _b64(data: bytes) -> str:
 
 def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 # --- keys -------------------------------------------------------------------------

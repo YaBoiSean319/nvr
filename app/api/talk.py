@@ -19,7 +19,7 @@ from app import talk
 from app.api import live_media
 from app.audit import record
 from app.credentials import decrypt
-from app.principal import Administrator, CurrentUser, Principal, current_user, requires_scope
+from app.principal import Administrator, CurrentUser, Principal, current_user, refresh, requires_scope
 from app.recording import safe_stream_url
 from app.store import connect
 
@@ -120,11 +120,15 @@ def talk_audio(camera_id: str, session_id: str, user: Administrator) -> Response
 
 
 def _still_allowed(camera_id: str, user: Principal) -> bool:
+    """Whether this person may still talk through this camera, asked afresh: their sign-in, role and camera access as they are now (#298)."""
+    current = refresh(user)
+    if current is None:
+        return False
     try:
-        _, config = _camera_row(camera_id, user)
+        _, config = _camera_row(camera_id, current)
     except HTTPException:
         return False
-    return _may(user, config)
+    return _may(current, config)
 
 
 # Close codes follow live_media's: 4403 not allowed, 4404 no such camera, 4415 camera has no usable speaker, 4429 someone else is talking, 4502 the camera failed.

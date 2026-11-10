@@ -50,6 +50,7 @@ from . import occupancy
 from .alarms import PLATE_LABEL_PREFIX, create_alarm
 from .scheduling import mode_at
 from .store import connect
+from app.clock import parse as _parse
 
 logger = logging.getLogger("nvr.rules")
 
@@ -64,11 +65,6 @@ BATCH_SIZE = 5000
 # A camera's groups: its policy group and every group it browses in.
 CAMERA_GROUPS_SQL = ("SELECT group_id FROM cameras WHERE id=? AND group_id IS NOT NULL "
                      "UNION SELECT group_id FROM camera_group_memberships WHERE camera_id=?")
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)

@@ -427,7 +427,11 @@ class AccessTests(SearchCase):
         for scopes in (["metrics"], ["media"]):
             denied = anonymous.get("/api/ai/search", params=params, headers=token(scopes))
             self.assertEqual(denied.status_code, 403, scopes)
-            self.assertEqual(anonymous.get(f"/api/ai/tracks/{track}/thumbnail", headers=token(scopes)).status_code, 403, scopes)
+        # A picture from a camera needs the media scope (#295), not read: the thumbnail is the other way round from the search that finds it.
+        thumbnail = f"/api/ai/tracks/{track}/thumbnail"
+        for scopes in (["metrics"], ["read"]):
+            self.assertEqual(anonymous.get(thumbnail, headers=token(scopes)).status_code, 403, scopes)
+        self.assertNotEqual(anonymous.get(thumbnail, headers=token(["media"])).status_code, 403, "media is the scope that may fetch it (404 here: no keyframe was stored)")
 
 
 class CoverageTests(SearchCase):

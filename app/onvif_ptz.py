@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .onvif_destination import UnsafeDestination, confine
 from .onvif_stream import DEVICE, MEDIA, SCHEMA, SOAP, _local, _parse_response
 
 PTZ = "http://www.onvif.org/ver20/ptz/wsdl"
@@ -81,9 +82,13 @@ class PtzClient:
                     addresses[_local(node.tag)] = xaddr
         if "PTZ" not in addresses:
             raise PtzUnsupported()
-        self.ptz_url = addresses["PTZ"]
+        try:
+            self.ptz_url = confine(self.device_service_url, addresses["PTZ"])
+            media_url = confine(self.device_service_url, addresses["Media"]) if "Media" in addresses else self.device_service_url
+        except UnsafeDestination as exc:
+            raise PtzUnsupported() from exc
         if not self.profile_token:
-            profiles = await self._call(client, addresses.get("Media", self.device_service_url), f"{MEDIA}/GetProfiles", "<trt:GetProfiles/>")
+            profiles = await self._call(client, media_url, f"{MEDIA}/GetProfiles", "<trt:GetProfiles/>")
             self.profile_token = next((node.get("token") for node in profiles.iter() if _local(node.tag) == "Profiles" and node.get("token")), None)
             if not self.profile_token:
                 raise PtzUnsupported()

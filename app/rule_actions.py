@@ -14,7 +14,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,6 +25,7 @@ from .alarms import label_text
 from .credentials import decrypt, encrypt
 from .store import connect, has_row
 from .webhooks import signed_headers, validate_target_url
+from app.clock import now as _now
 
 SECRET_TYPES = {"webhook", "mqtt", "slack", "teams"}
 MAX_ACTIONS = 10
@@ -77,10 +78,6 @@ def _check_broker(url: str, allow_private: bool, *, delivering: bool = False) ->
     # Same address rules as webhooks; a public broker must use TLS, as a public webhook must use HTTPS.
     (_checked if delivering else validate_destination)(f"{'https' if broker.tls else 'http'}://{host}:{broker.port}/", allow_private)
     return broker
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _settings(action: dict[str, Any]) -> dict[str, Any]:

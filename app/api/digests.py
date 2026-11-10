@@ -13,6 +13,7 @@ from app import digests
 from app.api.rules import ActionDefinition
 from app.principal import Administrator, CurrentUser
 from app.store import connect
+from app.clock import now as _now
 
 router = APIRouter()
 
@@ -50,10 +51,6 @@ class ModelBody(BaseModel):
     url: str | None = Field(default=None, max_length=2048)
     model: str = Field(default="", max_length=200)
     allow_private: bool = False
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _range(start: str, end: str) -> tuple[datetime, datetime]:

@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app import privacy
+from app import privacy, track_privacy
 from app.principal import CurrentUser
 from app.store import connect
 from app.tracks import detection_view, iter_unanalyzed, track_view
@@ -44,18 +44,20 @@ def list_detections(
     limit: int = Query(default=500, ge=1, le=5000),
 ) -> dict[str, object]:
     start_text, end_text = _range(start, end)
-    clauses = ["camera_id=?", "detected_at>=?", "detected_at<?"]
+    clauses = ["d.camera_id=?", "d.detected_at>=?", "d.detected_at<?"]
     values: list[object] = [camera_id, start_text, end_text]
     if label:
-        clauses.append("label=?")
+        clauses.append("d.label=?")
         values.append(label)
     if track_id:
-        clauses.append("track_id=?")
+        clauses.append("d.track_id=?")
         values.append(track_id)
     with connect() as db:
         _require_camera(db, camera_id)
+        # Detections that touch a privacy mask are left out in SQL (#296), so the limit and "truncated" never depend on what was hidden.
+        visible, visible_values = track_privacy.detection_visible_sql(track_privacy.zones_by_camera(db, [camera_id]), "d")
         rows = db.execute(
-            "SELECT * FROM ai_detections WHERE " + " AND ".join(clauses) + " ORDER BY detected_at,id LIMIT ?", (*values, limit)
+            f"SELECT d.* FROM ai_detections d WHERE {' AND '.join(clauses)} AND {visible} ORDER BY d.detected_at,d.id LIMIT ?", (*values, *visible_values, limit)
         ).fetchall()
         unanalyzed = list(iter_unanalyzed(db, camera_id, start_text, end_text))
     return {"camera_id": camera_id, "start": start_text, "end": end_text, "detections": [detection_view(row) for row in rows],
@@ -72,18 +74,21 @@ def list_tracks(
     limit: int = Query(default=500, ge=1, le=5000),
 ) -> dict[str, object]:
     start_text, end_text = _range(start, end)
-    clauses = ["camera_id=?", "first_seen_at<?", "last_seen_at>=?"]
+    clauses = ["t.camera_id=?", "t.first_seen_at<?", "t.last_seen_at>=?"]
     values: list[object] = [camera_id, end_text, start_text]
     if label:
-        clauses.append("label=?")
+        clauses.append("t.label=?")
         values.append(label)
     with connect() as db:
         _require_camera(db, camera_id)
+        zones = track_privacy.zones_by_camera(db, [camera_id])
+        visible, visible_values = track_privacy.track_visible_sql(zones, alias="t", window=(start_text, end_text))
         rows = db.execute(
-            "SELECT * FROM ai_tracks WHERE " + " AND ".join(clauses) + " ORDER BY first_seen_at,id LIMIT ?", (*values, limit)
+            f"SELECT t.* FROM ai_tracks t WHERE {' AND '.join(clauses)} AND {visible} ORDER BY t.first_seen_at,t.id LIMIT ?", (*values, *visible_values, limit)
         ).fetchall()
+        views = track_privacy.project(db, [track_view(row) for row in rows], zones)
         unanalyzed = list(iter_unanalyzed(db, camera_id, start_text, end_text))
-    return {"camera_id": camera_id, "start": start_text, "end": end_text, "tracks": [track_view(row) for row in rows],
+    return {"camera_id": camera_id, "start": start_text, "end": end_text, "tracks": views,
             "truncated": len(rows) == limit, "unanalyzed": unanalyzed, "coverage_note": COVERAGE_NOTE}
 
 
@@ -93,8 +98,13 @@ def get_track(track_id: str, user: CurrentUser) -> dict[str, object]:
         track = db.execute("SELECT * FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
         if track is None or not user.access.can_see(track["camera_id"]):
             raise HTTPException(status_code=404, detail="Track not found")
-        rows = db.execute("SELECT * FROM ai_detections WHERE track_id=? ORDER BY detected_at,id LIMIT 5000", (track_id,)).fetchall()
-    return {**track_view(track), "detections": [detection_view(row) for row in rows]}
+        zones = track_privacy.zones_by_camera(db, [track["camera_id"]])
+        visible, visible_values = track_privacy.detection_visible_sql(zones, "d")
+        rows = db.execute(f"SELECT d.* FROM ai_detections d WHERE d.track_id=? AND {visible} ORDER BY d.detected_at,d.id LIMIT 5000", (track_id, *visible_values)).fetchall()
+        shown = track_privacy.project(db, [track_view(track)], zones)
+    if not shown:  # Nothing of it may be seen: the same answer as for a track that never existed
+        raise HTTPException(status_code=404, detail="Track not found")
+    return {**shown[0], "detections": [detection_view(row) for row in rows]}
 
 
 OVERLAY_LIMIT = 5000
@@ -102,9 +112,8 @@ MAX_OVERLAY_WINDOW_SECONDS = 600
 
 
 def _hidden_by_mask(row: Any, zones: list[dict[str, float]]) -> bool:
-    """A box that touches a privacy-masked area is never drawn: its place would show that something is behind the mask."""
-    left, top, right, bottom = row["box_x"], row["box_y"], row["box_x"] + row["box_width"], row["box_y"] + row["box_height"]
-    return any(left < zone["x"] + zone["width"] and right > zone["x"] and top < zone["y"] + zone["height"] and bottom > zone["y"] for zone in zones)
+    """A box that touches a privacy-masked area is never drawn: its place would show that something is behind the mask. The one rule, shared with the raw endpoints."""
+    return track_privacy.box_touches({"x": row["box_x"], "y": row["box_y"], "width": row["box_width"], "height": row["box_height"]}, zones)
 
 
 def _pose_for(row: Any, zones: list[dict[str, float]]) -> dict[str, list[float]] | None:

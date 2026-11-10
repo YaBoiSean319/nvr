@@ -27,6 +27,9 @@ test("how long live video took to start is measured in the tile and reported und
 
 test("before any live video has been opened, Diagnostics says so", async ({ page }) => {
   seedFixtures(1);
+  // The start-up history lives in the server's memory and the journey above has already filled it, so the empty report is scripted: this checks what the page says when there is nothing to show.
+  const group = { count: 0, median_ms: null, p90_ms: null, worst_ms: null };
+  await page.route("**/api/system/live-startup", route => route.fulfill({ json: { summary: { count: 0, started: group, joined: group }, recent: [] } }));
   await signInNext(page);
   await page.goto("/settings/diagnostics");
   await expect(page.getByRole("region", { name: "Live video start-up" })).toContainText("No live video has been opened since the NVR started.");

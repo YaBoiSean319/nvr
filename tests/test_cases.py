@@ -344,7 +344,9 @@ class ItemTests(CaseCase):
         self.assertEqual(self.full.patch(f"/api/cases/{case}", json={"title": "  "}).status_code, 422)
 
 
-class PackageTests(CaseCase):
+class PackageCase(CaseCase):
+    """Building, downloading and verifying a package with stand-in exports; the tests are in PackageTests."""
+
     def package(self, case: str, client=None) -> str:
         response = (client or self.full).post(f"/api/cases/{case}/packages")
         self.assertEqual(response.status_code, 202, response.text)
@@ -382,6 +384,9 @@ class PackageTests(CaseCase):
         self.clip(self.case, self.d1, 1, 1, label="Corridor")
         self.add(self.case, kind="note", text="Door forced at 02:10")
 
+
+
+class PackageTests(PackageCase):
     def test_the_package_holds_every_clip_the_notes_and_the_audit_and_verifies(self):
         package, content = self.build(self.case)
         names = set(zipfile.ZipFile(io.BytesIO(content)).namelist())

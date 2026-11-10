@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field, model_validator
 
-from app import face_models, faces
+from app import face_models, faces, track_privacy
 from app.principal import Administrator
 from app.store import connect
 
@@ -210,6 +211,14 @@ def picture(entry_id: str, _: Administrator) -> Response:
             data = faces.entry_picture(db, entry_id)
         except faces.FaceError as error:
             _raise(error)
+        # The picture is a crop of a recorded frame. If a mask has since been drawn over where it was taken, it is not shown (#301). An entry enrolled before the
+        # place was recorded has no box to compare, and stays visible.
+        source = db.execute("SELECT camera_id,box_json FROM face_embeddings WHERE entry_id=? ORDER BY rowid LIMIT 1", (entry_id,)).fetchone()
+        if source is not None and source["box_json"]:
+            masks = track_privacy.zones_by_camera(db, [source["camera_id"]]).get(source["camera_id"], [])
+            box = json.loads(source["box_json"])
+            if masks and (not track_privacy.box_usable(box) or track_privacy.box_touches(box, masks)):
+                raise HTTPException(status_code=404, detail="That entry has no picture")
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
@@ -237,9 +246,12 @@ def sightings(user: Administrator, limit: int = 50) -> dict[str, Any]:
     """The most recent matches, newest first; looking at them is itself audited."""
     limit = max(1, min(limit, 200))
     with connect() as db:
+        # A sighting whose face a mask now covers is not listed (#301); this is in the query so the limit never counts what was hidden.
+        visible, visible_values = track_privacy.box_json_visible_sql(track_privacy.zones_by_camera(db, [row[0] for row in db.execute("SELECT id FROM cameras")]), "s")
         rows = db.execute(
             "SELECT s.id,s.entry_id,e.name AS entry_name,s.camera_id,c.name AS camera_name,s.track_id,s.seen_at,s.similarity,(s.picture IS NOT NULL) AS has_picture "
-            "FROM face_sightings s JOIN face_watch_entries e ON e.id=s.entry_id JOIN cameras c ON c.id=s.camera_id ORDER BY s.seen_at DESC,s.id DESC LIMIT ?", (limit,)).fetchall()
+            f"FROM face_sightings s JOIN face_watch_entries e ON e.id=s.entry_id JOIN cameras c ON c.id=s.camera_id WHERE {visible} ORDER BY s.seen_at DESC,s.id DESC LIMIT ?",
+            (*visible_values, limit)).fetchall()
         faces.audit(db, int(user["id"]), "face_sightings_viewed", "all", {"shown": len(rows)})
     return {"sightings": [{**dict(row), "has_picture": bool(row["has_picture"])} for row in rows]}
 
@@ -247,8 +259,16 @@ def sightings(user: Administrator, limit: int = 50) -> dict[str, Any]:
 @router.get("/api/faces/sightings/{sighting_id}/picture")
 def sighting_picture(sighting_id: str, user: Administrator) -> Response:
     with connect() as db:
-        row = db.execute("SELECT picture,entry_id FROM face_sightings WHERE id=?", (sighting_id,)).fetchone()
+        row = db.execute("SELECT picture,entry_id,camera_id,box_json FROM face_sightings WHERE id=?", (sighting_id,)).fetchone()
         if row is None or row["picture"] is None:
             raise HTTPException(status_code=404, detail="No picture for that sighting")
+        masks = track_privacy.zones_by_camera(db, [row["camera_id"]]).get(row["camera_id"], [])
+        if masks:  # A mask drawn since over where the face was: the picture is not shown, and a box that cannot be compared is not trusted (#301)
+            try:
+                box = json.loads(row["box_json"])
+            except (TypeError, ValueError):
+                box = None
+            if not track_privacy.box_usable(box) or track_privacy.box_touches(box, masks):
+                raise HTTPException(status_code=404, detail="No picture for that sighting")
         faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
     return Response(bytes(row["picture"]), media_type="image/jpeg", headers={"Cache-Control": "no-store"})

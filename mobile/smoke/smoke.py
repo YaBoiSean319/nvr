@@ -52,6 +52,11 @@ def main(apk: str, address: str, expected: str) -> int:
         handle.write(f'<?xml version="1.0" encoding="utf-8" standalone="yes" ?><map><string name="server.url">{address}</string></map>')
     adb("push", "CapacitorStorage.xml", "/data/local/tmp/CapacitorStorage.xml")
     adb("shell", f"run-as {PACKAGE} sh -c 'mkdir -p shared_prefs && cp /data/local/tmp/CapacitorStorage.xml shared_prefs/CapacitorStorage.xml'")
+    # The server the phone trusts is kept apart, in storage only native code writes (#299); enrol it as the start screen would.
+    with open("nvr_enrolment.xml", "w") as handle:
+        handle.write(f'<?xml version="1.0" encoding="utf-8" standalone="yes" ?><map><string name="origin">{address.rstrip("/")}</string></map>')
+    adb("push", "nvr_enrolment.xml", "/data/local/tmp/nvr_enrolment.xml")
+    adb("shell", f"run-as {PACKAGE} sh -c 'cp /data/local/tmp/nvr_enrolment.xml shared_prefs/nvr_enrolment.xml'")
     adb("shell", "am", "start", "-n", ACTIVITY)
     deadline = time.time() + 150
     text = ""

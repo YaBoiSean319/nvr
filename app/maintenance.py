@@ -11,6 +11,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from app.clock import now as _now
 
 MAX_ADMIN_LENGTH = timedelta(days=7)
 MAX_OPERATOR_LENGTH = timedelta(hours=8)
@@ -22,10 +23,6 @@ MAX_CAMERAS = 200
 
 class WindowError(ValueError):
     """A window cannot be made or changed as asked."""
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def iso(moment: datetime) -> str:

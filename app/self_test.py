@@ -15,16 +15,13 @@ from typing import Any
 
 from .incidents import sync_incident
 from .store import connect
+from app.clock import now as _now
 
 logger = logging.getLogger(__name__)
 
 SCHEDULE_TIME = time(3, 41)  # After the nightly backup at 02:17, so its result is fresh.
 SILENT_AFTER = timedelta(days=1)
 FAULT_TYPE = "self_test"
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _result(check: str, kind: str, name: str, passed: bool | None, detail: str, **extra: Any) -> dict[str, Any]:

@@ -18,6 +18,7 @@ from typing import Any
 from . import privacy, ptz
 from .audit import record
 from .store import connect
+from app.clock import now as _now
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,6 @@ class TrackingRefused(Exception):
     def __init__(self, message: str, code: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _parse(value: str) -> datetime:

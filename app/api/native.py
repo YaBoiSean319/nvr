@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app import device_sessions, native_push
 from app.api.identity import start_session
-from app.principal import Administrator, CurrentUser
+from app.principal import Administrator, CurrentUser, SignedInPerson
 from app.store import connect
 
 router = APIRouter()
@@ -57,8 +58,8 @@ def remove_device(payload: TokenRequest, user: CurrentUser) -> Response:
 
 
 @router.post("/api/native/device-sessions", status_code=status.HTTP_201_CREATED)
-def create_device_session(payload: DeviceSessionRequest, user: CurrentUser) -> dict[str, object]:
-    """For a fully signed-in person: the secret the app keeps in the phone's secure storage. Shown once."""
+def create_device_session(payload: DeviceSessionRequest, user: SignedInPerson) -> dict[str, object]:
+    """For a fully signed-in person: the secret the app keeps in the phone's secure storage. Shown once. Never for an API token or a video wall (#292)."""
     return device_sessions.create(int(user["id"]), payload.device_label.strip())
 
 
@@ -68,7 +69,11 @@ def resume_device_session(payload: ResumeRequest, response: Response) -> dict[st
     resumed = device_sessions.resume(payload.token)
     if resumed is None:
         raise HTTPException(status_code=401, detail="Sign in again")
-    start_session(response, resumed["user_id"])
+    try:
+        start_session(response, resumed["user_id"], device_session_id=resumed["id"])
+    except sqlite3.IntegrityError:
+        # The phone was taken away between the exchange and the session being made: nothing is issued.
+        raise HTTPException(status_code=401, detail="Sign in again") from None
     return {"username": resumed["username"], "role": resumed["role"], "token": resumed["token"], "expires_at": resumed["expires_at"]}
 
 

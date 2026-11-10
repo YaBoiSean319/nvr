@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
+from .onvif_destination import UnsafeDestination, confine
 from .onvif_stream import DEVICE, SCHEMA, SOAP, _local, _parse_response
 
 MEDIA2 = "http://www.onvif.org/ver20/media/wsdl"
@@ -64,6 +65,10 @@ async def write_masks(device_service_url: str, username: str, password: str, zon
                 media2 = next((child.text.strip() for child in service if _local(child.tag) == "XAddr" and child.text), None)
         if not media2:
             raise MasksUnsupported()
+        try:
+            media2 = confine(device_service_url, media2)
+        except UnsafeDestination as exc:
+            raise MasksUnsupported() from exc
         configurations = await _call(client, media2, f"{MEDIA2}/GetVideoSourceConfigurations", "<tr2:GetVideoSourceConfigurations/>")
         # Every video source: a stream from a source left unmasked would carry the private area.
         sources = list(dict.fromkeys(node.get("token") for node in configurations.iter() if _local(node.tag) == "Configurations" and node.get("token")))

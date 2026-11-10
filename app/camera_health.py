@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from . import metrics
 from .credentials import decrypt
 from .store import connect
+from app.clock import now as _now, parse as _parse
 
 logger = logging.getLogger("nvr.camera_health")
 
@@ -38,17 +39,8 @@ UP_STATES = ("recording", "buffering")  # The same two as in the trigger of migr
 PRERELEASE = frozenset({"alpha", "beta", "rc", "pre", "dev", "preview", "a", "b"})
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
-
-
-def _parse(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # --- the recorder's dropped-frame counter ----------------------------------------------------------------------------------------------------
