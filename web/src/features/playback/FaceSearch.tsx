@@ -79,11 +79,14 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
         {look.error ? <p className="notice" data-tone="bad" role="alert">{failureText(look.error, "The picture could not be read.")}</p> : null}
         {message ? <p className="notice" data-tone="good" role="status">{message}</p> : null}
         {found ? (
-          found.faces.length === 0 ? <p className="muted" role="status">No face was found in that picture. Try a moment where the face is larger and facing the camera.</p> : (
+          found.faces.length === 0 ? <p className="muted" role="status">No face was found in that picture. Try a moment where the face is larger and facing the camera.</p> : !found.picture ? (
+            // Nobody puts a face on the list without seeing it: faces were found, but there is no picture to choose on.
+            <p className="notice" data-tone="bad" role="alert">The picture could not be shown, so no face can be chosen from it. Look at the playhead again to try once more.</p>
+          ) : (
             <>
               <p className="muted" role="status">{found.faces.length} {found.faces.length === 1 ? "face" : "faces"} found. Choose one.</p>
               <div className="face-picture" style={{ position: "relative" }}>
-                {found.picture ? <img src={`data:image/jpeg;base64,${found.picture}`} alt="The picture at the playhead" style={{ width: "100%", display: "block" }} /> : <div className="grid-empty">No picture</div>}
+                <img src={`data:image/jpeg;base64,${found.picture}`} alt="The picture at the playhead" style={{ width: "100%", display: "block" }} />
                 {/* Largest first, so a smaller box inside a larger one is drawn over it and is the one under the pointer, whatever order the faces were found in. */}
                 {drawOrder(found.faces).map(index => {
                   const face = found.faces[index]!;

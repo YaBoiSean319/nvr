@@ -215,3 +215,19 @@ test("with one face box inside another, the smaller face is the one chosen, what
   await page.keyboard.press("Enter");
   await expect(panel.getByRole("button", { name: "Face 2", exact: true })).toHaveAttribute("aria-pressed", "true");
 });
+
+test("when faces were found but the picture could not be made, nothing can be chosen, and the page says so differently from no face being found", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const { panel } = await openFaceDrawer(page, { picture: null, faces: [{ box: { x: 0.1, y: 0.1, width: 0.2, height: 0.3 }, score: 0.9, pixels: [80, 90], usable: true, reason: null }] });
+  await panel.getByRole("button", { name: "Look at the playhead" }).click();
+  await expect(panel.getByRole("alert")).toContainText("The picture could not be shown");
+  await expect(panel).not.toContainText("faces found. Choose one");
+  await expect(panel).not.toContainText("1 face found");
+  await expect(panel.getByRole("button", { name: /^Face 1/ })).toHaveCount(0);
+  await expect(panel.getByRole("form", { name: "Add this face" })).toHaveCount(0);
+  await expect(panel).not.toContainText("No face was found"); // That is for a picture with no face in it
+
+  await panel.getByRole("button", { name: "Look at the playhead" }).click(); // Trying again asks again
+  await expect(panel.getByRole("alert")).toContainText("The picture could not be shown");
+});
