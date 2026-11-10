@@ -171,7 +171,7 @@ test("the alert rule is offered once for the switched-on cameras no face rule co
 async function openFaceDrawer(page, { faces, picture = PICTURE, addStatus = 201 }) {
   const sent = [];
   const now = new Date().toISOString();
-  await page.route("**/api/faces/find", route => route.fulfill({ json: { camera_id: "x", at: now, picture, faces } }));
+  await page.route("**/api/faces/find", route => route.fulfill({ json: { camera_id: route.request().postDataJSON().camera_id, at: now, picture, faces } }));
   await page.route("**/api/faces/watch", async route => {
     if (route.request().method() !== "POST") return route.fallback();
     sent.push(route.request().postDataJSON());
@@ -277,4 +277,23 @@ test("the expiry date field offers nothing before today", async ({ page }) => {
   await panel.getByRole("button", { name: "Face 1", exact: true }).click();
   const today = await page.evaluate(() => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; });
   await expect(panel.getByLabel("Remove from the list after (optional)")).toHaveAttribute("min", today);
+});
+
+test("the picture says which camera and moment it is from, and changing the camera clears it, its boxes and the chosen face", async ({ page }) => {
+  seedFixtures(2);
+  await signInNext(page);
+  const { panel } = await openFaceDrawer(page, { faces: [{ box: { x: 0.1, y: 0.1, width: 0.2, height: 0.3 }, score: 0.9, pixels: [80, 90], usable: true, reason: null }] });
+  await page.getByRole("button", { name: /^Camera 002/ }).click(); // Both cameras are shown in Playback
+  await panel.getByLabel("Camera").selectOption({ label: "Camera 001" });
+  await panel.getByRole("button", { name: "Look at the playhead" }).click();
+  await expect(panel.getByRole("img", { name: "The picture at the playhead" })).toBeVisible();
+  await expect(panel.getByText(/^Camera 001 · .*\d/)).toBeVisible(); // The camera, and the moment as the site writes it
+  await panel.getByRole("button", { name: "Face 1", exact: true }).click();
+  await expect(panel.getByRole("form", { name: "Add this face" })).toBeVisible();
+
+  await panel.getByLabel("Camera").selectOption({ label: "Camera 002" });
+  await expect(panel.getByRole("img", { name: "The picture at the playhead" })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: /^Face 1/ })).toHaveCount(0);
+  await expect(panel.getByRole("form", { name: "Add this face" })).toHaveCount(0);
+  await expect(panel.getByText(/^Camera 001 · /)).toHaveCount(0);
 });

@@ -1,6 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
+import { useDisplaySettings } from "@/api/queries";
 import { api } from "@/api/client";
+import { formatSiteDateTime } from "@/lib/zonedTime";
 import type { Camera } from "@/api/types";
 import { failureText } from "@/features/admin/tabDraft";
 import { FACES_KEY, useFaceEntries, type FaceEntry } from "@/features/settings/FacesSettings";
@@ -30,6 +32,7 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
   const [reason, setReason] = useState("");
   const [expires, setExpires] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const display = useDisplaySettings();
   const entries = useFaceEntries();
   const list: FaceEntry[] = entries.data?.entries ?? [];
 
@@ -74,7 +77,7 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
         {shownIds.length === 0 ? <p className="muted">No cameras are shown in Playback.</p> : (
           <div className="attr-form">
             <label className="attr-field"><span>Camera</span>
-              <select value={chosenCamera} onChange={event => setCameraId(event.target.value)}>
+              <select value={chosenCamera} onChange={event => { setCameraId(event.target.value); setFound(null); setPicked(null); }}>
                 {shownIds.map(id => <option key={id} value={id}>{cameras.get(id)?.name ?? id}</option>)}
               </select>
             </label>
@@ -92,6 +95,7 @@ export function FaceSearch({ shownIds, cameras }: { shownIds: string[]; cameras:
           ) : (
             <>
               <p className="muted" role="status">{found.faces.length} {found.faces.length === 1 ? "face" : "faces"} found. Choose one.</p>
+              <p className="muted" role="status">{cameras.get(found.camera_id)?.name ?? found.camera_id} · {display.data ? formatSiteDateTime(Date.parse(found.at), display.data) : found.at}</p>
               <div className="face-picture" style={{ position: "relative" }}>
                 <img src={`data:image/jpeg;base64,${found.picture}`} alt="The picture at the playhead" style={{ width: "100%", display: "block" }} />
                 {/* Largest first, so a smaller box inside a larger one is drawn over it and is the one under the pointer, whatever order the faces were found in. */}
