@@ -34,3 +34,22 @@ test("before any live video has been opened, Diagnostics says so", async ({ page
   await page.goto("/settings/diagnostics");
   await expect(page.getByRole("region", { name: "Live video start-up" })).toContainText("No live video has been opened since the NVR started.");
 });
+
+test("while the start-up report is still loading, Diagnostics does not claim no live video was opened", async ({ page }) => {
+  seedFixtures(1);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route("**/api/system/live-startup", async route => {
+    await held;
+    const group = { count: 0, median_ms: null, p90_ms: null, worst_ms: null };
+    await route.fulfill({ json: { summary: { count: 0, started: group, joined: group }, recent: [] } });
+  });
+  await signInNext(page);
+  await page.goto("/settings/diagnostics");
+  const section = page.getByRole("region", { name: "Live video start-up" });
+  await expect(section).toContainText("Loading");
+  await expect(section).not.toContainText("No live video has been opened");
+  release();
+  await expect(section).toContainText("No live video has been opened since the NVR started.");
+  await expect(section).not.toContainText("Loading");
+});

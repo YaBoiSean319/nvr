@@ -38,6 +38,8 @@ from typing import Any, Awaitable, Callable, Iterable
 
 import numpy as np
 
+from . import jpeg
+
 logger = logging.getLogger("nvr.plates")
 
 DETECTOR_ID = "vehicle-license-plate-detection-barrier-0106"
@@ -295,18 +297,8 @@ def associate(box: dict[str, float], vehicles: Iterable[tuple[str, dict[str, flo
 # --- storage ----------------------------------------------------------------------------------------------------------------------------------
 
 def encode_crop(crop: np.ndarray | None) -> bytes | None:
-    """A BGR crop as a JPEG (ffmpeg), or None when it cannot be encoded."""
-    ffmpeg = shutil.which("ffmpeg")
-    if crop is None or crop.ndim != 3 or crop.size == 0 or not ffmpeg:
-        return None
-    height, width = crop.shape[:2]
-    try:
-        result = subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-i", "pipe:0",
-                                 "-vf", "scale=iw*max(1\\,ceil(160/iw)):-1:flags=bicubic", "-frames:v", "1", "-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-                                input=np.ascontiguousarray(crop, dtype=np.uint8).tobytes(), capture_output=True, timeout=5, check=False)
-    except subprocess.TimeoutExpired:
-        return None
-    return result.stdout if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8") else None
+    """A BGR crop as a JPEG (ffmpeg), widened to at least 160 pixels so a small plate stays legible; None when it cannot be encoded."""
+    return jpeg.encode(crop, scale="scale=iw*max(1\\,ceil(160/iw)):-1:flags=bicubic", quality=3, timeout=5)
 
 
 def store_read(db: sqlite3.Connection, camera_id: str, track_id: str, plate: str, confidence: float, at: datetime, box: dict[str, float], crop: bytes | None,

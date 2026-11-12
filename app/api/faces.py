@@ -4,17 +4,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field, model_validator
 
 from app import face_models, faces, track_privacy
+from app import rules as rules_engine
 from app.principal import Administrator
 from app.store import connect
 
 router = APIRouter()
+PICTURE_AUDIT_INTERVAL = timedelta(minutes=10)
 
 
 def _raise(error: faces.FaceError) -> None:
@@ -44,6 +46,16 @@ class FindRequest(BaseModel):
         return self
 
 
+def _check_expiry(value: datetime | None) -> None:
+    """An expiry needs a timezone and has to be ahead: an entry that is already expired is never looked for, whatever the page says about it (#311)."""
+    if value is None:
+        return
+    if value.tzinfo is None:
+        raise ValueError("The expiry must include a timezone")
+    if value <= datetime.now(timezone.utc):
+        raise ValueError("The expiry must be in the future; an entry that has already expired would never be looked for")
+
+
 class AddRequest(FindRequest):
     box: Box | None = None
     point: Point | None = None
@@ -61,8 +73,7 @@ class AddRequest(FindRequest):
                 raise ValueError("Enter a name or label for the entry")
             if not (self.reason or "").strip():
                 raise ValueError("Enter why this person is on the list")
-        if self.expires_at is not None and self.expires_at.tzinfo is None:
-            raise ValueError("The expiry must include a timezone")
+        _check_expiry(self.expires_at)
         return self
 
 
@@ -79,8 +90,7 @@ class UpdateRequest(BaseModel):
             raise ValueError("The name cannot be empty")
         if self.reason is not None and not self.reason.strip():
             raise ValueError("The reason cannot be empty")
-        if self.expires_at is not None and self.expires_at.tzinfo is None:
-            raise ValueError("The expiry must include a timezone")
+        _check_expiry(self.expires_at)
         return self
 
 
@@ -125,7 +135,7 @@ async def find(payload: FindRequest, user: Administrator) -> dict[str, Any]:
         frame, found = await faces.find_faces(payload.camera_id, payload.at)
     except faces.FaceError as error:
         _raise(error)
-    jpeg = await asyncio.to_thread(faces.frame_jpeg, frame)
+    jpeg = await asyncio.to_thread(faces.frame_jpeg, frame) if found else None  # A frame with no face is not encoded or sent: the drawer shows only that none was found (#313)
     with connect() as db:
         faces.audit(db, int(user["id"]), "face_search_viewed", payload.camera_id, {"at": payload.at.astimezone(timezone.utc).isoformat(), "faces": len(found)})
     return {"camera_id": payload.camera_id, "at": payload.at.astimezone(timezone.utc).isoformat(), "picture": base64.b64encode(jpeg).decode() if jpeg else None, "faces": [{key: value for key, value in item.items() if key != "_face"} for item in found]}
@@ -227,7 +237,12 @@ def cameras(_: Administrator) -> dict[str, Any]:
     with connect() as db:
         enabled = set(faces.cameras_enabled(db))
         rows = db.execute("SELECT id,name FROM cameras WHERE archived_at IS NULL ORDER BY name,id").fetchall()
-    return {"cameras": [{"camera_id": row["id"], "name": row["name"], "enabled": row["id"] in enabled} for row in rows], "models_available": face_models.installed()}
+        face_rules = [rule for rule in rules_engine.load_rules(db) if rule.condition_type == "face" and rule.enabled]
+        # Switched-on cameras no enabled face rule watches: a match there is stored but alerts nobody, so the page offers the rule for exactly these (#307).
+        unalerted = [row["id"] for row in rows if row["id"] in enabled
+                     and not any(rule.watches_camera(row["id"], rules_engine._camera_groups(db, row["id"])) for rule in face_rules)]
+    return {"cameras": [{"camera_id": row["id"], "name": row["name"], "enabled": row["id"] in enabled} for row in rows], "models_available": face_models.installed(),
+            "unalerted_camera_ids": unalerted}
 
 
 @router.put("/api/faces/cameras/{camera_id}")
@@ -270,5 +285,10 @@ def sighting_picture(sighting_id: str, user: Administrator) -> Response:
                 box = None
             if not track_privacy.box_usable(box) or track_privacy.box_touches(box, masks):
                 raise HTTPException(status_code=404, detail="No picture for that sighting")
-        faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
+        # A list fetches each thumbnail again whenever it is redrawn: looking at a picture is recorded, once per person and match in a while, not once per fetch (#306).
+        recent = db.execute("SELECT 1 FROM audit_log WHERE actor_id=? AND action='face_sighting_picture_viewed' AND resource_id=? AND details_json=? AND created_at>?",
+                            (int(user["id"]), row["entry_id"], json.dumps({"sighting_id": sighting_id}, separators=(",", ":")),
+                             (datetime.now(timezone.utc) - PICTURE_AUDIT_INTERVAL).strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
+        if recent is None:
+            faces.audit(db, int(user["id"]), "face_sighting_picture_viewed", row["entry_id"], {"sighting_id": sighting_id})
     return Response(bytes(row["picture"]), media_type="image/jpeg", headers={"Cache-Control": "no-store"})

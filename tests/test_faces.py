@@ -1,6 +1,7 @@
 """The face watch list (#253, part 2): who is on it, the switches, finding a face in a recording. A stand-in reader and picture source stand in for the models and the footage."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
@@ -161,11 +162,34 @@ class FindAndAddTests(Case):
             self.assertEqual(self.client.post("/api/faces/find", json={"camera_id": self.camera, "at": AT}).status_code, 404)
 
 
+class PictureCostTests(Case):
+    """Looking for a usable moment is cheap: a frame with no face is not encoded or sent (#313)."""
+
+    def look(self) -> dict:
+        return self.client.post("/api/faces/find", json={"camera_id": self.camera, "at": AT}).json()
+
+    def test_a_frame_with_no_face_is_never_encoded(self):
+        self.found.clear()
+        with patch.object(faces, "frame_jpeg", wraps=faces.frame_jpeg) as encoder:
+            body = self.look()
+        self.assertEqual((body["faces"], body["picture"]), ([], None))
+        encoder.assert_not_called()
+
+    def test_a_frame_with_faces_is_encoded_once_and_sent_as_before(self):
+        with patch.object(faces, "frame_jpeg", wraps=faces.frame_jpeg) as encoder:
+            body = self.look()
+        self.assertEqual(len(body["faces"]), 2)
+        self.assertTrue(base64.b64decode(body["picture"]).startswith(b"\xff\xd8"))
+        encoder.assert_called_once()
+
+
 class ListTests(Case):
     def test_the_list_shows_expiry_and_only_live_entries_are_compared(self):
         self.add(name="Live")
         self.add(name="Soon gone", expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
-        expired = self.add(name="Expired", expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat()).json()
+        expired = self.add(name="Expired", expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat()).json()
+        with connect() as db:  # An entry becomes expired as time passes; one cannot be made already expired (#311)
+            db.execute("UPDATE face_watch_entries SET expires_at=? WHERE id=?", ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), expired["id"]))
         off = self.add(name="Switched off").json()
         self.assertTrue(self.client.patch(f"/api/faces/watch/{off['id']}", json={"enabled": False}).json()["enabled"] is False)
         entries = {item["name"]: item for item in self.client.get("/api/faces/watch").json()["entries"]}
@@ -210,6 +234,33 @@ class ChangeTests(Case):
         self.assertEqual(self.audit_actions()[-1], "face_watch_removed")
 
 
+class ExpiryTests(Case):
+    """An expiry that is not in the future is refused, with a message that says why, when adding and when changing (#311)."""
+
+    def past(self) -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+    def test_adding_a_person_with_an_expiry_in_the_past_is_refused_and_nothing_is_created(self):
+        refused = self.add(expires_at=self.past())
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertIn("in the future", refused.text)
+        self.assertEqual(self.client.get("/api/faces/watch").json()["entries"], [])
+
+    def test_changing_an_expiry_to_a_time_in_the_past_is_refused_and_the_entry_is_unchanged(self):
+        entry = self.add(expires_at="2030-01-01T00:00:00+00:00").json()
+        refused = self.client.patch(f"/api/faces/watch/{entry['id']}", json={"expires_at": self.past()})
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertIn("in the future", refused.text)
+        self.assertEqual(self.client.get("/api/faces/watch").json()["entries"][0]["expires_at"], entry["expires_at"])
+
+    def test_a_future_expiry_is_still_accepted_when_adding_and_changing(self):
+        soon = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        entry = self.add(expires_at=soon)
+        self.assertEqual(entry.status_code, 201, entry.text)
+        later = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+        self.assertEqual(self.client.patch(f"/api/faces/watch/{entry.json()['id']}", json={"expires_at": later}).status_code, 200)
+
+
 class SwitchTests(Case):
     def test_every_camera_starts_off_and_each_switch_is_recorded(self):
         listing = self.client.get("/api/faces/cameras").json()
@@ -252,6 +303,65 @@ class SightingTests(Case):
         self.assertEqual(self.client.get("/api/faces/sightings/s1/picture").content, b"\xff\xd8jpeg")
         self.assertEqual(self.client.get("/api/faces/sightings/s2/picture").status_code, 404)
         self.assertEqual(self.audit_actions()[-2:], ["face_sightings_viewed", "face_sighting_picture_viewed"])
+
+
+    def sighting_with_picture(self) -> None:
+        entry = self.add().json()
+        with connect() as db:
+            db.execute("INSERT INTO ai_tracks(id,camera_id,label,first_seen_at,last_seen_at,model_id,model_version,provider) VALUES('t1',?,'person','2026-11-06T12:00:00+00:00','2026-11-06T12:00:00+00:00','m','1','cpu')", (self.camera,))
+            db.execute("INSERT INTO face_sightings(id,entry_id,camera_id,track_id,seen_at,similarity,box_json,picture) VALUES('s1',?,?,'t1','2026-11-06T12:00:05+00:00',0.8,'{}',?)",
+                       (entry["id"], self.camera, b"\xff\xd8jpeg"))
+
+    def test_fetching_the_same_match_picture_again_does_not_write_another_audit_row(self):
+        # A redrawn list fetches each thumbnail again (#306): looking at a picture is recorded, but not once per redraw.
+        self.sighting_with_picture()
+        for _ in range(4):
+            self.assertEqual(self.client.get("/api/faces/sightings/s1/picture").status_code, 200)
+        self.assertEqual(self.audit_actions().count("face_sighting_picture_viewed"), 1)
+
+    def test_a_picture_looked_at_again_much_later_is_recorded_again(self):
+        self.sighting_with_picture()
+        self.client.get("/api/faces/sightings/s1/picture")
+        with connect() as db:
+            db.execute("UPDATE audit_log SET created_at=datetime('now','-1 hour') WHERE action='face_sighting_picture_viewed'")
+        self.client.get("/api/faces/sightings/s1/picture")
+        self.assertEqual(self.audit_actions().count("face_sighting_picture_viewed"), 2)
+
+
+class RuleCoverageTests(Case):
+    """The page offers the alert rule only for switched-on cameras no enabled face rule covers (#307), as Fall detection does."""
+
+    def unalerted(self) -> list[str]:
+        return self.client.get("/api/faces/cameras").json()["unalerted_camera_ids"]
+
+    def switch(self, *cameras: str) -> None:
+        for camera in cameras:
+            self.assertEqual(self.client.put(f"/api/faces/cameras/{camera}", json={"enabled": True}).status_code, 200)
+
+    def rule(self, cameras: list[str]) -> dict:
+        made = self.client.post("/api/rules", json={"name": "Watched face seen", "camera_ids": cameras, "condition": {"type": "face", "entry_ids": []}})
+        self.assertEqual(made.status_code, 201, made.text)
+        return made.json()
+
+    def test_with_no_rule_every_switched_on_camera_is_flagged_and_switched_off_ones_are_not(self):
+        self.assertEqual(self.unalerted(), [])
+        self.switch("cam-1")
+        self.assertEqual(self.unalerted(), ["cam-1"])
+
+    def test_a_rule_covering_some_cameras_leaves_the_others_flagged_and_a_camera_switched_on_later_brings_the_notice_back(self):
+        self.switch("cam-1")
+        self.rule(["cam-1"])
+        self.assertEqual(self.unalerted(), [])
+        self.switch("cam-2")
+        self.assertEqual(self.unalerted(), ["cam-2"])
+
+    def test_a_rule_covering_every_switched_on_camera_clears_the_notice_and_a_disabled_one_does_not_count(self):
+        self.switch("cam-1", "cam-2")
+        made = self.rule(["cam-1", "cam-2"])
+        self.assertEqual(self.unalerted(), [])
+        keep = {key: made[key] for key in ("name", "camera_ids", "group_ids", "condition", "classes", "schedule", "cooldown_seconds", "pop_into_live")}
+        self.client.put(f"/api/rules/{made['id']}", json={**keep, "enabled": False, "actions": []})
+        self.assertEqual(self.unalerted(), ["cam-2", "cam-1"])  # In the page's order: by camera name
 
 
 class AccessTests(Case):

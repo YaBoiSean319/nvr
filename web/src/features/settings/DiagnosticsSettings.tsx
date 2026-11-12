@@ -50,7 +50,7 @@ function LiveStartupTimes() {
             </tbody>
           </table>
         </>
-      ) : <p className="muted">{report.error ? failureText(report.error) : "No live video has been opened since the NVR started."}</p>}
+      ) : <p className="muted" role={report.isPending ? "status" : undefined}>{report.error ? failureText(report.error) : report.isPending ? "Loading…" : "No live video has been opened since the NVR started."}</p>}
     </section>
   );
 }

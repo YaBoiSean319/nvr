@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api } from "@/api/client";
 import { failureText } from "@/features/admin/tabDraft";
 
 export interface FaceEntry { id: string; name: string; reason: string; expires_at: string | null; expired: boolean; enabled: boolean; embeddings: number; has_picture: boolean; created_by: string | null; created_at: string }
 interface FaceStatus { models: { available: boolean; detector_installed: boolean; recogniser_installed: boolean }; match_threshold: number; default_threshold: number; cameras_enabled: number; entries: number }
-interface FaceCameras { cameras: { camera_id: string; name: string; enabled: boolean }[]; models_available: boolean }
+interface FaceCameras { cameras: { camera_id: string; name: string; enabled: boolean }[]; models_available: boolean; unalerted_camera_ids: string[] }
 interface Sighting { id: string; entry_id: string; entry_name: string; camera_id: string; camera_name: string; seen_at: string; similarity: number; has_picture: boolean }
 
 export const FACES_KEY = ["admin", "faces"] as const;
@@ -44,7 +44,8 @@ export function FacesSettings() {
   const watch = useFaceEntries();
   const cameras = useQuery({ queryKey: [...FACES_KEY, "cameras"], queryFn: ({ signal }) => api<FaceCameras>("/api/faces/cameras", { signal }) });
   const [showSightings, setShowSightings] = useState(false);
-  const sightings = useQuery({ queryKey: [...FACES_KEY, "sightings"], enabled: showSightings, staleTime: 0, queryFn: ({ signal }) => api<{ sightings: Sighting[] }>("/api/faces/sightings", { signal }) });
+  // Looking at matches is audited, so they are fetched when the person asks (the button, Refresh) and never by a save elsewhere on the page, a return to the window or a redraw (#306).
+  const sightings = useQuery({ queryKey: ["face-sightings"], enabled: showSightings, staleTime: Infinity, gcTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false, queryFn: ({ signal }) => api<{ sightings: Sighting[] }>("/api/faces/sightings", { signal }) });
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [threshold, setThreshold] = useState<number | null>(null);
@@ -71,15 +72,19 @@ export function FacesSettings() {
     onSuccess: async () => { setError(null); setMessage("Deleted, with their pictures and the numbers that describe their face."); await refresh(); },
     onError: failed("The entry could not be deleted."),
   });
+  const making = useRef(false);  // Set at once, where a disabled button only follows the next render: two quick clicks must make one rule
   const createRule = useMutation({
-    mutationFn: () => api("/api/rules", { method: "POST", body: { name: "Watched face seen", camera_ids: (cameras.data?.cameras ?? []).filter(item => item.enabled).map(item => item.camera_id), condition: { type: "face", entry_ids: [] }, cooldown_seconds: 300, pop_into_live: true } }),
-    onSuccess: async () => { setError(null); setMessage("Rule created: a watched face now raises an alarm and comes up in Live for people who opted in. Add push or other actions to it under Rules."); },
+    mutationFn: (cameraIds: string[]) => api("/api/rules", { method: "POST", body: { name: "Watched face seen", camera_ids: cameraIds, condition: { type: "face", entry_ids: [] }, cooldown_seconds: 300, pop_into_live: true } }),
+    // The notice goes away only when the page has heard which cameras the new rule covers, so a second click cannot make a second rule.
+    onSuccess: async () => { setError(null); setMessage("Rule created: a watched face now raises an alarm and comes up in Live for people who opted in. Add push or other actions to it under Rules."); await refresh(); },
     onError: failed("The rule could not be created."),
+    onSettled: () => { making.current = false; },
   });
+  const makeRule = (cameraIds: string[]) => { if (making.current) return; making.current = true; createRule.mutate(cameraIds); };
 
   const models = status.data?.models;
   const current = threshold ?? status.data?.match_threshold ?? 0.45;
-  const enabledCameras = (cameras.data?.cameras ?? []).filter(item => item.enabled).length;
+  const uncovered = cameras.data?.unalerted_camera_ids ?? [];
   return (
     <>
       {message ? <p className="notice" data-tone="good" role="status">{message}</p> : null}
@@ -113,9 +118,13 @@ export function FacesSettings() {
           ))}
           {cameras.data?.cameras.length === 0 ? <li className="muted">No cameras yet.</li> : null}
         </ul>
-        {enabledCameras > 0 && (watch.data?.entries.length ?? 0) > 0 ? (
-          <div className="field-actions">
-            <button type="button" className="button" disabled={createRule.isPending} onClick={() => createRule.mutate()}>Create an alert rule for these cameras</button>
+        {uncovered.length > 0 && (watch.data?.entries.length ?? 0) > 0 ? (
+          <div className="notice" data-tone="warn" role="status">
+            <p>
+              {uncovered.length === 1 ? "One camera is" : `${uncovered.length} cameras are`} looking for watched faces, but no rule will alert anyone about {uncovered.length === 1 ? "it" : "them"}:
+              matches there are only recorded. Create the rule so a watched face raises an alarm.
+            </p>
+            <button type="button" className="button" data-variant="primary" disabled={createRule.isPending} onClick={() => makeRule(uncovered)}>Create an alert rule for these cameras</button>
           </div>
         ) : null}
       </section>
@@ -134,6 +143,10 @@ export function FacesSettings() {
         {!showSightings ? (
           <button type="button" className="button" onClick={() => setShowSightings(true)}>Show recent matches</button>
         ) : (
+          <>
+          <div className="field-actions">
+            <button type="button" className="button" disabled={sightings.isFetching} onClick={() => void sightings.refetch()}>Refresh matches</button>
+          </div>
           <ul className="status-list" aria-label="Recent matches">
             {(sightings.data?.sightings ?? []).map(item => (
               <li key={item.id}>
@@ -144,6 +157,7 @@ export function FacesSettings() {
             ))}
             {sightings.data?.sightings.length === 0 ? <li className="muted">No matches yet.</li> : null}
           </ul>
+          </>
         )}
         <p className="muted field-hint">Looking at matches and their pictures is recorded in the audit log.</p>
       </section>
