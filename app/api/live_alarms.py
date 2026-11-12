@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app import live_alarms
+from app.clock import stamp
 from app.api_tokens import TokenRejected, authenticate, token_scopes
 from app.principal import WALL_COOKIE_NAME, WALL_SCOPES, Administrator, CurrentUser, secure_cookie, wall_principal
 from app.security import token_digest
@@ -66,8 +67,8 @@ def wall_sign_in(payload: WallSignIn, response: Response) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     expires = now + timedelta(days=WALL_SESSION_DAYS)
     with connect() as db:
-        db.execute("DELETE FROM wall_sessions WHERE expires_at<=?", (now.isoformat(),))
-        db.execute("INSERT INTO wall_sessions(token_hash,api_token_id,expires_at) VALUES(?,?,?)", (token_digest(raw), row["id"], expires.isoformat()))
+        db.execute("DELETE FROM wall_sessions WHERE expires_at<=?", (stamp(now),))
+        db.execute("INSERT INTO wall_sessions(token_hash,api_token_id,expires_at) VALUES(?,?,?)", (token_digest(raw), row["id"], stamp(expires)))
     response.set_cookie(WALL_COOKIE_NAME, raw, httponly=True, secure=secure_cookie(), samesite="strict", path="/", max_age=WALL_SESSION_DAYS * 86400)
     return _wall_view(row["name"])
 

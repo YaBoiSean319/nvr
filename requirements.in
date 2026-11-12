@@ -4,6 +4,7 @@ uvicorn[standard]==0.38.0
 cryptography==50.0.2
 Authlib==1.9.5
 httpx==0.28.1
+httpx2==2.16.0
 h2==4.4.1
 itsdangerous==2.2.0
 openvino==2026.2.1

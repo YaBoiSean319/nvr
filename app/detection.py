@@ -21,6 +21,7 @@ from . import acceleration, ai_capacity
 from .credentials import decrypt
 from .recording import _manifest_bytes, _PROTOCOLS, safe_stream_url
 from .store import connect
+from .clock import parse as clock_parse, stamp as clock_stamp
 
 logger = logging.getLogger(__name__)
 
@@ -316,13 +317,26 @@ def set_camera_state(camera_id: str, state: str, error: str | None = None, at: d
         _set_camera_state(db, camera_id, state, error, at)
 
 
+STATE_WRITE_SECONDS = 5.0  # While a camera stays "analyzed", its row is refreshed this often; any other change is written at once
+
+
+def _written_recently(written: str | None, moment: datetime) -> bool:
+    try:
+        return written is not None and 0 <= (moment - clock_parse(written)).total_seconds() < STATE_WRITE_SECONDS
+    except (TypeError, ValueError):
+        return False
+
+
 def _set_camera_state(db: sqlite3.Connection, camera_id: str, state: str, error: str | None = None, at: datetime | None = None) -> None:
     """``set_camera_state`` on a connection the caller owns (#279)."""
-    stamp = (at or datetime.now(timezone.utc)).isoformat()
+    moment = at or datetime.now(timezone.utc)
+    stamp = clock_stamp(moment)  # Canonical, like every other time written for the state and the coverage (#284)
     db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
-    row = db.execute("SELECT status FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+    row = db.execute("SELECT status,last_success_at,last_error FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
     if row is None:
         return
+    if state == "analyzed" and row["status"] == "analyzed" and (row["last_error"] or None) == (error or None) and _written_recently(row["last_success_at"], moment):
+        return  # Still analysing, as a moment ago: nothing to say yet. A frame at 5 fps on 20 cameras would otherwise rewrite this row 100 times a second (#279).
     db.execute("UPDATE ai_camera_settings SET status=?,last_attempt_at=?,last_success_at=CASE WHEN ?='analyzed' THEN ? ELSE last_success_at END,last_error=?,updated_at=? WHERE camera_id=?",
                (state, stamp, state, stamp, error, stamp, camera_id))
     active = db.execute("SELECT id,state FROM ai_coverage WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()

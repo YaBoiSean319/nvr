@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from authlib.integrations.starlette_client import OAuth
 
 from app import auth_limits as limits, mfa, network
+from app.clock import stamp
 from app.access import ensure_default_grant
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
 from app.security import hash_password, new_session_token, spend_password_time, token_digest, verify_password
@@ -116,10 +117,10 @@ def start_session(response: Response, user_id: int, device_session_id: str | Non
     session_id = str(uuid.uuid4())
     expires = datetime.now(timezone.utc) + timedelta(hours=_session_hours())
     with connect() as db:
-        db.execute("DELETE FROM sessions WHERE expires_at <= ?", (datetime.now(timezone.utc).isoformat(),))
+        db.execute("DELETE FROM sessions WHERE expires_at <= ?", (stamp(),))
         db.execute(
             "INSERT INTO sessions(session_id, token_hash, user_id, expires_at, device_session_id) VALUES (?, ?, ?, ?, ?)",
-            (session_id, token_digest(raw), user_id, expires.isoformat(), device_session_id),
+            (session_id, token_digest(raw), user_id, stamp(expires), device_session_id),
         )
     response.set_cookie(
         COOKIE_NAME,

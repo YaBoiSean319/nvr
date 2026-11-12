@@ -381,22 +381,26 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(query.get("code_challenge_method"), ["S256"])
 
     def test_oidc_callback_validates_state_nonce_signature_and_pkce_with_fake_provider(self):
-        import httpx
         from authlib.integrations.httpx_client import AsyncOAuth2Client
         from authlib.integrations.starlette_client.apps import StarletteOAuth2App
-        from authlib.jose import JsonWebKey, jwt
+        from joserfc import jwt
+        from joserfc.jwk import RSAKey
         from unittest.mock import patch
 
+        try:  # Authlib's client speaks httpx2 when it is installed (it is, in requirements) and falls back to httpx with a deprecation warning
+            import httpx2 as wire
+        except ImportError:
+            import httpx as wire
         tenant=OIDC_TEST_TENANT
         client_id="client-id"
         issuer=f"https://login.microsoftonline.com/{tenant}/v2.0"
         jwks_url=f"https://login.microsoftonline.com/{tenant}/keys"
-        private_key=JsonWebKey.generate_key("RSA",2048,options={"kid":"fake-key"},is_private=True)
+        private_key=RSAKey.generate_key(2048,parameters={"kid":"fake-key"})
         observed={"challenge":None,"nonce":None,"bad_nonce":False}
 
         def provider(request):
             if request.url.path.endswith(".well-known/openid-configuration"):
-                return httpx.Response(200,json={
+                return wire.Response(200,json={
                     "issuer":issuer,
                     "authorization_endpoint":"https://idp.test/authorize",
                     "token_endpoint":"https://idp.test/token",
@@ -411,22 +415,22 @@ class BootstrapTests(unittest.TestCase):
                 verifier=form["code_verifier"][0]
                 challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
                 if challenge != observed["challenge"]:
-                    return httpx.Response(400,json={"error":"invalid_grant"})
+                    return wire.Response(400,json={"error":"invalid_grant"})
                 now=int(clock.time())
                 token=jwt.encode({"alg":"RS256","kid":"fake-key"},{
                     "iss":issuer,"aud":client_id,"sub":"fake-subject","tid":tenant,
                     "iat":now,"exp":now+600,
                     "nonce":"wrong-nonce" if observed["bad_nonce"] else observed["nonce"],
                     "preferred_username":"fake-operator@example.test","roles":["NVR.Operator"],
-                },private_key).decode()
-                return httpx.Response(200,json={"access_token":"fake-access","token_type":"Bearer","expires_in":600,"id_token":token})
+                },private_key)
+                return wire.Response(200,json={"access_token":"fake-access","token_type":"Bearer","expires_in":600,"id_token":token})
             if request.url == jwks_url:
-                return httpx.Response(200,json={"keys":[private_key.as_dict(is_private=False)]})
-            return httpx.Response(404)
+                return wire.Response(200,json={"keys":[private_key.as_dict(private=False)]})
+            return wire.Response(404)
 
         class FakeProviderClient(AsyncOAuth2Client):
             def __init__(self,*args,**kwargs):
-                kwargs["transport"]=httpx.MockTransport(provider)
+                kwargs["transport"]=wire.MockTransport(provider)
                 kwargs["trust_env"]=False
                 super().__init__(*args,**kwargs)
 

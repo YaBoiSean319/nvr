@@ -40,7 +40,15 @@ async function startSite(address, spec) {
   if (seeded.status !== 0) throw new Error(`The site could not be seeded: ${seeded.stderr}`);
   const token = await fetch(`${url}/api/admin/api-tokens`, { method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie }, body: JSON.stringify({ name: "console", scopes: ["read", "media"] }) });
   const secret = (await token.json()).secret;
-  return { url, secret, made: JSON.parse(seeded.stdout.trim().split("\n").pop()), stop() { server.kill("SIGTERM"); fs.rmSync(directory, { recursive: true, force: true }); } };
+  return { url, secret, made: JSON.parse(seeded.stdout.trim().split("\n").pop()), // The server is still writing to its database while it shuts down: wait for it to be gone before deleting the folder it writes in (removing it underneath it failed with ENOTEMPTY).
+    async stop() {
+      const exited = new Promise(resolve => server.once("exit", resolve));
+      server.kill("SIGTERM");
+      const forced = setTimeout(() => server.kill("SIGKILL"), 5_000);
+      await exited;
+      clearTimeout(forced);
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } };
 }
 
 async function addSite(page, site, name) {
@@ -88,7 +96,7 @@ test("an administrator federates a site and its cameras and alarms appear, with 
     await detail.getByRole("button", { name: "Acknowledge" }).click();
     await expect(detail).toContainText("belongs to the site Alpha");
   } finally {
-    site.stop();
+    await site.stop();
   }
 });
 
@@ -106,6 +114,6 @@ test("live video of a site's camera plays through the console", async ({ page })
     await page.getByRole("button", { name: /^Gate A1\b/ }).click();
     await expect(page.getByRole("group", { name: /^Gate A1:/ })).toHaveAttribute("data-phase", "live", { timeout: 45_000 });
   } finally {
-    site.stop();
+    await site.stop();
   }
 });

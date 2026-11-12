@@ -13,7 +13,7 @@ from typing import Any
 
 from . import track_privacy
 from .attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES, attribute_model_available, zone_cells
-from app.clock import parse as _parse
+from app.clock import parse as _parse, stamp
 
 MAX_RANGE = timedelta(days=92)
 MAX_LIMIT = 200
@@ -133,7 +133,7 @@ def coverage(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, e
     for chunk in range(0, len(ids), 500):
         part = ids[chunk:chunk + 500]
         for row in db.execute(f"SELECT camera_id,state,starts_at,ends_at,detail FROM ai_coverage WHERE camera_id IN ({','.join('?' * len(part))}) "
-                              "AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at", (*part, _iso(end), _iso(start))):
+                              "AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at", (*part, stamp(end), stamp(start))):
             rows[row["camera_id"]].append(row)
     report = []
     analysed_total = 0.0
