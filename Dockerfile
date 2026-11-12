@@ -17,7 +17,7 @@ COPY requirements.txt .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates smartmontools \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --require-hashes -r requirements.txt \
     && mkdir -p /opt/nvr/models /opt/nvr/models/plates /opt/nvr/models/pose /opt/nvr/models/faces \
     && curl -fsSL --retry 3 https://storage.openvinotoolkit.org/repositories/open_model_zoo/2021.4/models_bin/2/person-vehicle-bike-detection-2004/FP32/person-vehicle-bike-detection-2004.xml -o /opt/nvr/models/person-vehicle-bike-detection-2004.xml \
     && curl -fsSL --retry 3 https://storage.openvinotoolkit.org/repositories/open_model_zoo/2021.4/models_bin/2/person-vehicle-bike-detection-2004/FP32/person-vehicle-bike-detection-2004.bin -o /opt/nvr/models/person-vehicle-bike-detection-2004.bin \
