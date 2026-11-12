@@ -10,11 +10,11 @@ import hashlib
 import json
 import secrets
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from .credentials import derived_key
 from .store import connect
-from app.clock import now as _now
+from app.clock import now as _now, stamp
 
 SCOPES = ("read", "media", "export", "metrics", "admin")
 TOKEN_PREFIX = "nvrt"
@@ -159,7 +159,7 @@ def _audit(db: sqlite3.Connection, actor_id: int | None, action: str, token_id: 
 
 
 def _iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return stamp(value)
 
 
 def _parse(value: str) -> datetime:

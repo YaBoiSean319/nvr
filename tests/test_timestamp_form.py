@@ -55,3 +55,15 @@ class SessionFormTests(FormCase):
             client = TestClient(self.app)
             client.cookies.set("nvr_session", tokens[label])
             self.assertEqual(client.get("/api/auth/me").status_code, expected, label)
+
+
+class TokenFormTests(FormCase):
+    def test_a_tokens_expiry_revocation_and_use_are_in_the_canonical_form(self):
+        made = self.admin.post("/api/admin/api-tokens", json={"name": "feed", "scopes": ["read"], "expires_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()})
+        self.assertEqual(made.status_code, 201, made.text)
+        self.assertRegex(made.json()["token"]["expires_at"], CANONICAL)
+        client = TestClient(self.app)
+        self.assertEqual(client.get("/api/cameras", headers={"Authorization": f"Bearer {made.json()['secret']}"}).status_code, 200)
+        self.assert_canonical("api_tokens", "expires_at", "last_used_at")
+        self.assertEqual(self.admin.delete(f"/api/admin/api-tokens/{made.json()['token']['id']}").status_code, 200)
+        self.assert_canonical("api_tokens", "revoked_at")
