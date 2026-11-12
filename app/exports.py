@@ -1179,13 +1179,9 @@ def _dewarp_graph(work_dir: Path, index: int, plan: dict[str, Any], source_width
     return dewarp_geometry.graph(x_path, y_path, size), size
 
 
-def create_export_record(
-    requested_by: int, camera_ids: list[str], start: datetime, end: datetime,
-    output_modes: list[str] | None = None,
-    tile_camera_ids: list[str | None] | None = None, grid_resolution: str = "1080p",
-    include_audio: bool = False, audio_camera_id: str | None = None, retry_of: str | None = None,
-    redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None, dewarp_lenses: dict[str, dict[str, Any]] | None = None,
-) -> str:
+def _checked_request(camera_ids: list[str], output_modes: list[str] | None, tile_camera_ids: list[str | None] | None, grid_resolution: str,
+                     include_audio: bool, audio_camera_id: str | None) -> tuple[list[str], list[str | None]]:
+    """The checks that need no database: the outputs, the grid and its tiles, and the audio choice. Returns the outputs and the tile layout to use."""
     output_modes = output_modes or ["individual", "grid"]
     if not output_modes or len(set(output_modes)) != len(output_modes) or any(mode not in {"individual", "grid"} for mode in output_modes):
         raise ValueError("Choose individual, grid, or both export outputs")
@@ -1203,6 +1199,65 @@ def create_export_record(
     tile_ids = [item for item in tile_camera_ids if item is not None]
     if len(tile_camera_ids) not in {1, 4, 9, 16} or len(tile_ids) != len(set(tile_ids)) or set(tile_ids) != set(camera_ids):
         raise ValueError("Grid tiles must include each selected camera exactly once")
+    return output_modes, tile_camera_ids
+
+
+def _check_cameras_and_audio(db: sqlite3.Connection, camera_ids: list[str], output_modes: list[str], include_audio: bool, audio_camera_id: str | None) -> None:
+    """Every camera exists, and the audio asked for comes from a camera an administrator enabled it on."""
+    placeholders = ",".join("?" for _ in camera_ids)
+    present = {row[0] for row in db.execute(f"SELECT id FROM cameras WHERE id IN ({placeholders})", tuple(camera_ids))}
+    if present != set(camera_ids):
+        raise LookupError("Export request contains an unknown camera")
+    if include_audio:
+        capability_rows = db.execute(f"SELECT id,audio_supported,audio_enabled FROM cameras WHERE id IN ({placeholders})", tuple(camera_ids)).fetchall()
+        if "individual" in output_modes and "grid" not in output_modes and not any(row["audio_supported"] == 1 and row["audio_enabled"] == 1 for row in capability_rows):
+            raise ValueError("Individual audio requires at least one administrator-enabled camera audio source")
+        if "grid" in output_modes:
+            source = next((row for row in capability_rows if row["id"] == audio_camera_id), None)
+            if source is None or source["audio_supported"] != 1 or source["audio_enabled"] != 1:
+                raise ValueError("Grid audio source must have administrator-enabled audio")
+
+
+def _export_segments(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: datetime) -> list[sqlite3.Row]:
+    """The indexed footage the export will be cut from; refused when there is none or when it is more than an export may take."""
+    placeholders = ",".join("?" for _ in camera_ids)
+    segments = db.execute(
+        f"SELECT id,size_bytes FROM recording_segments WHERE camera_id IN ({placeholders}) AND starts_at<? AND ends_at>? AND unavailable_at IS NULL",
+        (*camera_ids, end.isoformat(), start.isoformat()),
+    ).fetchall()
+    if not segments:
+        raise LookupError("No indexed footage is available in the requested interval")
+    if len(segments) > MAX_EXPORT_SEGMENTS or sum(int(segment["size_bytes"]) for segment in segments) > MAX_EXPORT_SOURCE_BYTES:
+        raise OverflowError("Export source exceeds the supported size or segment limit")
+    return segments
+
+
+def _dewarp_plan(db: sqlite3.Connection, dewarp: dict[str, dict[str, Any]] | None, dewarp_lenses: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """The lens and view of each dewarped camera, checked: a retry renders with the lens of the original request, as its manifest says."""
+    plan: dict[str, Any] = {}
+    for camera_id, view in (dewarp or {}).items():
+        kept = (dewarp_lenses or {}).get(camera_id)
+        lens = ({"mount": kept["mount"], "center_x": kept["cx"], "center_y": kept["cy"], "radius": kept["radius"], "fov": kept["fov"]} if kept
+                else db.execute("SELECT * FROM camera_lens WHERE camera_id=?", (camera_id,)).fetchone())
+        if lens is None:
+            raise ValueError("A dewarped view needs a fisheye camera: set the camera's lens first")
+        if view.get("mode") not in dewarp_geometry.MODES:
+            raise ValueError("Choose a view, a panorama or a double panorama")
+        if lens["mount"] == "wall" and view["mode"] == "double_panorama":
+            raise ValueError("A wall-mounted camera sees 180 degrees: use a panorama")
+        plan[camera_id] = {"lens": {"mount": lens["mount"], "cx": lens["center_x"], "cy": lens["center_y"], "radius": lens["radius"], "fov": lens["fov"]},
+                           "view": {"mode": view["mode"], "pan": float(view.get("pan", 0)), "tilt": float(view.get("tilt", -90)), "fov": float(view.get("fov", 90))}}
+    return plan
+
+
+def create_export_record(
+    requested_by: int, camera_ids: list[str], start: datetime, end: datetime,
+    output_modes: list[str] | None = None,
+    tile_camera_ids: list[str | None] | None = None, grid_resolution: str = "1080p",
+    include_audio: bool = False, audio_camera_id: str | None = None, retry_of: str | None = None,
+    redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None, dewarp_lenses: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    output_modes, tile_camera_ids = _checked_request(camera_ids, output_modes, tile_camera_ids, grid_resolution, include_audio, audio_camera_id)
     job_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:
@@ -1210,41 +1265,9 @@ def create_export_record(
         active = db.execute("SELECT COUNT(*) FROM exports WHERE status IN ('queued','running')").fetchone()[0]
         if active >= MAX_ACTIVE_EXPORTS:
             raise OverflowError("The export queue is full; wait for an existing job to finish")
-        placeholders = ",".join("?" for _ in camera_ids)
-        present = {row[0] for row in db.execute(f"SELECT id FROM cameras WHERE id IN ({placeholders})", tuple(camera_ids))}
-        if present != set(camera_ids):
-            raise LookupError("Export request contains an unknown camera")
-        if include_audio:
-            capability_rows = db.execute(f"SELECT id,audio_supported,audio_enabled FROM cameras WHERE id IN ({placeholders})", tuple(camera_ids)).fetchall()
-            if "individual" in output_modes and "grid" not in output_modes and not any(row["audio_supported"] == 1 and row["audio_enabled"] == 1 for row in capability_rows):
-                raise ValueError("Individual audio requires at least one administrator-enabled camera audio source")
-            if "grid" in output_modes:
-                source = next((row for row in capability_rows if row["id"] == audio_camera_id), None)
-                if source is None or source["audio_supported"] != 1 or source["audio_enabled"] != 1:
-                    raise ValueError("Grid audio source must have administrator-enabled audio")
-        segments = db.execute(
-            f"SELECT id,size_bytes FROM recording_segments WHERE camera_id IN ({placeholders}) AND starts_at<? AND ends_at>? AND unavailable_at IS NULL",
-            (*camera_ids, end.isoformat(), start.isoformat()),
-        ).fetchall()
-        count = len(segments)
-        size = sum(int(segment["size_bytes"]) for segment in segments)
-        if not count:
-            raise LookupError("No indexed footage is available in the requested interval")
-        if count > MAX_EXPORT_SEGMENTS or size > MAX_EXPORT_SOURCE_BYTES:
-            raise OverflowError("Export source exceeds the supported size or segment limit")
-        dewarp_plan: dict[str, Any] = {}
-        for camera_id, view in (dewarp or {}).items():
-            kept = (dewarp_lenses or {}).get(camera_id)  # A retry renders with the lens of the original request, as its manifest says
-            lens = ({"mount": kept["mount"], "center_x": kept["cx"], "center_y": kept["cy"], "radius": kept["radius"], "fov": kept["fov"]} if kept
-                    else db.execute("SELECT * FROM camera_lens WHERE camera_id=?", (camera_id,)).fetchone())
-            if lens is None:
-                raise ValueError("A dewarped view needs a fisheye camera: set the camera's lens first")
-            if view.get("mode") not in dewarp_geometry.MODES:
-                raise ValueError("Choose a view, a panorama or a double panorama")
-            if lens["mount"] == "wall" and view["mode"] == "double_panorama":
-                raise ValueError("A wall-mounted camera sees 180 degrees: use a panorama")
-            dewarp_plan[camera_id] = {"lens": {"mount": lens["mount"], "cx": lens["center_x"], "cy": lens["center_y"], "radius": lens["radius"], "fov": lens["fov"]},
-                                      "view": {"mode": view["mode"], "pan": float(view.get("pan", 0)), "tilt": float(view.get("tilt", -90)), "fov": float(view.get("fov", 90))}}
+        _check_cameras_and_audio(db, camera_ids, output_modes, include_audio, audio_camera_id)
+        segments = _export_segments(db, camera_ids, start, end)
+        dewarp_plan = _dewarp_plan(db, dewarp, dewarp_lenses)
         display_row = db.execute("SELECT time_zone,date_format,clock_format FROM site_display_settings WHERE singleton_id=1").fetchone()
         display_settings = {"time_zone": display_row["time_zone"], "date_format": display_row["date_format"], "clock_format": display_row["clock_format"]}
         db.execute("INSERT INTO exports(id,requested_by,camera_ids_json,output_modes_json,display_settings_json,tile_camera_ids_json,grid_resolution,requested_start,requested_end,status,include_audio,audio_camera_id,created_at,updated_at,retry_of) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",

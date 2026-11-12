@@ -8,3 +8,12 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  # Python packages: the direct, pinned ones are in requirements.in and requirements-dev.in; the hashed lock (requirements.txt, requirements-dev.txt) is made by
+  # scripts/lock-requirements.sh, and tests/test_requirements_lock.py fails a pull request that changes one without the other.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
