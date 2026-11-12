@@ -18,7 +18,7 @@ from typing import Any
 
 from .security import new_session_token, token_digest
 from .store import connect
-from app.clock import now as _now
+from app.clock import now as _now, stamp
 
 LIFETIME = timedelta(days=30)
 GRACE = timedelta(minutes=2)
@@ -49,16 +49,16 @@ def _remove(db, user_id: int, session_id: str, action: str) -> bool:
 def create(user_id: int, label: str) -> dict[str, Any]:
     """A new device session for a signed-in person; the least recently used go once there are too many."""
     raw = PREFIX + new_session_token()
-    session_id, expires = str(uuid.uuid4()), (_now() + LIFETIME).isoformat()
+    session_id, expires = str(uuid.uuid4()), stamp(_now() + LIFETIME)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            db.execute("DELETE FROM device_sessions WHERE expires_at<=?", (_now().isoformat(),))
+            db.execute("DELETE FROM device_sessions WHERE expires_at<=?", (stamp(_now()),))
             old = [row[0] for row in db.execute("SELECT id FROM device_sessions WHERE user_id=? ORDER BY COALESCE(last_used_at,created_at) DESC", (user_id,))][MAX_PER_USER - 1:]
             for stale in old:
                 _remove(db, user_id, stale, "device_session_evicted")
             db.execute("INSERT INTO device_sessions(id,user_id,token_hash,device_label,created_at,expires_at) VALUES(?,?,?,?,?,?)",
-                       (session_id, user_id, token_digest(raw), label, _now().isoformat(), expires))
+                       (session_id, user_id, token_digest(raw), label, stamp(_now()), expires))
             _audit(db, user_id, "device_session_created", session_id, device=label)
         except BaseException:
             db.execute("ROLLBACK")
@@ -73,13 +73,13 @@ def resume(token: str) -> dict[str, Any] | None:
         return None
     digest, now = token_digest(token), _now()
     raw = PREFIX + new_session_token()
-    expires = (now + LIFETIME).isoformat()
+    expires = stamp(now + LIFETIME)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute("SELECT s.*,u.username,u.role FROM device_sessions s JOIN users u ON u.id=s.user_id "
-                             "WHERE s.token_hash=? OR (s.previous_hash=? AND s.previous_until>?)", (digest, digest, now.isoformat())).fetchone()
-            if row is None or row["expires_at"] <= now.isoformat():
+                             "WHERE s.token_hash=? OR (s.previous_hash=? AND s.previous_until>?)", (digest, digest, stamp(now))).fetchone()
+            if row is None or row["expires_at"] <= stamp(now):
                 db.execute("ROLLBACK")
                 return None
             retry = digest != row["token_hash"]
@@ -89,9 +89,9 @@ def resume(token: str) -> dict[str, Any] | None:
                 previous_hash, previous_until = None, None
             else:
                 # The secret in use becomes the "previous" one for GRACE from now; this is the only place that deadline is set.
-                previous_hash, previous_until = digest, (now + GRACE).isoformat()
+                previous_hash, previous_until = digest, stamp(now + GRACE)
             db.execute("UPDATE device_sessions SET token_hash=?,previous_hash=?,previous_until=?,last_used_at=?,expires_at=? WHERE id=?",
-                       (token_digest(raw), previous_hash, previous_until, now.isoformat(), expires, row["id"]))
+                       (token_digest(raw), previous_hash, previous_until, stamp(now), expires, row["id"]))
             _audit(db, int(row["user_id"]), "device_session_retried" if retry else "device_session_resumed", row["id"], device=row["device_label"])
         except BaseException:
             db.execute("ROLLBACK")
@@ -103,7 +103,7 @@ def resume(token: str) -> dict[str, Any] | None:
 def listing(user_id: int) -> list[dict[str, Any]]:
     with connect() as db:
         return [{"id": row["id"], "device_label": row["device_label"], "created_at": row["created_at"], "last_used_at": row["last_used_at"], "expires_at": row["expires_at"]}
-                for row in db.execute("SELECT * FROM device_sessions WHERE user_id=? AND expires_at>? ORDER BY COALESCE(last_used_at,created_at) DESC", (user_id, _now().isoformat()))]
+                for row in db.execute("SELECT * FROM device_sessions WHERE user_id=? AND expires_at>? ORDER BY COALESCE(last_used_at,created_at) DESC", (user_id, stamp(_now())))]
 
 
 def revoke(user_id: int, session_id: str) -> bool:

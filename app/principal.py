@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from typing import Annotated, Callable, Literal, TypeVar
 
 from fastapi import Depends, HTTPException, status
@@ -27,6 +26,7 @@ from starlette.requests import HTTPConnection
 from fastapi.dependencies.models import Dependant
 
 from . import network
+from .clock import stamp
 from .access import EVERYTHING, Access, resolve as resolve_access
 from .api_tokens import TokenRejected, authenticate, grants, token_scopes, usable_token
 from .mfa import required_for
@@ -141,7 +141,7 @@ def current_user(request: HTTPConnection) -> Principal:
             "(SELECT COUNT(*) FROM user_totp t WHERE t.user_id=u.id AND t.confirmed_at IS NOT NULL) + "
             "(SELECT COUNT(*) FROM user_passkeys p WHERE p.user_id=u.id) AS factor_count "
             "FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
-            (token_digest(raw), datetime.now(timezone.utc).isoformat()),
+            (token_digest(raw), stamp()),
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
@@ -184,7 +184,7 @@ def wall_principal(request: HTTPConnection, raw: str) -> Principal:
     """Resolve a video wall's session cookie: its token's scopes, on the routes a wall needs."""
     with connect() as db:
         session = db.execute("SELECT api_token_id FROM wall_sessions WHERE token_hash=? AND expires_at>?",
-                             (token_digest(raw), datetime.now(timezone.utc).isoformat())).fetchone()
+                             (token_digest(raw), stamp())).fetchone()
     try:
         row = usable_token(session["api_token_id"]) if session else None
     except TokenRejected:
@@ -222,7 +222,7 @@ def refresh(principal: Principal) -> Principal | None:
     if getattr(principal, "credential", None) is None:
         return principal
     kind, ref = principal.credential
-    now = datetime.now(timezone.utc).isoformat()
+    now = stamp()
     with connect() as db:
         if kind == "session":
             row = db.execute("SELECT u.id,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?", (ref, now)).fetchone()
