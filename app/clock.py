@@ -8,6 +8,10 @@ Modules keep their own ``_now``/``_parse`` names (``from app.clock import now as
 ``strftime('%Y-%m-%dT%H:%M:%fZ','now')`` column defaults produce. Fixed-width, so comparing two of them as text orders them in time. Paths move to it one at a time
 (sessions, API tokens, ...); a column's readers and its comparisons move together, because a text comparison between two forms can misorder two instants less than
 a second apart (``...:00Z`` sorts after ``...:00.5+00:00``).
+
+Recording times are the deliberate exception (decided on #284): ``recording_segments`` start and end times, and an alarm's own event and clip times, are all written
+by ``datetime.isoformat()`` (microseconds and a UTC offset) by every recorder and compared in that same form, so they are consistent among themselves. They stay in that
+form, and anything comparing against them must too; do not compare them with a ``stamp()`` column in SQL.
 """
 from __future__ import annotations
 
