@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app import detection
+from app.clock import stamp
 from app.store import connect
 from tests.scene_case import SceneTestCase
 
@@ -26,13 +27,13 @@ class StateWriteTests(SceneTestCase):
         writes = [self.state("analyzed", second) for second in range(0, 5)]
         self.assertGreater(writes[0], 0)
         self.assertEqual(writes[1:], [0, 0, 0, 0], "the same state within the interval is not written again")
-        self.assertEqual(self.row()["last_success_at"], T0.isoformat())
+        self.assertEqual(self.row()["last_success_at"], stamp(T0))
 
     def test_the_state_is_refreshed_once_the_interval_has_passed(self):
         self.state("analyzed", 0)
         self.assertEqual(self.state("analyzed", detection.STATE_WRITE_SECONDS - 0.5), 0)
         self.assertGreater(self.state("analyzed", detection.STATE_WRITE_SECONDS + 0.5), 0)
-        self.assertEqual(self.row()["last_success_at"], (T0 + timedelta(seconds=detection.STATE_WRITE_SECONDS + 0.5)).isoformat())
+        self.assertEqual(self.row()["last_success_at"], stamp(T0 + timedelta(seconds=detection.STATE_WRITE_SECONDS + 0.5)))
 
     def test_a_change_of_state_is_written_at_once(self):
         self.state("analyzed", 0)

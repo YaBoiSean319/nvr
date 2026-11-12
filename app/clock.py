@@ -27,3 +27,8 @@ def stamp(value: datetime | None = None) -> str:
     """``value`` (default: now) as the canonical stored form: UTC, milliseconds, ``Z``. A naive time counts as UTC."""
     moment = now() if value is None else value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.astimezone(timezone.utc).microsecond // 1000:03d}Z"
+
+
+def canon(value: str) -> str:
+    """A timestamp in any stored or supplied form, as the canonical stamp: for the bound of a comparison against a column that is written canonically."""
+    return stamp(parse(value))

@@ -98,3 +98,23 @@ class AlarmFormTests(FormCase):
             db.execute("UPDATE alarms SET resolved_at=NULL WHERE id='a1'")
             self.assertTrue(alarms.protects_footage(db, self.d1, starts, ends, alarms.resolved_kept_since(db, datetime.now(timezone.utc))))  # Still open
             self.assertRegex(alarms.resolved_kept_since(db, datetime.now(timezone.utc)), CANONICAL)  # Compared with resolved_at, so written in the same form
+
+
+class CoverageFormTests(FormCase):
+    def test_analysis_state_and_coverage_are_written_canonically_and_found_by_a_window_in_any_form(self):
+        from app import detection, tracks
+        t0 = datetime(2026, 11, 12, 9, 0, 0, 500000, tzinfo=timezone.utc)
+        with connect() as db:
+            detection._set_camera_state(db, self.d1, "analyzed", at=t0)
+            detection._set_camera_state(db, self.d1, "failed", "The camera stopped", at=t0 + timedelta(seconds=10))
+            detection._set_camera_state(db, self.d1, "analyzed", at=t0 + timedelta(seconds=20))
+        self.assert_canonical("ai_camera_settings", "last_attempt_at", "last_success_at", "updated_at", where=f"camera_id='{self.d1}'")
+        self.assert_canonical("ai_coverage", "starts_at", where=f"camera_id='{self.d1}'")
+        self.assert_canonical("ai_coverage", "ends_at", where=f"camera_id='{self.d1}' AND ends_at IS NOT NULL")
+        with connect() as db:
+            def failed(start: datetime, end: datetime) -> list[str]:
+                return [row["state"] for row in tracks.iter_unanalyzed(db, self.d1, start.isoformat(), end.isoformat())]
+            self.assertEqual(failed(t0 + timedelta(seconds=9), t0 + timedelta(seconds=11)), ["failed"])  # Inside the failure
+            self.assertEqual(failed(t0 + timedelta(seconds=10, milliseconds=-1), t0 + timedelta(seconds=10, milliseconds=2)), ["failed"])  # Across its first millisecond (the stored form has no finer resolution)
+            self.assertEqual(failed(t0, t0 + timedelta(seconds=9, milliseconds=900)), [])  # Ends before the failure starts
+            self.assertEqual(failed(t0 + timedelta(seconds=20, milliseconds=100), t0 + timedelta(seconds=30)), [])  # Starts after it has ended

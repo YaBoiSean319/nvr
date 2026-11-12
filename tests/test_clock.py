@@ -35,6 +35,10 @@ class StampTests(unittest.TestCase):
         db = sqlite3.connect(":memory:")
         self.assertEqual(db.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?)", (clock.stamp(moment),)).fetchone()[0], clock.stamp(moment))
 
+    def test_canon_turns_every_form_into_the_canonical_one(self):
+        for text in ("2026-11-12T09:30:00.123456+00:00", "2026-11-12T09:30:00.123Z", "2026-11-12T11:30:00.123+02:00", "2026-11-12T09:30:00.123456"):
+            self.assertEqual(clock.canon(text), "2026-11-12T09:30:00.123Z", text)
+
     def test_the_database_defaults_are_the_same_form(self):
         self.assertRegex(sqlite3.connect(":memory:").execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')").fetchone()[0], CANONICAL)
         self.assertRegex(clock.stamp(), CANONICAL)

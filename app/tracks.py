@@ -20,6 +20,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from .attributes import TrackProfile
+from .clock import canon
 from .detection import MODEL_HEIGHT, MODEL_WIDTH, box_iou
 
 HISTOGRAM_BINS = 8
@@ -225,7 +226,7 @@ def iter_unanalyzed(db: sqlite3.Connection, camera_id: str, start: str, end: str
     return (dict(row) for row in db.execute(
         "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
         "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
-        (camera_id, end, start)))
+        (camera_id, canon(end), canon(start))))  # ai_coverage is written in the canonical form
 
 
 def encode_jpeg(frame: bytes) -> bytes | None:

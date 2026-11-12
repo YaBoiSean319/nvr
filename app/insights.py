@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import rules, search, track_privacy
-from app.clock import parse as _parse
+from app.clock import parse as _parse, stamp
 
 MAX_RANGE = {"hour": timedelta(days=31), "day": search.MAX_RANGE}
 LABELS = search.LABELS
@@ -65,7 +65,7 @@ def _analysed_intervals(db: sqlite3.Connection, camera_ids: list[str], start: da
     for offset in range(0, len(camera_ids), CHUNK):
         part = camera_ids[offset:offset + CHUNK]
         for row in db.execute(f"SELECT camera_id,starts_at,ends_at FROM ai_coverage WHERE state='analyzed' AND camera_id IN ({','.join('?' * len(part))}) "
-                              "AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at", (*part, _iso(end), _iso(start))):
+                              "AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at", (*part, stamp(end), stamp(start))):
             begin, finish = max(start, _parse(row["starts_at"])), min(end, _parse(row["ends_at"]) if row["ends_at"] else end)
             if finish > begin:
                 found[row["camera_id"]].append((begin, finish))
