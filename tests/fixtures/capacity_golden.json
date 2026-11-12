@@ -1,0 +1,3765 @@
+{
+ "ai_with_and_without_rate": {
+  "ai_cameras": 10,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": true,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": true,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 8.0
+   }
+  ],
+  "cameras": 12,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": true,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 6,
+    "duty": 1.0,
+    "footage_bytes": 3981312000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "AI a",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   },
+   {
+    "ai": true,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 4,
+    "duty": 1.0,
+    "footage_bytes": 2654208000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "AI b",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   },
+   {
+    "ai": false,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 2,
+    "duty": 1.0,
+    "footage_bytes": 1327104000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "Plain",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [
+     "analysis_fps",
+     "ai_frame_megapixels",
+     "decode_ms_per_megapixel",
+     "inference_ms_accelerator"
+    ],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.1372
+   },
+   "cores_ai_processor": {
+    "assumes": [
+     "analysis_fps",
+     "ai_frame_megapixels",
+     "decode_ms_per_megapixel",
+     "inference_ms_cpu"
+    ],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.5852
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.2662
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "ai_frame_megapixels",
+     "analysis_fps",
+     "decode_ms_per_megapixel",
+     "headroom",
+     "inference_ms_accelerator",
+     "inference_ms_cpu",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.4034
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "ai_frame_megapixels",
+     "analysis_fps",
+     "decode_ms_per_megapixel",
+     "headroom",
+     "inference_ms_accelerator",
+     "inference_ms_cpu",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.8514
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 7962624000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 8360755200000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 10032906240000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 24.576
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 4.096
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 3.072
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 3.072
+   }
+  },
+  "tiles_per_viewer": 4,
+  "viewers": 2
+ },
+ "assumed_notes_carried": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 2,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [
+     "retention (30 days)",
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 2,
+    "duty": 1.0,
+    "footage_bytes": 1327104000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "Unknown",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.0435
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.0435
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.0435
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 1327104000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 1393459200000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 1672151040000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 4.096
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 0.512
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.512
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.512
+   }
+  },
+  "tiles_per_viewer": 1,
+  "viewers": 1
+ },
+ "continuous_entered_bitrate": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 4,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [],
+    "bitrate_kbps": 4096.0,
+    "bitrate_source": "entered",
+    "bytes_per_day": 44236800000,
+    "codec": "h264",
+    "count": 4,
+    "duty": 1.0,
+    "footage_bytes": 2477260800000,
+    "fps": 20,
+    "height": 1440,
+    "name": "Lobby",
+    "recording": "continuous",
+    "retention_days": 14,
+    "width": 2560
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.2048
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.2048
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.2048
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": false,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 2477260800000
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": false,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 2601123840000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": false,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 3121348608000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": false,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 16.384
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": false,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 8.192
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": false,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 2.048
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": false,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 2.048
+   }
+  },
+  "tiles_per_viewer": 4,
+  "viewers": 2
+ },
+ "disabled_recording": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 3,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 0,
+    "codec": "h264",
+    "count": 3,
+    "duty": 0.0,
+    "footage_bytes": 0,
+    "fps": 15,
+    "height": 1080,
+    "name": "Spare",
+    "recording": "disabled",
+    "retention_days": 30,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.064
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.064
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.064
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 0
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 0
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 0
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 6.144
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 0.512
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.0
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.0
+   }
+  },
+  "tiles_per_viewer": 1,
+  "viewers": 1
+ },
+ "empty": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 0,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": false,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 0
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": false,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 0
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": false,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 0
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": false,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 0.0
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": false,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 0.0
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": false,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.0
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": false,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.0
+   }
+  },
+  "tiles_per_viewer": 4,
+  "viewers": 3
+ },
+ "everything_at_once": {
+  "ai_cameras": 17,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "entered",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.6
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": true,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": true,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": true,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "entered",
+    "unit": "ms",
+    "used": true,
+    "value": 90.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 8.0
+   }
+  ],
+  "cameras": 21,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": true,
+    "assumed": [
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 6635520000,
+    "codec": "h265",
+    "count": 10,
+    "duty": 0.3,
+    "footage_bytes": 5971968000000,
+    "fps": 25,
+    "height": 1080,
+    "name": "A",
+    "recording": "motion",
+    "retention_days": 90,
+    "width": 1920
+   },
+   {
+    "ai": true,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 7,
+    "duty": 1.0,
+    "footage_bytes": 4644864000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "B",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   },
+   {
+    "ai": false,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "frame rate (15)",
+     "bitrate (1229 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 1228.8,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 0,
+    "codec": "h265",
+    "count": 1,
+    "duty": 0.0,
+    "footage_bytes": 0,
+    "fps": 15,
+    "height": 1080,
+    "name": "C",
+    "recording": "disabled",
+    "retention_days": 30,
+    "width": 1920
+   },
+   {
+    "ai": false,
+    "assumed": [
+     "codec (H.264)",
+     "frame rate (15)",
+     "share of the day recorded (25%, motion recording)"
+    ],
+    "bitrate_kbps": 512.0,
+    "bitrate_source": "entered",
+    "bytes_per_day": 1382400000,
+    "codec": "h264",
+    "count": 3,
+    "duty": 0.25,
+    "footage_bytes": 124416000000,
+    "fps": 15,
+    "height": 480,
+    "name": "D",
+    "recording": "motion",
+    "retention_days": 30,
+    "width": 640
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [
+     "analysis_fps",
+     "ai_frame_megapixels",
+     "decode_ms_per_megapixel",
+     "inference_ms_accelerator"
+    ],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.1813
+   },
+   "cores_ai_processor": {
+    "assumes": [
+     "analysis_fps",
+     "ai_frame_megapixels",
+     "decode_ms_per_megapixel",
+     "inference_ms_cpu"
+    ],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 1.6983
+   },
+   "cores_conversion": {
+    "assumes": [
+     "hevc_transcode_share",
+     "transcode_cores_1080p15"
+    ],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 18.1714
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.5369
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "ai_frame_megapixels",
+     "analysis_fps",
+     "decode_ms_per_megapixel",
+     "headroom",
+     "hevc_transcode_share",
+     "inference_ms_accelerator",
+     "inference_ms_cpu",
+     "live_cores_per_mbps",
+     "live_share",
+     "motion_share",
+     "overhead",
+     "record_cores_per_mbps",
+     "transcode_cores_1080p15"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 18.8896
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "ai_frame_megapixels",
+     "analysis_fps",
+     "decode_ms_per_megapixel",
+     "headroom",
+     "hevc_transcode_share",
+     "inference_ms_accelerator",
+     "inference_ms_cpu",
+     "live_cores_per_mbps",
+     "live_share",
+     "motion_share",
+     "overhead",
+     "record_cores_per_mbps",
+     "transcode_cores_1080p15"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 20.4066
+   },
+   "disk_footage": {
+    "assumes": [
+     "motion_share"
+    ],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 10741248000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "motion_share",
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 11278310400000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "motion_share",
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 13533972480000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 37.5808
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 32.2121
+   },
+   "write_average": {
+    "assumes": [
+     "motion_share"
+    ],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 2.608
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 4.544
+   }
+  },
+  "tiles_per_viewer": 12,
+  "viewers": 6
+ },
+ "hevc_mixed": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": true,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 8,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [
+     "bitrate (3686 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 3686.4,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 39813120000,
+    "codec": "h265",
+    "count": 5,
+    "duty": 1.0,
+    "footage_bytes": 5971968000000,
+    "fps": 15,
+    "height": 2160,
+    "name": "North",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 3840
+   },
+   {
+    "ai": false,
+    "assumed": [
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 3,
+    "duty": 1.0,
+    "footage_bytes": 1990656000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "South",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [
+     "hevc_transcode_share",
+     "transcode_cores_1080p15"
+    ],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 20.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.3686
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "hevc_transcode_share",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps",
+     "transcode_cores_1080p15"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 20.3686
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "hevc_transcode_share",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps",
+     "transcode_cores_1080p15"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 20.3686
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 7962624000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 8360755200000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 10032906240000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 24.576
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 24.576
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 3.072
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 3.072
+   }
+  },
+  "tiles_per_viewer": 8,
+  "viewers": 4
+ },
+ "more_tiles_than_cameras": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 2,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 2,
+    "duty": 1.0,
+    "footage_bytes": 1327104000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "Few",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.0666
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.0666
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.0666
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 1327104000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 1393459200000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 1672151040000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 4.096
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 5.12
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.512
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.512
+   }
+  },
+  "tiles_per_viewer": 50,
+  "viewers": 5
+ },
+ "motion_assumed_share": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 2,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)",
+     "share of the day recorded (25%, motion recording)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 5529600000,
+    "codec": "h264",
+    "count": 2,
+    "duty": 0.25,
+    "footage_bytes": 77414400000,
+    "fps": 15,
+    "height": 1080,
+    "name": "Yard",
+    "recording": "motion",
+    "retention_days": 7,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.041
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "motion_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.041
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "motion_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.041
+   },
+   "disk_footage": {
+    "assumes": [
+     "motion_share"
+    ],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 77414400000
+   },
+   "disk_needed": {
+    "assumes": [
+     "motion_share",
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 81285120000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "motion_share",
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 97542144000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 4.096
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 0.0
+   },
+   "write_average": {
+    "assumes": [
+     "motion_share"
+    ],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.128
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.512
+   }
+  },
+  "tiles_per_viewer": 0,
+  "viewers": 0
+ },
+ "motion_measured_share": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 1,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [
+     "codec (H.264)"
+    ],
+    "bitrate_kbps": 1500.0,
+    "bitrate_source": "measured",
+    "bytes_per_day": 1944000000,
+    "codec": "h264",
+    "count": 1,
+    "duty": 0.12,
+    "footage_bytes": 58320000000,
+    "fps": 10,
+    "height": 720,
+    "name": "Dock",
+    "recording": "motion",
+    "retention_days": 30,
+    "width": 1280
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.0169
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.0169
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.0169
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 58320000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 61236000000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 73483200000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 1.5
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 0.375
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.0225
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.1875
+   }
+  },
+  "tiles_per_viewer": 2,
+  "viewers": 1
+ },
+ "one_continuous_default_picture": {
+  "ai_cameras": 0,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.25
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.05
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": false,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": false,
+    "value": 8.0
+   }
+  ],
+  "cameras": 1,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": false,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "codec (H.264)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 22118400000,
+    "codec": "h264",
+    "count": 1,
+    "duty": 1.0,
+    "footage_bytes": 663552000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "Gate",
+    "recording": "continuous",
+    "retention_days": 30,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_ai_processor": {
+    "assumes": [],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.023
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.023
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "headroom",
+     "live_cores_per_mbps",
+     "live_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.023
+   },
+   "disk_footage": {
+    "assumes": [],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 663552000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 696729600000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 836075520000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 2.048
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 0.512
+   },
+   "write_average": {
+    "assumes": [],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.256
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.256
+   }
+  },
+  "tiles_per_viewer": 1,
+  "viewers": 1
+ },
+ "overrides_changed_and_unchanged_and_unknown": {
+  "ai_cameras": 2,
+  "assumptions": [
+   {
+    "key": "motion_share",
+    "label": "Share of the day a motion-recorded camera records",
+    "source": "entered",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.5
+   },
+   {
+    "key": "overhead",
+    "label": "Container and filesystem overhead on footage",
+    "source": "entered",
+    "unit": "x",
+    "used": true,
+    "value": 1.1
+   },
+   {
+    "key": "headroom",
+    "label": "Headroom added to the recommended disk size",
+    "source": "default",
+    "unit": "x",
+    "used": true,
+    "value": 1.2
+   },
+   {
+    "key": "live_share",
+    "label": "Live-grid stream as a share of the camera's main bitrate",
+    "source": "default",
+    "unit": "fraction",
+    "used": true,
+    "value": 0.25
+   },
+   {
+    "key": "record_cores_per_mbps",
+    "label": "Processor cores to record 1 Mbps (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.01
+   },
+   {
+    "key": "live_cores_per_mbps",
+    "label": "Processor cores to send 1 Mbps to browsers (stream copy)",
+    "source": "default",
+    "unit": "cores per Mbps",
+    "used": true,
+    "value": 0.005
+   },
+   {
+    "key": "hevc_transcode_share",
+    "label": "Share of viewed H.265 streams converted for the browser",
+    "source": "default",
+    "unit": "fraction",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "transcode_cores_1080p15",
+    "label": "Processor cores to convert one 1080p 15 fps H.265 stream",
+    "source": "default",
+    "unit": "cores",
+    "used": false,
+    "value": 0.5
+   },
+   {
+    "key": "analysis_fps",
+    "label": "Frames analysed per second by AI, per AI camera",
+    "source": "default",
+    "unit": "frames per second",
+    "used": true,
+    "value": 0.5
+   },
+   {
+    "key": "ai_frame_megapixels",
+    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "source": "default",
+    "unit": "megapixels",
+    "used": true,
+    "value": 0.3
+   },
+   {
+    "key": "decode_ms_per_megapixel",
+    "label": "Time to decode one megapixel of a frame",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 6.0
+   },
+   {
+    "key": "inference_ms_cpu",
+    "label": "Time for one AI inference on the processor",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 40.0
+   },
+   {
+    "key": "inference_ms_accelerator",
+    "label": "Time for one AI inference on an accelerator",
+    "source": "default",
+    "unit": "ms",
+    "used": true,
+    "value": 8.0
+   }
+  ],
+  "cameras": 2,
+  "defaults": {
+   "bitrate_kbps_h264_15fps": [
+    {
+     "kbps": 512,
+     "up_to_megapixels": 0.35
+    },
+    {
+     "kbps": 1024,
+     "up_to_megapixels": 1.0
+    },
+    {
+     "kbps": 2048,
+     "up_to_megapixels": 2.2
+    },
+    {
+     "kbps": 3072,
+     "up_to_megapixels": 4.2
+    },
+    {
+     "kbps": 4096,
+     "up_to_megapixels": 5.5
+    },
+    {
+     "kbps": 6144,
+     "up_to_megapixels": 8.5
+    },
+    {
+     "kbps": 8192,
+     "up_to_megapixels": null
+    }
+   ],
+   "h265_factor": 0.6
+  },
+  "disclaimer": "This is an estimate, not a certification of capacity. Real footage varies with the scene, the camera's settings and the hardware; measure with a few cameras before buying for many, and keep headroom.",
+  "lines": [
+   {
+    "ai": true,
+    "assumed": [
+     "picture size (1920 x 1080)",
+     "frame rate (15)",
+     "bitrate (2048 kbps for this picture size and frame rate)",
+     "share of the day recorded (50%, motion recording)"
+    ],
+    "bitrate_kbps": 2048.0,
+    "bitrate_source": "assumed",
+    "bytes_per_day": 11059200000,
+    "codec": "hevc",
+    "count": 2,
+    "duty": 0.5,
+    "footage_bytes": 663552000000,
+    "fps": 15,
+    "height": 1080,
+    "name": "Gate",
+    "recording": "motion",
+    "retention_days": 30,
+    "width": 1920
+   }
+  ],
+  "metrics": {
+   "cores_ai_accelerated": {
+    "assumes": [
+     "analysis_fps",
+     "ai_frame_megapixels",
+     "decode_ms_per_megapixel",
+     "inference_ms_accelerator"
+    ],
+    "basis": "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (with an accelerator)",
+    "unit": "cores",
+    "value": 0.0098
+   },
+   "cores_ai_processor": {
+    "assumes": [
+     "analysis_fps",
+     "ai_frame_megapixels",
+     "decode_ms_per_megapixel",
+     "inference_ms_cpu"
+    ],
+    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "inputs_assumed": false,
+    "label": "Processor, AI analysis (no accelerator)",
+    "unit": "cores",
+    "value": 0.0418
+   },
+   "cores_conversion": {
+    "assumes": [],
+    "basis": "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
+    "inputs_assumed": false,
+    "label": "Processor, H.265 conversion for browsers",
+    "unit": "cores",
+    "value": 0.0
+   },
+   "cores_streams": {
+    "assumes": [
+     "record_cores_per_mbps",
+     "live_cores_per_mbps"
+    ],
+    "basis": "cores per Mbps x network in, and x network out",
+    "inputs_assumed": false,
+    "label": "Processor, recording and live copying",
+    "unit": "cores",
+    "value": 0.0512
+   },
+   "cores_total_accelerated": {
+    "assumes": [
+     "ai_frame_megapixels",
+     "analysis_fps",
+     "decode_ms_per_megapixel",
+     "headroom",
+     "inference_ms_accelerator",
+     "inference_ms_cpu",
+     "live_cores_per_mbps",
+     "live_share",
+     "motion_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "as above, AI inference on the accelerator",
+    "inputs_assumed": false,
+    "label": "Processor total, with an accelerator",
+    "unit": "cores",
+    "value": 0.061
+   },
+   "cores_total_processor": {
+    "assumes": [
+     "ai_frame_megapixels",
+     "analysis_fps",
+     "decode_ms_per_megapixel",
+     "headroom",
+     "inference_ms_accelerator",
+     "inference_ms_cpu",
+     "live_cores_per_mbps",
+     "live_share",
+     "motion_share",
+     "overhead",
+     "record_cores_per_mbps"
+    ],
+    "basis": "the four processor lines above, AI on the processor",
+    "inputs_assumed": false,
+    "label": "Processor total, no accelerator",
+    "unit": "cores",
+    "value": 0.093
+   },
+   "disk_footage": {
+    "assumes": [
+     "motion_share"
+    ],
+    "basis": "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras",
+    "inputs_assumed": true,
+    "label": "Footage kept",
+    "unit": "bytes",
+    "value": 663552000000
+   },
+   "disk_needed": {
+    "assumes": [
+     "motion_share",
+     "overhead"
+    ],
+    "basis": "footage x overhead",
+    "inputs_assumed": true,
+    "label": "Disk needed",
+    "unit": "bytes",
+    "value": 729907200000
+   },
+   "disk_recommended": {
+    "assumes": [
+     "motion_share",
+     "overhead",
+     "headroom"
+    ],
+    "basis": "disk needed x headroom",
+    "inputs_assumed": true,
+    "label": "Disk recommended",
+    "unit": "bytes",
+    "value": 875888640000
+   },
+   "network_in": {
+    "assumes": [],
+    "basis": "sum of every camera's bitrate: each stays connected whether or not it is recording",
+    "inputs_assumed": true,
+    "label": "Network in (cameras to the NVR)",
+    "unit": "Mbps",
+    "value": 4.096
+   },
+   "network_out": {
+    "assumes": [
+     "live_share"
+    ],
+    "basis": "viewers x tiles each x average bitrate x live share",
+    "inputs_assumed": true,
+    "label": "Network out (viewers)",
+    "unit": "Mbps",
+    "value": 2.048
+   },
+   "write_average": {
+    "assumes": [
+     "motion_share"
+    ],
+    "basis": "sum of bitrate x share of the day recorded, over 8",
+    "inputs_assumed": true,
+    "label": "Write speed, average",
+    "unit": "MB/s",
+    "value": 0.256
+   },
+   "write_peak": {
+    "assumes": [],
+    "basis": "every recording camera writing at once",
+    "inputs_assumed": true,
+    "label": "Write speed, peak",
+    "unit": "MB/s",
+    "value": 0.512
+   }
+  },
+  "tiles_per_viewer": 3,
+  "viewers": 2
+ }
+}
