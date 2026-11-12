@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -588,6 +589,249 @@ def _job_view(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+@dataclass
+class _ExportJob:
+    """What one queued export asked for, and where its files go."""
+    id: str
+    requester: int
+    camera_ids: list[str]
+    output_modes: list[str]
+    display_settings: dict[str, Any]
+    tile_camera_ids: list[str | None]
+    grid_resolution: str
+    include_audio: bool
+    audio_camera_id: str | None
+    redaction_review_id: str | None
+    dewarp_plan: dict[str, Any]
+    start: datetime
+    end: datetime
+    work_dir: Path
+    final_path: Path
+    partial_path: Path
+
+
+def _claim_export(job_id: str) -> "_ExportJob | None":
+    """Take a queued job (the first to claim it wins) and read what it asked for; None when it is not queued any more."""
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM exports WHERE id=? AND status='queued'", (job_id,)).fetchone()
+        if row is None:
+            return
+        claimed = db.execute("UPDATE exports SET status='running',progress=1,updated_at=? WHERE id=? AND status='queued'", (datetime.now(timezone.utc).isoformat(), job_id))
+        if claimed.rowcount != 1:
+            return
+        camera_ids = json.loads(row["camera_ids_json"])
+        output_modes = json.loads(row["output_modes_json"])
+        display_settings = json.loads(row["display_settings_json"])
+        tile_camera_ids = json.loads(row["tile_camera_ids_json"])
+        grid_resolution = row["grid_resolution"]
+        include_audio = bool(row["include_audio"])
+        audio_camera_id = row["audio_camera_id"]
+        redaction_review_id = row["redaction_review_id"]
+        dewarp_plan = json.loads(row["dewarp_json"] or "{}")
+        requester = row["requested_by"]
+        start, end = _parse_time(row["requested_start"]), _parse_time(row["requested_end"])
+    return _ExportJob(
+        id=job_id, requester=requester, camera_ids=camera_ids, output_modes=output_modes, display_settings=display_settings, tile_camera_ids=tile_camera_ids,
+        grid_resolution=grid_resolution, include_audio=include_audio, audio_camera_id=audio_camera_id, redaction_review_id=redaction_review_id,
+        dewarp_plan=dewarp_plan, start=start, end=end, work_dir=recordings_path() / EXPORT_DIRECTORY / f".{job_id}.work",
+        final_path=recordings_path() / EXPORT_DIRECTORY / f"{job_id}.zip", partial_path=recordings_path() / EXPORT_DIRECTORY / f"{job_id}.zip.partial",
+    )
+
+
+def _reserve_sources(job: "_ExportJob", acquired: list[Path]) -> tuple[list[dict[str, Any]], int]:
+    """Read what is to be exported and install the playback lease on every source, under the write lock.
+
+    One synchronous call, run in a worker thread: the lock is never held while the event loop waits for something. Anything else on the loop that writes to the
+    database would otherwise wait for a lock whose holder cannot continue until the loop is free (a deadlock that ends only at the busy timeout).
+    """
+    camera_ids = job.camera_ids
+    output_modes = job.output_modes
+    include_audio = job.include_audio
+    audio_camera_id = job.audio_camera_id
+    start = job.start
+    end = job.end
+    with connect() as db:
+        # Retention also takes this write lock before unlinking a segment.
+        # Keep it until the in-memory lease is installed for every source.
+        db.execute("BEGIN IMMEDIATE")
+        per_camera: list[dict[str, Any]] = []
+        total_segments = 0
+        total_source_bytes = 0
+        for index, camera_id in enumerate(camera_ids):
+            camera = db.execute("SELECT id,name,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if camera is None:
+                raise RuntimeError("A selected camera was removed before export started")
+            segments = _contiguous_segments([dict(item) for item in db.execute(
+                "SELECT id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments "
+                "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
+                (camera_id, end.isoformat(), start.isoformat()),
+            ).fetchall()])
+            # Privacy masks: burn in the mask over the whole camera if any of its footage needs it.
+            zones: list[dict[str, float]] = []
+            for segment in segments:
+                zones = zones or privacy.server_zones(db, camera_id, _parse_time(segment["starts_at"]))
+            per_camera.append({"camera_id": camera_id, "name": camera["name"], "index": index, "segments": segments, "privacy_zones": zones,
+                               "audio_supported": bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
+                               "spans": _unique_output_spans(start, end, segments)})
+            total_segments += len(segments)
+            total_source_bytes += sum(int(segment["size_bytes"]) for segment in segments)
+        if not total_segments:
+            raise RuntimeError("No indexed footage is available in the requested interval")
+        if total_segments > MAX_EXPORT_SEGMENTS or total_source_bytes > MAX_EXPORT_SOURCE_BYTES:
+            raise RuntimeError("Export source exceeds the supported size or segment limit")
+        if include_audio:
+            eligible_audio = [camera for camera in per_camera if camera["audio_supported"] and camera["audio_enabled"]]
+            if "grid" in output_modes:
+                source = next((camera for camera in per_camera if camera["camera_id"] == audio_camera_id), None)
+                if source is None or not source["audio_supported"] or not source["audio_enabled"]:
+                    raise RuntimeError("Grid audio source must have administrator-enabled audio")
+            elif not eligible_audio:
+                raise RuntimeError("Audio export requires at least one administrator-enabled camera audio source")
+        for camera in per_camera:
+            for segment in camera["segments"]:
+                path = recording_file_path(segment["relative_path"])
+                if not path.is_file():
+                    raise RuntimeError("A source recording is unavailable; no partial export was produced")
+                acquire_playback(path)
+                acquired.append(path)
+    return per_camera, total_segments
+
+
+def _base_metadata(job: "_ExportJob") -> dict[str, Any]:
+    """The manifest as far as it can be written before any video is made."""
+    job_id = job.id
+    requester = job.requester
+    output_modes = job.output_modes
+    display_settings = job.display_settings
+    tile_camera_ids = job.tile_camera_ids
+    grid_resolution = job.grid_resolution
+    include_audio = job.include_audio
+    audio_camera_id = job.audio_camera_id
+    start = job.start
+    end = job.end
+    metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "package_type": "nvr_evidence",
+        "export_id": job_id,
+        "audit_reference": {"resource_type": "export", "resource_id": job_id},
+        "requested_by_user_id": requester,
+        "requested_interval": {"start": start.isoformat(), "end": end.isoformat()},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "output_modes": output_modes,
+        "display_settings": display_settings,
+        "tile_camera_ids": tile_camera_ids,
+        "grid_resolution": grid_resolution,
+        "audio": {"included": include_audio, "grid_camera_id": audio_camera_id if "grid" in output_modes else None,
+                  "individual_policy": "Each administrator-enabled camera contributes its own recorded audio; other individual videos remain silent" if include_audio else "omitted",
+                  "policy": "individual outputs use each camera's own recorded audio; grid uses only the selected camera and is silent when that source has no recorded audio" if include_audio else "Audio omitted by default"},
+        "timestamp_provenance": "All timestamps are ISO 8601 with explicit UTC offsets and normalized to UTC. Recording intervals come from the NVR segment index; camera clock accuracy and timestamp authenticity are not independently attested.",
+        "cameras": [],
+        "omitted_cameras": [],
+        "notes": ["Audio is omitted unless requested; individual outputs use the camera's own recorded audio, while grid output uses the selected camera source and silence for missing spans.", "Individual camera videos omit each camera's missing intervals. The synchronized grid follows the union of selected camera recordings and compresses only intervals where every selected camera is missing footage.", "Burned camera and time labels use the site display settings captured when this export was requested; labels show source time before gap compression.", "SHA-256 detects changes relative to this manifest but is not a digital signature and does not establish who created the package or when."],
+    }
+    return metadata
+
+
+def _redaction_regions(job: "_ExportJob", per_camera: list[dict[str, Any]], metadata: dict[str, Any]) -> dict[str, Any]:
+    """The redaction review's boxes for this export, checked against the footage and masks as they are now; adds its entry to the manifest."""
+    redaction_review_id = job.redaction_review_id
+    redaction_regions: dict[str, Any] = {}
+    if redaction_review_id:
+        with connect() as db:
+            redaction_regions, metadata["redaction"] = redaction.manifest_entry(db, redaction_review_id)
+        # The review's boxes are keyed to the footage it analysed: if that, or a privacy mask, has changed since, they would land on the wrong frames.
+        if redaction_regions.get("fingerprint") != redaction.fingerprint((camera["camera_id"], camera) for camera in per_camera if camera["spans"]):
+            raise RuntimeError("The footage or privacy masks changed since the redaction review; review the range again")
+    return redaction_regions
+
+
+def _grid_timeline(job: "_ExportJob", union: list[dict[str, Any]]) -> dict[str, Any]:
+    """The grid's place in time: where each stretch of source footage lands in the output and which gaps are compressed. Sets output_start and output_end on each interval."""
+    tile_camera_ids = job.tile_camera_ids
+    grid_resolution = job.grid_resolution
+    compressed = 0.0
+    source_to_output = []
+    global_gaps = []
+    for interval in union:
+        if interval["skipped"]:
+            global_gaps.append({"source_start": interval["source_start"].isoformat(), "source_end": interval["source_end"].isoformat(),
+                                "output_transition_seconds": round(compressed, 6),
+                                "duration_seconds": round((interval["source_end"] - interval["source_start"]).total_seconds(), 6)})
+        else:
+            interval["output_start"] = compressed
+            interval["output_end"] = compressed + (interval["source_end"] - interval["source_start"]).total_seconds()
+            source_to_output.append({"source_start": interval["source_start"].isoformat(), "source_end": interval["source_end"].isoformat(),
+                                     "output_start_seconds": round(compressed, 6), "output_end_seconds": round(interval["output_end"], 6)})
+            compressed = interval["output_end"]
+    return {"video_file": "grid.mp4", "resolution": grid_resolution, "tile_camera_ids": tile_camera_ids,
+                         "duration_seconds": round(compressed, 6), "source_to_output_intervals": source_to_output,
+                         "global_gaps_compressed": global_gaps}
+
+
+async def _signed_chain(job: "_ExportJob", per_camera: list[dict[str, Any]], metadata: dict[str, Any]) -> Path:
+    """The signed footage chain for the sources used, written beside the videos; notes in the manifest which cameras' footage was signed."""
+    work_dir = job.work_dir
+    work_dir.mkdir(parents=True, exist_ok=True)
+    # Signed footage: each source segment's hash now, and the signed chain covering it, for offline checks.
+    # Catch the chain up first, so footage recorded moments ago is covered by a signature too.
+    while await footage_chain.append_pending():
+        pass
+    await asyncio.to_thread(footage_chain.sign_heads)
+    chain_package: dict[str, Any] = {"schema_version": 1, "algorithm": "Ed25519", "cameras": []}
+    for camera in per_camera:
+        sources = [{"segment_id": int(segment["id"]), "relative_path": segment["relative_path"],
+                    "sha256": await asyncio.to_thread(footage_chain.file_sha256, recording_file_path(segment["relative_path"]))}
+                   for segment in camera["segments"]]
+        with connect() as db:
+            extract = footage_chain.extract(db, camera["camera_id"], [source["segment_id"] for source in sources])
+        chain_package["cameras"].append({"camera_id": camera["camera_id"], "sources": sources, "chain": extract})
+    chain_path = work_dir / "chain.json"
+    chain_path.write_text(json.dumps(chain_package, indent=2, sort_keys=True), encoding="utf-8")
+    metadata["signed_footage"] = {camera["camera_id"]: ("signed" if camera["chain"] else "not_signed") for camera in chain_package["cameras"]}
+    return chain_path
+
+
+def _record_completed(job: "_ExportJob", metadata: dict[str, Any], expires_at: str, total_segments: int) -> None:
+    """Mark the export completed and audit it, unless it was cancelled in the meantime."""
+    job_id = job.id
+    requester = job.requester
+    completed_at = datetime.now(timezone.utc)
+    with connect() as db:
+        updated = db.execute("UPDATE exports SET status='completed',progress=100,expires_at=?,metadata_json=?,output_relative_path=?,updated_at=?,completed_at=?,error=NULL WHERE id=? AND status='running' AND cancel_requested=0",
+                   (expires_at, json.dumps(metadata, separators=(",", ":")), f"{EXPORT_DIRECTORY}/{job_id}.zip", completed_at.isoformat(), completed_at.isoformat(), job_id))
+        if updated.rowcount != 1:
+            raise ExportCancelled()
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                   (requester, "export_completed", "export", job_id, json.dumps({"camera_count": len(metadata["cameras"]), "omitted_camera_count": len(metadata["omitted_cameras"]), "segment_count": total_segments})))
+
+
+def _record_cancelled(job: "_ExportJob") -> None:
+    """A cancelled export leaves no files and is recorded as cancelled."""
+    job_id = job.id
+    requester = job.requester
+    final_path = job.final_path
+    partial_path = job.partial_path
+    partial_path.unlink(missing_ok=True)
+    final_path.unlink(missing_ok=True)
+    with connect() as db:
+        db.execute("UPDATE exports SET status='cancelled',progress=0,cancel_requested=0,error=NULL,updated_at=?,completed_at=? WHERE id=? AND status='running'", (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (requester, "export_cancelled", "export", job_id, "{}"))
+
+
+def _record_failed(job: "_ExportJob", exc: Exception) -> None:
+    """A failed export leaves no files and says why, up to 500 characters."""
+    job_id = job.id
+    requester = job.requester
+    final_path = job.final_path
+    partial_path = job.partial_path
+    partial_path.unlink(missing_ok=True)
+    final_path.unlink(missing_ok=True)
+    with connect() as db:
+        db.execute("UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=? AND status='running'", (str(exc)[:500], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
+        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (requester, "export_failed", "export", job_id, json.dumps({"reason": str(exc)[:500]})))
+
+
 class ExportManager:
     """Persistent, single-worker export queue with bounded queued work."""
 
@@ -723,352 +967,240 @@ class ExportManager:
                 self._queue.task_done()
 
     async def _execute(self, job_id: str) -> None:
-        with connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM exports WHERE id=? AND status='queued'", (job_id,)).fetchone()
-            if row is None:
-                return
-            claimed = db.execute("UPDATE exports SET status='running',progress=1,updated_at=? WHERE id=? AND status='queued'", (datetime.now(timezone.utc).isoformat(), job_id))
-            if claimed.rowcount != 1:
-                return
-            camera_ids = json.loads(row["camera_ids_json"])
-            output_modes = json.loads(row["output_modes_json"])
-            display_settings = json.loads(row["display_settings_json"])
-            tile_camera_ids = json.loads(row["tile_camera_ids_json"])
-            grid_resolution = row["grid_resolution"]
-            include_audio = bool(row["include_audio"])
-            audio_camera_id = row["audio_camera_id"]
-            redaction_review_id = row["redaction_review_id"]
-            dewarp_plan = json.loads(row["dewarp_json"] or "{}")
-            requester = row["requested_by"]
-            start, end = _parse_time(row["requested_start"]), _parse_time(row["requested_end"])
-
+        job = _claim_export(job_id)
+        if job is None:
+            return
         acquired: list[Path] = []
-        work_dir = recordings_path() / EXPORT_DIRECTORY / f".{job_id}.work"
-        final_path = recordings_path() / EXPORT_DIRECTORY / f"{job_id}.zip"
-        partial_path = final_path.with_suffix(".zip.partial")
         try:
             if job_id in self._cancelled:
                 raise ExportCancelled()
-            work_dir.mkdir(parents=True, exist_ok=False)
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            _ensure_export_space(final_path.parent)
-            def reserve_sources() -> tuple[list[dict[str, Any]], int]:
-                """Read what is to be exported and install the playback lease on every source, under the write lock.
-
-                One synchronous call, run in a worker thread: the lock is never held while the event loop waits for something. Anything else on the loop that writes to the
-                database would otherwise wait for a lock whose holder cannot continue until the loop is free (a deadlock that ends only at the busy timeout).
-                """
-                with connect() as db:
-                    # Retention also takes this write lock before unlinking a segment.
-                    # Keep it until the in-memory lease is installed for every source.
-                    db.execute("BEGIN IMMEDIATE")
-                    per_camera: list[dict[str, Any]] = []
-                    total_segments = 0
-                    total_source_bytes = 0
-                    for index, camera_id in enumerate(camera_ids):
-                        camera = db.execute("SELECT id,name,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
-                        if camera is None:
-                            raise RuntimeError("A selected camera was removed before export started")
-                        segments = _contiguous_segments([dict(item) for item in db.execute(
-                            "SELECT id,relative_path,starts_at,ends_at,size_bytes FROM recording_segments "
-                            "WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL ORDER BY starts_at",
-                            (camera_id, end.isoformat(), start.isoformat()),
-                        ).fetchall()])
-                        # Privacy masks: burn in the mask over the whole camera if any of its footage needs it.
-                        zones: list[dict[str, float]] = []
-                        for segment in segments:
-                            zones = zones or privacy.server_zones(db, camera_id, _parse_time(segment["starts_at"]))
-                        per_camera.append({"camera_id": camera_id, "name": camera["name"], "index": index, "segments": segments, "privacy_zones": zones,
-                                           "audio_supported": bool(camera["audio_supported"]), "audio_enabled": bool(camera["audio_enabled"]),
-                                           "spans": _unique_output_spans(start, end, segments)})
-                        total_segments += len(segments)
-                        total_source_bytes += sum(int(segment["size_bytes"]) for segment in segments)
-                    if not total_segments:
-                        raise RuntimeError("No indexed footage is available in the requested interval")
-                    if total_segments > MAX_EXPORT_SEGMENTS or total_source_bytes > MAX_EXPORT_SOURCE_BYTES:
-                        raise RuntimeError("Export source exceeds the supported size or segment limit")
-                    if include_audio:
-                        eligible_audio = [camera for camera in per_camera if camera["audio_supported"] and camera["audio_enabled"]]
-                        if "grid" in output_modes:
-                            source = next((camera for camera in per_camera if camera["camera_id"] == audio_camera_id), None)
-                            if source is None or not source["audio_supported"] or not source["audio_enabled"]:
-                                raise RuntimeError("Grid audio source must have administrator-enabled audio")
-                        elif not eligible_audio:
-                            raise RuntimeError("Audio export requires at least one administrator-enabled camera audio source")
-                    for camera in per_camera:
-                        for segment in camera["segments"]:
-                            path = recording_file_path(segment["relative_path"])
-                            if not path.is_file():
-                                raise RuntimeError("A source recording is unavailable; no partial export was produced")
-                            acquire_playback(path)
-                            acquired.append(path)
-                return per_camera, total_segments
-
-            per_camera, total_segments = await asyncio.to_thread(reserve_sources)
-
-            metadata: dict[str, Any] = {
-                "schema_version": 1,
-                "package_type": "nvr_evidence",
-                "export_id": job_id,
-                "audit_reference": {"resource_type": "export", "resource_id": job_id},
-                "requested_by_user_id": requester,
-                "requested_interval": {"start": start.isoformat(), "end": end.isoformat()},
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "output_modes": output_modes,
-                "display_settings": display_settings,
-                "tile_camera_ids": tile_camera_ids,
-                "grid_resolution": grid_resolution,
-                "audio": {"included": include_audio, "grid_camera_id": audio_camera_id if "grid" in output_modes else None,
-                          "individual_policy": "Each administrator-enabled camera contributes its own recorded audio; other individual videos remain silent" if include_audio else "omitted",
-                          "policy": "individual outputs use each camera's own recorded audio; grid uses only the selected camera and is silent when that source has no recorded audio" if include_audio else "Audio omitted by default"},
-                "timestamp_provenance": "All timestamps are ISO 8601 with explicit UTC offsets and normalized to UTC. Recording intervals come from the NVR segment index; camera clock accuracy and timestamp authenticity are not independently attested.",
-                "cameras": [],
-                "omitted_cameras": [],
-                "notes": ["Audio is omitted unless requested; individual outputs use the camera's own recorded audio, while grid output uses the selected camera source and silence for missing spans.", "Individual camera videos omit each camera's missing intervals. The synchronized grid follows the union of selected camera recordings and compresses only intervals where every selected camera is missing footage.", "Burned camera and time labels use the site display settings captured when this export was requested; labels show source time before gap compression.", "SHA-256 detects changes relative to this manifest but is not a digital signature and does not establish who created the package or when."],
-            }
-            redaction_regions: dict[str, Any] = {}
-            if redaction_review_id:
-                with connect() as db:
-                    redaction_regions, metadata["redaction"] = redaction.manifest_entry(db, redaction_review_id)
-                # The review's boxes are keyed to the footage it analysed: if that, or a privacy mask, has changed since, they would land on the wrong frames.
-                if redaction_regions.get("fingerprint") != redaction.fingerprint((camera["camera_id"], camera) for camera in per_camera if camera["spans"]):
-                    raise RuntimeError("The footage or privacy masks changed since the redaction review; review the range again")
+            job.work_dir.mkdir(parents=True, exist_ok=False)
+            job.final_path.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_export_space(job.final_path.parent)
+            per_camera, total_segments = await asyncio.to_thread(_reserve_sources, job, acquired)
+            metadata = _base_metadata(job)
+            redaction_regions = _redaction_regions(job, per_camera, metadata)
             self._progress(job_id, 10)
-            union = _union_intervals(per_camera, start, end) if "grid" in output_modes else []
+            union = _union_intervals(per_camera, job.start, job.end) if "grid" in job.output_modes else []
             if union:
-                compressed = 0.0
-                source_to_output = []
-                global_gaps = []
-                for interval in union:
-                    if interval["skipped"]:
-                        global_gaps.append({"source_start": interval["source_start"].isoformat(), "source_end": interval["source_end"].isoformat(),
-                                            "output_transition_seconds": round(compressed, 6),
-                                            "duration_seconds": round((interval["source_end"] - interval["source_start"]).total_seconds(), 6)})
-                    else:
-                        interval["output_start"] = compressed
-                        interval["output_end"] = compressed + (interval["source_end"] - interval["source_start"]).total_seconds()
-                        source_to_output.append({"source_start": interval["source_start"].isoformat(), "source_end": interval["source_end"].isoformat(),
-                                                 "output_start_seconds": round(compressed, 6), "output_end_seconds": round(interval["output_end"], 6)})
-                        compressed = interval["output_end"]
-                metadata["grid"] = {"video_file": "grid.mp4", "resolution": grid_resolution, "tile_camera_ids": tile_camera_ids,
-                                     "duration_seconds": round(compressed, 6), "source_to_output_intervals": source_to_output,
-                                     "global_gaps_compressed": global_gaps}
+                metadata["grid"] = _grid_timeline(job, union)
             for camera in per_camera:
                 if job_id in self._cancelled:
                     raise ExportCancelled()
-                spans = camera["spans"]
-                actual, missing = _interval_metadata(start, end, [
-                    {"starts_at": span["source_start"].isoformat(), "ends_at": span["source_end"].isoformat()}
-                    for span in spans
-                ])
-                if not spans:
-                    metadata["omitted_cameras"].append({"camera_id": camera["camera_id"], "camera_name": camera["name"], "reason": "No indexed footage overlaps the requested interval"})
-                    continue
-                entry: dict[str, Any] = {
-                    "camera_id": camera["camera_id"], "camera_name": camera["name"],
-                    "privacy_masked": bool(camera["privacy_zones"]),
-                    "actual_intervals": actual, "missing_intervals": missing,
-                    "segment_count": len(spans), "video_file": None,
-                    "source_to_output_intervals": [
-                        {"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
-                         "output_start_seconds": round(span["output_start"], 6), "output_end_seconds": round(span["output_end"], 6)}
-                        for span in spans
-                    ],
-                }
-                camera_audio_enabled = bool(include_audio and camera["audio_supported"] and camera["audio_enabled"])
-                entry["audio"] = {"included": camera_audio_enabled,
-                                  "reason": None if camera_audio_enabled else "Audio not requested" if not include_audio else "Camera audio is not administrator-enabled"}
-                entry["video_file"] = None
-                if "individual" in output_modes:
-                    manifest = work_dir / f"camera-{camera['index']}.ffconcat"
-                    video_file = _camera_video_filename(camera["name"], camera["camera_id"], camera["index"])
-                    clip_path = work_dir / video_file
-                    # A redacted clip is first rendered under another name and then re-encoded blurred; only the blurred one is ever packaged.
-                    render_path = work_dir / f"unredacted-{video_file}" if redaction_review_id else clip_path
-                    subtitle_path = work_dir / f"camera-{camera['index']}.srt"
-                    lines = ["ffconcat version 1.0\n"]
-                    for span in spans:
-                        segment = span["segment"]
-                        segment_start = _parse_time(segment["starts_at"])
-                        lines.append(_ffconcat_quote(recording_file_path(segment["relative_path"])))
-                        lines.append(f"inpoint {(span['source_start'] - segment_start).total_seconds():.6f}\n")
-                        lines.append(f"outpoint {(span['source_end'] - segment_start).total_seconds():.6f}\n")
-                    manifest.write_text("".join(lines), encoding="utf-8")
-                    first_overlay_samples = _write_source_time_subtitles(subtitle_path, camera["name"], spans, display_settings)
-                    chain = privacy.with_mask(f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}", camera["privacy_zones"])
-                    camera_dewarp = dewarp_plan.get(camera["camera_id"])
-                    if camera_dewarp:
-                        # The mask covers the raw picture first; then the fisheye circle is dewarped to the view the person chose, with the geometry Live uses.
-                        first_file = recording_file_path(spans[0]["segment"]["relative_path"])
-                        source_width, source_height = await asyncio.to_thread(_video_size, first_file)
-                        graph, output_size = await asyncio.to_thread(_dewarp_graph, work_dir, camera["index"], camera_dewarp, source_width, source_height)
-                        chain = privacy.with_mask(f"fps=15,scale={source_width}:{source_height},{graph},{_subtitle_filter_path(subtitle_path, output_size[0], output_size[1])}", camera["privacy_zones"])
-                        entry["dewarp"] = {**camera_dewarp["view"], "lens": camera_dewarp["lens"], "output_size": list(output_size), "source_size": [source_width, source_height]}
-                    await self._render(job_id, lambda encoder, hardware: [
-                        "-hide_banner", "-loglevel", "error", *encoder.pre, *(acceleration.decode_args() if hardware else []), "-f", "concat", "-safe", "0", "-i", str(manifest),
-                        "-map", "0:v:0", "-an", "-vf", encoder.filters(chain),
-                        *encoder.codec, "-movflags", "+faststart", "-y", str(render_path),
-                    ])
-                    if job_id in self._cancelled:
-                        raise ExportCancelled()
-                    if not render_path.is_file() or render_path.stat().st_size == 0:
-                        raise RuntimeError(f"No playable video was produced for camera {camera['name']}")
-                    if redaction_review_id:
-                        try:
-                            counts = await asyncio.to_thread(redaction.redact_clip, render_path, clip_path, redaction_regions, camera["camera_id"], lambda: job_id in self._cancelled)
-                        except redaction.Cancelled as exc:
-                            raise ExportCancelled() from exc
-                        finally:
-                            render_path.unlink(missing_ok=True)
-                        entry["redaction"] = redaction.camera_summary(redaction_regions, camera["camera_id"], counts)
-                    if camera_audio_enabled:
-                        audio_path = work_dir / f"camera-{camera['index']}.m4a"
-                        duration = sum((span["source_end"] - span["source_start"]).total_seconds() for span in spans)
-                        await _render_audio(self, job_id, work_dir, spans, duration, audio_path)
-                        await _mux_audio(self, job_id, clip_path, audio_path)
-                        audio_path.unlink(missing_ok=True)
-                        entry["audio_source_to_output_intervals"] = [
-                            {"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
-                             "output_start_seconds": round(span["output_start"], 6), "output_end_seconds": round(span["output_end"], 6)}
-                            for span in spans
-                        ]
-                    entry["overlay"] = {"time_zone": display_settings["time_zone"], "date_format": display_settings["date_format"],
-                                         "clock_format": display_settings["clock_format"], "first_source_labels": first_overlay_samples,
-                                         "gap_indicator": "Recording gap skipped"}
-                    entry["video_file"] = video_file
-                metadata["cameras"].append(entry)
-                self._progress(job_id, 15 + round(55 * (camera["index"] + 1) / max(1, len(per_camera))))
-
-            if "grid" in output_modes:
-                hardware_failure = None
-                for hardware in (True, False) if acceleration.selected() else (False,):
-                    try:
-                        await _render_grid(self, job_id, work_dir, per_camera, tile_camera_ids, union, grid_resolution, display_settings, hardware)
-                    except RuntimeError as exc:
-                        if not hardware or job_id in self._cancelled:
-                            raise
-                        hardware_failure = str(exc)
-                        continue
-                    if hardware_failure:
-                        acceleration.disable(hardware_failure)
-                    break
-                if include_audio:
-                    source_camera = next(camera for camera in per_camera if camera["camera_id"] == audio_camera_id)
-                    audio_path = work_dir / "grid.m4a"
-                    duration = float(metadata["grid"]["duration_seconds"])
-                    await _render_audio(self, job_id, work_dir, source_camera["spans"], duration, audio_path, union)
-                    await _mux_audio(self, job_id, work_dir / "grid.mp4", audio_path)
-                    audio_path.unlink(missing_ok=True)
-                    metadata["audio"]["grid_source_to_output_intervals"] = [
-                        {"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
-                         "output_start_seconds": round(_union_output_time(span["source_start"], union), 6),
-                         "output_end_seconds": round(_union_output_time(span["source_end"], union), 6)}
-                        for span in source_camera["spans"]
-                    ]
-                metadata["grid"]["overlays"] = {
-                    camera["camera_id"]: {"camera_name": camera["name"], **camera.get("grid_overlay", {}),
-                        "missing_tile_label": "No video available", "missing_tile_label_alignment": "center",
-                        "missing_tile_time_labels": ["Shared source time", "Last frame captured"],
-                        "missing_tile_state": "frozen_last_frame_or_dark_before_first_frame"}
-                    for camera in per_camera if camera["camera_id"] in tile_camera_ids
-                }
-
-            work_dir.mkdir(parents=True, exist_ok=True)
-            # Signed footage: each source segment's hash now, and the signed chain covering it, for offline checks.
-            # Catch the chain up first, so footage recorded moments ago is covered by a signature too.
-            while await footage_chain.append_pending():
-                pass
-            await asyncio.to_thread(footage_chain.sign_heads)
-            chain_package: dict[str, Any] = {"schema_version": 1, "algorithm": "Ed25519", "cameras": []}
-            for camera in per_camera:
-                sources = [{"segment_id": int(segment["id"]), "relative_path": segment["relative_path"],
-                            "sha256": await asyncio.to_thread(footage_chain.file_sha256, recording_file_path(segment["relative_path"]))}
-                           for segment in camera["segments"]]
-                with connect() as db:
-                    extract = footage_chain.extract(db, camera["camera_id"], [source["segment_id"] for source in sources])
-                chain_package["cameras"].append({"camera_id": camera["camera_id"], "sources": sources, "chain": extract})
-            chain_path = work_dir / "chain.json"
-            chain_path.write_text(json.dumps(chain_package, indent=2, sort_keys=True), encoding="utf-8")
-            metadata["signed_footage"] = {camera["camera_id"]: ("signed" if camera["chain"] else "not_signed") for camera in chain_package["cameras"]}
+                await self._render_camera(job, camera, redaction_regions, metadata, len(per_camera))
+            if "grid" in job.output_modes:
+                await self._render_grid_output(job, per_camera, union, metadata)
+            chain_path = await _signed_chain(job, per_camera, metadata)
             expires_at = (datetime.now(timezone.utc) + EXPORT_RETENTION).isoformat()
             metadata["expires_at"] = expires_at
-            metadata_path = work_dir / "metadata.json"
-            metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-            package_files = [metadata_path, chain_path] + [work_dir / item["video_file"] for item in metadata["cameras"] if item["video_file"]]
-            if "grid" in output_modes:
-                package_files.append(work_dir / "grid.mp4")
-            integrity = {
-                "schema_version": 1,
-                "algorithm": "sha256",
-                "files": [
-                    {"path": path.name, "size_bytes": path.stat().st_size, "sha256": _file_sha256(path)}
-                    for path in package_files
-                ],
-            }
-            integrity_path = work_dir / "integrity.json"
-            integrity_path.write_text(json.dumps(integrity, indent=2, sort_keys=True), encoding="utf-8")
-            estimated_package_bytes = sum(path.stat().st_size for path in package_files) + integrity_path.stat().st_size + 1024 * 1024
-            _ensure_export_space(final_path.parent, estimated_package_bytes)
-            if job_id in self._cancelled:
-                raise ExportCancelled()
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            self._progress(job_id, 85)
-            archive_files = [(metadata_path, "metadata.json"), (chain_path, "chain.json"), (integrity_path, "integrity.json")]
-            archive_files.extend((work_dir / item["video_file"], item["video_file"]) for item in metadata["cameras"] if item["video_file"])
-            if "grid" in output_modes:
-                archive_files.append((work_dir / "grid.mp4", "grid.mp4"))
-            total_archive_bytes = sum(path.stat().st_size for path, _ in archive_files)
-            written_archive_bytes = 0
-            last_archive_progress = 85
-            with zipfile.ZipFile(partial_path, "w", compression=zipfile.ZIP_STORED) as archive:
-                for source_path, archive_name in archive_files:
-                    with source_path.open("rb") as source, archive.open(archive_name, "w") as destination:
-                        while chunk := source.read(1024 * 1024):
-                            if job_id in self._cancelled:
-                                raise ExportCancelled()
-                            destination.write(chunk)
-                            written_archive_bytes += len(chunk)
-                            progress = 85 + round(14 * written_archive_bytes / max(1, total_archive_bytes))
-                            if progress > last_archive_progress:
-                                self._progress(job_id, progress)
-                                last_archive_progress = progress
-            if partial_path.stat().st_size > MAX_EXPORT_PACKAGE_BYTES:
-                raise RuntimeError("Evidence package exceeds the 2 GiB export limit")
-            _ensure_export_space(final_path.parent, partial_path.stat().st_size)
-            if job_id in self._cancelled:
-                raise ExportCancelled()
-            os.replace(partial_path, final_path)
-            completed_at = datetime.now(timezone.utc)
-            with connect() as db:
-                updated = db.execute("UPDATE exports SET status='completed',progress=100,expires_at=?,metadata_json=?,output_relative_path=?,updated_at=?,completed_at=?,error=NULL WHERE id=? AND status='running' AND cancel_requested=0",
-                           (expires_at, json.dumps(metadata, separators=(",", ":")), f"{EXPORT_DIRECTORY}/{job_id}.zip", completed_at.isoformat(), completed_at.isoformat(), job_id))
-                if updated.rowcount != 1:
-                    raise ExportCancelled()
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                           (requester, "export_completed", "export", job_id, json.dumps({"camera_count": len(metadata["cameras"]), "omitted_camera_count": len(metadata["omitted_cameras"]), "segment_count": total_segments})))
+            self._write_package(job, metadata, chain_path)
+            _record_completed(job, metadata, expires_at, total_segments)
         except ExportCancelled:
-            partial_path.unlink(missing_ok=True)
-            final_path.unlink(missing_ok=True)
-            with connect() as db:
-                db.execute("UPDATE exports SET status='cancelled',progress=0,cancel_requested=0,error=NULL,updated_at=?,completed_at=? WHERE id=? AND status='running'", (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (requester, "export_cancelled", "export", job_id, "{}"))
+            _record_cancelled(job)
         except asyncio.CancelledError:
-            partial_path.unlink(missing_ok=True)
-            final_path.unlink(missing_ok=True)
+            job.partial_path.unlink(missing_ok=True)
+            job.final_path.unlink(missing_ok=True)
             raise
         except Exception as exc:
-            partial_path.unlink(missing_ok=True)
-            final_path.unlink(missing_ok=True)
-            with connect() as db:
-                db.execute("UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=? AND status='running'", (str(exc)[:500], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
-                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (requester, "export_failed", "export", job_id, json.dumps({"reason": str(exc)[:500]})))
+            _record_failed(job, exc)
         finally:
             self._processes.pop(job_id, None)
             self._cancelled.discard(job_id)
             for path in acquired:
                 release_playback(path)
-            shutil.rmtree(work_dir, ignore_errors=True)
+            shutil.rmtree(job.work_dir, ignore_errors=True)
+
+    async def _render_camera(self, job: "_ExportJob", camera: dict[str, Any], redaction_regions: dict[str, Any], metadata: dict[str, Any], camera_count: int) -> None:
+        """One camera's part of the package: its entry in the manifest and, when individual videos are asked for, its video (dewarped, redacted, with audio)."""
+        job_id = job.id
+        output_modes = job.output_modes
+        display_settings = job.display_settings
+        include_audio = job.include_audio
+        redaction_review_id = job.redaction_review_id
+        dewarp_plan = job.dewarp_plan
+        start = job.start
+        end = job.end
+        work_dir = job.work_dir
+        if job_id in self._cancelled:
+            raise ExportCancelled()
+        spans = camera["spans"]
+        actual, missing = _interval_metadata(start, end, [
+            {"starts_at": span["source_start"].isoformat(), "ends_at": span["source_end"].isoformat()}
+            for span in spans
+        ])
+        if not spans:
+            metadata["omitted_cameras"].append({"camera_id": camera["camera_id"], "camera_name": camera["name"], "reason": "No indexed footage overlaps the requested interval"})
+            return
+        entry: dict[str, Any] = {
+            "camera_id": camera["camera_id"], "camera_name": camera["name"],
+            "privacy_masked": bool(camera["privacy_zones"]),
+            "actual_intervals": actual, "missing_intervals": missing,
+            "segment_count": len(spans), "video_file": None,
+            "source_to_output_intervals": [
+                {"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
+                 "output_start_seconds": round(span["output_start"], 6), "output_end_seconds": round(span["output_end"], 6)}
+                for span in spans
+            ],
+        }
+        camera_audio_enabled = bool(include_audio and camera["audio_supported"] and camera["audio_enabled"])
+        entry["audio"] = {"included": camera_audio_enabled,
+                          "reason": None if camera_audio_enabled else "Audio not requested" if not include_audio else "Camera audio is not administrator-enabled"}
+        entry["video_file"] = None
+        if "individual" in output_modes:
+            manifest = work_dir / f"camera-{camera['index']}.ffconcat"
+            video_file = _camera_video_filename(camera["name"], camera["camera_id"], camera["index"])
+            clip_path = work_dir / video_file
+            # A redacted clip is first rendered under another name and then re-encoded blurred; only the blurred one is ever packaged.
+            render_path = work_dir / f"unredacted-{video_file}" if redaction_review_id else clip_path
+            subtitle_path = work_dir / f"camera-{camera['index']}.srt"
+            lines = ["ffconcat version 1.0\n"]
+            for span in spans:
+                segment = span["segment"]
+                segment_start = _parse_time(segment["starts_at"])
+                lines.append(_ffconcat_quote(recording_file_path(segment["relative_path"])))
+                lines.append(f"inpoint {(span['source_start'] - segment_start).total_seconds():.6f}\n")
+                lines.append(f"outpoint {(span['source_end'] - segment_start).total_seconds():.6f}\n")
+            manifest.write_text("".join(lines), encoding="utf-8")
+            first_overlay_samples = _write_source_time_subtitles(subtitle_path, camera["name"], spans, display_settings)
+            chain = privacy.with_mask(f"fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,{_subtitle_filter_path(subtitle_path, 1280, 720)}", camera["privacy_zones"])
+            camera_dewarp = dewarp_plan.get(camera["camera_id"])
+            if camera_dewarp:
+                # The mask covers the raw picture first; then the fisheye circle is dewarped to the view the person chose, with the geometry Live uses.
+                first_file = recording_file_path(spans[0]["segment"]["relative_path"])
+                source_width, source_height = await asyncio.to_thread(_video_size, first_file)
+                graph, output_size = await asyncio.to_thread(_dewarp_graph, work_dir, camera["index"], camera_dewarp, source_width, source_height)
+                chain = privacy.with_mask(f"fps=15,scale={source_width}:{source_height},{graph},{_subtitle_filter_path(subtitle_path, output_size[0], output_size[1])}", camera["privacy_zones"])
+                entry["dewarp"] = {**camera_dewarp["view"], "lens": camera_dewarp["lens"], "output_size": list(output_size), "source_size": [source_width, source_height]}
+            await self._render(job_id, lambda encoder, hardware: [
+                "-hide_banner", "-loglevel", "error", *encoder.pre, *(acceleration.decode_args() if hardware else []), "-f", "concat", "-safe", "0", "-i", str(manifest),
+                "-map", "0:v:0", "-an", "-vf", encoder.filters(chain),
+                *encoder.codec, "-movflags", "+faststart", "-y", str(render_path),
+            ])
+            if job_id in self._cancelled:
+                raise ExportCancelled()
+            if not render_path.is_file() or render_path.stat().st_size == 0:
+                raise RuntimeError(f"No playable video was produced for camera {camera['name']}")
+            if redaction_review_id:
+                try:
+                    counts = await asyncio.to_thread(redaction.redact_clip, render_path, clip_path, redaction_regions, camera["camera_id"], lambda: job_id in self._cancelled)
+                except redaction.Cancelled as exc:
+                    raise ExportCancelled() from exc
+                finally:
+                    render_path.unlink(missing_ok=True)
+                entry["redaction"] = redaction.camera_summary(redaction_regions, camera["camera_id"], counts)
+            if camera_audio_enabled:
+                audio_path = work_dir / f"camera-{camera['index']}.m4a"
+                duration = sum((span["source_end"] - span["source_start"]).total_seconds() for span in spans)
+                await _render_audio(self, job_id, work_dir, spans, duration, audio_path)
+                await _mux_audio(self, job_id, clip_path, audio_path)
+                audio_path.unlink(missing_ok=True)
+                entry["audio_source_to_output_intervals"] = [
+                    {"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
+                     "output_start_seconds": round(span["output_start"], 6), "output_end_seconds": round(span["output_end"], 6)}
+                    for span in spans
+                ]
+            entry["overlay"] = {"time_zone": display_settings["time_zone"], "date_format": display_settings["date_format"],
+                                 "clock_format": display_settings["clock_format"], "first_source_labels": first_overlay_samples,
+                                 "gap_indicator": "Recording gap skipped"}
+            entry["video_file"] = video_file
+        metadata["cameras"].append(entry)
+        self._progress(job_id, 15 + round(55 * (camera["index"] + 1) / max(1, camera_count)))
+
+    async def _render_grid_output(self, job: "_ExportJob", per_camera: list[dict[str, Any]], union: list[dict[str, Any]], metadata: dict[str, Any]) -> None:
+        """The synchronized grid video (on the graphics chip first when there is one, in software if that fails), its audio and its overlay manifest."""
+        job_id = job.id
+        display_settings = job.display_settings
+        tile_camera_ids = job.tile_camera_ids
+        grid_resolution = job.grid_resolution
+        include_audio = job.include_audio
+        audio_camera_id = job.audio_camera_id
+        work_dir = job.work_dir
+        hardware_failure = None
+        for hardware in (True, False) if acceleration.selected() else (False,):
+            try:
+                await _render_grid(self, job_id, work_dir, per_camera, tile_camera_ids, union, grid_resolution, display_settings, hardware)
+            except RuntimeError as exc:
+                if not hardware or job_id in self._cancelled:
+                    raise
+                hardware_failure = str(exc)
+                continue
+            if hardware_failure:
+                acceleration.disable(hardware_failure)
+            break
+        if include_audio:
+            source_camera = next(camera for camera in per_camera if camera["camera_id"] == audio_camera_id)
+            audio_path = work_dir / "grid.m4a"
+            duration = float(metadata["grid"]["duration_seconds"])
+            await _render_audio(self, job_id, work_dir, source_camera["spans"], duration, audio_path, union)
+            await _mux_audio(self, job_id, work_dir / "grid.mp4", audio_path)
+            audio_path.unlink(missing_ok=True)
+            metadata["audio"]["grid_source_to_output_intervals"] = [
+                {"source_start": span["source_start"].isoformat(), "source_end": span["source_end"].isoformat(),
+                 "output_start_seconds": round(_union_output_time(span["source_start"], union), 6),
+                 "output_end_seconds": round(_union_output_time(span["source_end"], union), 6)}
+                for span in source_camera["spans"]
+            ]
+        metadata["grid"]["overlays"] = {
+            camera["camera_id"]: {"camera_name": camera["name"], **camera.get("grid_overlay", {}),
+                "missing_tile_label": "No video available", "missing_tile_label_alignment": "center",
+                "missing_tile_time_labels": ["Shared source time", "Last frame captured"],
+                "missing_tile_state": "frozen_last_frame_or_dark_before_first_frame"}
+            for camera in per_camera if camera["camera_id"] in tile_camera_ids
+        }
+
+    def _write_package(self, job: "_ExportJob", metadata: dict[str, Any], chain_path: Path) -> None:
+        """metadata.json and integrity.json, then the zip, checked against the space and size limits and moved into place."""
+        job_id = job.id
+        output_modes = job.output_modes
+        work_dir = job.work_dir
+        final_path = job.final_path
+        partial_path = job.partial_path
+        metadata_path = work_dir / "metadata.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        package_files = [metadata_path, chain_path] + [work_dir / item["video_file"] for item in metadata["cameras"] if item["video_file"]]
+        if "grid" in output_modes:
+            package_files.append(work_dir / "grid.mp4")
+        integrity = {
+            "schema_version": 1,
+            "algorithm": "sha256",
+            "files": [
+                {"path": path.name, "size_bytes": path.stat().st_size, "sha256": _file_sha256(path)}
+                for path in package_files
+            ],
+        }
+        integrity_path = work_dir / "integrity.json"
+        integrity_path.write_text(json.dumps(integrity, indent=2, sort_keys=True), encoding="utf-8")
+        estimated_package_bytes = sum(path.stat().st_size for path in package_files) + integrity_path.stat().st_size + 1024 * 1024
+        _ensure_export_space(final_path.parent, estimated_package_bytes)
+        if job_id in self._cancelled:
+            raise ExportCancelled()
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        self._progress(job_id, 85)
+        archive_files = [(metadata_path, "metadata.json"), (chain_path, "chain.json"), (integrity_path, "integrity.json")]
+        archive_files.extend((work_dir / item["video_file"], item["video_file"]) for item in metadata["cameras"] if item["video_file"])
+        if "grid" in output_modes:
+            archive_files.append((work_dir / "grid.mp4", "grid.mp4"))
+        total_archive_bytes = sum(path.stat().st_size for path, _ in archive_files)
+        written_archive_bytes = 0
+        last_archive_progress = 85
+        with zipfile.ZipFile(partial_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            for source_path, archive_name in archive_files:
+                with source_path.open("rb") as source, archive.open(archive_name, "w") as destination:
+                    while chunk := source.read(1024 * 1024):
+                        if job_id in self._cancelled:
+                            raise ExportCancelled()
+                        destination.write(chunk)
+                        written_archive_bytes += len(chunk)
+                        progress = 85 + round(14 * written_archive_bytes / max(1, total_archive_bytes))
+                        if progress > last_archive_progress:
+                            self._progress(job_id, progress)
+                            last_archive_progress = progress
+        if partial_path.stat().st_size > MAX_EXPORT_PACKAGE_BYTES:
+            raise RuntimeError("Evidence package exceeds the 2 GiB export limit")
+        _ensure_export_space(final_path.parent, partial_path.stat().st_size)
+        if job_id in self._cancelled:
+            raise ExportCancelled()
+        os.replace(partial_path, final_path)
 
     async def _render(self, job_id: str, build: "Callable[[acceleration.Encoder, bool], list[str]]") -> None:
         """Run an FFmpeg render built for an encoder: on the graphics chip when there is one, and again in software if that fails."""
