@@ -67,3 +67,34 @@ class TokenFormTests(FormCase):
         self.assert_canonical("api_tokens", "expires_at", "last_used_at")
         self.assertEqual(self.admin.delete(f"/api/admin/api-tokens/{made.json()['token']['id']}").status_code, 200)
         self.assert_canonical("api_tokens", "revoked_at")
+
+
+class AlarmFormTests(FormCase):
+    def alarm(self, alarm_id: str = "a1") -> None:
+        occurred = datetime(2026, 11, 12, 9, 0, 0, tzinfo=timezone.utc)
+        with connect() as db:
+            db.execute("INSERT INTO alarms(id,rule_name,camera_id,label,condition_type,occurred_at,box_json,clip_starts_at,clip_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                       (alarm_id, "Gate", self.d1, "person", "zone_entry", occurred.isoformat(), "{}", (occurred - timedelta(seconds=10)).isoformat(),
+                        (occurred + timedelta(seconds=20)).isoformat(), occurred.isoformat(), occurred.isoformat()))
+
+    def test_what_is_recorded_as_people_act_on_an_alarm_is_in_the_canonical_form(self):
+        self.alarm()
+        self.assertEqual(self.admin.post("/api/alarms/a1/acknowledge").status_code, 200)
+        self.assertEqual(self.admin.post("/api/alarms/a1/comments", json={"body": "Looking into it"}).status_code, 201)
+        self.assertEqual(self.admin.post("/api/alarms/a1/resolve", json={"note": "Staff member"}).status_code, 200)
+        self.assert_canonical("alarms", "acknowledged_at", "resolved_at", "updated_at")
+        self.assert_canonical("alarm_history", "occurred_at")
+        self.assert_canonical("alarm_comments", "created_at")
+
+    def test_footage_stays_protected_for_the_days_after_an_alarm_is_resolved_and_then_is_not(self):
+        from app import alarms
+        self.alarm()
+        starts, ends = "2026-11-12T09:00:00+00:00", "2026-11-12T09:05:00+00:00"
+        self.assertEqual(self.admin.post("/api/alarms/a1/resolve", json={}).status_code, 200)
+        with connect() as db:
+            self.assertTrue(alarms.protects_footage(db, self.d1, starts, ends, alarms.resolved_kept_since(db, datetime.now(timezone.utc))))  # Resolved just now, inside the days kept
+            db.execute("UPDATE alarms SET resolved_at=? WHERE id='a1'", (datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat(),))
+            self.assertFalse(alarms.protects_footage(db, self.d1, starts, ends, alarms.resolved_kept_since(db, datetime.now(timezone.utc))))  # Resolved long ago, in the old form
+            db.execute("UPDATE alarms SET resolved_at=NULL WHERE id='a1'")
+            self.assertTrue(alarms.protects_footage(db, self.d1, starts, ends, alarms.resolved_kept_since(db, datetime.now(timezone.utc))))  # Still open
+            self.assertRegex(alarms.resolved_kept_since(db, datetime.now(timezone.utc)), CANONICAL)  # Compared with resolved_at, so written in the same form

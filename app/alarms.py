@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
-from app.clock import parse as _parse
+from app.clock import parse as _parse, stamp as _stamp
 
 CLIP_BEFORE = timedelta(seconds=10)
 CLIP_AFTER = timedelta(seconds=20)
@@ -28,7 +28,7 @@ class AlarmError(Exception):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _stamp()
 
 
 def _record(db: sqlite3.Connection, alarm_id: str, actor_id: int | None, action: str, details: dict[str, Any]) -> None:
@@ -181,7 +181,7 @@ def resolved_footage_days(db: sqlite3.Connection) -> int:
 
 def resolved_kept_since(db: sqlite3.Connection, now: datetime) -> str:
     """Alarms resolved after this time still keep their footage."""
-    return (now - timedelta(days=resolved_footage_days(db))).astimezone(timezone.utc).isoformat()
+    return _stamp(now - timedelta(days=resolved_footage_days(db)))  # Compared with resolved_at, so in the same form
 
 
 def protects_footage(db: sqlite3.Connection, camera_id: str, starts_at: str, ends_at: str, kept_since: str) -> bool:
