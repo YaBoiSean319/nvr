@@ -93,114 +93,142 @@ def _n(value: float) -> float:
     return round(value, 4)
 
 
-def estimate(rows: list[Row], viewers: int, tiles_per_viewer: int, overrides: dict[str, float] | None = None) -> dict[str, Any]:
-    """The estimate for a plan: totals, each line, and the assumptions every figure rests on."""
-    values = {**DEFAULTS, **{key: float(value) for key, value in (overrides or {}).items() if key in ASSUMPTION_BY_KEY}}
-    entered_overrides = {key for key in (overrides or {}) if key in ASSUMPTION_BY_KEY and float(overrides[key]) != DEFAULTS[key]}
-    used: set[str] = set()
-    lines: list[dict[str, Any]] = []
-    cameras = sum(row.count for row in rows)
-    disk = ingest_kbps = write_avg_kbps = write_peak_kbps = 0.0
-    ai_cameras = 0
-    ai_frames_per_second = 0.0
-    hevc_cameras = 0
-    hevc_pixels_fps = 0.0
-    for row in rows:
-        assumed: list[str] = list(row.assumed)
-        width, height = (row.width, row.height) if row.width and row.height else DEFAULT_PICTURE
-        if not (row.width and row.height):
-            assumed.append("picture size (1920 x 1080)")
-        codec = row.codec or DEFAULT_CODEC
-        if not row.codec:
-            assumed.append("codec (H.264)")
-        fps = row.fps or DEFAULT_FPS
-        if not row.fps:
-            assumed.append("frame rate (15)")
-        if row.bitrate_kbps:
-            kbps, source = float(row.bitrate_kbps), row.bitrate_source
-        else:
-            kbps, source = default_bitrate(width, height, codec, fps), "assumed"
-            assumed.append(f"bitrate ({kbps:.0f} kbps for this picture size and frame rate)")
-        if row.recording == "continuous":
-            duty = 1.0
-        elif row.recording == "disabled":
-            duty = 0.0
-        elif row.recorded_share is not None:
-            duty = row.recorded_share
-        else:
-            duty = values["motion_share"]
-            used.add("motion_share")
-            assumed.append(f"share of the day recorded ({duty:.0%}, motion recording)")
-        bytes_per_day = kbps * 1000 / 8 * SECONDS_PER_DAY * duty
-        line_disk = bytes_per_day * row.retention_days * row.count
-        disk += line_disk
-        ingest_kbps += kbps * row.count
-        write_avg_kbps += kbps * duty * row.count
-        write_peak_kbps += kbps * row.count if row.recording != "disabled" else 0.0
-        if row.ai:
-            ai_cameras += row.count
-            ai_frames_per_second += (row.analysis_fps or values["analysis_fps"]) * row.count
-            if not row.analysis_fps:
-                used.add("analysis_fps")
-        if codec == "h265":
-            hevc_cameras += row.count
-            hevc_pixels_fps += width * height * fps * row.count
-        lines.append({
-            "name": row.name, "count": row.count, "width": width, "height": height, "codec": codec, "fps": _n(fps), "recording": row.recording, "retention_days": row.retention_days,
-            "ai": row.ai, "bitrate_kbps": _n(kbps), "bitrate_source": source, "duty": _n(duty), "bytes_per_day": round(bytes_per_day), "footage_bytes": round(line_disk),
-            "assumed": assumed,
-        })
-    average_kbps = ingest_kbps / cameras if cameras else 0.0
+@dataclass
+class _Totals:
+    """What the plan's lines add up to, before the figures built on them."""
+    disk: float = 0.0
+    ingest_kbps: float = 0.0
+    write_avg_kbps: float = 0.0
+    write_peak_kbps: float = 0.0
+    ai_cameras: int = 0
+    ai_frames_per_second: float = 0.0
+    hevc_cameras: int = 0
+    hevc_pixels_fps: float = 0.0
+
+
+def _plan_line(row: Row, values: dict[str, float], used: set[str], totals: _Totals) -> dict[str, Any]:
+    """One line of the plan worked out (what was assumed, its bitrate, share of the day recorded, footage kept), added to the totals."""
+    assumed: list[str] = list(row.assumed)
+    width, height = (row.width, row.height) if row.width and row.height else DEFAULT_PICTURE
+    if not (row.width and row.height):
+        assumed.append("picture size (1920 x 1080)")
+    codec = row.codec or DEFAULT_CODEC
+    if not row.codec:
+        assumed.append("codec (H.264)")
+    fps = row.fps or DEFAULT_FPS
+    if not row.fps:
+        assumed.append("frame rate (15)")
+    if row.bitrate_kbps:
+        kbps, source = float(row.bitrate_kbps), row.bitrate_source
+    else:
+        kbps, source = default_bitrate(width, height, codec, fps), "assumed"
+        assumed.append(f"bitrate ({kbps:.0f} kbps for this picture size and frame rate)")
+    if row.recording == "continuous":
+        duty = 1.0
+    elif row.recording == "disabled":
+        duty = 0.0
+    elif row.recorded_share is not None:
+        duty = row.recorded_share
+    else:
+        duty = values["motion_share"]
+        used.add("motion_share")
+        assumed.append(f"share of the day recorded ({duty:.0%}, motion recording)")
+    bytes_per_day = kbps * 1000 / 8 * SECONDS_PER_DAY * duty
+    line_disk = bytes_per_day * row.retention_days * row.count
+    totals.disk += line_disk
+    totals.ingest_kbps += kbps * row.count
+    totals.write_avg_kbps += kbps * duty * row.count
+    totals.write_peak_kbps += kbps * row.count if row.recording != "disabled" else 0.0
+    if row.ai:
+        totals.ai_cameras += row.count
+        totals.ai_frames_per_second += (row.analysis_fps or values["analysis_fps"]) * row.count
+        if not row.analysis_fps:
+            used.add("analysis_fps")
+    if codec == "h265":
+        totals.hevc_cameras += row.count
+        totals.hevc_pixels_fps += width * height * fps * row.count
+    return {
+        "name": row.name, "count": row.count, "width": width, "height": height, "codec": codec, "fps": _n(fps), "recording": row.recording, "retention_days": row.retention_days,
+        "ai": row.ai, "bitrate_kbps": _n(kbps), "bitrate_source": source, "duty": _n(duty), "bytes_per_day": round(bytes_per_day), "footage_bytes": round(line_disk),
+        "assumed": assumed,
+    }
+
+
+def _processor_load(totals: _Totals, cameras: int, viewers: int, tiles_per_viewer: int, values: dict[str, float]) -> dict[str, float]:
+    """What viewing, recording, H.265 conversion and AI analysis ask of the processor, and the network going out to viewers."""
+    average_kbps = totals.ingest_kbps / cameras if cameras else 0.0
     live_streams = viewers * min(tiles_per_viewer, cameras)
     egress_kbps = live_streams * average_kbps * values["live_share"]
-    recording_cores = ingest_kbps / 1000 * values["record_cores_per_mbps"]
-    live_cores = egress_kbps / 1000 * values["live_cores_per_mbps"]
-    hevc_fraction = hevc_cameras / cameras if cameras else 0.0
+    hevc_fraction = totals.hevc_cameras / cameras if cameras else 0.0
     converted = live_streams * hevc_fraction * values["hevc_transcode_share"]
-    average_hevc_work = hevc_pixels_fps / hevc_cameras / (DEFAULT_PICTURE[0] * DEFAULT_PICTURE[1] * REFERENCE_FPS) if hevc_cameras else 0.0
-    transcode_cores = converted * average_hevc_work * values["transcode_cores_1080p15"]
+    average_hevc_work = totals.hevc_pixels_fps / totals.hevc_cameras / (DEFAULT_PICTURE[0] * DEFAULT_PICTURE[1] * REFERENCE_FPS) if totals.hevc_cameras else 0.0
     decode_s = values["decode_ms_per_megapixel"] * values["ai_frame_megapixels"] / 1000
-    ai_cpu = ai_frames_per_second * (decode_s + values["inference_ms_cpu"] / 1000)
-    ai_accelerated = ai_frames_per_second * (decode_s + values["inference_ms_accelerator"] / 1000)
+    return {
+        "egress_kbps": egress_kbps,
+        "recording_cores": totals.ingest_kbps / 1000 * values["record_cores_per_mbps"],
+        "live_cores": egress_kbps / 1000 * values["live_cores_per_mbps"],
+        "transcode_cores": converted * average_hevc_work * values["transcode_cores_1080p15"],
+        "ai_cpu": totals.ai_frames_per_second * (decode_s + values["inference_ms_cpu"] / 1000),
+        "ai_accelerated": totals.ai_frames_per_second * (decode_s + values["inference_ms_accelerator"] / 1000),
+    }
+
+
+def _mark_assumptions_used(used: set[str], totals: _Totals) -> None:
     for key in ("overhead", "headroom", "live_share", "record_cores_per_mbps", "live_cores_per_mbps"):
         used.add(key)
-    if hevc_cameras:
+    if totals.hevc_cameras:
         used.update({"hevc_transcode_share", "transcode_cores_1080p15"})
-    if ai_cameras:
+    if totals.ai_cameras:
         used.update({"ai_frame_megapixels", "decode_ms_per_megapixel", "inference_ms_cpu", "inference_ms_accelerator"})
 
-    inputs_assumed = any(line["assumed"] for line in lines)
+
+def _metrics(totals: _Totals, load: dict[str, float], values: dict[str, float], used: set[str], inputs_assumed: bool) -> dict[str, dict[str, Any]]:
+    """Each result with how it is worked out and the assumptions it rests on: only those that actually applied to this plan."""
 
     def metric(label: str, value: float, unit: str, basis: str, *assumes: str, from_inputs: bool = False) -> dict[str, Any]:
-        """A result with how it is worked out and the assumptions it rests on: only those that actually applied to this plan."""
         return {"label": label, "value": round(value) if unit == "bytes" else _n(value), "unit": unit, "basis": basis, "assumes": [key for key in assumes if key in used],
                 "inputs_assumed": from_inputs and inputs_assumed}
 
-    footage = disk
+    recording_cores, live_cores, transcode_cores = load["recording_cores"], load["live_cores"], load["transcode_cores"]
+    footage = totals.disk
     stored = footage * values["overhead"]
     metrics = {
         "disk_footage": metric("Footage kept", footage, "bytes", "bitrate / 8 x 86 400 s x share of the day recorded x retention days, summed over cameras", "motion_share", from_inputs=True),
         "disk_needed": metric("Disk needed", stored, "bytes", "footage x overhead", "motion_share", "overhead", from_inputs=True),
         "disk_recommended": metric("Disk recommended", stored * values["headroom"], "bytes", "disk needed x headroom", "motion_share", "overhead", "headroom", from_inputs=True),
-        "write_average": metric("Write speed, average", write_avg_kbps / 8 / 1000, "MB/s", "sum of bitrate x share of the day recorded, over 8", "motion_share", from_inputs=True),
-        "write_peak": metric("Write speed, peak", write_peak_kbps / 8 / 1000, "MB/s", "every recording camera writing at once", from_inputs=True),
-        "network_in": metric("Network in (cameras to the NVR)", ingest_kbps / 1000, "Mbps", "sum of every camera's bitrate: each stays connected whether or not it is recording", from_inputs=True),
-        "network_out": metric("Network out (viewers)", egress_kbps / 1000, "Mbps", "viewers x tiles each x average bitrate x live share", "live_share", from_inputs=True),
+        "write_average": metric("Write speed, average", totals.write_avg_kbps / 8 / 1000, "MB/s", "sum of bitrate x share of the day recorded, over 8", "motion_share", from_inputs=True),
+        "write_peak": metric("Write speed, peak", totals.write_peak_kbps / 8 / 1000, "MB/s", "every recording camera writing at once", from_inputs=True),
+        "network_in": metric("Network in (cameras to the NVR)", totals.ingest_kbps / 1000, "Mbps", "sum of every camera's bitrate: each stays connected whether or not it is recording", from_inputs=True),
+        "network_out": metric("Network out (viewers)", load["egress_kbps"] / 1000, "Mbps", "viewers x tiles each x average bitrate x live share", "live_share", from_inputs=True),
         "cores_streams": metric("Processor, recording and live copying", recording_cores + live_cores, "cores", "cores per Mbps x network in, and x network out",
                                 "record_cores_per_mbps", "live_cores_per_mbps"),
         "cores_conversion": metric("Processor, H.265 conversion for browsers", transcode_cores, "cores", "viewed H.265 streams converted x cores per 1080p 15 fps stream, scaled by their size",
                                    "hevc_transcode_share", "transcode_cores_1080p15"),
-        "cores_ai_processor": metric("Processor, AI analysis (no accelerator)", ai_cpu, "cores", "analysed frames per second x (decode + inference on the processor)",
+        "cores_ai_processor": metric("Processor, AI analysis (no accelerator)", load["ai_cpu"], "cores", "analysed frames per second x (decode + inference on the processor)",
                                      "analysis_fps", "ai_frame_megapixels", "decode_ms_per_megapixel", "inference_ms_cpu"),
-        "cores_ai_accelerated": metric("Processor, AI analysis (with an accelerator)", ai_accelerated, "cores", "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
+        "cores_ai_accelerated": metric("Processor, AI analysis (with an accelerator)", load["ai_accelerated"], "cores", "as above with the inference on the accelerator (it needs the accelerator's own capacity too)",
                                        "analysis_fps", "ai_frame_megapixels", "decode_ms_per_megapixel", "inference_ms_accelerator"),
     }
-    metrics["cores_total_processor"] = metric("Processor total, no accelerator", recording_cores + live_cores + transcode_cores + ai_cpu, "cores", "the four processor lines above, AI on the processor",
+    metrics["cores_total_processor"] = metric("Processor total, no accelerator", recording_cores + live_cores + transcode_cores + load["ai_cpu"], "cores", "the four processor lines above, AI on the processor",
                                               *sorted({key for item in metrics.values() for key in item["assumes"]}))
-    metrics["cores_total_accelerated"] = metric("Processor total, with an accelerator", recording_cores + live_cores + transcode_cores + ai_accelerated, "cores", "as above, AI inference on the accelerator",
+    metrics["cores_total_accelerated"] = metric("Processor total, with an accelerator", recording_cores + live_cores + transcode_cores + load["ai_accelerated"], "cores", "as above, AI inference on the accelerator",
                                                 *sorted({key for item in metrics.values() for key in item["assumes"]}))
+    return metrics
+
+
+def estimate(rows: list[Row], viewers: int, tiles_per_viewer: int, overrides: dict[str, float] | None = None) -> dict[str, Any]:
+    """The estimate for a plan: totals, each line, and the assumptions every figure rests on."""
+    values = {**DEFAULTS, **{key: float(value) for key, value in (overrides or {}).items() if key in ASSUMPTION_BY_KEY}}
+    entered_overrides = {key for key in (overrides or {}) if key in ASSUMPTION_BY_KEY and float(overrides[key]) != DEFAULTS[key]}
+    used: set[str] = set()
+    totals = _Totals()
+    lines = [_plan_line(row, values, used, totals) for row in rows]
+    cameras = sum(row.count for row in rows)
+    load = _processor_load(totals, cameras, viewers, tiles_per_viewer, values)
+    _mark_assumptions_used(used, totals)
+    metrics = _metrics(totals, load, values, used, any(line["assumed"] for line in lines))
     return {
-        "cameras": cameras, "viewers": viewers, "tiles_per_viewer": tiles_per_viewer, "ai_cameras": ai_cameras, "lines": lines, "metrics": metrics,
+        "cameras": cameras, "viewers": viewers, "tiles_per_viewer": tiles_per_viewer, "ai_cameras": totals.ai_cameras, "lines": lines, "metrics": metrics,
         "assumptions": [{"key": item.key, "label": item.label, "value": values[item.key], "unit": item.unit, "source": "entered" if item.key in entered_overrides else "default",
                          "used": item.key in used} for item in ASSUMPTIONS],
         "defaults": {"bitrate_kbps_h264_15fps": [{"up_to_megapixels": None if limit == float("inf") else limit, "kbps": kbps} for limit, kbps in BITRATE_CLASSES], "h265_factor": H265_FACTOR},

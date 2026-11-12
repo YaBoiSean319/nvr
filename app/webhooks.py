@@ -13,7 +13,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpx
 
@@ -55,7 +55,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def validate_target_url(value: str, allow_private: bool) -> str:
+def _split_target(value: str) -> tuple[SplitResult, str, int | None]:
+    """The URL taken apart and checked for shape: http(s), a host, no credentials or fragment, a sane port. Returns the parts, the host and the port."""
     target = value.strip()
     try:
         parsed = urlsplit(target)
@@ -69,18 +70,28 @@ def validate_target_url(value: str, allow_private: bool) -> str:
         raise ValueError("Webhook host is invalid")
     if port is not None and not 1 <= port <= 65535:
         raise ValueError("Webhook port is invalid")
-    literal_host = True
+    return parsed, host, port
+
+
+def _destination_addresses(parsed: SplitResult, host: str, port: int | None) -> tuple[list[ipaddress.IPv4Address | ipaddress.IPv6Address], bool]:
+    """Where the URL points: the address itself when it is one (True), otherwise every address its name resolves to (False)."""
     try:
-        addresses = [ipaddress.ip_address(host)]
+        return [ipaddress.ip_address(host)], True
     except ValueError:
-        literal_host = False
-        try:
-            resolved = socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-        except OSError as exc:
-            raise ValueError("Webhook hostname could not be resolved") from exc
-        addresses = list({ipaddress.ip_address(item[4][0]) for item in resolved})
+        pass
+    try:
+        resolved = socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError("Webhook hostname could not be resolved") from exc
+    addresses = list({ipaddress.ip_address(item[4][0]) for item in resolved})
     if not addresses:
         raise ValueError("Webhook hostname has no usable address")
+    return addresses, False
+
+
+def _check_destination_policy(addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address], literal_host: bool, scheme: str, allow_private: bool) -> None:
+    """Refuse what a webhook must never reach (loopback, link-local, multicast, reserved, other special-purpose ranges); private receivers need a literal address,
+    the administrator's explicit say-so and a private-only answer; a public destination must be https."""
     for address in addresses:
         if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified or address.is_reserved:
             raise ValueError("Loopback, link-local, multicast, and reserved webhook destinations are not allowed")
@@ -91,8 +102,14 @@ def validate_target_url(value: str, allow_private: bool) -> str:
         raise ValueError("Private webhook receivers must use an explicit private IP address")
     if any(private_kinds) and (not allow_private or not all(private_kinds)):
         raise ValueError("Private webhook receivers require explicit administrator authorization and a private-only DNS result")
-    if parsed.scheme != "https" and not (allow_private and all(private_kinds)):
+    if scheme != "https" and not (allow_private and all(private_kinds)):
         raise ValueError("Public webhook destinations must use HTTPS")
+
+
+def validate_target_url(value: str, allow_private: bool) -> str:
+    parsed, host, port = _split_target(value)
+    addresses, literal_host = _destination_addresses(parsed, host, port)
+    _check_destination_policy(addresses, literal_host, parsed.scheme, allow_private)
     display_host = f"[{host}]" if ":" in host else host
     netloc = display_host + (f":{port}" if port else "")
     return urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, ""))

@@ -39,13 +39,10 @@ test("an administrator adds a cold tier, sets a policy, moves old footage and it
   await policy.getByRole("button", { name: "Save policy for default" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
   await page.getByRole("button", { name: "Move some footage now" }).click();
-  try {
-    await expect(page.getByText("2 segments moved.")).toBeVisible({ timeout: 25_000 }); // A busy CI runner copies and verifies slowly
-  } catch (error) {
-    console.log(`The move did not report 2 segments moved; the page said:\n${(await page.locator("main").innerText()).slice(0, 1500)}`);
-    throw error;
-  }
-  await expect(page.getByRole("list", { name: "Tier list" })).toContainText("2 segments");
+  // The background mover also runs every 30 s, and when its pass overlaps this click the other one reports fewer or none moved; the footage ends up in the tier either way
+  // (a busy CI runner copies and verifies slowly, so the passes overlap more often). The page answers the click, and the footage is what is checked.
+  await expect(page.getByText(/\d+ segments? moved\./)).toBeVisible({ timeout: 25_000 });
+  await expect(page.getByRole("list", { name: "Tier list" })).toContainText("2 segments", { timeout: 25_000 });
   expect(fs.readdirSync(path.join(fs.realpathSync(cold), seeded.segments[0].camera_id)).length).toBe(2);
 
   // Still there to play, through the server.

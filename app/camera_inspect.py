@@ -115,143 +115,171 @@ async def inspect_camera(host: str, username: str = "", password: str = "", *, d
 
 async def _inspect(host: str, username: str, password: str, device_service_url: str | None, brand: str, transport: httpx.AsyncBaseTransport | None,
                    verify: bool, protocols: str | None) -> dict[str, Any]:
-    steps: dict[str, dict[str, str]] = {key: {"id": key, "label": label, "state": "pending", "detail": ""} for key, label in STEPS}
-    capabilities: dict[str, dict[str, str]] = {name: _state("unknown", "Not checked") for name in ("discovery", "authentication", "video", "audio", "motion", "ptz")}
-    report: dict[str, Any] = {"ok": False, "device": {}, "brand": "auto", "device_service_url": None, "services": {}, "auth": {}, "profiles": [], "selection": None,
-                              "steps": [], "capabilities": capabilities}
+    return await _Inspection(verify, protocols).run(host, username, password, device_service_url, brand, transport)
 
-    def finish(client: OnvifClient | None) -> dict[str, Any]:
-        for step in steps.values():
+
+class _Inspection:
+    """One inspection of a camera: the report being filled in, one method for each stage. A stage that cannot go on says so and the later ones are skipped."""
+
+    def __init__(self, verify: bool, protocols: str | None) -> None:
+        self.verify, self.protocols = verify, protocols
+        self.steps: dict[str, dict[str, str]] = {key: {"id": key, "label": label, "state": "pending", "detail": ""} for key, label in STEPS}
+        self.capabilities: dict[str, dict[str, str]] = {name: _state("unknown", "Not checked") for name in ("discovery", "authentication", "video", "audio", "motion", "ptz")}
+        self.report: dict[str, Any] = {"ok": False, "device": {}, "brand": "auto", "device_service_url": None, "services": {}, "auth": {}, "profiles": [], "selection": None,
+                                       "steps": [], "capabilities": self.capabilities}
+
+    def finish(self, client: OnvifClient | None) -> dict[str, Any]:
+        for step in self.steps.values():
             if step["state"] == "pending":
                 step["state"] = "skipped"
-        report["steps"] = list(steps.values())
-        report["auth"] = dict(client.auth_by_service) if client else {}
-        report["diagnostics"] = client.diagnostics() if client else []
-        return report
+        self.report["steps"] = list(self.steps.values())
+        self.report["auth"] = dict(client.auth_by_service) if client else {}
+        self.report["diagnostics"] = client.diagnostics() if client else []
+        return self.report
 
-    def done(key: str, state: str, detail: str = "") -> None:
-        steps[key].update(state=state, detail=detail)
+    def done(self, key: str, state: str, detail: str = "") -> None:
+        self.steps[key].update(state=state, detail=detail)
 
-    try:
-        client = OnvifClient(host, username, password, transport=transport)
-    except ValueError as exc:
-        done("connect", "failed", str(exc))
-        capabilities["discovery"] = _state("failed", str(exc))
-        return finish(None)
-    async with client:
+    async def run(self, host: str, username: str, password: str, device_service_url: str | None, brand: str, transport: httpx.AsyncBaseTransport | None) -> dict[str, Any]:
+        try:
+            client = OnvifClient(host, username, password, transport=transport)
+        except ValueError as exc:
+            self.done("connect", "failed", str(exc))
+            self.capabilities["discovery"] = _state("failed", str(exc))
+            return self.finish(None)
+        async with client:
+            url = await self._connect(client, device_service_url, brand)
+            if url is None or not await self._authenticate(client, url, username, brand):
+                return self.finish(client)
+            services, selection, profiles = await self._streams(client, url)
+            if services is not None:
+                await self._services(client, services, profiles)
+            else:
+                self.done("motion", "skipped", "Not checked: the camera's services could not be listed")
+            await self._video(client, services, selection)
+            skipped = self.steps["video"]["state"] == "skipped" and not self.verify and selection is not None and selection.record is not None
+            if selection is not None and selection.live is not None and services is not None and self.report["selection"] is not None:
+                await _check_live(client, services, selection.live, self.report["selection"], self.verify, self.protocols)
+            self.report["ok"] = self.capabilities["video"]["state"] == "ok" or skipped
+            self.done("ready", "ok" if self.report["ok"] else "failed", "" if self.report["ok"] else "Video could not be verified; the camera can still be saved and fixed later")
+            return self.finish(client)
+
+    async def _connect(self, client: OnvifClient, device_service_url: str | None, brand: str) -> str | None:
+        """Find the device service. None when nothing answers."""
         try:
             url = await client.locate_device(device_service_url, ports_for(brand))
-            report["device_service_url"] = url
-            done("connect", "ok")
-            capabilities["discovery"] = _state("ok", "An ONVIF device service answered")
         except OnvifError as exc:
-            done("connect", "failed", _failure(exc))
-            capabilities["discovery"] = _state("failed", _failure(exc))
-            return finish(client)
+            self.done("connect", "failed", _failure(exc))
+            self.capabilities["discovery"] = _state("failed", _failure(exc))
+            return None
+        self.report["device_service_url"] = url
+        self.done("connect", "ok")
+        self.capabilities["discovery"] = _state("ok", "An ONVIF device service answered")
+        return url
 
+    async def _authenticate(self, client: OnvifClient, url: str, username: str, brand: str) -> bool:
+        """Sign in and identify the camera. False when the camera rejects the login."""
         info = None
         try:
             info = await client.device_information(url)
             method = client.auth_by_service.get("device", "none")
             if method == "none" and username:
-                done("authenticate", "ok", "The camera's device service does not ask for a login; the credentials are checked on its other services")
-                capabilities["authentication"] = _state("unknown", steps["authenticate"]["detail"])
+                self.done("authenticate", "ok", "The camera's device service does not ask for a login; the credentials are checked on its other services")
+                self.capabilities["authentication"] = _state("unknown", self.steps["authenticate"]["detail"])
             else:
-                done("authenticate", "ok", "No login is needed" if method == "none" else f"Signed in with {method.replace('+', ' and ')}")
-                capabilities["authentication"] = _state("ok", steps["authenticate"]["detail"])
+                self.done("authenticate", "ok", "No login is needed" if method == "none" else f"Signed in with {method.replace('+', ' and ')}")
+                self.capabilities["authentication"] = _state("ok", self.steps["authenticate"]["detail"])
         except OnvifError as exc:
             if exc.code == "auth_rejected":
-                done("authenticate", "failed", _failure(exc))
-                capabilities["authentication"] = _state("failed", _failure(exc))
-                return finish(client)
+                self.done("authenticate", "failed", _failure(exc))
+                self.capabilities["authentication"] = _state("failed", _failure(exc))
+                return False
             # The camera would not describe itself, but did not reject the login: go on to its streams.
-            done("authenticate", "ok", "Credentials were not rejected")
-            capabilities["authentication"] = _state("unknown", "Credentials were not rejected, but sign-in could not be confirmed")
-            done("identify", "failed", _failure(exc))
+            self.done("authenticate", "ok", "Credentials were not rejected")
+            self.capabilities["authentication"] = _state("unknown", "Credentials were not rejected, but sign-in could not be confirmed")
+            self.done("identify", "failed", _failure(exc))
         if info is not None:
-            report["device"] = {"manufacturer": info.manufacturer, "model": info.model, "firmware": info.firmware}
-            report["brand"] = brand_of(info.manufacturer) if info.manufacturer else "auto"
-            done("identify", "ok", " ".join(part for part in (info.manufacturer, info.model) if part) or "The camera did not give its make or model")
+            self.report["device"] = {"manufacturer": info.manufacturer, "model": info.model, "firmware": info.firmware}
+            self.report["brand"] = brand_of(info.manufacturer) if info.manufacturer else "auto"
+            self.done("identify", "ok", " ".join(part for part in (info.manufacturer, info.model) if part) or "The camera did not give its make or model")
+        return True
 
+    async def _streams(self, client: OnvifClient, url: str) -> tuple[Services | None, Selection | None, list[MediaProfile]]:
+        """List the camera's services and video profiles and choose the ones to record and to show live."""
         services: Services | None = None
         selection: Selection | None = None
         profiles: list[MediaProfile] = []
         try:
             services = await client.services(url)
-            report["services"] = dict(services.urls)
+            self.report["services"] = dict(services.urls)
             profiles = await client.profiles(services)
             selection = choose_profiles(profiles)
-            report["profiles"] = [item.view() for item in profiles]
+            self.report["profiles"] = [item.view() for item in profiles]
             if selection.record is None:
-                done("streams", "failed", selection.problems[0] if selection.problems else "No compatible video profile found")
-                capabilities["video"] = _state("failed", "No compatible video profile found")
+                self.done("streams", "failed", selection.problems[0] if selection.problems else "No compatible video profile found")
+                self.capabilities["video"] = _state("failed", "No compatible video profile found")
             else:
-                report["selection"] = {"record_token": selection.record.token, "live_token": selection.live.token if selection.live else None,
-                                       "reason": selection.reason, "warnings": list(selection.problems)}
-                done("streams", "ok", selection.reason)
+                self.report["selection"] = {"record_token": selection.record.token, "live_token": selection.live.token if selection.live else None,
+                                            "reason": selection.reason, "warnings": list(selection.problems)}
+                self.done("streams", "ok", selection.reason)
         except OnvifError as exc:
-            done("streams", "failed", _failure(exc))
-            capabilities["video"] = _state("failed", _failure(exc))
+            self.done("streams", "failed", _failure(exc))
+            self.capabilities["video"] = _state("failed", _failure(exc))
             if exc.code == "auth_rejected":
-                capabilities["authentication"] = _state("failed", _failure(exc))
-                done("authenticate", "failed", _failure(exc))
-        if services is not None:
-            names = set(services.urls)
-            capabilities["ptz"] = _state("available", "The camera has a PTZ service") if "ptz" in names or any(item.has_ptz for item in profiles) else _state("unsupported", "No PTZ service")
-            capabilities["audio"] = _state("available", "A profile carries audio") if any(item.has_audio for item in profiles) else _state("unsupported", "No profile carries audio")
-            if "events" not in names:
-                done("motion", "skipped", "The camera did not report an ONVIF Events service")
-                capabilities["motion"] = _state("unsupported", "No ONVIF Events service: motion can use the NVR's own detection instead")
-            else:
-                try:
-                    caps = await client.service_capabilities(services, "events")
-                except OnvifError as exc:
-                    done("motion", "failed", _failure(exc))
-                    capabilities["motion"] = _state("failed", _failure(exc))
-                else:
-                    if caps.get("WSPullPointSupport", "true").casefold() in {"false", "0"}:
-                        done("motion", "skipped", "The camera's Events service does not offer pull-point subscriptions")
-                        capabilities["motion"] = _state("unsupported", "No pull-point subscriptions: motion can use the NVR's own detection instead")
-                    else:
-                        probe = await probe_motion(client, services.urls["events"])
-                        if probe["ok"]:
-                            topics = ", ".join(probe["topics"][:3])
-                            detail = "The camera accepted a motion event subscription" + (f" ({topics})" if topics else "")
-                            done("motion", "ok", detail)
-                            capabilities["motion"] = _state("ok", detail)
-                        else:
-                            done("motion", "failed", str(probe["reason"]))
-                            capabilities["motion"] = _state("failed", f"{probe['reason']}: video is not affected, and the NVR can use its own motion detection")
-        else:
-            done("motion", "skipped", "Not checked: the camera's services could not be listed")
+                self.capabilities["authentication"] = _state("failed", _failure(exc))
+                self.done("authenticate", "failed", _failure(exc))
+        return services, selection, profiles
 
+    async def _services(self, client: OnvifClient, services: Services, profiles: list[MediaProfile]) -> None:
+        """What the services and profiles say about PTZ and audio, and whether the camera can report motion."""
+        names = set(services.urls)
+        self.capabilities["ptz"] = _state("available", "The camera has a PTZ service") if "ptz" in names or any(item.has_ptz for item in profiles) else _state("unsupported", "No PTZ service")
+        self.capabilities["audio"] = _state("available", "A profile carries audio") if any(item.has_audio for item in profiles) else _state("unsupported", "No profile carries audio")
+        if "events" not in names:
+            self.done("motion", "skipped", "The camera did not report an ONVIF Events service")
+            self.capabilities["motion"] = _state("unsupported", "No ONVIF Events service: motion can use the NVR's own detection instead")
+            return
+        try:
+            caps = await client.service_capabilities(services, "events")
+        except OnvifError as exc:
+            self.done("motion", "failed", _failure(exc))
+            self.capabilities["motion"] = _state("failed", _failure(exc))
+            return
+        if caps.get("WSPullPointSupport", "true").casefold() in {"false", "0"}:
+            self.done("motion", "skipped", "The camera's Events service does not offer pull-point subscriptions")
+            self.capabilities["motion"] = _state("unsupported", "No pull-point subscriptions: motion can use the NVR's own detection instead")
+            return
+        probe = await probe_motion(client, services.urls["events"])
+        if probe["ok"]:
+            topics = ", ".join(probe["topics"][:3])
+            detail = "The camera accepted a motion event subscription" + (f" ({topics})" if topics else "")
+            self.done("motion", "ok", detail)
+            self.capabilities["motion"] = _state("ok", detail)
+        else:
+            self.done("motion", "failed", str(probe["reason"]))
+            self.capabilities["motion"] = _state("failed", f"{probe['reason']}: video is not affected, and the NVR can use its own motion detection")
+
+    async def _video(self, client: OnvifClient, services: Services | None, selection: Selection | None) -> None:
+        """Ask for the recording stream's address and, unless told not to, check that it decodes."""
         if selection is not None and selection.record is not None and services is not None:
             try:
                 uri = await client.stream_uri(services, selection.record)
                 source = client.stream_url_with_login(uri)
             except OnvifError as exc:
-                done("video", "failed", _failure(exc))
-                capabilities["video"] = _state("failed", _failure(exc))
+                self.done("video", "failed", _failure(exc))
+                self.capabilities["video"] = _state("failed", _failure(exc))
+                return
+            if not self.verify:
+                self.done("video", "skipped", "Video was not verified")
+                self.capabilities["video"] = _state("unknown", "Video was not verified")
+                return
+            result = await verify_video(source, self.protocols)
+            if result.get("decoded"):
+                self.report["video"] = result.get("video")
+                self.done("video", "ok", f"Decoded video from {selection.record.name}")
+                self.capabilities["video"] = _state("ok", f"Decoded video from {selection.record.name}")
             else:
-                if not verify:
-                    done("video", "skipped", "Video was not verified")
-                    capabilities["video"] = _state("unknown", "Video was not verified")
-                else:
-                    result = await verify_video(source, protocols)
-                    if result.get("decoded"):
-                        report["video"] = result.get("video")
-                        done("video", "ok", f"Decoded video from {selection.record.name}")
-                        capabilities["video"] = _state("ok", f"Decoded video from {selection.record.name}")
-                    else:
-                        done("video", "failed", str(result["reason"]))
-                        capabilities["video"] = _state("failed", str(result["reason"]))
-        elif steps["video"]["state"] == "pending":
-            done("video", "skipped", "Not checked: no video profile was chosen")
-
-        skipped = steps["video"]["state"] == "skipped" and not verify and selection is not None and selection.record is not None
-        if selection is not None and selection.live is not None and services is not None and report["selection"] is not None:
-            await _check_live(client, services, selection.live, report["selection"], verify, protocols)
-
-        report["ok"] = capabilities["video"]["state"] == "ok" or skipped
-        done("ready", "ok" if report["ok"] else "failed", "" if report["ok"] else "Video could not be verified; the camera can still be saved and fixed later")
-        return finish(client)
+                self.done("video", "failed", str(result["reason"]))
+                self.capabilities["video"] = _state("failed", str(result["reason"]))
+        elif self.steps["video"]["state"] == "pending":
+            self.done("video", "skipped", "Not checked: no video profile was chosen")
