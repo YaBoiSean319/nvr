@@ -86,7 +86,9 @@ module.exports = {
   workers: 1,
   retries: 0,
   timeout: 45_000,
-  expect: { timeout: 8_000 },
+  // Every wait for something on the page. 8 s was ample when the CI runner took about 20 minutes for the suite; on a slower runner (26 minutes) a different
+  // journey ran out of it on each run (sign-in with 200 cameras, a saved-setting notice), and each passed locally in seconds.
+  expect: { timeout: 15_000 },
   reporter: [
     ["list"],
     ["json", { outputFile: testReportPath }],
