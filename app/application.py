@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
+import sqlite3
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -14,7 +17,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import acceleration, api, network
+from . import acceleration, api, db_health, network
 from .api import web_interface
 from .backup import BackupManager
 from .detection import DetectionManager
@@ -47,6 +50,8 @@ from .version import APP_VERSION
 from .webhooks import WebhookManager
 from .workers import liveness, supervised
 from .workers.control import BackupClient, DetectionClient, ExportClient, RecorderClient, RulesClient
+
+logger = logging.getLogger(__name__)
 
 
 STARTUP_ORDER = (
@@ -139,6 +144,17 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         # an action's secret URL or a token. Say what is wrong and where, never what was sent.
         detail = [{key: error[key] for key in ("type", "loc", "msg") if key in error} for error in exc.errors()]
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(detail)})
+
+    damaged_logged = {"at": 0.0}
+
+    @app.exception_handler(sqlite3.DatabaseError)
+    async def database_failed(_: Request, exc: sqlite3.DatabaseError) -> JSONResponse:
+        if not db_health.is_damage(exc):
+            raise exc  # A busy database, a constraint or a bug keeps its usual 500 and traceback
+        if time.monotonic() - damaged_logged["at"] > 60:  # One line a minute, not one per request
+            damaged_logged["at"] = time.monotonic()
+            logger.error("A request failed because the database file is damaged (%s). %s", exc, db_health.ADVICE)
+        return JSONResponse(status_code=503, content={"detail": "The NVR's database is damaged. Ask an administrator to check the server log; nothing has been deleted."})
 
     @app.middleware("http")
     async def keep_nothing_on_the_phone(request: Request, call_next):
