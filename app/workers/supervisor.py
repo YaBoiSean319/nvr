@@ -43,6 +43,24 @@ SUMMARIES = {
 FAULT_TYPES = {"ai": "ai_worker"}
 
 
+def end_group(process: subprocess.Popen) -> bool:
+    """End every process still in the worker's process group (its FFmpeg children and anything else it started); True if there were any.
+
+    A worker is started as the leader of its own group, so its children share the group id. A worker that is killed (by this supervisor for a
+    stalled loop, or by the kernel for lack of memory) cannot run its own cleanup, and its FFmpeg processes would otherwise keep running,
+    still connected to the cameras, while the restarted worker started a second set on the same folders (#322).
+    """
+    try:
+        os.killpg(process.pid, 0)  # Is anyone left in the group?
+    except (ProcessLookupError, PermissionError):
+        return False
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 @dataclass
 class Worker:
     name: str
@@ -60,7 +78,7 @@ class Worker:
 
     def start(self) -> None:
         environment = {**os.environ, "NVR_SUPERVISED": "1"}
-        self.process = subprocess.Popen([sys.executable, "-m", self.module], env=environment)
+        self.process = subprocess.Popen([sys.executable, "-m", self.module], env=environment, start_new_session=True)  # Its own process group: see end_group
         self.started_at = time.monotonic()
         self.killed_reason, self.last_rss, self.peak_rss, self.rss_sampled_at = None, None, None, 0.0
         liveness.record(self.name, state="starting", pid=self.process.pid, started=True, restarted=self.pending_restart)
@@ -98,9 +116,12 @@ class Supervisor:
         if code is None and self._hung(worker, now):
             logger.warning("%s worker stopped reporting liveness; restarting it", worker.name)
             worker.killed_reason = f"killed by the supervisor: no heartbeat for {liveness.STALE_AFTER.total_seconds():.0f} s (the process was alive but its event loop was blocked or starved)"
+            end_group(process)  # Its children first: a SIGKILLed worker cannot stop them itself
             process.kill()
             code = process.wait()
         if code is not None:
+            if end_group(process):
+                logger.warning("Ended processes the %s worker left running (for example FFmpeg) so the restarted worker does not start a second set", worker.name)
             self._exited(worker, code, now)
             return
         self._sample_memory(worker, now)
@@ -203,8 +224,11 @@ class Supervisor:
                     worker.process.wait(timeout=STOP_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:
                     logger.warning("%s worker did not stop in time; killing it", worker.name)
+                    end_group(worker.process)
                     worker.process.kill()
                     worker.process.wait()
+                if end_group(worker.process):
+                    logger.warning("Ended processes the %s worker left running when it stopped", worker.name)
             liveness.record(worker.name, state="stopped")
 
 
