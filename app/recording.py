@@ -109,6 +109,35 @@ async def _stream_fault(source: str) -> str:
     return "stream_error"
 
 
+def _motion_buffer_args(executable: str, spool: Path, row: sqlite3.Row) -> list[str]:
+    """FFmpeg's command line for the rolling motion buffer: copy the video (and audio when on) into a short HLS playlist in ``spool``."""
+    list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
+    return [
+        executable, "-hide_banner", "-nostats", "-loglevel", "warning", "-progress", "pipe:1",
+        "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
+        "-i", "pipe:0", "-map", "0:v:0", *audio_recording_args(bool(row["audio_enabled"])), "-c:v", "copy",
+        "-f", "hls", "-hls_time", "2", "-hls_list_size", str(list_size),
+        "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
+        "-hls_segment_filename", str(spool / "segment-%06d.ts"), str(spool / "live.m3u8"),
+    ]
+
+
+async def _stop_motion_parts(tasks: list["asyncio.Task[None] | None"], assembler: MotionClipAssembler, proc: asyncio.subprocess.Process | None) -> None:
+    """Cancel the buffer's helper tasks in order, finish the clip in progress, then end FFmpeg (killing it if it will not stop)."""
+    for task in tasks:
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    await assembler.stop()
+    if proc and proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+
 def _manifest_bytes(source: str) -> bytes:
     # Feed the source URL to FFmpeg over stdin so camera credentials never appear in argv.
     # RTSP options belong to the nested file opened by the concat demuxer.
@@ -502,21 +531,18 @@ class RecordingManager:
                 await self._run_continuous(camera_id, expected_mode)
                 return
 
-    async def _run_motion(self, camera_id: str) -> bool:
-        row = self._camera(camera_id)
-        if row is None or not row["enabled"] or not row["recording_enabled"]:
-            self._set_status(camera_id, "stopped")
-            return False
+    def _motion_inputs(self, camera_id: str, row: sqlite3.Row) -> tuple[str, str, dict[str, str]] | None:
+        """FFmpeg, the stream address and the event credentials; None once the camera's status says why it cannot start."""
         fallback_enabled = bool(row["motion_fallback_enabled"])
         if not row["motion_service_url"] and not fallback_enabled:
             with connect() as db:
                 db.execute("UPDATE cameras SET recording_status='unsupported',motion_source_status='unsupported',server_motion_status='disabled',last_error='Configure an ONVIF event service or enable server motion fallback' WHERE id=?", (camera_id,))
-            return False
+            return None
         executable = shutil.which("ffmpeg")
         if not executable:
             with connect() as db:
                 db.execute("UPDATE cameras SET recording_status='unavailable',motion_source_status='unavailable',server_motion_status=?,last_error='FFmpeg is not installed' WHERE id=?", ("unavailable" if fallback_enabled else "disabled", camera_id))
-            return False
+            return None
         try:
             source = decrypt(row["stream_url_ciphertext"])
             safe_stream_url(source)
@@ -524,7 +550,19 @@ class RecordingManager:
         except Exception:
             with connect() as db:
                 db.execute("UPDATE cameras SET recording_status='failed',motion_source_status='configuration_error',last_error='Camera credentials are unavailable' WHERE id=?", (camera_id,))
+            return None
+        return executable, source, credentials
+
+    async def _run_motion(self, camera_id: str) -> bool:
+        row = self._camera(camera_id)
+        if row is None or not row["enabled"] or not row["recording_enabled"]:
+            self._set_status(camera_id, "stopped")
             return False
+        fallback_enabled = bool(row["motion_fallback_enabled"])
+        inputs = self._motion_inputs(camera_id, row)
+        if inputs is None:
+            return False
+        executable, source, credentials = inputs
 
         spool = motion_buffer_path() / camera_id
         spool.mkdir(parents=True, exist_ok=True)
@@ -541,16 +579,7 @@ class RecordingManager:
         source_state = {"value": "connecting" if row["motion_service_url"] else "unsupported"}
         source_changed = asyncio.Event()
         try:
-            list_size = min(1024, max(40, int((row["motion_pre_roll_seconds"] + row["motion_post_roll_seconds"] + 60) / 2)))
-            audio_args = audio_recording_args(bool(row["audio_enabled"]))
-            args = [
-                executable, "-hide_banner", "-nostats", "-loglevel", "warning", "-progress", "pipe:1",
-                "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
-                "-i", "pipe:0", "-map", "0:v:0", *audio_args, "-c:v", "copy",
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", str(list_size),
-                "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
-                "-hls_segment_filename", str(spool / "segment-%06d.ts"), str(spool / "live.m3u8"),
-            ]
+            args = _motion_buffer_args(executable, spool, row)
             proc = await asyncio.create_subprocess_exec(
                 *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -590,19 +619,7 @@ class RecordingManager:
                     ),
                     name=f"server-motion-{camera_id}",
                 )
-            while not self.stopping:
-                await assembler.poll()
-                newest = max(spool.glob("segment-*.ts"), key=lambda path: path.stat().st_mtime, default=None)
-                if newest is not None:
-                    try:
-                        if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
-                            self._mark_video_fresh(camera_id)
-                    except OSError:
-                        pass
-                if proc.returncode is not None:
-                    self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=await _stream_fault(source))
-                    break
-                await asyncio.sleep(1)
+            await self._watch_motion_buffer(camera_id, proc, spool, assembler, source)
         except asyncio.CancelledError:
             raise
         except (OSError, ValueError):
@@ -610,30 +627,27 @@ class RecordingManager:
                 db.execute("UPDATE cameras SET recording_status='reconnecting',motion_source_status='unavailable',last_error='Camera motion buffer could not start',stream_fault=? WHERE id=?",
                            (await _stream_fault(source), camera_id))
         finally:
-            if progress_task:
-                progress_task.cancel()
-                await asyncio.gather(progress_task, return_exceptions=True)
-            if stderr_task:
-                stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
-            if event_task:
-                event_task.cancel()
-                await asyncio.gather(event_task, return_exceptions=True)
-            if fallback_task:
-                fallback_task.cancel()
-                await asyncio.gather(fallback_task, return_exceptions=True)
-            await assembler.stop()
-            if proc and proc.returncode is None:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+            await _stop_motion_parts([progress_task, stderr_task, event_task, fallback_task], assembler, proc)
             if self.stopping:
                 self._set_status(camera_id, "stopped")
             shutil.rmtree(spool, ignore_errors=True)
         return True
+
+    async def _watch_motion_buffer(self, camera_id: str, proc: asyncio.subprocess.Process, spool: Path, assembler: MotionClipAssembler, source: str) -> None:
+        """Poll the clip assembler once a second until the manager stops or FFmpeg exits; a fresh segment marks the video live."""
+        while not self.stopping:
+            await assembler.poll()
+            newest = max(spool.glob("segment-*.ts"), key=lambda path: path.stat().st_mtime, default=None)
+            if newest is not None:
+                try:
+                    if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
+                        self._mark_video_fresh(camera_id)
+                except OSError:
+                    pass
+            if proc.returncode is not None:
+                self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=await _stream_fault(source))
+                break
+            await asyncio.sleep(1)
 
     async def _watch_server_motion_fallback(
         self,
