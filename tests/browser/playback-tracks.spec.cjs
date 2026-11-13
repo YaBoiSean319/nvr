@@ -193,7 +193,10 @@ test("previous and next appearance land on the object's stored detections, acros
   const { anchor, seeded } = await open(page);
   await page.keyboard.press("b");
   await seekBy(page, 5);
+  // Stepping while the followed object's path is still loading only says so and does not move, so wait for the path before the first step.
+  const pathLoaded = page.waitForResponse(response => response.url().includes(`/api/playback/overlay/tracks/${seeded.person}`), { timeout: 10_000 }).catch(() => null);
   await page.locator(`.track-box[data-track-id="${seeded.person}"]`).click();
+  await pathLoaded;
   const group = controls(page).getByRole("group", { name: "Object tracks" });
   const nextObject = group.getByRole("button", { name: /Object ▶/ });
   const previousObject = group.getByRole("button", { name: /◀ Object/ });
