@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from . import access, coverage, rule_actions, search
+from . import access, coverage, rule_actions, search, track_privacy
 from .credentials import decrypt, encrypt
 from .store import connect, has_row
 from .webhooks import validate_target_url
@@ -175,8 +175,10 @@ def build(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: d
         "truncated": len(alarm_rows) > ALARM_ITEMS,
     }
 
-    people = [row for row in db.execute(f"SELECT id,camera_id,first_seen_at FROM ai_tracks WHERE camera_id IN ({marks}) AND label='person' AND first_seen_at>=? AND first_seen_at<? "
-                                        "ORDER BY first_seen_at,id", (*camera_ids, start_text, end_text)) if _after_hours(_parse(row["first_seen_at"]), window, zone)]
+    # A person seen only behind a privacy mask is neither listed nor counted: the digest would otherwise say that someone was there (#296).
+    seen, seen_values = track_privacy.track_visible_sql(track_privacy.zones_by_camera(db, camera_ids), alias="t", window=(start_text, end_text))
+    people = [row for row in db.execute(f"SELECT t.id,t.camera_id,t.first_seen_at FROM ai_tracks t WHERE t.camera_id IN ({marks}) AND t.label='person' AND t.first_seen_at>=? AND t.first_seen_at<? "
+                                        f"AND {seen} ORDER BY t.first_seen_at,t.id", (*camera_ids, start_text, end_text, *seen_values)) if _after_hours(_parse(row["first_seen_at"]), window, zone)]
     gates = db.execute(f"SELECT e.id,e.camera_id,e.rule_name,e.occurred_at,e.condition_type,a.id AS alarm_id FROM rule_events e LEFT JOIN alarms a ON a.rule_event_id=e.id "
                        f"WHERE e.camera_id IN ({marks}) AND e.label='vehicle' AND e.condition_type IN ({','.join('?' * len(NOTABLE_RULE_TYPES))}) AND e.occurred_at>=? AND e.occurred_at<? "
                        "ORDER BY e.occurred_at,e.id", (*camera_ids, *NOTABLE_RULE_TYPES, start_text, end_text)).fetchall()

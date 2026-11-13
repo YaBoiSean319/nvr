@@ -160,6 +160,29 @@ class ContentTests(DigestCase):
         self.assertEqual([item["camera_id"] for item in by_day["tracks"]["after_hours_people"]["items"]], [self.d1])
 
 
+class MaskTests(DigestCase):
+    """A digest must not say that someone was after hours in an area a privacy mask hides (#296)."""
+
+    def add_seen(self, camera_id: str, when: datetime, box: dict) -> str:
+        track = self.add_person(camera_id, when)
+        with connect() as db:
+            db.execute("INSERT INTO ai_detections(camera_id,track_id,detected_at,label,confidence,box_x,box_y,box_width,box_height,attributes_json,model_id,model_version,provider) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,'{}','m','1','CPU')", (camera_id, track, when.isoformat(), "person", 0.9, box["x"], box["y"], box["width"], box["height"]))
+        return track
+
+    def test_after_hours_people_behind_a_mask_are_not_counted_or_listed(self):
+        hidden = self.add_seen(self.d1, at(3), {"x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1})   # Inside the mask
+        shown = self.add_seen(self.d1, at(4), {"x": 0.7, "y": 0.7, "width": 0.1, "height": 0.1})    # Outside it
+        elsewhere = self.add_seen(self.d2, at(5), {"x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1})  # Another camera, no mask
+        before = self.preview(self.admin)["digest"]["tracks"]["after_hours_people"]
+        self.assertEqual({item["track_id"] for item in before["items"]}, {hidden, shown, elsewhere})
+        saved = self.admin.put(f"/api/cameras/{self.d1}/privacy", json={"zones": [{"x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5}]})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        after = self.preview(self.admin)["digest"]["tracks"]["after_hours_people"]
+        self.assertEqual({item["track_id"] for item in after["items"]}, {shown, elsewhere})
+        self.assertEqual(after["total"], 2)  # The count does not give the hidden one away either
+
+
 class AccessTests(DigestCase):
     def test_a_digest_includes_only_cameras_the_reader_may_see(self):
         self.fixture()
