@@ -422,7 +422,9 @@ test("200-camera filtering and selection record browser measurements without row
     await selectCamera(page, name);
     panelSamples.push(await elapsed());
   }
-  const system = await (await page.request.get("/api/system/status")).json();
+  // The server closes a connection that has been idle for 5 s, and the one this request would reuse has been idle about that long: a reset on reuse is that race, not a failure of the server, so the read is tried once more on a fresh connection.
+  const readSystem = async () => (await page.request.get("/api/system/status")).json();
+  const system = await readSystem().catch(error => (/ECONNRESET/.test(String(error)) ? readSystem() : Promise.reject(error)));
   const errorCount = Object.values(errors).reduce((total, count) => total + count, 0);
   writeAcceptanceMeasurements({
     record_type: "camera-admin-acceptance-measurements",
