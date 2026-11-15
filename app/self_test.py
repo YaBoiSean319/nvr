@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
@@ -74,13 +75,49 @@ def _check_backup() -> list[dict[str, Any]]:
     return [_result("backup", "backup", "Configuration backup", True, f"The latest configuration backup is {state['age_hours']:.1f} hours old")]
 
 
+def _check_database(full: bool) -> dict[str, Any]:
+    """Is the database file damaged? The nightly run reads every page (minutes on a large file); a run by hand only probes it (milliseconds)."""
+    from . import db_health
+
+    outcome = db_health.check(full=full)
+    what = "passed its integrity check" if full else "opened and read normally"
+    if outcome.ok:
+        return _result("database", "database", "Database", True, f"The database file {what} ({outcome.seconds:g} s)")
+    return _result("database", "database", "Database", False, f"The database file is damaged ({outcome.summary}). {db_health.ADVICE}", lines=outcome.lines)
+
+
+def _record_damaged(kind: str, started: datetime, database: dict[str, Any]) -> dict[str, Any]:
+    """A damaged file ends the run at once: the other checks read the same file, and recovering their incidents on a run that skipped them would be wrong.
+    The incident and the run are written if the file still allows it; the log line and the returned result stand either way."""
+    logger.error("Self-test: %s", database["detail"])
+    finished = _now()
+    try:
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                sync_incident(db, incident_key=f"{FAULT_TYPE}:database", camera_id=None, fault_type=FAULT_TYPE,
+                              summary=f"Self-test failed: {database['detail']}", active=True, details={"check": "database", "detail": database["detail"], "lines": database.get("lines", [])})
+                db.execute("INSERT INTO self_test_runs(kind,started_at,finished_at,passed,results_json) VALUES(?,?,?,0,?)",
+                           (kind, started.isoformat(), finished.isoformat(), json.dumps([database])))
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+    except sqlite3.Error:
+        logger.exception("The damaged-database result could not be written to the database itself")
+    return {"kind": kind, "started_at": started.isoformat(), "finished_at": finished.isoformat(), "passed": False, "results": [database]}
+
+
 def run(kind: str = "manual") -> dict[str, Any]:
     """Run every check, record the run, and raise or recover an incident for each check."""
     started = _now()
+    database = _check_database(full=kind == "scheduled")  # First, and before the run is recorded: a damaged file cannot be relied on to record anything
+    if database["passed"] is False:
+        return _record_damaged(kind, started, database)
     with connect() as db:
         run_id = db.execute("INSERT INTO self_test_runs(kind,started_at) VALUES(?,?)", (kind, started.isoformat())).lastrowid
     try:
-        results = _check_cameras(started) + _check_volumes() + _check_backup()
+        results = [database] + _check_cameras(started) + _check_volumes() + _check_backup()
     except BaseException:
         with connect() as db:  # A run that never finished must not count as tonight's, or it would not be retried.
             db.execute("DELETE FROM self_test_runs WHERE id=?", (run_id,))
@@ -165,6 +202,11 @@ class SelfTestManager:
                 await asyncio.to_thread(self.process_once)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - tried again next poll
-                logger.exception("Self-test cycle failed")
+            except Exception as exc:  # noqa: BLE001 - tried again next poll
+                from . import db_health
+
+                if db_health.is_damage(exc):
+                    logger.error("The self-test cannot read the database: the file is damaged (%s). %s", exc, db_health.ADVICE)  # One line, not a traceback a minute
+                else:
+                    logger.exception("Self-test cycle failed")
             await asyncio.sleep(self.poll_seconds)

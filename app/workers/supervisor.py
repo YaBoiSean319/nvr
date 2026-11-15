@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app import backup, failover, logforward, migrations
+from app import backup, db_health, failover, logforward, migrations
 from app.detection import mark_analysis_interrupted
 from app.incidents import sync_incident
 from app.store import connect, initialize
@@ -238,6 +238,7 @@ def main() -> int:
     os.umask(0o077)
     if backup.pre_migration_backup not in migrations.pre_migration_hooks:
         migrations.pre_migration_hooks.append(backup.pre_migration_backup)
+    db_health.log_at_startup()  # Before anything else touches the file, so a damaged one is named first and not copied by the pre-migration backup unnoticed
     initialize()
     backup.reconcile_after_restore()
     failover.prepare_startup()  # A primary does not record until it has heard from the standby
