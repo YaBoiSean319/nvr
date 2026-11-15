@@ -1,0 +1,154 @@
+"""What ``RecordingManager._run_continuous`` does at each exit, including a recording that has gone stale while FFmpeg is still running (#286)."""
+from __future__ import annotations
+
+import asyncio
+import os
+import tempfile
+import unittest
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+_ENV = ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH")
+
+
+class RunContinuousTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        os.environ["NVR_DB_PATH"] = str(self.root / "state.sqlite3")
+        os.environ["NVR_RECORDINGS_PATH"] = str(self.root / "recordings")
+        os.environ["NVR_CREDENTIAL_KEY_PATH"] = str(self.root / "credentials.key")
+        from app.store import initialize
+
+        initialize()
+
+    def tearDown(self):
+        for key in _ENV:
+            os.environ.pop(key, None)
+        self.temporary.cleanup()
+
+    def camera(self, *, source: bytes | None = None, audio: int = 0) -> str:
+        from app.credentials import encrypt
+        from app.store import connect
+
+        camera_id = str(uuid.uuid4())
+        with connect() as db:
+            db.execute(
+                "INSERT INTO cameras(id,name,stream_url_ciphertext,recording_enabled,recording_mode,audio_enabled) VALUES(?,?,?,1,'continuous',?)",
+                (camera_id, f"Continuous pin {camera_id[:8]}", source if source is not None else encrypt("rtsp://127.0.0.1:9/stream"), audio),
+            )
+        return camera_id
+
+    def row(self, camera_id: str):
+        from app.store import connect
+
+        with connect() as db:
+            return db.execute("SELECT recording_status,last_error,stream_fault,recording_fault_since FROM cameras WHERE id=?", (camera_id,)).fetchone()
+
+    def fake_ffmpeg(self, body: str) -> Path:
+        script = self.root / "ffmpeg"
+        script.write_text(f"#!/usr/bin/env python3\nimport sys, time\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+        return script
+
+    def run_loop(self, camera_id: str, fake: Path | None, *, seconds: float | None = None, fault: str = "camera_offline"):
+        """Run the loop to its end, or for ``seconds`` and then stop the manager. Returns whatever the loop raised."""
+        from app.recording import RecordingManager
+
+        manager = RecordingManager()
+
+        async def stream_fault(source):
+            return fault
+
+        async def body():
+            task = asyncio.create_task(manager._run_continuous(camera_id))
+            if seconds is not None:
+                await asyncio.sleep(seconds)
+                manager.stopping = True
+            try:
+                await asyncio.wait_for(task, timeout=40)
+            except asyncio.TimeoutError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+
+        which = (lambda name: str(fake)) if fake else (lambda name: None)
+        with patch("app.recording.shutil.which", side_effect=which), patch("app.recording._stream_fault", stream_fault):
+            try:
+                asyncio.run(body())
+            except Exception as exc:  # noqa: BLE001 - what the loop raised is the finding
+                return exc
+        return None
+
+    def test_a_camera_that_is_off_stops_without_starting_ffmpeg(self):
+        from app.store import connect
+
+        camera_id = self.camera()
+        with connect() as db:
+            db.execute("UPDATE cameras SET recording_enabled=0 WHERE id=?", (camera_id,))
+        self.assertIsNone(self.run_loop(camera_id, self.fake_ffmpeg("sys.exit(1)")))
+        self.assertEqual(self.row(camera_id)["recording_status"], "stopped")
+
+    def test_a_missing_ffmpeg_marks_the_camera_unavailable(self):
+        camera_id = self.camera()
+        self.assertIsNone(self.run_loop(camera_id, None))
+        row = self.row(camera_id)
+        self.assertEqual((row["recording_status"], row["last_error"]), ("unavailable", "FFmpeg is not installed"))
+
+    def test_unreadable_credentials_or_an_unsafe_address_fail_the_camera(self):
+        from app.credentials import encrypt
+
+        for source in (b"not-encrypted", encrypt("file:///etc/passwd")):
+            camera_id = self.camera(source=source)
+            self.assertIsNone(self.run_loop(camera_id, self.fake_ffmpeg("sys.exit(1)")))
+            row = self.row(camera_id)
+            self.assertEqual((row["recording_status"], row["last_error"], row["stream_fault"]), ("failed", "Camera credentials are unavailable", "stream_error"))
+
+    def test_an_unwritable_volume_says_so_and_keeps_retrying(self):
+        camera_id = self.camera()
+        with patch("app.storage.camera_recordings_dir", side_effect=OSError("read-only")):
+            self.assertIsNone(self.run_loop(camera_id, self.fake_ffmpeg("sys.exit(1)"), seconds=1))
+        row = self.row(camera_id)
+        self.assertEqual((row["recording_status"], row["last_error"], row["stream_fault"]), ("unavailable", "Assigned recording volume is missing or not writable", "disk_unavailable"))
+
+    def test_an_ffmpeg_that_exits_is_reconnecting_with_the_fault_and_its_arguments(self):
+        camera_id = self.camera(audio=0)
+        argv = self.root / "argv.txt"
+        fake = self.fake_ffmpeg(f"open({str(argv)!r}, 'w').write(chr(10).join(sys.argv[1:]))\nsys.stdin.read()\nsys.exit(1)")
+        self.assertIsNone(self.run_loop(camera_id, fake, seconds=3))
+        row = self.row(camera_id)
+        self.assertEqual((row["recording_status"], row["last_error"], row["stream_fault"]), ("reconnecting", "Camera stream interrupted; retrying", "camera_offline"))
+        args = argv.read_text(encoding="utf-8").split("\n")
+        for pair in (("-c:v", "copy"), ("-f", "concat"), ("-i", "pipe:0"), ("-map", "0:v:0"), ("-segment_time", "60"), ("-reset_timestamps", "1"),
+                     ("-segment_format", "mp4"), ("-segment_list_type", "csv"), ("-strftime", "1")):
+            self.assertEqual(args[args.index(pair[0]) + 1], pair[1], pair)
+        self.assertTrue(args[-1].endswith("segment-%Y%m%dT%H%M%SZ.mp4"))
+        self.assertEqual(args[args.index("-segment_list") + 1], str(Path(args[-1]).parent / "segments.csv"))
+
+    def test_an_ffmpeg_that_cannot_start_reconnects_and_says_why(self):
+        camera_id = self.camera()
+        self.assertIsNone(self.run_loop(camera_id, self.root / "no-such-ffmpeg", seconds=2, fault="stream_error"))
+        row = self.row(camera_id)
+        self.assertEqual((row["recording_status"], row["last_error"], row["stream_fault"]), ("reconnecting", "Camera stream could not start; retrying", "stream_error"))
+
+    def test_a_recording_that_has_gone_stale_while_ffmpeg_runs_is_marked_and_the_loop_survives(self):
+        """FFmpeg is up but nothing has been finalised for far longer than two segments: the fault start is recorded and recording carries on."""
+        from app.store import connect
+
+        camera_id = self.camera()
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        with connect() as db:
+            db.execute("INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,100)",
+                       (camera_id, f"{camera_id}/old.mp4", (long_ago - timedelta(seconds=60)).isoformat(), long_ago.isoformat()))
+        fake = self.fake_ffmpeg("sys.stdin.read()\ntime.sleep(60)")
+        raised = self.run_loop(camera_id, fake, seconds=1)
+        self.assertIsNone(raised, f"the recording loop died: {raised!r}")
+        row = self.row(camera_id)
+        self.assertIsNotNone(row["recording_fault_since"])
+        self.assertNotEqual(row["recording_status"], "recording")
+
+
+if __name__ == "__main__":
+    unittest.main()
