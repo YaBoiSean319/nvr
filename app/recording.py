@@ -801,17 +801,16 @@ class RecordingManager:
                                 self._mark_video_fresh(camera_id)
                         except OSError:
                             pass
+                    recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
                     with connect() as db:
                         latest = db.execute(
                             "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
                             (camera_id,),
                         ).fetchone()["latest"]
-                    if latest:
-                        recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
-                        if latest >= recent_cutoff:
-                            self._set_status(camera_id, "recording")
-                        if latest and latest < recent_cutoff:
+                        if latest and latest < recent_cutoff:  # Written here, while the connection is open: leaving the block closes it (#278)
                             db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
+                    if latest and latest >= recent_cutoff:
+                        self._set_status(camera_id, "recording")
                     await asyncio.sleep(2)
                 if process.returncode is None:
                     process.terminate()
