@@ -605,7 +605,13 @@ class ClusterTests(unittest.TestCase):
         returned = datetime.now(timezone.utc)
         self.primary.start_process()
         self.eventually(lambda: self.incident(self.primary) is not None, 40, "The primary never learned of the takeover")
-        self.assertEqual(self.incident(self.primary)["state"], "active")
+        # The incident is active only while the primary imports the standby's footage, which can take less than a poll, so what is checked is that it was raised
+        # (by the primary, for this takeover) and not what state it is in by the time it is read.
+        learned = self.incident(self.primary)
+        raised = self.rows(self.primary, "SELECT details_json FROM incident_events WHERE incident_id=? AND event_type='raised'", learned["id"])
+        self.assertEqual(len(raised), 1)
+        self.assertEqual(json.loads(raised[0]["details_json"])["role"], "primary")
+        self.assertIn(learned["state"], {"active", "recovered"})
         self.eventually(lambda: self.rows(self.primary, "SELECT 1 FROM failover_episodes WHERE role='primary' AND state='done'"), 60, "The footage was not handed back")
         self.eventually(lambda: self.incident(self.standby)["state"] == "recovered" and self.incident(self.primary)["state"] == "recovered", 20, "An incident did not recover")
         self.assertFalse(self.status(self.standby)["takeover_active"])

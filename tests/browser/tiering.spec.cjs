@@ -42,8 +42,12 @@ test("an administrator adds a cold tier, sets a policy, moves old footage and it
   // The background mover also runs every 30 s, and when its pass overlaps this click the other one reports fewer or none moved; the footage ends up in the tier either way
   // (a busy CI runner copies and verifies slowly, so the passes overlap more often). The page answers the click, and the footage is what is checked.
   await expect(page.getByText(/\d+ segments? moved\./)).toBeVisible({ timeout: 25_000 });
+  // The footage is what is checked first: it ends up in the tier whichever pass moved it. The page's tier list is only refreshed by the click's own answer, so when the other
+  // pass finishes later it still says "0 segments" until the page is loaded again; load it again before reading the list.
+  const tierFolder = path.join(fs.realpathSync(cold), seeded.segments[0].camera_id);
+  await expect.poll(() => (fs.existsSync(tierFolder) ? fs.readdirSync(tierFolder).length : 0), { timeout: 25_000 }).toBe(2);
+  await page.reload();
   await expect(page.getByRole("list", { name: "Tier list" })).toContainText("2 segments", { timeout: 25_000 });
-  expect(fs.readdirSync(path.join(fs.realpathSync(cold), seeded.segments[0].camera_id)).length).toBe(2);
 
   // Still there to play, through the server.
   for (const segment of seeded.segments) {
