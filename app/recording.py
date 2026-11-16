@@ -138,6 +138,20 @@ async def _stop_motion_parts(tasks: list["asyncio.Task[None] | None"], assembler
             await proc.wait()
 
 
+def _continuous_args(executable: str, audio: bool, output_dir: Path, list_path: Path, segment_duration: int) -> list[str]:
+    """FFmpeg's command line for continuous recording: copy the video (and audio when on) into timestamped MP4 segments, listed in a CSV."""
+    return [
+        executable, "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
+        "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
+        "-i", "pipe:0",
+        "-map", "0:v:0", *audio_recording_args(audio), "-c:v", "copy", "-f", "segment",
+        "-segment_time", str(segment_duration), "-reset_timestamps", "1",
+        "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart",
+        "-segment_list", str(list_path), "-segment_list_type", "csv", "-strftime", "1",
+        str(output_dir / "segment-%Y%m%dT%H%M%SZ.mp4"),
+    ]
+
+
 def _manifest_bytes(source: str) -> bytes:
     # Feed the source URL to FFmpeg over stdin so camera credentials never appear in argv.
     # RTSP options belong to the nested file opened by the concat demuxer.
@@ -738,6 +752,50 @@ class RecordingManager:
                 with connect() as db:
                     db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
 
+    def _continuous_source(self, camera_id: str, row: sqlite3.Row) -> str | None:
+        """The camera's stream address, or None once the camera's status says its credentials or address cannot be used."""
+        try:
+            source = decrypt(row["stream_url_ciphertext"])
+            safe_stream_url(source)
+        except Exception:
+            self._set_status(camera_id, "failed", "Camera credentials are unavailable", fault="stream_error")
+            return None
+        return source
+
+    async def _end_ffmpeg(self, process: asyncio.subprocess.Process | None) -> None:
+        """Ask FFmpeg to stop, and kill it if it has not within five seconds."""
+        if process and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+    async def _watch_continuous_output(self, camera_id: str, process: asyncio.subprocess.Process, list_path: Path, output_dir: Path, segment_duration: int) -> None:
+        """Every two seconds while FFmpeg runs: index the finished segments, mark the video fresh when a file is being written, and say whether the
+        recording is current ("recording") or has stalled (the start of the fault is kept)."""
+        while process.returncode is None and not self.stopping:
+            self._index_csv(camera_id, list_path, output_dir)
+            newest = max(output_dir.glob("segment-*.mp4"), key=lambda path: path.stat().st_mtime, default=None)
+            if newest is not None:
+                try:
+                    if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
+                        self._mark_video_fresh(camera_id)
+                except OSError:
+                    pass
+            recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
+            with connect() as db:
+                latest = db.execute(
+                    "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
+                    (camera_id,),
+                ).fetchone()["latest"]
+                if latest and latest < recent_cutoff:  # Written here, while the connection is open: leaving the block closes it (#278)
+                    db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
+            if latest and latest >= recent_cutoff:
+                self._set_status(camera_id, "recording")
+            await asyncio.sleep(2)
+
     async def _run_continuous(self, camera_id: str, expected_mode: str = "continuous") -> None:
         executable = shutil.which("ffmpeg")
         if not executable:
@@ -750,11 +808,8 @@ class RecordingManager:
             if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
                 self._set_status(camera_id, "stopped")
                 return
-            try:
-                source = decrypt(row["stream_url_ciphertext"])
-                safe_stream_url(source)
-            except Exception:
-                self._set_status(camera_id, "failed", "Camera credentials are unavailable", fault="stream_error")
+            source = self._continuous_source(camera_id, row)
+            if source is None:
                 return
             try:
                 from .storage import camera_recordings_dir
@@ -766,17 +821,7 @@ class RecordingManager:
                 continue
             list_path = output_dir / "segments.csv"
             self._set_status(camera_id, "connecting")
-            audio_args = audio_recording_args(bool(row["audio_enabled"]))
-            args = [
-                executable, "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
-                "-f", "concat", "-safe", "0", "-protocol_whitelist", _PROTOCOLS,
-                "-i", "pipe:0",
-                "-map", "0:v:0", *audio_args, "-c:v", "copy", "-f", "segment",
-                "-segment_time", str(segment_duration), "-reset_timestamps", "1",
-                "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart",
-                "-segment_list", str(list_path), "-segment_list_type", "csv", "-strftime", "1",
-                str(output_dir / "segment-%Y%m%dT%H%M%SZ.mp4"),
-            ]
+            args = _continuous_args(executable, bool(row["audio_enabled"]), output_dir, list_path, segment_duration)
             env = os.environ.copy()
             env["TZ"] = "UTC"
             process: asyncio.subprocess.Process | None = None
@@ -792,46 +837,15 @@ class RecordingManager:
                 process.stdin.write(_manifest_bytes(source))
                 await process.stdin.drain()
                 process.stdin.close()
-                while process.returncode is None and not self.stopping:
-                    self._index_csv(camera_id, list_path, output_dir)
-                    newest = max(output_dir.glob("segment-*.mp4"), key=lambda path: path.stat().st_mtime, default=None)
-                    if newest is not None:
-                        try:
-                            if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
-                                self._mark_video_fresh(camera_id)
-                        except OSError:
-                            pass
-                    recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
-                    with connect() as db:
-                        latest = db.execute(
-                            "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
-                            (camera_id,),
-                        ).fetchone()["latest"]
-                        if latest and latest < recent_cutoff:  # Written here, while the connection is open: leaving the block closes it (#278)
-                            db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
-                    if latest and latest >= recent_cutoff:
-                        self._set_status(camera_id, "recording")
-                    await asyncio.sleep(2)
-                if process.returncode is None:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        process.kill()
-                        await process.wait()
+                await self._watch_continuous_output(camera_id, process, list_path, output_dir, segment_duration)
+                await self._end_ffmpeg(process)
                 self._index_csv(camera_id, list_path, output_dir)
                 if self.stopping:
                     return
                 failures += 1
                 self._set_status(camera_id, "reconnecting", "Camera stream interrupted; retrying", fault=await _stream_fault(source))
             except asyncio.CancelledError:
-                if process and process.returncode is None:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        process.kill()
-                        await process.wait()
+                await self._end_ffmpeg(process)
                 self._index_csv(camera_id, list_path, output_dir)
                 raise
             except OSError:
