@@ -219,6 +219,28 @@ class ErrorResponseTests(unittest.TestCase):
         self.assertIn("database is damaged", response.json()["detail"])
         self.assertTrue(any("database file is damaged" in line for line in logged.output))
 
+    def test_the_health_check_fails_on_a_damaged_file_and_passes_on_a_healthy_one(self):
+        from fastapi.testclient import TestClient
+        from app.application import create_app
+        from app.db_health import Outcome
+
+        with TestClient(create_app(start_workers=False), raise_server_exceptions=False) as client:
+            self.assertEqual(client.get("/healthz").json(), {"status": "ok"})
+            with patch("app.db_health.check", return_value=Outcome(ok=False, full=False, seconds=0, lines=["bad"])):
+                response = client.get("/healthz")
+        self.assertEqual((response.status_code, response.json()["detail"]), (503, "Database damaged"))
+
+    def test_the_health_check_notices_a_file_that_is_no_longer_a_database(self):
+        from fastapi.testclient import TestClient
+        from app.application import create_app
+
+        with TestClient(create_app(start_workers=False), raise_server_exceptions=False) as client:
+            for suffix in ("", "-wal", "-shm"):
+                (self.root / f"state.sqlite3{suffix}").unlink(missing_ok=True)
+            (self.root / "state.sqlite3").write_bytes(os.urandom(8192))
+            response = client.get("/healthz")
+        self.assertEqual((response.status_code, response.json()["detail"]), (503, "Database damaged"))
+
     def test_a_busy_database_keeps_its_ordinary_500(self):
         response = self.get(sqlite3.OperationalError("database is locked"))
         self.assertEqual(response.status_code, 500)

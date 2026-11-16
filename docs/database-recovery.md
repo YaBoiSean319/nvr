@@ -7,6 +7,8 @@ The NVR keeps its settings, users, alarms, recording index and history in one SQ
 - Every page fails with "The NVR's database is damaged" (or, on older versions, "The NVR could not complete the request"), and the log shows `database disk image is malformed` or `file is not a database`.
 - The log has the line `THE DATABASE FILE IS DAMAGED` at startup, and an incident **Self-test failed: The database file is damaged** is raised by the nightly self-test (03:41 site time), which reads every page of the file. Running the self-test by hand only probes the file; the full check runs at night because it takes minutes on a large database.
 
+The container's health check (`/healthz`) also fails with "Database damaged" when it cannot open the file and read the start of every table, so `docker compose ps` shows the container as unhealthy. Docker only marks it; it does not restart it.
+
 A busy database ("database is locked") is not damage and is reported differently.
 
 ## Why it happens
