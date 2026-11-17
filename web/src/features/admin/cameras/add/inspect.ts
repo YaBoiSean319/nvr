@@ -132,16 +132,26 @@ export const BULK_LABEL: Record<BulkStatus, string> = {
   queued: "Waiting", checking: "Checking…", adding: "Adding…", added: "Added", attention: "Added, needs attention", failed: "Not added", invalid: "Invalid", skipped: "Not run",
 };
 
-/** Run `work` over `items`, never more than `limit` at once, so a long list does not open a connection to every camera together. */
-export async function runLimited<T>(items: T[], limit: number, work: (item: T) => Promise<void>, stopped: () => boolean): Promise<void> {
-  let next = 0;
-  const worker = async () => {
-    while (!stopped()) {
-      const index = next;
-      next += 1;
-      if (index >= items.length) return;
-      await work(items[index] as T);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+/** One camera of a bulk add as the server reports it (never with a password). `row` counts from 1 in the list that was sent. */
+export interface BulkJobItem { row: number; host: string; name: string; status: Exclude<BulkStatus, "invalid">; detail: string; camera_id: string | null }
+
+/** A bulk add the server is working through, or has finished. It keeps running when the page is closed. */
+export interface BulkJob {
+  id: string;
+  state: "running" | "done" | "cancelled";
+  created_at: string;
+  finished_at: string | null;
+  add_anyway: boolean;
+  recording: boolean;
+  counts: Record<string, number>;
+  items: BulkJobItem[];
 }
+
+export const startBulkJob = (cameras: Array<{ host: string; username: string; password: string; name: string }>, addAnyway: boolean, recording: boolean) =>
+  api<BulkJob>("/api/cameras/bulk-jobs", {
+    method: "POST",
+    body: { cameras: cameras.map(camera => ({ host: camera.host, username: camera.username || null, password: camera.password || null, name: camera.name || null })), add_anyway: addAnyway, recording },
+  });
+export const getBulkJob = (id: string) => api<BulkJob>(`/api/cameras/bulk-jobs/${encodeURIComponent(id)}`);
+export const latestBulkJob = () => api<{ job: BulkJob | null }>("/api/cameras/bulk-jobs/latest");
+export const cancelBulkJob = (id: string) => api<BulkJob>(`/api/cameras/bulk-jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });

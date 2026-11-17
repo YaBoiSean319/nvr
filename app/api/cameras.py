@@ -508,12 +508,11 @@ async def _resolve_live_substream(payload: CameraCreateRequest, resolved_service
         return None  # Live view uses the main stream
 
 
-def _store_new_camera(request: Request, payload: CameraCreateRequest, *, name: str, stream_url: str, resolved_service_url: str | None, capability: dict[str, Any],
+def _store_new_camera(discovery_claim: dict[str, Any] | None, payload: CameraCreateRequest, *, name: str, stream_url: str, resolved_service_url: str | None, capability: dict[str, Any],
                       video_problem: str | None, live_substream_url: str | None, motion_username: str | None, motion_password: str | None, health: Any) -> str:
     """Insert the camera with its capabilities, and (for a discovered device) claim its candidate in the same transaction. Returns the new camera's id."""
     with connect() as db:
         try:
-            discovery_claim = getattr(request.state, "discovery_add_claim", None)
             if discovery_claim:
                 db.execute("BEGIN IMMEDIATE")
             camera_id = insert_camera(
@@ -566,12 +565,9 @@ def _store_new_camera(request: Request, payload: CameraCreateRequest, *, name: s
     return camera_id
 
 
-@router.post("/api/cameras", status_code=status.HTTP_201_CREATED)
-async def create_camera(
-    payload: CameraCreateRequest,
-    request: Request,
-    _: Administrator,
-) -> dict[str, object]:
+async def add_camera(payload: CameraCreateRequest, recorders: Any, *, discovery_claim: dict[str, Any] | None = None) -> dict[str, object]:
+    """Check a new camera's stream and save it, then start recording it if asked. This is everything ``POST /api/cameras`` does, without a web request, so the
+    bulk-add job (``app.bulk_add``) adds a camera exactly as the form does. Raises ``HTTPException`` (422 for what is wrong with the camera, 409 for a name in use)."""
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Camera name is required")
@@ -584,12 +580,21 @@ async def create_camera(
     capability, video_problem = await _probe_new_camera_stream(payload, stream_url, unresolved)
     live_substream_url = await _resolve_live_substream(payload, resolved_service_url, capability, video_problem)
     health = await _initial_health(payload, resolved_service_url) if onvif_resolved else None
-    camera_id = _store_new_camera(request, payload, name=name, stream_url=stream_url, resolved_service_url=resolved_service_url, capability=capability, video_problem=video_problem,
+    camera_id = _store_new_camera(discovery_claim, payload, name=name, stream_url=stream_url, resolved_service_url=resolved_service_url, capability=capability, video_problem=video_problem,
                                   live_substream_url=live_substream_url, motion_username=motion_username, motion_password=motion_password, health=health)
-    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
+    await recorders.sync_camera(camera_id, force_restart=True)
     with connect() as db:
         row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
     return camera_view(row)
+
+
+@router.post("/api/cameras", status_code=status.HTTP_201_CREATED)
+async def create_camera(
+    payload: CameraCreateRequest,
+    request: Request,
+    _: Administrator,
+) -> dict[str, object]:
+    return await add_camera(payload, request.app.state.recorders, discovery_claim=getattr(request.state, "discovery_add_claim", None))
 
 
 def _reuse_source_credentials(current: sqlite3.Row, payload: CameraSourceUpdateRequest) -> CameraSourceUpdateRequest:

@@ -1,5 +1,5 @@
 // Real-browser journeys for the simplified Add Camera flow (#173): Quick Add (address and login only, the NVR's checks shown step by step,
-// diagnostics on request) and Bulk Add (many cameras, a few at a time, each with its own result).
+// diagnostics on request) and Bulk Add (many cameras, added by the NVR in the background a few at a time, each with its own result).
 // The fixture camera answers ONVIF at 127.0.0.1:8766 and the simulated RTSP camera is the stream, so the video step is "Working" in CI and
 // "Needs attention" without it; these journeys hold either way, because a camera that needs attention can still be added.
 const { test, expect, seedFixtures, signInNext } = require("./helpers.cjs");
@@ -106,11 +106,20 @@ test("Quick Add asks for a new check when the address or login changes after it,
   await expect(form.getByRole("button", { name: "Add camera anyway" })).toBeEnabled();
 });
 
-test("Bulk Add checks and adds many cameras a few at a time, with a result for each and invalid lines refused", async ({ page }) => {
+const AT = "2026-11-17T12:00:00.000Z";
+const item = (row, host, status, detail = "", name = "") => ({ row, host, name, status, detail, camera_id: status === "added" || status === "attention" ? `camera-${row}` : null });
+function bulkJob(state, items, id = "job-1") {
+  const counts = {};
+  for (const entry of items) counts[entry.status] = (counts[entry.status] ?? 0) + 1;
+  return { id, state, created_at: AT, finished_at: state === "running" ? null : AT, add_anyway: true, recording: false, counts, items };
+}
+const bulkPanel = page => page.getByRole("region", { name: "Bulk add", exact: true });
+
+test("Bulk Add adds many cameras in the background, with a result for each, invalid lines refused, and the job is still there when the page is left and opened again", async ({ page }) => {
   seedFixtures(0);
   await signInNext(page);
   await openAdd(page, "Bulk Add");
-  const panel = page.getByRole("region", { name: "Bulk add", exact: true });
+  const panel = bulkPanel(page);
   await panel.getByRole("textbox").fill([
     "# address,username,password,name",
     "127.0.0.1:8766,,,Bulk Dock",
@@ -120,14 +129,6 @@ test("Bulk Add checks and adds many cameras a few at a time, with a result for e
     "127.0.0.1:8766,user,,",
   ].join("\n"));
   await expect(panel.getByRole("button", { name: "Check and add 3 cameras" })).toBeEnabled();
-
-  let active = 0;
-  let busiest = 0;
-  await page.route("**/api/cameras/inspect", async route => {
-    active += 1;
-    busiest = Math.max(busiest, active);
-    try { await route.fulfill({ response: await route.fetch() }); } finally { active -= 1; }
-  });
   await panel.getByRole("button", { name: "Check and add 3 cameras" }).click();
   const table = panel.getByRole("table", { name: "Bulk add results" });
   await expect(panel.getByRole("status")).toContainText("3 added of 5", { timeout: 120_000 });
@@ -137,69 +138,57 @@ test("Bulk Add checks and adds many cameras a few at a time, with a result for e
   }
   await expect(table.locator('tr[data-status="invalid"]')).toHaveCount(2);
   await expect(table.locator('tr[data-status="added"], tr[data-status="attention"]')).toHaveCount(3);
-  expect(busiest).toBeLessThanOrEqual(3);
   for (const camera of (await cameras(page)).filter(item => item.name.startsWith("Bulk "))) expect(camera.recording_enabled).toBe(false);
+
+  // The NVR did the work, not this page: leave and come back, and what happened is shown from the server.
+  await page.getByRole("tab", { name: "Manual Add" }).click();
+  await page.getByRole("tab", { name: "Bulk Add" }).click();
+  await expect(bulkPanel(page).getByRole("status")).toContainText("3 added of 3");
+  await expect(bulkPanel(page).getByRole("table", { name: "Bulk add results" }).locator('tr[data-status="added"], tr[data-status="attention"]')).toHaveCount(3);
+  await expectNoSecretKept(page);
 });
 
-test("Bulk Add copes with hundreds of cameras without opening more than three checks at once, and can be stopped", async ({ page }) => {
+test("a Bulk Add that is still running when the page is opened is picked up, shows its progress and can be stopped", async ({ page }) => {
   seedFixtures(0);
   await signInNext(page);
+  let cancelled = 0;
+  const running = bulkJob("running", [item(1, "10.5.0.1", "added", "Fixture 10.5.0.1"), item(2, "10.5.0.2", "checking"), item(3, "10.5.0.3", "queued")], "job-9");
+  await page.route("**/api/cameras/bulk-jobs/latest", route => route.fulfill({ json: { job: running } }));
+  await page.route("**/api/cameras/bulk-jobs/job-9", route => route.fulfill({ json: running }));
+  await page.route("**/api/cameras/bulk-jobs/job-9/cancel", route => {
+    cancelled += 1;
+    return route.fulfill({ json: bulkJob("cancelled", [item(1, "10.5.0.1", "added", "Fixture 10.5.0.1"), item(2, "10.5.0.2", "checking"), item(3, "10.5.0.3", "skipped", "Stopped before this camera")], "job-9") });
+  });
   await openAdd(page, "Bulk Add");
-  const panel = page.getByRole("region", { name: "Bulk add", exact: true });
-  const total = 240;
-  await panel.getByRole("textbox").fill(Array.from({ length: total }, (_, index) => `10.9.${Math.floor(index / 250)}.${index % 250 + 1},u,p,Scale ${index + 1}`).join("\n"));
-  let active = 0;
-  let busiest = 0;
-  let inspected = 0;
-  let hold = null;
-  const report = { ok: true, device: { manufacturer: "Fixture", model: "Scale" }, brand: "other", device_service_url: "http://10.9.0.1/onvif/device_service", profiles: [],
-    selection: { record_token: "main", live_token: null, reason: "", warnings: [] }, steps: [], capabilities: {}, diagnostics: [] };
-  await page.route("**/api/cameras/inspect", async route => {
-    active += 1;
-    busiest = Math.max(busiest, active);
-    inspected += 1;
-    await new Promise(resolve => setTimeout(resolve, 15));
-    if (hold) await hold;
-    await route.fulfill({ json: report });
-    active -= 1;
-  });
-  await page.route("**/api/cameras", async route => {
-    if (route.request().method() !== "POST") return route.continue();
-    const body = route.request().postDataJSON();
-    await route.fulfill({ status: 201, json: { id: `scale-${body.name}`, name: body.name } });
-  });
-  await panel.getByRole("button", { name: `Check and add ${total} cameras` }).click();
-  await expect(panel.getByRole("status")).toContainText(`${total} added of ${total}`, { timeout: 120_000 });
-  expect(busiest).toBeLessThanOrEqual(3);
-  expect(inspected).toBe(total);
-  await expect(panel.getByRole("table", { name: "Bulk add results" }).locator('tr[data-status="added"]')).toHaveCount(total);
-
-  // Stop leaves the rest marked as not run, and offers to retry them.
-  await panel.getByRole("textbox").fill(Array.from({ length: 60 }, (_, index) => `10.8.0.${index + 1},u,p,Stopped ${index + 1}`).join("\n"));
-  let release;
-  hold = new Promise(resolve => { release = resolve; });
-  await panel.getByRole("button", { name: "Check and add 60 cameras" }).click();
-  await expect.poll(() => active).toBe(3);  // Three are being checked, held; the other 57 are queued
+  const panel = bulkPanel(page);
+  const table = panel.getByRole("table", { name: "Bulk add results" });
+  await expect(panel.getByRole("status")).toContainText("1 added of 3");
+  await expect(panel.getByRole("status")).toContainText("1 in progress");
+  await expect(table.locator('tr[data-status="queued"]')).toHaveCount(1);
+  await expect(panel.getByRole("textbox")).toBeDisabled();
   await panel.getByRole("button", { name: "Stop" }).click();
-  release();
-  await expect(panel.getByRole("button", { name: "Retry 57 not added" })).toBeVisible({ timeout: 30_000 });
-  await expect(panel.getByRole("table", { name: "Bulk add results" }).locator('tr[data-status="skipped"]')).toHaveCount(57);
-  await expect(panel.getByRole("table", { name: "Bulk add results" }).locator('tr[data-status="added"]')).toHaveCount(3);
+  await expect(table.locator('tr[data-status="skipped"]')).toHaveCount(1);
+  await expect(panel.getByRole("button", { name: "Stop" })).toHaveCount(0);
+  expect(cancelled).toBe(1);
+  await expect(panel.getByRole("button", { name: /^Retry/ })).toHaveCount(0);  // A job picked up again holds no passwords to retry with
 });
 
-const OK_REPORT = { ok: true, device: { manufacturer: "Fixture", model: "Scale" }, brand: "other", device_service_url: "http://10.9.0.1/onvif/device_service", profiles: [],
-  selection: { record_token: "main", live_token: null, reason: "", warnings: [] }, steps: [], capabilities: {}, diagnostics: [] };
-
-test("Bulk Add reads quoted and awkward passwords exactly as written, a header with a byte-order mark, host:port and bracketed IPv6", async ({ page }) => {
+test("Bulk Add sends passwords exactly as written (quotes, commas, a header with a byte-order mark, host:port, bracketed IPv6) and retries only what was not added", async ({ page }) => {
   seedFixtures(0);
   await signInNext(page);
   await openAdd(page, "Bulk Add");
-  const panel = page.getByRole("region", { name: "Bulk add", exact: true });
-  const asked = [];
-  await page.route("**/api/cameras/inspect", route => { asked.push(route.request().postDataJSON()); return route.fulfill({ json: OK_REPORT }); });
-  await page.route("**/api/cameras", route => (route.request().method() === "POST" ? route.fulfill({ status: 201, json: { id: "x", name: route.request().postDataJSON().name } }) : route.continue()));
+  const panel = bulkPanel(page);
+  const sent = [];
+  await page.route("**/api/cameras/bulk-jobs", route => {
+    if (route.request().method() !== "POST") return route.continue();
+    sent.push(route.request().postDataJSON());
+    const rows = sent.length === 1
+      ? [item(1, "10.7.0.1", "added"), item(2, "10.7.0.2", "failed", "Camera authentication rejected"), item(3, "10.7.0.3", "added"), item(4, "[::1]:8080", "skipped", "Stopped before this camera"), item(5, "cam.example.test:8000", "added")]
+      : [item(1, "10.7.0.2", "added"), item(2, "[::1]:8080", "added")];
+    return route.fulfill({ status: 201, json: bulkJob("done", rows, `job-${sent.length}`) });
+  });
   await panel.getByRole("textbox").fill([
-    "﻿address,username,password,name",
+    "\uFEFFaddress,username,password,name",
     '10.7.0.1,user,"pa,ss",Quoted',
     '10.7.0.2,user,pa"ss,Bare',
     '10.7.0.3,user," padded ",Spaces',
@@ -207,30 +196,19 @@ test("Bulk Add reads quoted and awkward passwords exactly as written, a header w
     "cam.example.test:8000,user,pw,Named",
   ].join("\n"));
   await panel.getByRole("button", { name: "Check and add 5 cameras" }).click();
-  await expect(panel.getByRole("status")).toContainText("5 added of 5", { timeout: 30_000 });
-  const by = host => asked.find(body => body.host === host);
+  await expect(panel.getByRole("status")).toContainText("3 added of 5");
+  const by = host => sent[0].cameras.find(camera => camera.host === host);
   expect(by("10.7.0.1").password).toBe("pa,ss");
   expect(by("10.7.0.2").password).toBe('pa"ss');
   expect(by("10.7.0.3").password).toBe(" padded ");
-  expect(by("::1").device_service_url).toBe("http://[::1]:8080/onvif/device_service");
-  expect(by("cam.example.test").device_service_url).toBe("http://cam.example.test:8000/onvif/device_service");
-});
+  expect(by("[::1]:8080")).toMatchObject({ username: "user", password: "pw", name: "Six" });
+  expect(by("cam.example.test:8000").name).toBe("Named");
+  expect(sent[0]).toMatchObject({ add_anyway: true, recording: false });
 
-test("leaving Bulk Add stops the run, so nothing keeps adding cameras out of sight", async ({ page }) => {
-  seedFixtures(0);
-  await signInNext(page);
-  await openAdd(page, "Bulk Add");
-  const panel = page.getByRole("region", { name: "Bulk add", exact: true });
-  let started = 0;
-  let release;
-  const hold = new Promise(resolve => { release = resolve; });
-  await page.route("**/api/cameras/inspect", async route => { started += 1; await hold; await route.fulfill({ json: OK_REPORT }); });
-  await page.route("**/api/cameras", route => (route.request().method() === "POST" ? route.fulfill({ status: 201, json: { id: "x", name: "x" } }) : route.continue()));
-  await panel.getByRole("textbox").fill(Array.from({ length: 30 }, (_, index) => `10.6.0.${index + 1},u,p,Leaving ${index + 1}`).join("\n"));
-  await panel.getByRole("button", { name: "Check and add 30 cameras" }).click();
-  await expect.poll(() => started).toBe(3);
-  await page.getByRole("tab", { name: "Manual Add" }).click();
-  release();
-  await page.waitForTimeout(500);
-  expect(started).toBe(3);  // The three that were under way finished; none of the other 27 was started
+  // Retry sends the two that were not added, with their passwords, as a new job.
+  await panel.getByRole("button", { name: "Retry 2 not added" }).click();
+  await expect(panel.getByRole("status")).toContainText("2 added of 2");
+  expect(sent).toHaveLength(2);
+  expect(sent[1].cameras.map(camera => [camera.host, camera.password])).toEqual([["10.7.0.2", 'pa"ss'], ["[::1]:8080", "pw"]]);
+  await expectNoSecretKept(page);
 });

@@ -9,8 +9,32 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request makes the older run pointless: stop it, so its roughly 60 runner-minutes are not spent on a commit nobody will merge.
+# Runs on main are never cancelled, so every merge is checked and published.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # A pull request that changes only documentation does not need the browser journeys (25 minutes). The unit tests still run: some of them read the docs.
+  # A skipped job counts as passed for required checks. Anything else, and every run that is not a pull request, runs everything.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/changed-code.sh
+
   camera-browser-acceptance:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     services:
