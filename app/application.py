@@ -18,6 +18,7 @@ from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import acceleration, api, db_health, network
+from .bulk_add import BulkAddRunner
 from .api import web_interface
 from .backup import BackupManager
 from .detection import DetectionManager
@@ -103,6 +104,8 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         app.state.live_hub = LiveHub()
         keeper = LiveReadyKeeper(app.state.live_hub)
         app.state.live_ready = keeper
+        # Bulk camera adding is a job kept in the database and worked through here, where the recorder client is.
+        app.state.bulk_add = BulkAddRunner(lambda: getattr(app.state, "recorders", None))
         # Which graphics acceleration works here is found out in the background, so starting is not held up by test encodes.
         app.state.acceleration_probe = asyncio.create_task(asyncio.to_thread(acceleration.refresh), name="acceleration-probe")
         try:
@@ -125,8 +128,10 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
             if start_workers:
                 # The live streams are shared in this process, so this is where they are held ready, supervised or not.
                 await keeper.start()
+                await app.state.bulk_add.start()
             yield
         finally:
+            await app.state.bulk_add.stop()
             await keeper.stop()
             await app.state.live_hub.close()
             if heartbeat:
