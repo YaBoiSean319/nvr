@@ -68,3 +68,9 @@ Run these from the folder with the compose file. If Docker says permission denie
 7. **Find the cause** (host disk errors, snapshots or checkpoints, host crashes, storage), turn on configuration backups, and copy them to another machine. A backup on the same disk does not protect against a failed disk.
 
 If every copy is damaged, keep the files and ask for help before deleting anything: part of a damaged file can often be recovered with SQLite's `.recover` command.
+
+## Keep the credential key with the data
+
+Camera addresses and passwords, webhook addresses and signing secrets are stored encrypted with a key kept outside the database, in the secrets volume (`NVR_CREDENTIAL_KEY_PATH`, by default `/secrets/credentials.key`). A restored or moved data folder is only readable together with that key: copy and restore the two as a pair.
+
+If the NVR starts without the key file it makes a new one, because that is what a first run needs. On an installation that already has cameras it also logs one line beginning `THE CREDENTIAL KEY FILE ... IS MISSING`. If you see it: stop the NVR, put the original key file back, and start again. Anything saved while the new key was in place (a camera's password re-entered, a webhook added) cannot be read with the original key and has to be entered again.
