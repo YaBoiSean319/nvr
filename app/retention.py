@@ -241,6 +241,31 @@ def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, polic
     return "removed", current
 
 
+MAX_EXPIRED_PER_CAMERA = 20000
+
+
+def _expired_candidates(db, now: datetime) -> list:
+    """The segments old enough to be past their camera's retention policy, oldest first, read without a transaction.
+
+    The pass used to load every stored segment and take the write lock once for each, expired or not: 30 s and 16,000 write locks to remove
+    nothing from 16,000 segments (#337). Each camera's candidates are now found through the (camera, start) index, so a pass over footage that
+    is all inside its policy reads a few index entries per camera and locks nothing. ``remove_segment`` still decides, inside its transaction,
+    whether each one really goes; footage under a hold is left out here, so a long run of it cannot use up the pass.
+
+    The bound is a second later than the policy's, compared as text: stored times may differ in how they write a whole second or UTC, and one
+    that is not yet due is only found "young" and left."""
+    moment = now.astimezone(timezone.utc)
+    found = []
+    for camera in db.execute("SELECT id FROM cameras").fetchall():
+        days, _ = effective_retention(db, camera["id"])
+        bound = (moment - timedelta(days=days) + timedelta(seconds=1)).isoformat()
+        found.extend(db.execute(
+            "SELECT s.id,s.camera_id,s.relative_path,s.ends_at,s.size_bytes FROM recording_segments s WHERE s.camera_id=? AND s.starts_at<? AND s.ends_at<? "
+            "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
+            "ORDER BY s.starts_at LIMIT ?", (camera["id"], bound, bound, moment.isoformat(), MAX_EXPIRED_PER_CAMERA)).fetchall())
+    return sorted(found, key=lambda row: row["ends_at"])
+
+
 def prune_motion_events(now: datetime) -> int:
     """Remove motion events that have no footage and are older than their camera's retention period; returns how many.
 
@@ -269,15 +294,8 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
         for hold in expired:
             db.execute("UPDATE recording_holds SET released_at=expires_at WHERE id=?",(hold["id"],))
             db.execute("INSERT INTO audit_log(action,resource_type,resource_id,details_json) VALUES('expire_hold','recording_segment',?,'{}')",(str(hold["segment_id"] or "unknown"),))
-        rows = db.execute("SELECT s.id,s.camera_id,s.relative_path,s.ends_at,s.size_bytes FROM recording_segments s ORDER BY s.ends_at").fetchall()
+        rows = _expired_candidates(db, now)
     for row in rows:
-        try:
-            end = datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00"))
-            if end.tzinfo is None:
-                end = end.replace(tzinfo=timezone.utc)
-        except ValueError:
-            failed += 1
-            continue
         try:
             with connect() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -297,7 +315,7 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             discard_objects([current])  # A copy in an object store goes once the row is gone (outside the write lock)
             removed_segments += 1
             removed_bytes += int(current["size_bytes"])
-        except (OSError,sqlite3.Error):
+        except (OSError,sqlite3.Error,ValueError):  # ValueError: a stored time that cannot be read
             failed += 1
     try:
         prune_motion_events(now)
