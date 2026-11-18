@@ -187,14 +187,16 @@ def _due_moves(now: datetime) -> list[_TourMove]:
         for tour in db.execute("SELECT * FROM ptz_tours WHERE enabled=1").fetchall():
             state = db.execute("SELECT * FROM ptz_tour_state WHERE tour_id=?", (tour["id"],)).fetchone()
             steps = json.loads(tour["steps_json"])
+            resting = None
             if not steps or not _scheduled(json.loads(tour["schedule_json"]) if tour["schedule_json"] else None, now):
-                db.execute("INSERT INTO ptz_tour_state(tour_id,step,next_at,state) VALUES(?,0,NULL,'idle') "
-                           "ON CONFLICT(tour_id) DO UPDATE SET next_at=NULL,state='idle'", (tour["id"],))
-                continue
-            if lease_held(db, tour["camera_id"]):
-                # Someone is driving: wait, and move to the next step as soon as they let go.
-                db.execute("INSERT INTO ptz_tour_state(tour_id,step,next_at,state) VALUES(?,0,NULL,'paused') "
-                           "ON CONFLICT(tour_id) DO UPDATE SET next_at=NULL,state='paused'", (tour["id"],))
+                resting = "idle"
+            elif lease_held(db, tour["camera_id"]):
+                resting = "paused"  # Someone is driving: wait, and move to the next step as soon as they let go.
+            if resting is not None:
+                # Written when it changes, not on every pass: a tour outside its schedule used to write this every second (#353).
+                if state is None or state["state"] != resting or state["next_at"] is not None:
+                    db.execute("INSERT INTO ptz_tour_state(tour_id,step,next_at,state) VALUES(?,0,NULL,?) "
+                               "ON CONFLICT(tour_id) DO UPDATE SET next_at=NULL,state=excluded.state", (tour["id"], resting))
                 continue
             if state is not None and state["next_at"] and datetime.fromisoformat(state["next_at"]) > now:
                 continue

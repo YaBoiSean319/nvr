@@ -103,6 +103,8 @@ def queue_held_summary(now: datetime | None = None) -> bool:
     """When alert emails were held back by a limit and things have gone quiet, queue one summary of how many (to the people told about problems; the Email page shows the count whatever)."""
     now = now or _now()
     with connect() as db:
+        if not has_row(db, "SELECT 1 FROM email_held WHERE singleton_id=1 AND held>0"):
+            return False  # Read first: this runs several times a second, and an idle pass must not take the write lock (#280, #353)
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute("SELECT held,first_held_at,last_held_at FROM email_held WHERE singleton_id=1").fetchone()

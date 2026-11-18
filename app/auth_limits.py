@@ -105,6 +105,10 @@ def _attempt(account: str, address: str, include_address: bool) -> None:
     now = _now()
     buckets = _buckets(account, address, include_address)
     with connect() as db:
+        waiting = _blocked(db, buckets, now)  # Read first: an attempt that is already being slowed is refused without taking the write lock (#353)
+        if waiting is not None:
+            raise HTTPException(status_code=429, detail=f"Too many failed attempts. Try again in {waiting.retry_after} seconds.",
+                                headers={"Retry-After": str(waiting.retry_after)})
         db.execute("BEGIN IMMEDIATE")
         try:
             throttle = _blocked(db, buckets, now)

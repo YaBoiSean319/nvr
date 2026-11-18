@@ -322,6 +322,15 @@ def check_takeover(now: datetime | None = None) -> int | None:
     has been copied to record from. Returns the epoch when it did."""
     now = now or _now()
     with connect() as db:
+        # Read first: this runs every two seconds, and a standby whose primary is alive has nothing to change (#280, #353). What is read here is
+        # read again under the lock before anything is done.
+        settings, state = read_settings(db), read_state(db)
+        if settings["role"] != "standby" or state["takeover_active"]:
+            return None
+        if state["watching_since"]:
+            last_heard = _parse(state["last_renewed_at"]) or _parse(state["watching_since"])
+            if (now - last_heard).total_seconds() < settings["silence_seconds"]:
+                return None
         db.execute("BEGIN IMMEDIATE")
         try:
             settings, state = read_settings(db), read_state(db)
