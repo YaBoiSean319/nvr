@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 def release(tag: str, body: str = "", *, draft: bool = False, prerelease: bool = False, schema: int | None = None) -> dict:
     marker = f"\n<!-- nvr-release: {json.dumps({'schema_version': schema})} -->" if schema is not None else ""
     return {"tag_name": tag, "name": tag, "body": body + marker, "draft": draft, "prerelease": prerelease,
-            "html_url": f"https://github.com/yaboisean319/nvr/releases/tag/{tag}", "published_at": "2026-10-20T12:00:00Z"}
+            "html_url": f"https://github.com/gvsccrc-it/nvr/releases/tag/{tag}", "published_at": "2026-10-20T12:00:00Z"}
 
 
 class ReleaseFeed:

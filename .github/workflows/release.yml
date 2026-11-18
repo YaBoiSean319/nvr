@@ -1,6 +1,6 @@
 name: NVR release
 
-# Push a tag like v1.2.0 on a commit of main that passed the checks. This publishes the image as ghcr.io/yaboisean319/nvr:1.2.0 and creates the release the NVR's
+# Push a tag like v1.2.0 on a commit of main that passed the checks. This publishes the image as ghcr.io/gvsccrc-it/nvr:1.2.0 and creates the release the NVR's
 # Settings, Updates page reads: its notes, and a line saying which database schema the release needs so the page can say whether it migrates.
 on:
   push:
@@ -42,7 +42,7 @@ jobs:
         id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/yaboisean319/nvr
+          images: ghcr.io/gvsccrc-it/nvr
           tags: |
             type=semver,pattern={{version}}
 

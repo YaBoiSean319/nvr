@@ -2,7 +2,7 @@
 
 Triage: `ready-for-agent`. Extends #1, #33, #49 and #67; incorporates open tickets #77 and #78.
 
-> Published as https://github.com/YaBoiSean319/nvr/issues/80.
+> Published as https://github.com/gvsccrc-it/nvr/issues/80.
 
 ## Problem Statement
 

@@ -10,13 +10,13 @@ Settings, **Updates** (administrators) tells you when a newer release is out, wh
 
 ## The check is opt-out
 
-The check asks one address: the repository's published releases (`https://api.github.com/repos/yaboisean319/nvr/releases`). Nothing about the installation is sent. Turn it off with the switch on the page, or for the whole installation with `NVR_UPDATE_CHECK=false`, and then **no request is made at all**: Check now is refused. Opening the page asks once when the last check is more than a day old (or there has been none); Check now asks whenever you like. There is no background checking while nobody has the page open.
+The check asks one address: the repository's published releases (`https://api.github.com/repos/gvsccrc-it/nvr/releases`). Nothing about the installation is sent. Turn it off with the switch on the page, or for the whole installation with `NVR_UPDATE_CHECK=false`, and then **no request is made at all**: Check now is refused. Opening the page asks once when the last check is more than a day old (or there has been none); Check now asks whenever you like. There is no background checking while nobody has the page open.
 
 | Setting | What it does |
 |---|---|
 | `NVR_UPDATE_CHECK=false` | Turns the check off for the whole installation. |
 | `NVR_UPDATE_FEED_URL` | A different releases feed (a mirror, for an installation without internet). GitHub's releases JSON format; `https`, or `http` to this machine only. |
-| `NVR_UPDATE_IMAGE` | The image the commands name. Default `ghcr.io/yaboisean319/nvr`. |
+| `NVR_UPDATE_IMAGE` | The image the commands name. Default `ghcr.io/gvsccrc-it/nvr`. |
 
 ## Updating
 
@@ -30,7 +30,7 @@ Footage is not part of the backup. A rollback restores the database and configur
 
 ## Publishing a release (for whoever maintains the repository)
 
-Push a tag `vX.Y.Z` on a commit of `main` whose checks passed, with `APP_VERSION` in `app/version.py` set to `X.Y.Z`. `.github/workflows/release.yml` publishes `ghcr.io/yaboisean319/nvr:X.Y.Z` and creates the release, with generated notes and the line `<!-- nvr-release: {"schema_version": N} -->` that tells installations whether it migrates. Pre-releases and drafts are never offered.
+Push a tag `vX.Y.Z` on a commit of `main` whose checks passed, with `APP_VERSION` in `app/version.py` set to `X.Y.Z`. `.github/workflows/release.yml` publishes `ghcr.io/gvsccrc-it/nvr:X.Y.Z` and creates the release, with generated notes and the line `<!-- nvr-release: {"schema_version": N} -->` that tells installations whether it migrates. Pre-releases and drafts are never offered.
 
 ## Limits
 
