@@ -241,6 +241,25 @@ def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, polic
     return "removed", current
 
 
+def prune_motion_events(now: datetime) -> int:
+    """Remove motion events that have no footage and are older than their camera's retention period; returns how many.
+
+    An event that produced a clip goes with its segment (a trigger). One that never did (a failed capture) explains a gap for as long as the
+    camera's footage is kept, and no longer (#333). A camera with nothing due is only read, never locked (#280)."""
+    from .store import has_row
+
+    removed = 0
+    with connect() as db:
+        cameras = [row[0] for row in db.execute("SELECT DISTINCT camera_id FROM motion_events WHERE segment_id IS NULL AND status!='recording'")]
+        for camera_id in cameras:
+            days, _ = effective_retention(db, camera_id)
+            cutoff = (now.astimezone(timezone.utc) - timedelta(days=days)).isoformat()
+            due = "FROM motion_events WHERE segment_id IS NULL AND status!='recording' AND camera_id=? AND received_at<?"
+            if has_row(db, f"SELECT 1 {due} LIMIT 1", (camera_id, cutoff)):
+                removed += db.execute(f"DELETE {due}", (camera_id, cutoff)).rowcount
+    return removed
+
+
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
     removed_segments = removed_bytes = skipped_leased = skipped_alarm = skipped_unavailable = failed = 0
@@ -280,6 +299,10 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             removed_bytes += int(current["size_bytes"])
         except (OSError,sqlite3.Error):
             failed += 1
+    try:
+        prune_motion_events(now)
+    except sqlite3.Error:
+        failed += 1
     # Deleting footage deletes its detections; detections no footage covers expire on the same schedule.
     from .tracks import purge_expired_detections
     with connect() as db:
