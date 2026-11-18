@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import sqlite3
 import shutil
@@ -206,7 +207,7 @@ def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, polic
     """Delete one segment's files and row, inside the caller's write transaction, unless something protects it.
 
     Returns ("removed", row) or the reason it stayed: "gone" (no such row), "held" (a hold), "alarm" (an open or recent alarm's clip), "reserved" (a queued or running export),
-    "young" (still inside its retention policy, only when ``policy_applies``) or "leased" (being played). Retention removes only what is past its policy; keeping a volume's headroom
+    "young" (still inside its retention policy, only when ``policy_applies``), "leased" (being played) or "unavailable" (its storage cannot be reached now). Retention removes only what is past its policy; keeping a volume's headroom
     (``policy_applies=False``) removes the oldest footage whatever its policy says, but never what is held, reserved or being played."""
     current=db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE id=?",(segment_id,)).fetchone()
     if current is None:
@@ -229,9 +230,12 @@ def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, polic
         if current_end.tzinfo is None: current_end=current_end.replace(tzinfo=timezone.utc)
         if current_end>now-timedelta(days=days):
             return "young", None
-    from .storage import remove_segment_files
-    if not remove_segment_files([current]):
-        return "leased", None
+    from .storage import StorageUnavailable, remove_segment_files
+    try:
+        if not remove_segment_files([current]):
+            return "leased", None
+    except StorageUnavailable:
+        return "unavailable", None  # The row stays until its storage is back (#338)
     db.execute("DELETE FROM recording_segments WHERE id=?", (segment_id,))
     record_deletion(db,current["camera_id"],int(current["size_bytes"]),current["starts_at"],current["ends_at"],now)
     return "removed", current
@@ -239,7 +243,7 @@ def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, polic
 
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
-    removed_segments = removed_bytes = skipped_leased = skipped_alarm = failed = 0
+    removed_segments = removed_bytes = skipped_leased = skipped_alarm = skipped_unavailable = failed = 0
     with connect() as db:
         kept_since = resolved_kept_since(db, now)
         expired=db.execute("SELECT id,segment_id FROM recording_holds WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?",(now.astimezone(timezone.utc).isoformat(),)).fetchall()
@@ -264,6 +268,9 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                 if outcome == "alarm":
                     skipped_alarm += 1
                     continue
+                if outcome == "unavailable":
+                    skipped_unavailable += 1
+                    continue
                 if outcome != "removed":
                     skipped_leased += 1
                     continue
@@ -284,5 +291,7 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                 purge_expired_detections(db,camera_id,now-timedelta(days=days))
         except sqlite3.Error:
             failed += 1
+    if skipped_unavailable:
+        logging.getLogger("nvr.retention").warning("%d expired recordings were not removed because their storage is not available; they are kept until it is back", skipped_unavailable)
     return {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "skipped_playback": skipped_leased,
-            "kept_for_alarms": skipped_alarm, "failed": failed}
+            "kept_for_alarms": skipped_alarm, "waiting_for_storage": skipped_unavailable, "failed": failed}

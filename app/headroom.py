@@ -6,6 +6,7 @@ volume the shortfall is reported beside the setting instead.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -77,6 +78,8 @@ def keep_headroom(now: datetime | None = None) -> dict[str, dict[str, int]]:
     for volume_id in volumes:
         try:
             path = volume_path(volume_id)
+            if volume_id != "default" and not os.path.ismount(path):
+                continue  # Not mounted: what is measured here would be the disk under the empty folder, and its footage is not there to remove (#338)
             usage = shutil.disk_usage(path)
         except (OSError, ValueError):
             continue
