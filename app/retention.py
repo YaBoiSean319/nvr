@@ -285,6 +285,25 @@ def prune_motion_events(now: datetime) -> int:
     return removed
 
 
+def prune_ai_observations(now: datetime) -> int:
+    """Remove grouped AI observations older than their camera's retention period that no remaining footage covers; returns how many.
+
+    Individual detections already followed retention; these did not, and every analysed frame searches them (#345). The same rule as detections:
+    past the policy, and not inside footage that is still kept (a hold, a longer-lived clip). A camera with nothing due is only read (#280)."""
+    from .store import has_row
+
+    removed = 0
+    with connect() as db:
+        for camera in db.execute("SELECT id FROM cameras").fetchall():
+            days, _ = effective_retention(db, camera["id"])
+            cutoff = (now.astimezone(timezone.utc) - timedelta(days=days)).isoformat()
+            due = ("FROM ai_observations WHERE camera_id=? AND first_seen_at<? AND NOT EXISTS (SELECT 1 FROM recording_segments s "
+                   "WHERE s.camera_id=ai_observations.camera_id AND s.starts_at<=ai_observations.first_seen_at AND s.ends_at>ai_observations.first_seen_at)")
+            if has_row(db, f"SELECT 1 {due} LIMIT 1", (camera["id"], cutoff)):
+                removed += db.execute(f"DELETE {due}", (camera["id"], cutoff)).rowcount
+    return removed
+
+
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
     removed_segments = removed_bytes = skipped_leased = skipped_alarm = skipped_unavailable = failed = 0
@@ -317,10 +336,11 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             removed_bytes += int(current["size_bytes"])
         except (OSError,sqlite3.Error,ValueError):  # ValueError: a stored time that cannot be read
             failed += 1
-    try:
-        prune_motion_events(now)
-    except sqlite3.Error:
-        failed += 1
+    for prune in (prune_motion_events, prune_ai_observations):
+        try:
+            prune(now)
+        except sqlite3.Error:
+            failed += 1
     # Deleting footage deletes its detections; detections no footage covers expire on the same schedule.
     from .tracks import purge_expired_detections
     with connect() as db:
