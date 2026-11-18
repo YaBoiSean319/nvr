@@ -13,6 +13,7 @@ scheme, port and path are taken from them), so a camera cannot point the NVR at 
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import ipaddress
@@ -29,7 +30,7 @@ from xml.sax.saxutils import escape
 import httpx
 
 from .onvif_profiles import MediaProfile, parse_profiles
-from .onvif_soap import declares_dtd, local as _local
+from .onvif_soap import declares_dtd, local as _local, read_capped
 
 SOAP = "http://www.w3.org/2003/05/soap-envelope"
 ADDRESSING = "http://www.w3.org/2005/08/addressing"
@@ -143,6 +144,7 @@ class OnvifClient:
             raise ValueError("Enter both the camera username and password, or leave both blank")
         self._username, self._password = username, password
         self._http = httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False, transport=transport)
+        self._deadline = 3 * float(timeout.read or 8.0) + float(timeout.connect or 3.0)  # For one whole exchange, however slowly its bytes arrive
         self.clock_offset: timedelta | None = None
         self.auth_by_service: dict[str, str] = {}
         self._digests: dict[str, httpx.DigestAuth] = {}  # One for each service address: after its first challenge it answers the next requests without another round trip.
@@ -222,16 +224,23 @@ class OnvifClient:
     async def _once(self, url: str, action: str, body: str, method: str, extra: str = "") -> tuple[httpx.Response, ET.Element | None]:
         auth = self._digests.setdefault(url, httpx.DigestAuth(self._username, self._password)) if "digest" in method else None
         envelope = self._envelope(action, body, wsse="wsse" in method, extra=extra)
+        headers = {"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"', "Accept-Encoding": "identity"}
         try:
-            response = await self._http.post(url, content=envelope, auth=auth, headers={"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"'})
-        except httpx.TimeoutException:
+            # The answer is read as it arrives and no further than the limit, and the whole exchange has a deadline: the HTTP timeout is per read (#378).
+            async with asyncio.timeout(self._deadline):
+                async with self._http.stream("POST", url, content=envelope, auth=auth, headers=headers) as response:
+                    try:
+                        data = await read_capped(response, MAX_RESPONSE_BYTES)
+                    except ValueError:
+                        data = b""  # Too large to be an ONVIF answer: no usable body, as before
+        except (httpx.TimeoutException, TimeoutError):
             raise OnvifError("timeout") from None
         except (httpx.HTTPError, OSError):
             raise OnvifError("unreachable") from None
         root = None
-        if response.content and len(response.content) <= MAX_RESPONSE_BYTES:
+        if data:
             try:
-                root = parse_xml(response.content)
+                root = parse_xml(data)
             except OnvifError:
                 root = None
             # A well-formed web page is not an ONVIF answer: only a SOAP envelope is.
