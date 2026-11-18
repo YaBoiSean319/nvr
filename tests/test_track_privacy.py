@@ -224,6 +224,26 @@ class AggregateTests(TrackPrivacyCase):
         masked = [after["cells"][row][column] for row in range(rows // 2) for column in range(columns // 2)]
         self.assertEqual(sum(masked), 0, "the masked quarter of the map is empty")
 
+    def test_the_ai_events_list_does_not_list_what_was_seen_behind_a_mask(self):
+        # The same observations as the timeline reads, through GET /api/ai/events (#375): by camera, across cameras, and for an operator.
+        with connect() as db:
+            for index, box in enumerate((INSIDE, OUTSIDE)):
+                db.execute("INSERT INTO ai_observations(id,camera_id,label,confidence,box_json,first_seen_at,last_seen_at,frame_width,frame_height,model_id,model_version,provider) "
+                           "VALUES(?,?,?,?,?,?,?,448,256,'m','1','CPU')", (f"obs{index}", self.camera_id, "person", 0.9, json.dumps(box),
+                                                                         (BASE + timedelta(seconds=index)).isoformat(), (BASE + timedelta(seconds=index + 1)).isoformat()))
+
+        def listed(client, **params) -> list[str]:
+            response = client.get("/api/ai/events", params=params)
+            self.assertEqual(response.status_code, 200, response.text)
+            return sorted(item["id"] for item in response.json()["events"])
+
+        self.assertEqual(listed(self.client, camera_id=self.camera_id), ["obs0", "obs1"], "unmasked, both are listed")
+        self.mask()
+        self.assertEqual(listed(self.client, camera_id=self.camera_id), ["obs1"])
+        self.assertEqual(listed(self.client), ["obs1"])
+        self.assertEqual(listed(self.client, camera_id=self.camera_id, limit=1), ["obs1"], "the limit does not count what was hidden")
+        self.assertEqual(listed(self.operator(), camera_id=self.camera_id), ["obs1"])
+
     def test_the_timeline_does_not_list_what_was_seen_behind_a_mask(self):
         with connect() as db:
             for index, box in enumerate((INSIDE, OUTSIDE)):
