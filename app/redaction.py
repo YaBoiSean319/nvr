@@ -33,7 +33,7 @@ from . import privacy, viewing_audit
 from .detection import box_iou
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback
-from .storage import recording_file_path
+from .storage import fetch_cold_sources, recording_file_path
 from .store import connect
 from app.clock import now as _now
 
@@ -446,6 +446,7 @@ async def analyse(review_id: str, detector: RedactionDetector | None = None) -> 
         tracks: list[dict[str, Any]] = []
         durations: dict[str, float] = {}
         plans = []
+        fetch_cold_sources(camera_ids, start, end)  # Downloads happen before the lock (#358)
         with connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for camera_id in camera_ids:
@@ -632,6 +633,7 @@ def preview_frame(review_id: str, row: sqlite3.Row, camera_id: str, at: float) -
     regions = _regions(row)
     held: list[Path] = []
     try:
+        fetch_cold_sources([camera_id], start, end)  # Downloads happen before the lock (#358)
         with connect() as db:
             db.execute("BEGIN IMMEDIATE")
             plan = _sources(db, camera_id, start, end)

@@ -22,7 +22,7 @@ from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
-from .storage import recording_file_path
+from .storage import fetch_cold_sources, recording_file_path
 from .store import connect
 
 POLL_SECONDS = 2
@@ -642,6 +642,7 @@ def _reserve_sources(job: "_ExportJob", acquired: list[Path]) -> tuple[list[dict
     audio_camera_id = job.audio_camera_id
     start = job.start
     end = job.end
+    fetch_cold_sources(camera_ids, start, end)  # Downloads happen here, before the lock (#358)
     with connect() as db:
         # Retention also takes this write lock before unlinking a segment.
         # Keep it until the in-memory lease is installed for every source.
