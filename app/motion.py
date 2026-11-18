@@ -73,6 +73,10 @@ class _Capture:
     last_segment_end: datetime | None = None
 
 
+STOP_JOIN_SECONDS = 20.0  # While stopping, a clip gets this long to be joined: inside the recorder's stop grace
+ENDED_EARLY = "The recording stopped before the event ended; the clip holds what was captured until then"
+
+
 class MotionClipAssembler:
     """Turn validated motion transitions and a rolling HLS buffer into indexed MP4 clips."""
 
@@ -138,14 +142,23 @@ class MotionClipAssembler:
         capture = self.capture
         if capture is None:
             return
-        playlist_path = self.spool_dir / "live.m3u8"
-        try:
-            segments = parse_live_playlist(playlist_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError):
-            return
         now = datetime.now(timezone.utc)
-        eligible = [s for s in segments if s.ends_at >= capture.requested_start and s.starts_at <= now]
-        for index, segment in enumerate(eligible):
+        if not self._copy_buffered(capture, now):
+            return
+        if capture.active or now < capture.capture_until or not capture.copied:
+            return
+        if capture.last_segment_end and capture.last_segment_end < capture.capture_until:
+            return
+        await self._finalize(capture)
+        self.capture = None
+
+    def _copy_buffered(self, capture: _Capture, now: datetime) -> bool:
+        """Copy the buffer's segments that belong to this capture and are not yet copied into its staging folder. False when the buffer's list cannot be read."""
+        try:
+            segments = parse_live_playlist((self.spool_dir / "live.m3u8").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            return False
+        for segment in (s for s in segments if s.ends_at >= capture.requested_start and s.starts_at <= now):
             if segment.name in capture.copied:
                 continue
             source = self.spool_dir / segment.name
@@ -159,14 +172,9 @@ class MotionClipAssembler:
             capture.copied.add(segment.name)
             capture.segments[segment.name] = segment
             capture.last_segment_end = max(capture.last_segment_end or segment.ends_at, segment.ends_at)
-        if capture.active or now < capture.capture_until or not capture.copied:
-            return
-        if capture.last_segment_end and capture.last_segment_end < capture.capture_until:
-            return
-        await self._finalize(capture)
-        self.capture = None
+        return True
 
-    async def _finalize(self, capture: _Capture) -> None:
+    async def _finalize(self, capture: _Capture, *, timeout: float | None = None, note: str | None = None) -> None:
         from .recording import recordings_path
         from .storage import camera_recordings_dir
         staging = capture.staging_dir
@@ -192,7 +200,8 @@ class MotionClipAssembler:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
-            await asyncio.wait_for(proc.wait(), timeout=120)
+            # Joining is a copy, and takes longer for a longer clip: two minutes, or half a second for each two-second part if that is more (#339).
+            await asyncio.wait_for(proc.wait(), timeout=timeout if timeout is not None else max(120.0, len(files) * 0.5))
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -220,8 +229,8 @@ class MotionClipAssembler:
             except sqlite3.Error:
                 pass  # A counter must not strand the clip it counts.
             db.execute(
-                "UPDATE motion_events SET actual_start=?,actual_end=?,pre_roll_complete=?,status='complete',segment_id=?,failure_reason=NULL WHERE id=?",
-                (actual_start.isoformat(), actual_end.isoformat(), int(pre_roll_complete), segment_id, capture.event_id),
+                "UPDATE motion_events SET actual_start=?,actual_end=?,pre_roll_complete=?,status='complete',segment_id=?,failure_reason=? WHERE id=?",
+                (actual_start.isoformat(), actual_end.isoformat(), int(pre_roll_complete), segment_id, note, capture.event_id),
             )
             db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (self.camera_id,))
         shutil.rmtree(staging, ignore_errors=True)
@@ -233,7 +242,18 @@ class MotionClipAssembler:
         shutil.rmtree(capture.staging_dir, ignore_errors=True)
 
     async def stop(self) -> None:
+        """End the capture in progress, keeping what it holds. The camera was unplugged, the stream dropped or the recorder is stopping: the
+        footage up to that moment, pre-roll included, is the footage that matters, and it used to be thrown away (#339). What the buffer still
+        has is copied, the parts are joined into a clip, and the event is complete with a note that it ended early."""
         async with self._lock:
-            if self.capture is not None:
-                await self._mark_failed(self.capture, "Motion recorder stopped before post-roll completed")
-                self.capture = None
+            capture, self.capture = self.capture, None
+            if capture is None:
+                return
+            try:
+                self._copy_buffered(capture, datetime.now(timezone.utc))
+                if capture.copied:
+                    await self._finalize(capture, timeout=STOP_JOIN_SECONDS, note=ENDED_EARLY)
+                    return
+            except (OSError, sqlite3.Error):
+                pass
+            await self._mark_failed(capture, "Motion recorder stopped before post-roll completed")
