@@ -24,7 +24,7 @@ from . import acceleration
 from .access import may_view_camera
 from .credentials import decrypt
 from .store import connect
-from app.clock import now as _now
+from app.clock import now as _now, stamp
 
 MAX_ZONES = 8
 GRANT_MINUTES = 15
@@ -171,7 +171,7 @@ def zones_for(principal: Any, camera_id: str, *, unmasked: bool = False, recorde
             if principal.role != "administrator" or principal.token_id is not None or active_grant(db, int(principal.id), camera_id) is None:
                 raise UnmaskedRefused("Unmasked footage needs an administrator's stated reason first")
             recent = db.execute("SELECT 1 FROM audit_log WHERE actor_id=? AND action='privacy_unmasked_viewed' AND resource_id=? AND created_at>?",
-                                (int(principal.id), camera_id, (_now() - UNMASKED_AUDIT_INTERVAL).strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
+                                (int(principal.id), camera_id, stamp(_now() - UNMASKED_AUDIT_INTERVAL))).fetchone()
             if recent is None:
                 _audit(db, int(principal.id), "privacy_unmasked_viewed", camera_id, {"recorded_at": recorded_at.isoformat() if recorded_at else "live"})
             return []
