@@ -81,9 +81,22 @@ class Worker:
         self.process = subprocess.Popen([sys.executable, "-m", self.module], env=environment, start_new_session=True)  # Its own process group: see end_group
         self.started_at = time.monotonic()
         self.killed_reason, self.last_rss, self.peak_rss, self.rss_sampled_at = None, None, None, 0.0
-        liveness.record(self.name, state="starting", pid=self.process.pid, started=True, restarted=self.pending_restart)
+        try:
+            liveness.pulse_path(self.name).unlink(missing_ok=True)  # The last process's pulse says nothing about this one
+        except OSError:
+            pass
+        _record(self.name, state="starting", pid=self.process.pid, started=True, restarted=self.pending_restart)
         self.pending_restart = False
         logger.info("Started %s worker (pid %s)", self.name, self.process.pid)
+
+
+def _record(name: str, **state: object) -> None:
+    """Write a worker's state for the status page. The supervisor carries on if the database cannot be written: it used to exit, and being the
+    container's first process took everything down with it (#336)."""
+    try:
+        liveness.record(name, **state)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 - supervising matters more than the status row
+        logger.exception("Could not record the %s worker's state (%s); carrying on", name, state.get("state"))
 
 
 class Supervisor:
@@ -100,10 +113,27 @@ class Supervisor:
             worker.start()
         while not self.stopping:
             for worker in self.workers:
-                self._watch(worker)
+                try:
+                    self._watch(worker)
+                except Exception:  # noqa: BLE001 - one bad pass must not end supervision of every worker
+                    logger.exception("Watching the %s worker failed; carrying on", worker.name)
+            self._reap_orphans()
             time.sleep(POLL_SECONDS)
         self._stop_all()
         return 0
+
+    def _reap_orphans(self) -> None:
+        """Collect processes that are not workers and have ended. When a worker is killed, what it left running (FFmpeg) is ended too and, in a
+        container, is then this process's to collect; uncollected, each stays in the process table as a zombie until the container restarts."""
+        workers = {worker.process.pid for worker in self.workers if worker.process is not None}
+        for _ in range(256):
+            try:
+                ended = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)  # Look without collecting
+                if ended is None or ended.si_pid in workers:
+                    return  # Nothing has ended, or a worker has: its own watch collects it
+                os.waitpid(ended.si_pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                return
 
     def _watch(self, worker: Worker) -> None:
         now = time.monotonic()
@@ -115,7 +145,8 @@ class Supervisor:
         code = process.poll()
         if code is None and self._hung(worker, now):
             logger.warning("%s worker stopped reporting liveness; restarting it", worker.name)
-            worker.killed_reason = f"killed by the supervisor: no heartbeat for {liveness.STALE_AFTER.total_seconds():.0f} s (the process was alive but its event loop was blocked or starved)"
+            worker.killed_reason = (f"killed by the supervisor: no sign of life for {liveness.STALE_AFTER.total_seconds():.0f} s (the process was alive but its event loop was blocked or starved; "
+                                    "the sign is a file, not a database write, so a busy database does not cause this)")
             end_group(process)  # Its children first: a SIGKILLed worker cannot stop them itself
             process.kill()
             code = process.wait()
@@ -187,16 +218,12 @@ class Supervisor:
     def _hung(self, worker: Worker, now: float) -> bool:
         if now - worker.started_at < liveness.STALE_AFTER.total_seconds():
             return False
-        try:
-            return not self._reporting(worker)
-        except Exception:  # noqa: BLE001
-            return False
+        return not self._reporting(worker)
 
     @staticmethod
     def _reporting(worker: Worker) -> bool:
-        with connect() as db:
-            row = db.execute("SELECT * FROM worker_status WHERE name=?", (worker.name,)).fetchone()
-        return bool(row) and row["pid"] == (worker.process.pid if worker.process else None) and liveness.is_fresh(row)
+        """Whether the worker's event loop is turning, read from its pulse file: never from the database, which may be the thing that is stuck."""
+        return liveness.pulse_fresh(worker.name, worker.process.pid if worker.process else None)
 
     def _incident(self, worker: Worker, *, active: bool, details: dict[str, object] | None = None) -> None:
         try:
@@ -218,7 +245,7 @@ class Supervisor:
         # Stop accepting requests first; recording stops last.
         for worker in sorted(self.workers, key=lambda item: (item.name != "web", item.name == "recorder")):
             if worker.process and worker.process.poll() is None:
-                liveness.record(worker.name, state="stopping")
+                _record(worker.name, state="stopping")
                 worker.process.send_signal(signal.SIGTERM)
                 try:
                     worker.process.wait(timeout=STOP_GRACE_SECONDS)
@@ -229,7 +256,7 @@ class Supervisor:
                     worker.process.wait()
                 if end_group(worker.process):
                     logger.warning("Ended processes the %s worker left running when it stopped", worker.name)
-            liveness.record(worker.name, state="stopped")
+            _record(worker.name, state="stopped")
 
 
 def main() -> int:
