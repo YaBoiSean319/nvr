@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 import httpx
 
 from .onvif_destination import UnsafeDestination, confine
-from .onvif_stream import DEVICE, MEDIA, SCHEMA, SOAP, _local, _parse_response
+from .onvif_soap import call as _soap_call, escape as _escape, local as _local
+from .onvif_stream import DEVICE, MAX_RESPONSE_BYTES, MEDIA, SCHEMA, SOAP
 
 PTZ = "http://www.onvif.org/ver20/ptz/wsdl"
 FOV_SPACE = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationSpaceFov"
@@ -29,10 +30,6 @@ class Capabilities:
     centre: bool = False  # Relative moves in field-of-view space: click-to-centre.
     max_presets: int = 0
     spaces: list[str] = field(default_factory=list)
-
-
-def _escape(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _number(value: float) -> str:
@@ -57,9 +54,7 @@ class PtzClient:
         self.ptz_url: str | None = None
 
     async def _call(self, client: httpx.AsyncClient, url: str, action: str, body: str) -> ET.Element:
-        response = await client.post(url, content=_envelope(action, body), headers={"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"'})
-        response.raise_for_status()
-        return _parse_response(response.content)
+        return await _soap_call(client, url, action, _envelope(action, body), MAX_RESPONSE_BYTES)
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(auth=self.auth, timeout=httpx.Timeout(8, connect=4), trust_env=False, follow_redirects=False)

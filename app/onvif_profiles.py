@@ -14,6 +14,8 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
+from .onvif_soap import local as _local
+
 CODEC_RANK = {"h264": 0, "h265": 1, "mjpeg": 2, "other": 3}
 LIVE_PIXEL_CAP = 1280 * 720
 
@@ -46,10 +48,6 @@ class Selection:
     live: MediaProfile | None
     reason: str
     problems: tuple[str, ...] = field(default_factory=tuple)
-
-
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
 
 
 def normalise_encoding(value: str | None) -> str:

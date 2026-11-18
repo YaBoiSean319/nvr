@@ -6,7 +6,8 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from .onvif_stream import DEVICE, SCHEMA, SOAP, _local, _parse_response
+from .onvif_soap import call as _soap_call, escape as _escape, local as _local
+from .onvif_stream import DEVICE, MAX_RESPONSE_BYTES, SCHEMA, SOAP
 
 RELEASE_ATTEMPTS = 3
 
@@ -30,13 +31,8 @@ def _envelope(action: str, body: str) -> bytes:
 
 
 async def _call(client: httpx.AsyncClient, url: str, action: str, body: str) -> ET.Element:
-    response = await client.post(url, content=_envelope(action, body), headers={"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"'})
-    response.raise_for_status()
-    return _parse_response(response.content)
+    return await _soap_call(client, url, action, _envelope(action, body), MAX_RESPONSE_BYTES)
 
-
-def _escape(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 async def pulse(device_service_url: str, username: str, password: str, relay_token: str | None, duration_seconds: float) -> str:

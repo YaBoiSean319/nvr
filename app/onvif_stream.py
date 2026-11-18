@@ -4,7 +4,6 @@ The SOAP work is done by ``onvif_client`` (negotiated authentication, discovered
 entry points the camera APIs call, and the lookups that keep every request on the camera address the administrator entered."""
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -16,7 +15,7 @@ SOAP = "http://www.w3.org/2003/05/soap-envelope"
 DEVICE = "http://www.onvif.org/ver10/device/wsdl"
 MEDIA = "http://www.onvif.org/ver10/media/wsdl"
 SCHEMA = "http://www.onvif.org/ver10/schema"
-MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_RESPONSE_BYTES = 1024 * 1024  # For the PTZ, privacy-mask and relay calls; onvif_client has its own limit
 
 
 @dataclass(frozen=True)
@@ -36,19 +35,6 @@ class OnvifStreamProfile:
     has_audio: bool = False
     source: str = "media1"
     suggested: str = ""  # "record" or "live" for the profile the NVR would choose, else empty
-
-
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _parse_response(data: bytes) -> ET.Element:
-    if not data or len(data) > MAX_RESPONSE_BYTES:
-        raise ValueError("ONVIF response size is invalid")
-    upper = data.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
-        raise ValueError("ONVIF response XML is unsafe")
-    return ET.fromstring(data)
 
 
 def _camera_ip(value: str) -> str:
