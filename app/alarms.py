@@ -20,7 +20,6 @@ from app.clock import parse as _parse, stamp as _stamp
 
 CLIP_BEFORE = timedelta(seconds=10)
 CLIP_AFTER = timedelta(seconds=20)
-OPEN_STATES = ("new", "acknowledged", "assigned")
 
 
 class AlarmError(Exception):

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import access as access_rules, viewing_audit
+from .footage_chain import file_sha256
 from .storage import segment_available
 from .store import connect
 from app.clock import now as _now, parse as _parse
@@ -559,14 +560,6 @@ def _case_json(db: sqlite3.Connection, case: sqlite3.Row, package: sqlite3.Row, 
             "created_at": case["created_at"], "closed_at": case["closed_at"], "members": members, "items": items}, omitted
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def assemble(db: sqlite3.Connection, package: sqlite3.Row) -> None:
     """Write the case's evidence package: each clip's export, the notes, the audit and a manifest of every file."""
     from .recording import recordings_path
@@ -627,7 +620,7 @@ def assemble(db: sqlite3.Connection, package: sqlite3.Row) -> None:
                 files.append({"path": name, "size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()})
             for name, source in sources.items():
                 archive.write(source, name)
-                files.append({"path": name, "size_bytes": source.stat().st_size, "sha256": _sha256_file(source)})
+                files.append({"path": name, "size_bytes": source.stat().st_size, "sha256": file_sha256(source)})
             archive.writestr("integrity.json", json.dumps({"algorithm": "sha256", "files": files}, indent=2, sort_keys=True))
         os.replace(temporary, target)
     except OSError as exc:
@@ -635,7 +628,7 @@ def assemble(db: sqlite3.Connection, package: sqlite3.Row) -> None:
         _fail(db, package, f"The package could not be written: {str(exc)[:160]}")
         return
     db.execute("UPDATE case_packages SET status='ready',relative_path=?,size_bytes=?,sha256=?,completed_at=?,provenance_json=? WHERE id=?",
-               (str(target.relative_to(root)), target.stat().st_size, _sha256_file(target), _iso(_now()), json.dumps(provenance, sort_keys=True), package["id"]))
+               (str(target.relative_to(root)), target.stat().st_size, file_sha256(target), _iso(_now()), json.dumps(provenance, sort_keys=True), package["id"]))
     audit(db, case["id"], int(requester["id"]), "package_ready", package=package["id"], clips=len(sources), omitted=omitted)
 
 

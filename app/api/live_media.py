@@ -223,7 +223,6 @@ async def _mjpeg_frames(camera_id: str, source: str, quality: str, zones: list |
     )
     if process.stdin is None or process.stdout is None:
         raise RuntimeError("Live video transcoder did not start")
-    from app.recording import _manifest_bytes
     process.stdin.write(_manifest_bytes(source))
     await process.stdin.drain()
     process.stdin.close()

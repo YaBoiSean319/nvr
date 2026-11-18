@@ -11,7 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from app.workers import control_directory
 
@@ -84,17 +84,23 @@ class RecorderClient:
         await nudge("recorder", {"op": "sync_camera", "camera_id": camera_id, "force_restart": force_restart})
 
 
+_nudges: set[asyncio.Task[bool]] = set()
+
+
+def _nudge_soon(worker: str, message: dict[str, Any]) -> None:
+    """Send a nudge without waiting for it. The task is kept until it is done: the event loop holds only a weak reference to a task, so one
+    nobody keeps can be collected before it has been sent."""
+    task = asyncio.get_running_loop().create_task(nudge(worker, message))
+    _nudges.add(task)
+    task.add_done_callback(_nudges.discard)
+
+
 class ExportClient:
     """Stands in for the in-process export manager inside the supervised web process."""
 
-    def __init__(self) -> None:
-        self._nudges: set[asyncio.Task[bool]] = set()
-
     def enqueue(self, job_id: str) -> None:
         # The job is already committed as queued; the exporter also polls for it.
-        task = asyncio.get_running_loop().create_task(nudge("exporter", {"op": "enqueue", "job_id": job_id}))
-        self._nudges.add(task)
-        task.add_done_callback(self._nudges.discard)
+        _nudge_soon("exporter", {"op": "enqueue", "job_id": job_id})
 
     async def cancel(self, job_id: str) -> None:
         await nudge("exporter", {"op": "cancel", "job_id": job_id})
@@ -114,11 +120,11 @@ class BackupClient:
     """Stands in for the in-process backup manager inside the supervised web process."""
 
     def nudge(self) -> None:
-        asyncio.get_running_loop().create_task(nudge("background", {"op": "backup"}))
+        _nudge_soon("background", {"op": "backup"})
 
 
 class RulesClient:
     """Stands in for the in-process rules manager inside the supervised web process."""
 
     def nudge(self) -> None:
-        asyncio.get_running_loop().create_task(nudge("rules", {"op": "evaluate"}))
+        _nudge_soon("rules", {"op": "evaluate"})

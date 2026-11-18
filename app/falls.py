@@ -31,7 +31,6 @@ from .store import connect
 # The body points the decision uses, by their names, with (x, y, visibility) in the picture's own 0..1 coordinates.
 Pose = Mapping[str, tuple[float, float, float]]
 
-SENSITIVITIES = ("low", "normal", "high")
 DEFAULT_SENSITIVITY = "high"  # A missed fall costs more than a false alert
 DEFAULT_STAY_DOWN_SECONDS = 8.0  # Measured (tests/fixtures/fall_accuracy.py): 3 s raised alerts for deep bends, crouching and stumbles that 8 s did not, with no fall missed
 MIN_STAY_DOWN_SECONDS, MAX_STAY_DOWN_SECONDS = 1.0, 60.0

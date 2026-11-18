@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .onvif_client import EVENTS, OnvifClient, OnvifError
+from .onvif_soap import local as _local, parse_bounded
 
 WSNT = "http://docs.oasis-open.org/wsn/b-2"
 EVENT_PORT = "http://www.onvif.org/ver10/events/wsdl/EventPortType/"  # The Events service's own operations are addressed through its port type, unlike the device and media services
@@ -34,19 +35,6 @@ class CameraMotionEvent:
     source_key: str = ""  # which detector the camera named (a rule, a video source), so two detectors on one topic stay apart
 
 
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _parse_xml(data: bytes) -> ET.Element:
-    if not data or len(data) > MAX_XML_BYTES:
-        raise ValueError("ONVIF response size is invalid")
-    upper = data.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
-        raise ValueError("ONVIF response XML is unsafe")
-    return ET.fromstring(data)
-
-
 def _parse_datetime(value: str | None) -> datetime:
     if not value:
         return datetime.now(timezone.utc)
@@ -61,7 +49,7 @@ def _parse_datetime(value: str | None) -> datetime:
 
 def parse_motion_notifications(data: bytes) -> list[CameraMotionEvent]:
     """Extract standard ONVIF motion state changes without trusting XML text."""
-    root = _parse_xml(data)
+    root = parse_bounded(data, MAX_XML_BYTES)
     events: list[CameraMotionEvent] = []
     for notification in (node for node in root.iter() if _local(node.tag) == "NotificationMessage"):
         topic = next((node.text.strip() for node in notification.iter() if _local(node.tag) == "Topic" and node.text), "")

@@ -378,6 +378,9 @@ class LiveHub:
         # Set from Settings (see app/live_ready.py): None keeps the short default.
         self.linger_seconds: float | None = None
         self.starts: collections.deque[dict[str, object]] = collections.deque(maxlen=STARTS_KEPT)
+        # Streams being closed. The event loop keeps only a weak reference to a task, so one nobody holds can be collected before it has
+        # ended the stream's FFmpeg.
+        self._closing: set[asyncio.Task[None]] = set()
 
     def record_start(self, entry: dict[str, object]) -> None:
         """Remember how long one viewer waited for live video (kept in memory, newest last)."""
@@ -403,7 +406,9 @@ class LiveHub:
             stream.linger = None
             if not stream.viewers and self.streams.get(stream.key) is stream:
                 self.streams.pop(stream.key, None)
-                asyncio.create_task(stream.stop())
+                task = asyncio.create_task(stream.stop())
+                self._closing.add(task)
+                task.add_done_callback(self._closing.discard)
 
         stream.remove(viewer, close_if_idle)
 

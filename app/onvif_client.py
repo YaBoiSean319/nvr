@@ -29,6 +29,7 @@ from xml.sax.saxutils import escape
 import httpx
 
 from .onvif_profiles import MediaProfile, parse_profiles
+from .onvif_soap import declares_dtd, local as _local
 
 SOAP = "http://www.w3.org/2003/05/soap-envelope"
 ADDRESSING = "http://www.w3.org/2005/08/addressing"
@@ -102,15 +103,8 @@ def _utc(value: str) -> datetime:
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
 def parse_xml(data: bytes) -> ET.Element:
-    if not data or len(data) > MAX_RESPONSE_BYTES:
-        raise OnvifError("malformed")
-    upper = data.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+    if not data or len(data) > MAX_RESPONSE_BYTES or declares_dtd(data):
         raise OnvifError("malformed")
     try:
         return ET.fromstring(data)

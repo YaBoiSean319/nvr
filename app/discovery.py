@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
+from .onvif_soap import declares_dtd, local as _local_name
 
 MULTICAST_ADDRESS = "239.255.255.250"
 MULTICAST_PORT = 3702
@@ -51,10 +52,6 @@ def parse_camera_ip_range(value: str) -> tuple[ipaddress.IPv4Address, ...]:
     return hosts
 
 
-def _local_name(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
 def _safe_service_url(value: str) -> str | None:
     """Keep only an HTTP(S) service origin/path; discovery URLs can carry secrets."""
     try:
@@ -88,8 +85,7 @@ def parse_probe_response(data: bytes) -> list[DiscoveredDevice]:
     """Parse a bounded WS-Discovery ProbeMatches datagram without trusting XML input."""
     if not data or len(data) > MAX_DATAGRAM_BYTES:
         return []
-    upper = data.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+    if declares_dtd(data):
         return []
     try:
         root = ET.fromstring(data)
@@ -229,7 +225,7 @@ async def _probe_onvif_endpoint(address: ipaddress.IPv4Address, port: int, semap
     # A 401 from the standard ONVIF device-service path is useful: it confirms
     # the endpoint while allowing cameras that require ONVIF credentials.
     is_onvif = status == 401
-    if status == 200 and body and b"<!DOCTYPE" not in body.upper() and b"<!ENTITY" not in body.upper():
+    if status == 200 and body and not declares_dtd(body):
         try:
             root = ET.fromstring(body)
             is_onvif = any(

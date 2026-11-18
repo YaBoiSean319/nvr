@@ -25,7 +25,6 @@ from .retention import acquire_playback, release_playback, unlink_if_unleased
 from .storage import recording_file_path
 from .store import connect
 
-MAX_EXPORT_WORKERS = 1
 POLL_SECONDS = 2
 MAX_ACTIVE_EXPORTS = 4
 MAX_EXPORT_CAMERAS = 16
@@ -107,14 +106,6 @@ def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None,
         return {"checksums_valid": False, "files": [], "error": f"invalid evidence package: {str(exc)[:200]}"}
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _camera_video_filename(name: str, camera_id: str, index: int) -> str:
     readable = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip()).strip("-_").lower()[:48] or "camera"
     stable_suffix = re.sub(r"[^A-Za-z0-9]", "", camera_id).lower() or f"{index + 1:02d}"
@@ -176,7 +167,7 @@ def _has_audio(path: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-async def _render_audio(manager: "ExportManager", job_id: str, work_dir: Path, spans: list[dict[str, Any]],
+async def _render_audio(manager: "ExportManager", job_id: str, spans: list[dict[str, Any]],
                         duration: float, output: Path, grid_intervals: list[dict[str, Any]] | None = None) -> None:
     """Render a selected source's audio on output time, leaving missing spans silent."""
     if duration <= 0:
@@ -1045,7 +1036,6 @@ class ExportManager:
         camera_audio_enabled = bool(include_audio and camera["audio_supported"] and camera["audio_enabled"])
         entry["audio"] = {"included": camera_audio_enabled,
                           "reason": None if camera_audio_enabled else "Audio not requested" if not include_audio else "Camera audio is not administrator-enabled"}
-        entry["video_file"] = None
         if "individual" in output_modes:
             manifest = work_dir / f"camera-{camera['index']}.ffconcat"
             video_file = _camera_video_filename(camera["name"], camera["camera_id"], camera["index"])
@@ -1091,7 +1081,7 @@ class ExportManager:
             if camera_audio_enabled:
                 audio_path = work_dir / f"camera-{camera['index']}.m4a"
                 duration = sum((span["source_end"] - span["source_start"]).total_seconds() for span in spans)
-                await _render_audio(self, job_id, work_dir, spans, duration, audio_path)
+                await _render_audio(self, job_id, spans, duration, audio_path)
                 await _mux_audio(self, job_id, clip_path, audio_path)
                 audio_path.unlink(missing_ok=True)
                 entry["audio_source_to_output_intervals"] = [
@@ -1131,7 +1121,7 @@ class ExportManager:
             source_camera = next(camera for camera in per_camera if camera["camera_id"] == audio_camera_id)
             audio_path = work_dir / "grid.m4a"
             duration = float(metadata["grid"]["duration_seconds"])
-            await _render_audio(self, job_id, work_dir, source_camera["spans"], duration, audio_path, union)
+            await _render_audio(self, job_id, source_camera["spans"], duration, audio_path, union)
             await _mux_audio(self, job_id, work_dir / "grid.mp4", audio_path)
             audio_path.unlink(missing_ok=True)
             metadata["audio"]["grid_source_to_output_intervals"] = [
@@ -1164,7 +1154,7 @@ class ExportManager:
             "schema_version": 1,
             "algorithm": "sha256",
             "files": [
-                {"path": path.name, "size_bytes": path.stat().st_size, "sha256": _file_sha256(path)}
+                {"path": path.name, "size_bytes": path.stat().st_size, "sha256": footage_chain.file_sha256(path)}
                 for path in package_files
             ],
         }

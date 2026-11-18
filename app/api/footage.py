@@ -144,12 +144,9 @@ async def archive_camera(
         )
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "archive", "camera", camera_id, "{}"))
-    try:
-        # Archive state prevents new ingest after restart and the existing task is now cancelled.
-        await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
-    except Exception:
-        # The durable enabled=0 flag keeps the recorder supervisor from restarting ingest.
-        raise
+    # Archive state prevents new ingest after restart and the existing task is now cancelled. If this fails, the durable enabled=0 flag
+    # still keeps the recorder supervisor from restarting ingest.
+    await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

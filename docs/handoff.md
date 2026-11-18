@@ -11,10 +11,12 @@ Nothing on this page may hold a secret or a real site's address. The owner's pro
 - **Code health (#286), one function per PR with tests pinned first**: `ExportManager._execute`, `validate_target_url`, the capacity estimate, camera inspection, `create_camera`, `RecordingManager._run_motion` and `._run_continuous`.
 - **Reliability from a production incident (see Operations below)**: #321 (nightly database check, startup line, clear 503, `/healthz` fails on a damaged file, `docs/database-recovery.md`), #322 (a killed worker no longer leaves FFmpeg processes running), a fix for a stalled recording that killed a camera's recording loop (found while pinning `_run_continuous`).
 - **Bulk Add runs as a server-side job (#173, part)** and **cheaper CI**: see `docs/camera-onboarding.md` and the CI section below.
+- **A full backend review (#332, 2026-11-18)**: every backend module read by area, with the findings filed as #332's sub-issues (#333-#387). Its cleanup is one pull request (#340): the ONVIF helpers in one module (`app/onvif_soap.py`), dead code removed, and background tasks kept until they finish (lint rule `RUF006` is now on).
 
 ## Open work
 
 **Can start without the owner**
+- **The backend review's tickets (#332)**, all labelled `ready-for-agent` unless they need a decision. Highest first, because they decide whether recording stays up as a site ages: #334 (the recorder re-indexes every finished segment every 2 s), #335 (one database or file error ends a camera's recording loop), #336 (an unwritable database gets every worker killed), #337 (retention takes the write lock per stored segment), #338 (offline storage is treated as deleted footage), #339 (motion clips are discarded when the stream drops), #333, #345 and #346 (tables and a trigger whose cost grows with history), #356-#358 (exports: long grids, a worker that dies quietly, the write lock held across cold-tier downloads), #364 (a person cannot be removed) and #378 (a camera can exhaust memory with one ONVIF answer; needs #340 merged first). Several add a migration: merge those one at a time, each taking the next free number. #361 waits for #333.
 - **#328** backups stage two plaintext copies of the database on the data disk and fail on a nearly full disk: stream the tar into the encryption, check free space first (see the ticket).
 - **#286** two functions remain: `live_stream` (`app/api/live_media.py`, complexity F 82; the surrounding tests in `tests/test_live_stream.py`, `test_hevc.py`, `test_stream_credentials.py`, `test_privacy.py`, `test_access_grants.py`, `test_viewing_audit.py` passed as a baseline) and `DetectionManager._run` (`app/detection.py`, F 69). One function per PR; pin first.
 - **#256** settings grouping: the in-page sections for Integrations / AI analysis and Email alerts remain.
@@ -22,6 +24,7 @@ Nothing on this page may hold a secret or a real site's address. The owner's pro
 - **Idea, not agreed with the owner:** `python -m app.backup verify <file>` to decrypt a backup and run the integrity check without touching live data.
 
 **Waiting on the owner**
+- **#340** (the review's cleanup pull request) to be merged, and five decisions from the review, filed without the agent label: #349 (how long resolved alarms and rule events are kept), #362 (a disk budget for exports, case packages and masked copies), #374 (who may enrol a first second factor remotely), #376 (whether the AI detection webhook leaves out masked detections, compare #296) and #377 (whether operators and video walls see camera addresses).
 - Review of the shipped security (#292-#302) and Face watch (#306-#314) tickets; they are open on purpose. #299 (mobile native bridge) is paused with the mobile apps.
 - **#217** (workers killed for a blocked event loop): the reporting site's host details were skipped; it stays open. If stalls come back after the fixes above, the next step is that site's CPU, memory and disk numbers.
 - Whether the owner wants the server's idle-connection timeout raised for reverse proxies (uvicorn closes idle connections after 5 s): declined for now, "if it becomes a problem".

@@ -18,7 +18,6 @@ from .credentials import decrypt, encrypt
 from .security import token_digest
 from app.clock import now as _now
 
-POLICIES = ("off", "administrators", "all")
 TOTP_STEP_SECONDS = 30
 TOTP_DIGITS = 6
 TOTP_WINDOW = 1  # Accept the code before and after the current one, for clock drift.

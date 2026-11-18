@@ -26,7 +26,6 @@ from .detection import MODEL_FRAME_BYTES, MODEL_HEIGHT, MODEL_WIDTH, box_iou
 
 LOW = 0.05  # The model is asked for everything it half-sees; the thresholds are applied here
 THRESHOLDS = (0.3, 0.4, 0.5, 0.55, 0.6, 0.7)
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 @dataclass
