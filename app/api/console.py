@@ -10,7 +10,7 @@ import json
 import re
 import sqlite3
 from typing import Any
-from urllib.parse import parse_qsl, urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import websockets
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, status
@@ -48,6 +48,7 @@ register_url_convertor("consoleid", ConsoleIdConvertor())
 # What a person can ask of a site's camera through the console: look and watch, nothing else (the site's token is limited the same way, as a second guard).
 CAMERA_PATHS = (re.compile(r"^live$"), re.compile(r"^live/status$"), re.compile(r"^segments/\d{1,12}/(media|snapshot|frame-neighbor)$"))
 PASS_REQUEST = ("range", "if-none-match", "if-modified-since", "content-type", "accept")
+RELAYED_TYPES = {"image/jpeg", "image/png", "video/mp4", "video/mp2t", "multipart/x-mixed-replace", "audio/mpeg", "application/octet-stream"}
 PASS_RESPONSE = ("content-type", "content-length", "content-range", "accept-ranges", "etag", "last-modified", "cache-control", "content-disposition", "x-content-type-options")
 
 
@@ -148,6 +149,11 @@ async def update_site(site_id: str, body: SiteBody, user: Administrator) -> dict
     allow_private = bool(row["allow_private"]) if body.allow_private is None else body.allow_private
     try:
         url = console.check_url(body.url, allow_private) if body.url else row["base_url"]
+        moved = urlsplit(url).netloc.casefold() != urlsplit(row["base_url"]).netloc.casefold()
+        if (moved or (allow_private and not row["allow_private"])) and not body.token:
+            # The saved token is never sent to a host it was not entered for: changing only the address used to make the NVR call the new
+            # address with the site's token, handing a token that is "never returned" to whoever chose the address (#373).
+            raise console.ConsoleError("Enter the site's token again to change its address or to allow a private address")
         if body.token or body.url or body.allow_private is not None:
             await console.registry.load(max_age=0)
             link = console.registry.link(site_id)
@@ -235,15 +241,28 @@ async def _forward(request: Request, link: console.SiteLink, path: str) -> Respo
     except console.SiteDown:
         raise HTTPException(status_code=502, detail=f"The site {link.name} cannot be reached") from None
     if upstream.headers.get("content-type", "").startswith("application/json"):
-        raw = await upstream.aread()
-        await upstream.aclose()
+        raw = bytearray()
+        try:
+            async for chunk in upstream.aiter_bytes():  # Counted as it is read: a site may declare no length and never stop (#373)
+                raw.extend(chunk)
+                if len(raw) > console.MAX_JSON_BYTES:
+                    raise HTTPException(status_code=502, detail=f"The site {link.name} sent too large an answer")
+        finally:
+            await upstream.aclose()
+        raw = bytes(raw)
         try:
             data = json.loads(raw)
         except ValueError:
             return Response(raw, status_code=upstream.status_code, media_type="application/json")
         return JSONResponse(console.scrub(console.rewrite(link.id, data)), status_code=upstream.status_code)
-    return StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code, headers={name: upstream.headers[name] for name in PASS_RESPONSE if name in upstream.headers},
-                             background=BackgroundTask(upstream.aclose))
+    passed = {name: upstream.headers[name] for name in PASS_RESPONSE if name in upstream.headers}
+    # Only the kinds of answer a camera's footage and pictures are; anything else a site sends (a page with script, say) is served as a download and
+    # never as something the browser would run from this NVR's address (#373).
+    if passed.get("content-type", "").split(";")[0].strip().casefold() not in RELAYED_TYPES:
+        passed["content-type"] = "application/octet-stream"
+        passed["content-disposition"] = "attachment"
+    passed["x-content-type-options"] = "nosniff"
+    return StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code, headers=passed, background=BackgroundTask(upstream.aclose))
 
 
 @router.api_route("/api/cameras/{camera_id:consoleid}/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
