@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -162,11 +163,27 @@ def verify_passkey_second_factor(payload: PasskeyAssertion, request: Request, re
 # --- Sign-in: a passkey alone -----------------------------------------------------------
 
 MAX_PENDING_PASSKEY_SIGN_INS = 1000
+# One address may have this many passkey sign-ins waiting. Starting one needs no sign-in and the limit above is for the whole NVR, so a single
+# address could fill it and switch passkey sign-in off for everyone (#372); now it takes a hundred addresses.
+MAX_PENDING_PASSKEY_SIGN_INS_PER_ADDRESS = 10
+_PASSKEY_START_SECONDS = 300.0  # As long as a sign-in challenge lives
+_passkey_pending: dict[str, tuple[str, float]] = {}  # Challenge -> (the address that started it, when). In memory: it bounds what is stored, it is not a record
+
+
+def _waiting_from(address: str, now: float | None = None) -> int:
+    """How many passkey sign-ins this address has started and not yet finished or let expire."""
+    moment = time.monotonic() if now is None else now
+    for challenge in [key for key, (_, at) in _passkey_pending.items() if moment - at >= _PASSKEY_START_SECONDS]:
+        del _passkey_pending[challenge]
+    return sum(1 for started_by, _ in _passkey_pending.values() if started_by == address)
 
 
 @router.post("/api/auth/passkey/options")
 def passkey_sign_in_options(request: Request) -> dict[str, Any]:
     """Options for signing in with only a passkey, for people who turned that on."""
+    address = limits.client_address(request)
+    if _waiting_from(address) >= MAX_PENDING_PASSKEY_SIGN_INS_PER_ADDRESS:
+        raise HTTPException(status_code=429, detail="Too many sign-ins are waiting. Try again in a few minutes.", headers={"Retry-After": "60"})
     value = webauthn.new_challenge()
     with connect() as db:
         pending = db.execute("SELECT COUNT(*) FROM mfa_challenges WHERE kind='passkey_login' AND expires_at>?", (datetime.now(timezone.utc).isoformat(),)).fetchone()[0]
@@ -174,12 +191,14 @@ def passkey_sign_in_options(request: Request) -> dict[str, Any]:
             raise HTTPException(status_code=429, detail="Too many sign-ins are waiting. Try again in a few minutes.", headers={"Retry-After": "60"})
         raw = mfa.new_challenge(db, "passkey_login", None)
         _store_challenge(db, raw, value)
+    _passkey_pending[raw] = (address, time.monotonic())
     return {"challenge": raw, "options": webauthn.request_options(_relying_party(request), value, [], "required")}
 
 
 @router.post("/api/auth/passkey/login")
 def passkey_sign_in(payload: PasskeyAssertion, request: Request, response: Response) -> dict[str, object]:
     challenge, _ = _open_challenge(payload.challenge, "passkey_login", claim=True)
+    _passkey_pending.pop(payload.challenge, None)  # Answered: no longer waiting
     address = limits.client_address(request)
     limits.begin("", address)  # Counts the address; the account is counted once the passkey says whose it is.
     try:

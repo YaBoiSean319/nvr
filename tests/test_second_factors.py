@@ -577,6 +577,21 @@ class HardeningTests(SecondFactorCase):
             statuses = [self.browser().post("/api/auth/passkey/options").status_code for _ in range(4)]
         self.assertEqual(statuses, [200, 200, 429, 429])
 
+    def test_one_address_cannot_use_up_the_passkey_sign_ins_everyone_shares(self):
+        # Starting a passkey sign-in needs no sign-in, and the limit above is for the whole NVR (#372).
+        from app.api import mfa as mfa_api
+        mfa_api._passkey_pending.clear()
+        self.addCleanup(mfa_api._passkey_pending.clear)
+        share = mfa_api.MAX_PENDING_PASSKEY_SIGN_INS_PER_ADDRESS
+        with mock.patch.object(mfa_api.limits, "client_address", lambda request: "198.51.100.7"):
+            flood = [self.browser().post("/api/auth/passkey/options").status_code for _ in range(share + 5)]
+        self.assertEqual(flood, [200] * share + [429] * 5)
+        with mock.patch.object(mfa_api.limits, "client_address", lambda request: "192.0.2.20"):
+            self.assertEqual(self.browser().post("/api/auth/passkey/options").status_code, 200, "another address was refused because of the first")
+        # Its share comes back as its challenges are answered or expire.
+        self.assertEqual(mfa_api._waiting_from("198.51.100.7"), share)
+        self.assertEqual(mfa_api._waiting_from("198.51.100.7", now=mfa_api.time.monotonic() + mfa_api._PASSKEY_START_SECONDS + 1), 0)
+
     def test_adding_a_factor_to_a_protected_account_needs_the_password(self):
         self.enrol_totp(self.admin)
         refused = self.admin.post("/api/me/security/passkeys/options")
