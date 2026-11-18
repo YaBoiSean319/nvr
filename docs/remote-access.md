@@ -48,7 +48,8 @@ Administrators see how the page reached the NVR (the caller's address and whethe
 | --- | --- |
 | `NVR_TRUSTED_PROXIES` | Addresses or networks whose forwarded headers are believed |
 | `NVR_LOCAL_NETWORKS` | Further networks counted as local |
-| `NVR_ALLOWED_ORIGINS` | Further origins allowed to open the live video socket |
+| `NVR_ALLOWED_ORIGINS` | Further origins allowed to open the live video socket and to make requests that change something |
+| `NVR_MAX_REQUEST_BYTES` | The largest request body accepted (default 8 MiB; evidence packages uploaded for checking have their own 2 GiB limit). Set the same limit at your reverse proxy |
 | `NVR_PUBLIC_URL` | The address people use (also allowed for the live socket, and used for passkeys and links) |
 | `NVR_COOKIE_SECURE` | Mark the session cookie Secure (implied by an `https://` `NVR_PUBLIC_URL`) |
 
@@ -67,3 +68,9 @@ The site dials out to a hub (a small host with a public address, which you run);
 ## What the NVR does not do
 
 It does not run or monitor the tunnel, does not open ports (UPnP), and sends nothing to a service of ours. A tunnel that is down means no remote access, and recording carries on.
+
+## Requests from other sites, and large requests
+
+A request that changes something (`POST`, `PUT`, `PATCH`, `DELETE`) and carries a browser's `Origin` is refused with 403 unless the origin is the host the request was made to (as a trusted proxy reports it), `NVR_PUBLIC_URL` or one of `NVR_ALLOWED_ORIGINS`: the same rule as the live video socket. API tokens, scripts and the signed routes other systems call (`/api/inbound/...`) send no such origin and are not affected. If signing in from the browser answers "This request came from a page on another site", the NVR is behind a proxy it has not been told about: set `NVR_PUBLIC_URL` to the address people use, and `NVR_TRUSTED_PROXIES` to the proxy.
+
+A request body larger than `NVR_MAX_REQUEST_BYTES` is refused with 413 before anything reads it, signed in or not. Put the same limit on the reverse proxy, so an oversized request is turned away before it reaches the NVR at all.

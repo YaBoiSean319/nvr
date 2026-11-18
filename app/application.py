@@ -17,7 +17,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import acceleration, api, db_health, network
+from . import acceleration, api, db_health, network, request_guards
 from .bulk_add import BulkAddRunner
 from .api import web_interface
 from .backup import BackupManager
@@ -184,7 +184,9 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         session_cookie="nvr_oidc_flow",
         max_age=600,
     )
-    app.add_middleware(network.TrustedProxyMiddleware)  # Outermost: everything below sees the scheme and host a trusted proxy reports
+    app.add_middleware(request_guards.SameOriginMiddleware)  # Inside the trusted-proxy step: it compares with the host that step reports
+    app.add_middleware(network.TrustedProxyMiddleware)  # Everything below sees the scheme and host a trusted proxy reports
+    app.add_middleware(request_guards.RequestSizeLimitMiddleware)  # Outermost: an oversized body is refused before anything reads it
     for router in api.ROUTERS:
         app.include_router(router)
 
