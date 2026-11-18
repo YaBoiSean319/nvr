@@ -1,6 +1,8 @@
 """External events in (#138): signed events, replays and forgeries refused, mapping to cameras, the timeline, rules, MQTT, Home Assistant, and secrets."""
 from __future__ import annotations
 
+import time as time_module
+
 import asyncio
 import json
 import re
@@ -125,6 +127,40 @@ class InboundTests(EventCase):
             codes = [self.send(source, self.event()).status_code for _ in range(5)]
         self.assertEqual(codes, [202, 202, 202, 429, 429])
         api._recent.clear()
+
+    def test_unsigned_requests_cannot_use_up_the_real_senders_allowance(self):
+        # Requests were once counted before their signature was checked, by the connecting address: behind a proxy, everyone's (#380).
+        source = self.http_source()
+        from app.api import external_events as api
+        api._recent.clear()
+        self.addCleanup(api._recent.clear)
+        with patch.object(api, "RATE_PER_MINUTE", 3):
+            flood = [self.send(source, self.event(), secret="not-the-secret-at-all").status_code for _ in range(20)]
+            self.assertEqual(set(flood), {401})
+            self.assertEqual([self.send(source, self.event()).status_code for _ in range(3)], [202, 202, 202], "the real sender was refused because of someone else's requests")
+            self.assertEqual(self.send(source, self.event()).status_code, 429)  # Its own allowance still holds
+
+    def test_made_up_source_ids_and_a_caller_that_keeps_failing_are_told_to_slow_down_but_a_signed_event_still_gets_in(self):
+        source = self.http_source()
+        from app.api import external_events as api
+        api._recent.clear()
+        self.addCleanup(api._recent.clear)
+        with patch.object(api, "UNVERIFIED_PER_MINUTE", 5):
+            codes = [self.send(f"made-up-{number}", self.event()).status_code for number in range(8)]
+            self.assertEqual(codes, [401] * 5 + [429] * 3)
+            self.assertEqual(self.send(source, self.event()).status_code, 202)  # From the same address, correctly signed
+
+    def test_the_limiter_forgets_callers_that_have_gone_quiet(self):
+        from app.api import external_events as api
+        api._recent.clear()
+        self.addCleanup(api._recent.clear)
+        for number in range(50):
+            api._limited(f"unverified|198.51.100.{number}", 5)
+        self.assertEqual(len(api._recent), 50)
+        later = time_module.monotonic() + 200
+        with patch.object(api.time, "monotonic", lambda: later):
+            api._limited("source|one")
+        self.assertEqual(list(api._recent), ["source|one"])
 
 
 class MappingTests(EventCase):
