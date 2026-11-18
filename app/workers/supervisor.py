@@ -145,8 +145,8 @@ class Supervisor:
         code = process.poll()
         if code is None and self._hung(worker, now):
             logger.warning("%s worker stopped reporting liveness; restarting it", worker.name)
-            worker.killed_reason = (f"killed by the supervisor: no sign of life for {liveness.STALE_AFTER.total_seconds():.0f} s (the process was alive but its event loop was blocked or starved; "
-                                    "the sign is a file, not a database write, so a busy database does not cause this)")
+            worker.killed_reason = (f"killed by the supervisor: no heartbeat for {liveness.STALE_AFTER.total_seconds():.0f} s (the process was alive but its event loop was blocked or starved; "
+                                    "the heartbeat the supervisor reads is a file, not a database write, so a busy database does not cause this)")
             end_group(process)  # Its children first: a SIGKILLed worker cannot stop them itself
             process.kill()
             code = process.wait()
