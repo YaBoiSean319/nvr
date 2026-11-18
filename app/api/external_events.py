@@ -1,6 +1,7 @@
 """External events in (#138): the signed inbound endpoint, event sources and their camera mappings (administrators), Home Assistant, and the events on cameras."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import deque
@@ -96,7 +97,8 @@ async def inbound(source_id: str, request: Request) -> JSONResponse:
             raise EventRefused(429, "Too many events")
 
     try:
-        result = external_events.receive_http(source_id, body, request.headers, admit=admit)
+        # In a thread: storing the event takes the database's write lock, and waiting for it must not stop the web process (#354).
+        result = await asyncio.to_thread(external_events.receive_http, source_id, body, request.headers, admit=admit)
     except EventRefused as exc:
         if exc.status == 401 and _limited(f"unverified|{network.client_address(request)}", UNVERIFIED_PER_MINUTE):
             # A caller that keeps failing the check is told to slow down. Its requests are still checked, never dropped unread: a correctly signed

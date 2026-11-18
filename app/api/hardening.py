@@ -38,8 +38,12 @@ def get_report(_: Administrator) -> dict[str, object]:
 async def run_checks(admin: Administrator) -> dict[str, object]:
     """Run every check now. A camera probed within the probe gap is not probed again: its last answer is used."""
     result = await asyncio.to_thread(hardening.run, "manual")
-    with connect() as db:
-        record(db, admin.id, "hardening_run", "hardening", "checks", high=result["counts"]["high"], medium=result["counts"]["medium"])
+
+    def note() -> None:
+        with connect() as db:
+            record(db, admin.id, "hardening_run", "hardening", "checks", high=result["counts"]["high"], medium=result["counts"]["medium"])
+
+    await asyncio.to_thread(note)  # Off the event loop, like every database write in an asynchronous route (#354)
     return result
 
 
@@ -49,19 +53,22 @@ async def put_settings(payload: Settings, admin: Administrator) -> dict[str, obj
         hardening.parse_networks(payload.camera_networks)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            before = [str(network) for network in hardening.networks(db)]
-            after = hardening.set_networks(db, payload.camera_networks)
-            record(db, admin.id, "hardening_networks_set", "hardening", "networks", before=before, after=after)
-            if payload.probes_enabled is not None and payload.probes_enabled != hardening.probes_enabled(db):
-                hardening.set_probes_enabled(db, payload.probes_enabled)
-                record(db, admin.id, "hardening_probes_set", "hardening", "probes", enabled=payload.probes_enabled)
-            db.execute("COMMIT")
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
+    def save() -> None:
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                before = [str(network) for network in hardening.networks(db)]
+                after = hardening.set_networks(db, payload.camera_networks)
+                record(db, admin.id, "hardening_networks_set", "hardening", "networks", before=before, after=after)
+                if payload.probes_enabled is not None and payload.probes_enabled != hardening.probes_enabled(db):
+                    hardening.set_probes_enabled(db, payload.probes_enabled)
+                    record(db, admin.id, "hardening_probes_set", "hardening", "probes", enabled=payload.probes_enabled)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+    await asyncio.to_thread(save)  # Off the event loop (#354)
     return await asyncio.to_thread(hardening.run, "manual")
 
 

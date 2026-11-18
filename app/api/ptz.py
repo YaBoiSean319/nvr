@@ -98,9 +98,10 @@ def _client(camera_id: str):
 
 async def _command(camera_id: str, user: Principal, action) -> dict[str, object]:
     """Run a camera command for the lease holder, taking or renewing the lease first."""
-    client = _client(camera_id)
+    # In a thread: the pad sends a move every second and each takes the database's write lock for the lease (#354).
+    client = await asyncio.to_thread(_client, camera_id)
     try:
-        lease = ptz.acquire(camera_id, int(user["id"]))
+        lease = await asyncio.to_thread(ptz.acquire, camera_id, int(user["id"]))
     except ptz.LeaseHeld as exc:
         raise HTTPException(status_code=409, detail=f"{exc.holder} is controlling this camera") from exc
     try:
