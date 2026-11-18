@@ -405,9 +405,13 @@ class ExternalEventManager:
         async def on_message(topic: str, payload: bytes) -> None:
             await asyncio.to_thread(receive_message, source_id, topic, payload)
 
+        def connected() -> None:
+            nonlocal delay
+            delay = 2.0  # A working connection: the next reconnect starts from the shortest wait again (#382)
+
         while True:
             try:
-                await mqtt.subscribe(broker, filters, on_message)
+                await mqtt.subscribe(broker, filters, on_message, on_subscribed=connected)
                 error = "The broker closed the connection"
             except asyncio.CancelledError:
                 raise

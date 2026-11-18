@@ -16,6 +16,7 @@ TIMEOUT_SECONDS = 10
 MAX_REPLY_BYTES = 256  # CONNACK and PUBACK are 2 bytes; anything large is not a broker we understand.
 MAX_MESSAGE_BYTES = 64 * 1024  # The largest message a subscription accepts; a bigger one is skipped.
 KEEPALIVE_SECONDS = 60
+SILENCE_SECONDS = KEEPALIVE_SECONDS * 2  # A ping goes out every half keep-alive and is answered: silence this long means the broker has gone without closing
 DEFAULT_PORTS = {"mqtt": 1883, "mqtts": 8883}
 
 
@@ -85,6 +86,32 @@ async def _read_packet(reader: asyncio.StreamReader, limit: int = MAX_REPLY_BYTE
     return header, await reader.readexactly(length)
 
 
+_PUBLISH_HEAD_BYTES = 2 + 65535 + 2  # Topic length, the longest topic, a packet id: enough of any message to acknowledge it
+
+
+async def _read_message(reader: asyncio.StreamReader, limit: int) -> tuple[int, bytes, bool]:
+    """A packet while subscribed: (header, body, whether it was over ``limit``). An oversized one is read off the connection and thrown away,
+    keeping only enough of its start to acknowledge it. It used to end the connection, and a retained one is sent again on every reconnect, so
+    one large retained message on a matching topic stopped a source's events for good (#382)."""
+    header = (await reader.readexactly(1))[0]
+    multiplier, length = 1, 0
+    for _ in range(4):
+        byte = (await reader.readexactly(1))[0]
+        length += (byte & 0x7F) * multiplier
+        if not byte & 0x80:
+            break
+        multiplier *= 128
+    else:
+        raise ConnectionError("MQTT reply length is invalid")
+    if length <= limit:
+        return header, await reader.readexactly(length), False
+    head = await reader.readexactly(min(length, _PUBLISH_HEAD_BYTES))
+    left = length - len(head)
+    while left:
+        left -= len(await reader.readexactly(min(left, 65536)))
+    return header, head, True
+
+
 async def publish(broker: Broker, topic: str, payload: bytes, *, qos: int = 1, retain: bool = False) -> None:
     context = ssl.create_default_context() if broker.tls else None
     reader, writer = await asyncio.wait_for(asyncio.open_connection(broker.host, broker.port, ssl=context), TIMEOUT_SECONDS)
@@ -144,7 +171,7 @@ def validate_filter(topic_filter: str) -> str:
     return topic_filter
 
 
-async def subscribe(broker: Broker, filters: list[str], on_message, *, client_id: str | None = None) -> None:
+async def subscribe(broker: Broker, filters: list[str], on_message, *, client_id: str | None = None, on_subscribed=None, on_skipped=None) -> None:
     """Connect, subscribe and hand each message to ``await on_message(topic, payload)`` until the connection ends (the caller reconnects).
 
     Messages larger than ``MAX_MESSAGE_BYTES`` are dropped. Raises ``MqttRefused`` when the broker refuses the login, ``ConnectionError`` or ``OSError`` when it goes away."""
@@ -181,8 +208,13 @@ async def subscribe(broker: Broker, filters: list[str], on_message, *, client_id
                 await writer.drain()
 
         ping = asyncio.create_task(keep_alive())
+        if on_subscribed is not None:
+            on_subscribed()
         while True:
-            header, body = await _read_packet(reader, MAX_MESSAGE_BYTES + 2048)
+            try:
+                header, body, oversized = await asyncio.wait_for(_read_message(reader, MAX_MESSAGE_BYTES + 2048), SILENCE_SECONDS)
+            except asyncio.TimeoutError:
+                raise ConnectionError("MQTT broker stopped answering") from None
             if header >> 4 != 3:
                 continue  # PINGRESP, or anything else a broker may send
             qos = (header >> 1) & 0x03
@@ -194,6 +226,10 @@ async def subscribe(broker: Broker, filters: list[str], on_message, *, client_id
                 await writer.drain()
                 offset += 2
             payload = body[offset:]
+            if oversized:
+                if on_skipped is not None:
+                    on_skipped(topic)
+                continue
             # A retained message is a stored copy the broker replays on every connect, not something that just happened.
             if len(payload) <= MAX_MESSAGE_BYTES and not retained:
                 await on_message(topic, payload)
