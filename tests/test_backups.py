@@ -237,6 +237,15 @@ class BackupTests(unittest.TestCase):
         names = [backup.create_backup("manual")["file_name"] for _ in range(4)]
         self.assertEqual([path.name for path in self._files()], names[-2:])
 
+    def test_a_standbys_sync_backups_never_push_out_the_others(self):
+        # A primary with a standby makes a "failover" backup every few minutes (#342).
+        os.environ["NVR_BACKUP_KEEP"] = "4"
+        kept = [backup.create_backup(kind)["file_name"] for kind in ("pre_migration", "scheduled", "scheduled", "manual")]
+        syncs = [backup.create_backup("failover")["file_name"] for _ in range(6)]
+        self.assertEqual(sorted(path.name for path in self._files()), sorted(kept + syncs[-backup.FAILOVER_KEEP:]))
+        newer = backup.create_backup("scheduled")["file_name"]
+        self.assertEqual(sorted(path.name for path in self._files()), sorted(kept[1:] + [newer] + syncs[-backup.FAILOVER_KEEP:]))
+
     def test_schedule_runs_once_per_day_after_the_site_time(self):
         def due(moment: str) -> bool:
             return backup.scheduled_run_due(datetime.fromisoformat(moment))

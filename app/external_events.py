@@ -87,7 +87,7 @@ def verify_signature(secret: str, body: bytes, timestamp: str | None, signature:
     if abs((time.time() if now is None else now) - stamp) > SIGNATURE_WINDOW_SECONDS:
         return False
     expected = hmac.new(secret.encode("utf-8"), timestamp.encode("ascii", errors="replace") + b"." + body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature[7:], expected)
+    return hmac.compare_digest(signature[7:].encode("utf-8", "surrogatepass"), expected.encode("ascii"))  # As bytes: comparing text raises on a non-ASCII signature (#371)
 
 
 # --- events -------------------------------------------------------------------------------------------------------------------------------
@@ -405,9 +405,13 @@ class ExternalEventManager:
         async def on_message(topic: str, payload: bytes) -> None:
             await asyncio.to_thread(receive_message, source_id, topic, payload)
 
+        def connected() -> None:
+            nonlocal delay
+            delay = 2.0  # A working connection: the next reconnect starts from the shortest wait again (#382)
+
         while True:
             try:
-                await mqtt.subscribe(broker, filters, on_message)
+                await mqtt.subscribe(broker, filters, on_message, on_subscribed=connected)
                 error = "The broker closed the connection"
             except asyncio.CancelledError:
                 raise

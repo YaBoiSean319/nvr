@@ -164,14 +164,19 @@ def verify_registration(credential: dict[str, Any], challenge: bytes, rp: Relyin
         _client_data(response, "webauthn.create", challenge, rp)
         attestation = cbor.decode(unb64url(response["attestationObject"]))
         auth = _parse_auth_data(attestation["authData"])
-    except (KeyError, TypeError, cbor.CborError) as exc:
+    except (KeyError, TypeError, AttributeError, cbor.CborError) as exc:  # AttributeError: a "response" that is not an object (#371)
         raise WebAuthnError("The passkey response is malformed") from exc
     _check_relying_party(auth, rp, require_verified=False)
     if auth.credential_id is None or auth.cose_key is None:
         raise WebAuthnError("The response carries no new passkey")
     if b64url(auth.credential_id) != credential.get("id"):
         raise WebAuthnError("The passkey response is inconsistent")
-    key = cbor.decode(auth.cose_key)
+    try:
+        key = cbor.decode(auth.cose_key)
+    except cbor.CborError as exc:
+        raise WebAuthnError("The passkey response is malformed") from exc
+    if not isinstance(key, dict):
+        raise WebAuthnError("The passkey response is malformed")
     algorithm = key.get(3)
     if algorithm not in SUPPORTED:
         raise WebAuthnError("This passkey uses an algorithm the NVR does not support")
@@ -210,7 +215,7 @@ def verify_assertion(credential: dict[str, Any], challenge: bytes, rp: RelyingPa
         client_data = _client_data(response, "webauthn.get", challenge, rp)
         authenticator_data = unb64url(response["authenticatorData"])
         signature = unb64url(response["signature"])
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, AttributeError) as exc:
         raise WebAuthnError("The passkey response is malformed") from exc
     auth = _parse_auth_data(authenticator_data)
     _check_relying_party(auth, rp, require_verified)

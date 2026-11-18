@@ -34,7 +34,9 @@ def new_session_token() -> str:
 
 
 def token_digest(token: str) -> str:
-    return hashlib.sha256(token.encode("ascii")).hexdigest()
+    """The stored form of a session, wall or challenge token. Every token the NVR issues is ASCII, for which this is the digest it always was;
+    anything else a caller sends is digested too and simply matches nothing, where it used to raise and answer 500 (#371)."""
+    return hashlib.sha256(token.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 _decoy: str | None = None

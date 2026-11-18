@@ -108,6 +108,22 @@ def recording_file_path(relative_path: str) -> Path:
     return cold if cold is not None else hot
 
 
+def fetch_cold_sources(camera_ids, start, end) -> None:
+    """Bring the footage of these cameras in [start, end) that has moved to a cold tier within reach, before a caller takes the database's write
+    lock to lease it.
+
+    Leasing sources is done under the write lock, so retention cannot remove a file between choosing it and leasing it. Finding a cold source's
+    file downloads it from a bucket tier, and an hour of cold footage is sixty downloads: done under the lock, no process could write for as
+    long as they took, every worker's heartbeat failed and the export failed anyway (#358). Fetched here first, the files are in the cache when
+    the lock is taken, which then only checks and leases them. An error (an unreachable bucket) is raised here, with no lock held."""
+    with connect() as db:
+        paths = [row[0] for camera_id in camera_ids for row in db.execute(
+            "SELECT relative_path FROM recording_segments WHERE camera_id=? AND starts_at<? AND ends_at>? AND unavailable_at IS NULL AND tier_id IS NOT NULL ORDER BY starts_at",
+            (camera_id, end.isoformat(), start.isoformat()))]
+    for relative_path in paths:
+        recording_file_path(relative_path)
+
+
 def segment_available(relative_path: str) -> bool:
     """Whether a segment's footage exists, without fetching it from an object store to find out."""
     from . import tiering

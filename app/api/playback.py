@@ -57,7 +57,7 @@ def synchronized_playback_timeline(
             camera = db.execute("SELECT id,name,recording_status,audio_supported,audio_enabled,video_codec FROM cameras WHERE id=?", (camera_id,)).fetchone()
             if camera is None or not user.access.can_see(camera_id):  # A hidden camera is an unknown one.
                 raise HTTPException(status_code=422, detail="Playback request contains an unknown camera")
-            recorded = coverage_timeline(db, camera_id, start, end)
+            recorded = coverage_timeline(db, camera_id, start, end, limit=None)  # Every segment of the search: gaps worked out from a cut-off list are false (#360)
             segments = [{**row, "media_url": f"/api/cameras/{camera_id}/segments/{row['id']}/media"} for row in recorded["segments"]]
             coverage, gaps = recorded["coverage"], recorded["gaps"]
             event_rows = db.execute(

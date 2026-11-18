@@ -5,7 +5,9 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from app.store import connect
 
@@ -42,9 +44,42 @@ def beat(name: str) -> None:
         )
 
 
+def pulse_path(name: str) -> Path:
+    from app.workers import control_directory
+
+    return control_directory() / f"{name}.alive"
+
+
+def pulse(name: str) -> None:
+    """Say "this process's event loop is turning" to the supervisor, without the database: a small file holding the process id, rewritten every beat.
+
+    The supervisor used to judge a worker by its database heartbeat alone. That is a write, so when nothing could write for 30 s (one long
+    transaction anywhere, a stalling disk) every worker looked hung and was killed, the recorder included (#336)."""
+    path = pulse_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    temporary.write_text(str(os.getpid()), encoding="ascii")
+    os.replace(temporary, path)
+
+
+def pulse_fresh(name: str, pid: int | None, now: float | None = None) -> bool:
+    """Whether the worker with this process id has pulsed within ``STALE_AFTER``."""
+    path = pulse_path(name)
+    try:
+        age = (time.time() if now is None else now) - path.stat().st_mtime
+        return age <= STALE_AFTER.total_seconds() and pid is not None and path.read_text(encoding="ascii").strip() == str(pid)
+    except (OSError, UnicodeError):
+        return False
+
+
 async def heartbeat_forever(name: str) -> None:
-    """Report this process alive until cancelled."""
+    """Report this process alive until cancelled: the pulse the supervisor reads, then the database row the status page reads. Neither failing
+    stops the other, and a database that is busy only makes the status page stale."""
     while True:
+        try:
+            pulse(name)
+        except OSError:
+            logger.warning("%s worker could not write its liveness file", name)
         try:
             await asyncio.to_thread(beat, name)
         except sqlite3.Error:

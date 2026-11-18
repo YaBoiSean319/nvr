@@ -249,6 +249,43 @@ class RunContinuousTests(unittest.TestCase):
         asyncio.run(body())
         self.assertEqual(started, ["continuous"])
 
+    # The reconnect wait starts short again after stable recording, and a run that recorded nothing leaves no folder (#341).
+
+    def test_a_run_that_recorded_nothing_leaves_no_folder_behind(self):
+        camera_id = self.camera()
+        fake = self.fake_ffmpeg("sys.stdin.read()\nsys.exit(1)")  # Could not connect
+        self.assertIsNone(self.run_loop(camera_id, fake, seconds=3))
+        folder = self.root / "recordings" / camera_id
+        self.assertEqual([path.name for path in folder.iterdir()] if folder.exists() else [], [])
+
+    def test_a_folder_with_footage_is_kept_and_old_empty_ones_are_swept_at_start(self):
+        from app.recording import RecordingManager, remove_run_folder_if_empty
+
+        camera_id = self.camera()
+        base = self.root / "recordings" / camera_id
+        for name in ("empty", "only-list", "with-footage"):
+            (base / name).mkdir(parents=True)
+        (base / "only-list" / "segments.csv").write_text("")
+        (base / "with-footage" / "segments.csv").write_text("")
+        (base / "with-footage" / "segment-20260101T000000Z.mp4").write_bytes(b"x")
+        self.assertFalse(remove_run_folder_if_empty(base / "with-footage"))
+        self.assertEqual(RecordingManager._sweep_empty_run_folders([camera_id, "no-such-camera"]), 2)
+        self.assertEqual(sorted(path.name for path in base.iterdir()), ["with-footage"])
+
+    def test_the_reconnect_wait_starts_short_again_after_recording_well(self):
+        from app.recording import RECONNECT_MAX_SECONDS, STABLE_SECONDS, failures_after
+
+        def wait(failures: int) -> int:
+            return min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS)
+
+        failures = 0
+        for _ in range(6):  # A camera that cannot connect: each attempt ends at once
+            failures = failures_after(failures, 0.5)
+        self.assertEqual(wait(failures), RECONNECT_MAX_SECONDS)
+        failures = failures_after(failures, STABLE_SECONDS)  # Then it records for a minute and drops
+        self.assertEqual((failures, wait(failures)), (1, 2))
+        self.assertEqual(failures_after(1, STABLE_SECONDS - 1), 2)
+
     def test_a_file_that_vanishes_while_the_folder_is_listed_is_not_an_error(self):
         from app.recording import newest_is_fresh
 

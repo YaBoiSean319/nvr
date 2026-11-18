@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -246,6 +247,29 @@ def newest_is_fresh(folder: Path, pattern: str, seconds: float = 10) -> bool:
     return bool(newest) and datetime.now().timestamp() - newest <= seconds
 
 
+STABLE_SECONDS = 60  # A camera that recorded this long before it dropped starts its reconnect wait from the shortest again (#341)
+
+
+def failures_after(failures: int, ran_seconds: float) -> int:
+    """How many interruptions in a row a camera has had, after one more: a camera that had been recording for a while starts counting again, so
+    its next reconnect waits the shortest time. The count used only to grow, and after five interruptions since the recorder started every
+    reconnect waited the longest time, however well the camera had recorded in between (#341)."""
+    return 1 if ran_seconds >= STABLE_SECONDS else failures + 1
+
+
+def remove_run_folder_if_empty(folder: Path) -> bool:
+    """Remove a recording run's folder that holds no footage: nothing, or only FFmpeg's segment list. Each connection attempt makes a folder
+    before FFmpeg starts, so a camera that is offline left one about every 30 seconds, for ever (#341)."""
+    try:
+        with os.scandir(folder) as entries:
+            if any(entry.name != "segments.csv" for entry in entries):
+                return False
+        shutil.rmtree(folder, ignore_errors=True)
+        return True
+    except OSError:
+        return False
+
+
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -266,6 +290,10 @@ class RecordingManager:
             viewing_audit.close_orphans(db)
         with connect() as db:
             rows = db.execute("SELECT id FROM cameras").fetchall()
+        try:  # Before any camera starts: a run's folder is empty at the moment it is made
+            await asyncio.to_thread(self._sweep_empty_run_folders, [row["id"] for row in rows])
+        except Exception:  # noqa: BLE001 - tidying must never stop recording from starting
+            logging.getLogger("nvr.recording").exception("Empty recording folders could not be cleared")
         for row in rows:
             await self.sync_camera(row["id"])
         self.scheduler_task = asyncio.create_task(self._schedule_loop(), name="recording-schedule-supervisor")
@@ -273,6 +301,21 @@ class RecordingManager:
         self.headroom_task = asyncio.create_task(self._headroom_loop(), name="recording-storage-headroom")
         self.storage_task = asyncio.create_task(self._storage_loop(), name="recording-storage-health")
         await self.tamper.start()
+
+    @staticmethod
+    def _sweep_empty_run_folders(camera_ids: list[str]) -> int:
+        """Clear the empty run folders left by earlier connection attempts and by runs whose footage has all expired."""
+        from .storage import camera_recordings_dir
+
+        removed = 0
+        for camera_id in camera_ids:
+            try:
+                with os.scandir(camera_recordings_dir(camera_id)) as runs:
+                    folders = [Path(entry.path) for entry in runs if entry.is_dir(follow_symlinks=False)]
+            except OSError:
+                continue
+            removed += sum(remove_run_folder_if_empty(folder) for folder in folders)
+        return removed
 
     async def stop(self) -> None:
         self.stopping = True
@@ -590,13 +633,15 @@ class RecordingManager:
                 self._set_status(camera_id, "stopped")
                 return
             if expected_mode == "motion":
+                began = time.monotonic()
                 should_retry = await self._run_motion(camera_id)
+                ran_for = time.monotonic() - began
                 row = self._camera(camera_id)
                 if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode or self.stopping:
                     return
                 if not should_retry:
                     return
-                failures += 1
+                failures = failures_after(failures, ran_for)
                 await asyncio.sleep(min(2 ** min(failures, 5), RECONNECT_MAX_SECONDS))
             else:
                 await self._run_continuous(camera_id, expected_mode)
@@ -884,12 +929,13 @@ class RecordingManager:
                 process.stdin.write(_manifest_bytes(source))
                 await process.stdin.drain()
                 process.stdin.close()
+                began = time.monotonic()
                 await self._watch_continuous_output(camera_id, process, list_path, output_dir, segment_duration)
                 await self._end_ffmpeg(process)
                 self._index_csv(camera_id, list_path, output_dir)
                 if self.stopping:
                     return
-                failures += 1
+                failures = failures_after(failures, time.monotonic() - began)
                 self._set_status(camera_id, "reconnecting", "Camera stream interrupted; retrying", fault=await _stream_fault(source))
             except asyncio.CancelledError:
                 await self._end_ffmpeg(process)
@@ -909,6 +955,7 @@ class RecordingManager:
                 # However the watch ended, the FFmpeg this pass started is ended before another is started beside it (#335).
                 await self._end_ffmpeg(process)
                 self._indexed_lines.pop(list_path, None)  # Each run writes a new list
+                remove_run_folder_if_empty(output_dir)
                 if progress_task:
                     progress_task.cancel()
                     await asyncio.gather(progress_task, return_exceptions=True)

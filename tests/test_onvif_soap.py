@@ -59,7 +59,9 @@ class Recorder:
         self.seen.append((request.headers["content-type"], body))
         if callable(self.answer):
             return self.answer(body)
-        return self.answer if self.answer is not None else soap("<ok/>")
+        if self.answer is None:
+            return soap("<ok/>")
+        return httpx.Response(self.answer.status_code, content=self.answer.content)  # A new answer each time: a response is read only once
 
 
 def camera(module, handler):

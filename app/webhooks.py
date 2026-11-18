@@ -73,6 +73,11 @@ def _split_target(value: str) -> tuple[SplitResult, str, int | None]:
     return parsed, host, port
 
 
+class Unresolved(ValueError):
+    """The receiver's host name could not be looked up just now. Refused when a receiver is saved, like any unusable address; at delivery time it
+    is a passing fault (the site's uplink or DNS is down) and the delivery is tried again (#379)."""
+
+
 def _destination_addresses(parsed: SplitResult, host: str, port: int | None) -> tuple[list[ipaddress.IPv4Address | ipaddress.IPv6Address], bool]:
     """Where the URL points: the address itself when it is one (True), otherwise every address its name resolves to (False)."""
     try:
@@ -82,7 +87,7 @@ def _destination_addresses(parsed: SplitResult, host: str, port: int | None) -> 
     try:
         resolved = socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
     except OSError as exc:
-        raise ValueError("Webhook hostname could not be resolved") from exc
+        raise Unresolved("Webhook hostname could not be resolved") from exc
     addresses = list({ipaddress.ip_address(item[4][0]) for item in resolved})
     if not addresses:
         raise ValueError("Webhook hostname has no usable address")
@@ -257,6 +262,21 @@ def list_deliveries(limit: int = 100) -> list[dict[str, Any]]:
     return [{key: row[key] for key in ("id", "endpoint_id", "endpoint_name", "event_id", "event_type", "status", "attempt_count", "next_attempt_at", "response_status", "error_code", "created_at", "updated_at", "delivered_at")} for row in rows]
 
 
+HISTORY_DAYS = 30  # How long a finished delivery (delivered or failed) is kept for the deliveries list
+PRUNE_EVERY_SECONDS = 3600
+
+
+def prune_deliveries(now: datetime | None = None) -> int:
+    """Remove finished deliveries older than ``HISTORY_DAYS``; returns how many. Nothing removed them before, and every new event counted the
+    receiver's history (#350). Read first, so a pass with nothing due takes no write lock (#280)."""
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=HISTORY_DAYS)).isoformat()
+    due = "FROM webhook_deliveries WHERE status IN ('delivered','failed') AND updated_at<?"
+    with connect() as db:
+        if not has_row(db, f"SELECT 1 {due} LIMIT 1", (cutoff,)):
+            return 0
+        return db.execute(f"DELETE {due}", (cutoff,)).rowcount
+
+
 def recover_inflight() -> None:
     with connect() as db:
         db.execute("UPDATE webhook_deliveries SET status='queued',next_attempt_at=?,updated_at=?,error_code='process_restarted' WHERE status='delivering'", (_now(), _now()))
@@ -268,10 +288,13 @@ def claim_due_delivery() -> dict[str, Any] | None:
         if not has_row(db, "SELECT 1 FROM webhook_deliveries WHERE status='queued' AND next_attempt_at<=? LIMIT 1", (now,)):
             return None
         db.execute("BEGIN IMMEDIATE")
+        # One delivery at a time for each receiver, so its events arrive in order and a receiver that does not answer holds up only its own (#379).
         row = db.execute(
             "SELECT d.*,e.target_url_ciphertext,e.signing_secret_ciphertext,e.allow_private,e.enabled AS endpoint_enabled "
             "FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id "
-            "WHERE d.status='queued' AND d.next_attempt_at<=? ORDER BY d.created_at LIMIT 1",
+            "WHERE d.status='queued' AND d.next_attempt_at<=? "
+            "AND NOT EXISTS (SELECT 1 FROM webhook_deliveries busy WHERE busy.endpoint_id=d.endpoint_id AND busy.status='delivering') "
+            "ORDER BY d.created_at LIMIT 1",
             (now,),
         ).fetchone()
         if row is None:
@@ -296,26 +319,34 @@ def finish_delivery(delivery_id: str, attempt: int, *, response_status: int | No
         )
 
 
+DELIVERY_WORKERS = 4  # Receivers are delivered to side by side; each receiver still gets one delivery at a time
+ATTEMPT_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 5  # For a whole attempt: the HTTP timeout is per read, and a receiver can answer a byte at a time
+
+
 class WebhookManager:
     def __init__(self) -> None:
-        self.task: asyncio.Task[None] | None = None
+        self.tasks: list[asyncio.Task[None]] = []
         self.stopping = False
+        self._pruned_at = 0.0
 
     async def start(self) -> None:
         self.stopping = False
         recover_inflight()
-        self.task = asyncio.create_task(self._run(), name="webhook-delivery-worker")
+        self.tasks = [asyncio.create_task(self._run(), name=f"webhook-delivery-worker-{number}") for number in range(DELIVERY_WORKERS)]
 
     async def stop(self) -> None:
         self.stopping = True
-        if self.task and not self.task.done():
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
-        self.task = None
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks = []
 
     async def _run(self) -> None:
         while not self.stopping:
             try:
+                if time.monotonic() - self._pruned_at >= PRUNE_EVERY_SECONDS:
+                    self._pruned_at = time.monotonic()
+                    await asyncio.to_thread(prune_deliveries)
                 delivery = await asyncio.to_thread(claim_due_delivery)
                 if delivery is None:
                     await asyncio.sleep(1)
@@ -342,11 +373,13 @@ class WebhookManager:
             )
             body = json.dumps(json.loads(delivery["payload_json"]), sort_keys=True, separators=(",", ":")).encode("utf-8")
             headers = signed_headers(decrypt(delivery["signing_secret_ciphertext"]), str(delivery["event_id"]), str(delivery["event_type"]), body)
-            async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
-                response = await client.post(target, content=body, headers=headers)
-            code = int(response.status_code)
+            async with asyncio.timeout(ATTEMPT_DEADLINE_SECONDS):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=3), follow_redirects=False, trust_env=False) as client:
+                    async with client.stream("POST", target, content=body, headers=headers) as response:  # Only the status matters: the answer's body is never read
+                        code = int(response.status_code)
             await self._finish(delivery_id, attempt, response_status=code, error_code=None if 200 <= code < 300 else f"receiver_http_{code}", retryable=code == 429 or code >= 500)
         except Exception as exc:
-            error_code = "invalid_destination" if isinstance(exc, ValueError) else f"transport_{type(exc).__name__}"
-            await self._finish(delivery_id, attempt, error_code=error_code, retryable=not isinstance(exc, ValueError))
+            refused = isinstance(exc, ValueError) and not isinstance(exc, Unresolved)
+            error_code = "invalid_destination" if refused else "destination_unresolved" if isinstance(exc, Unresolved) else f"transport_{type(exc).__name__}"
+            await self._finish(delivery_id, attempt, error_code=error_code, retryable=not refused)
 

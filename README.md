@@ -161,7 +161,7 @@ Maintenance windows quiet alerts for cameras (or the whole site) while they are 
 
 Email alerts go through Microsoft 365 with a Microsoft sign-in (device code) rather than a mail password: see [docs/email-alerts.md](docs/email-alerts.md). `NVR_MS_LOGIN_URL` and `NVR_MS_GRAPH_URL` can point at another Microsoft cloud or a test stand-in.
 
-Backups run daily at 02:17 in the site time zone, before every schema migration, and on demand (**Back up now** in **Settings › Recording & storage**, or `POST /api/backups`; administrators only). They are written to `NVR_BACKUP_PATH` (`/backups` in Compose), and the newest `NVR_BACKUP_KEEP` (default 14) are kept. Mount `/backups` on a different disk or host than the NVR data. `GET /api/backups` reports backup age, the last success and failure, and the stored files. A failed backup, or no success for 26 hours, raises an incident (`system.failure` webhook) that recovers on the next success.
+Backups run daily at 02:17 in the site time zone, before every schema migration, and on demand (**Back up now** in **Settings › Recording & storage**, or `POST /api/backups`; administrators only). They are written to `NVR_BACKUP_PATH` (`/backups` in Compose), and the newest `NVR_BACKUP_KEEP` (default 14) are kept. The backups a standby's sync makes are counted on their own (the newest two are kept), so they never push out the others. Mount `/backups` on a different disk or host than the NVR data. `GET /api/backups` reports backup age, the last success and failure, and the stored files. A failed backup, or no success for 26 hours, raises an incident (`system.failure` webhook) that recovers on the next success.
 
 To restore, stop the NVR, then run the restore command in a one-off container with the same volumes and passphrase:
 

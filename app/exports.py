@@ -22,7 +22,7 @@ from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
-from .storage import recording_file_path
+from .storage import fetch_cold_sources, recording_file_path
 from .store import connect
 
 POLL_SECONDS = 2
@@ -642,6 +642,7 @@ def _reserve_sources(job: "_ExportJob", acquired: list[Path]) -> tuple[list[dict
     audio_camera_id = job.audio_camera_id
     start = job.start
     end = job.end
+    fetch_cold_sources(camera_ids, start, end)  # Downloads happen here, before the lock (#358)
     with connect() as db:
         # Retention also takes this write lock before unlinking a segment.
         # Keep it until the in-memory lease is installed for every source.
@@ -856,14 +857,21 @@ class ExportManager:
         with connect() as db:
             db.execute("UPDATE exports SET progress=?,updated_at=? WHERE id=? AND status='running'", (max(0, min(99, int(percent))), datetime.now(timezone.utc).isoformat(), job_id))
 
+    def _advance_progress(self, job_id: str, moving: bool) -> None:
+        """One step of the figure shown while a camera's video is encoded, up to 84 percent."""
+        with connect() as db:
+            row = db.execute("SELECT progress FROM exports WHERE id=?", (job_id,)).fetchone()
+        current = int(row[0]) if row else 0
+        self._progress(job_id, max(current, min(84, current + (1 if moving else 0))))
+
     async def _expire_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
-            expire_exports()
-            try:
-                redaction.expire_reviews()
-            except sqlite3.Error:
-                pass
+            for expire in (expire_exports, redaction.expire_reviews):
+                try:
+                    expire()
+                except (sqlite3.Error, OSError):
+                    logging.getLogger(__name__).warning("Expired exports or reviews could not be cleared this time", exc_info=True)
 
     async def _poll_loop(self) -> None:
         """Pick up queued jobs and cancel requests even when a nudge was lost."""
@@ -873,8 +881,20 @@ class ExportManager:
                 with connect() as db:
                     queued = [row[0] for row in db.execute("SELECT id FROM exports WHERE status='queued' ORDER BY created_at")]
                     cancelling = {row[0] for row in db.execute("SELECT id FROM exports WHERE status='running' AND cancel_requested=1")}
+                    running = [row[0] for row in db.execute("SELECT id FROM exports WHERE status='running'")]
+                    if self._running is None and running and not self._stopping:
+                        # Nothing is being rendered, yet a job says it is: its end could not be recorded (#357). Say so rather than leave it for ever.
+                        now = datetime.now(timezone.utc).isoformat()
+                        for row in db.execute("SELECT id,requested_by FROM exports WHERE status='running'").fetchall():
+                            if row["id"] == self._running:
+                                continue
+                            db.execute("UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=? AND status='running'", ("Export was interrupted by an internal error; start it again", now, now, row["id"]))
+                            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (row["requested_by"], "export_failed", "export", row["id"], '{"reason":"worker_error"}'))
             except sqlite3.Error:
                 continue
+            if (self._worker is None or self._worker.done()) and not self._stopping:
+                logging.getLogger(__name__).error("The export worker had ended; starting it again")
+                self._worker = asyncio.create_task(self._run(), name="nvr-export-worker")
             for job_id in queued:
                 self.enqueue(job_id)
             if self._case_task is None or self._case_task.done():
@@ -953,6 +973,11 @@ class ExportManager:
                     continue
                 self._running = job_id
                 await self._execute(job_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one job's error (the database busy while it was claimed or finished) must not end the worker (#357)
+                # A job still queued is picked up again by the poll; one left "running" with nothing running is failed by the poll.
+                logging.getLogger(__name__).exception("Export %s could not be run or finished; the export worker carries on", job_id)
             finally:
                 self._running = None
                 self._queue.task_done()
@@ -1238,10 +1263,10 @@ class ExportManager:
                         elapsed = int(line.split(b"=", 1)[1]) / 1_000_000
                     except ValueError:
                         continue
-                    with connect() as db:
-                        row = db.execute("SELECT progress FROM exports WHERE id=?", (job_id,)).fetchone()
-                    current = int(row[0]) if row else 0
-                    self._progress(job_id, max(current, min(84, current + (1 if elapsed > 0 else 0))))
+                    try:
+                        await asyncio.to_thread(self._advance_progress, job_id, elapsed > 0)
+                    except sqlite3.Error:
+                        pass  # The figure is for people; FFmpeg's output must keep being read or it stops (#357)
 
         try:
             progress_task = asyncio.create_task(read_progress())
