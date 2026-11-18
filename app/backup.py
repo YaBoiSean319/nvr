@@ -223,13 +223,20 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
     return {"file_name": name, "size_bytes": final_path.stat().st_size, "created_at": created.isoformat(), "run_id": run_id}
 
 
+FAILOVER_KEEP = 2  # A standby's sync makes one of these every few minutes; only the newest are any use
+
+
 def prune() -> list[str]:
+    """Remove backups beyond what is kept. The backups a standby's sync makes are counted on their own: a primary with a standby makes one
+    every few minutes, and counted with the rest they pushed every scheduled, manual and pre-migration backup out within hours (#342)."""
     files = sorted(destination().glob(f"nvr-config-*{SUFFIX}"))
+    failover = [item for item in files if item.name.endswith(f"-failover{SUFFIX}")]
+    others = [item for item in files if item not in failover]
     removed = []
-    for stale in files[:-keep()]:
+    for stale in others[:-keep()] + failover[:-FAILOVER_KEEP]:
         stale.unlink(missing_ok=True)
         removed.append(stale.name)
-    return removed
+    return sorted(removed)
 
 
 def pre_migration_backup(database: Path) -> None:

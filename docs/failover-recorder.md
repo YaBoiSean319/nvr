@@ -36,7 +36,7 @@ Cameras (with their stream addresses and logins, encrypted under the key both sh
 - **One standby, one primary.** More than one standby or primary per secret is not supported. The two NVRs must run the same version (the standby refuses configuration from a newer primary).
 - **The standby needs the cameras' network.** A takeover is only as good as the standby's route to the cameras and its storage; check Settings, Failover on the standby after every change of cameras, and exercise a takeover (below).
 - **AI analysis, rules and notifications do not run on the standby** during a takeover: it records.
-- The configuration is copied through the primary's encrypted backups: the primary must have a backup passphrase set, and `GET /api/inbound/failover/backup` makes a fresh backup if the newest is over five minutes old.
+- The configuration is copied through the primary's encrypted backups: the primary must have a backup passphrase set, and `GET /api/inbound/failover/backup` makes a fresh backup if the newest is over five minutes old. Only the newest two of these are kept, apart from the scheduled, manual and pre-migration backups, which keep their own count (`NVR_BACKUP_KEEP`).
 
 ## Exercise it
 
