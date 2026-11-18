@@ -29,8 +29,8 @@ from app.migrations import latest_version
 from app.store import connect, database_path
 from app.version import APP_VERSION
 
-DEFAULT_FEED = "https://api.github.com/repos/yaboisean319/nvr/releases?per_page=30"
-DEFAULT_IMAGE = "ghcr.io/yaboisean319/nvr"
+DEFAULT_FEED = "https://api.github.com/repos/gvsccrc-it/nvr/releases?per_page=30"
+DEFAULT_IMAGE = "ghcr.io/gvsccrc-it/nvr"
 MAX_FEED_BYTES = 2 * 1024 * 1024
 MAX_NOTES_CHARS = 20_000
 CHECK_TIMEOUT = httpx.Timeout(10, connect=5)

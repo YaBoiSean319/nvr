@@ -189,11 +189,11 @@ jobs:
           CLOUDFLARE_TUNNEL_TOKEN=x NVR_PUBLIC_HOST=nvr.example.com docker compose -f compose.yaml -f compose.cloudflared.yaml config -q
           docker compose -f compose.yaml -f compose.wireguard.yaml config -q
       - name: Build container image
-        run: docker build --tag ghcr.io/yaboisean319/nvr:edge .
+        run: docker build --tag ghcr.io/gvsccrc-it/nvr:edge .
       - name: Benchmark and validate bundled CPU detection model
-        run: docker run --rm ghcr.io/yaboisean319/nvr:edge python -m scripts.benchmark_ai
+        run: docker run --rm ghcr.io/gvsccrc-it/nvr:edge python -m scripts.benchmark_ai
       - name: Check the licence plate models in the image
-        run: docker run --rm ghcr.io/yaboisean319/nvr:edge python -m scripts.check_plate_models
+        run: docker run --rm ghcr.io/gvsccrc-it/nvr:edge python -m scripts.check_plate_models
       - name: Smoke test Compose health and persistence
         run: |
           NVR_PORT=8080 docker compose up --pull never -d
@@ -285,7 +285,7 @@ jobs:
         id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/yaboisean319/nvr
+          images: ghcr.io/gvsccrc-it/nvr
           tags: |
             type=raw,value=edge,enable={{is_default_branch}}
             type=sha,prefix=sha-

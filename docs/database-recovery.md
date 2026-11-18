@@ -27,19 +27,19 @@ Run these from the folder with the compose file. If Docker says permission denie
 
 2. **See what is in the data volume.** The volume is named after the compose project (`docker volume ls`; for a project called `nvr` it is `nvr_nvr-data`).
    ```
-   docker run --rm -v nvr_nvr-data:/data --entrypoint ls ghcr.io/yaboisean319/nvr:edge -la /data
+   docker run --rm -v nvr_nvr-data:/data --entrypoint ls ghcr.io/gvsccrc-it/nvr:edge -la /data
    ```
    You should see `nvr.sqlite3` and files named `nvr.sqlite3.pre-migration-vA-to-vB-<time>`. The NVR saves one before every upgrade that changes the database. Configuration backups, if they are turned on, are in the `nvr-backups` volume and anywhere you copy them.
 
 3. **Copy the whole folder somewhere safe before anything else is tried.** Use a folder with enough free space (each copy of a large database is as big as the database).
    ```
    mkdir -p ~/nvr-data-rescue
-   docker run --rm -v nvr_nvr-data:/data -v ~/nvr-data-rescue:/rescue --entrypoint cp ghcr.io/yaboisean319/nvr:edge -a /data/. /rescue/
+   docker run --rm -v nvr_nvr-data:/data -v ~/nvr-data-rescue:/rescue --entrypoint cp ghcr.io/gvsccrc-it/nvr:edge -a /data/. /rescue/
    ```
 
 4. **Check each copy, read only.** This changes nothing and takes a few minutes per gigabyte. Each line ends in `['ok']` for a healthy file.
    ```
-   docker run --rm -i -v nvr_nvr-data:/data:ro --entrypoint python ghcr.io/yaboisean319/nvr:edge - <<'EOF'
+   docker run --rm -i -v nvr_nvr-data:/data:ro --entrypoint python ghcr.io/gvsccrc-it/nvr:edge - <<'EOF'
    import sqlite3, glob, time
    for f in sorted(glob.glob('/data/nvr.sqlite3*')):
        t = time.time()
@@ -54,7 +54,7 @@ Run these from the folder with the compose file. If Docker says permission denie
 
 5. **Restore the newest healthy copy.** The damaged file is renamed, not deleted, so it can still be examined. Replace the copy's name with the one from step 2.
    ```
-   docker run --rm -v nvr_nvr-data:/data --entrypoint sh ghcr.io/yaboisean319/nvr:edge -c 'cd /data && mv nvr.sqlite3 nvr.sqlite3.damaged && cp nvr.sqlite3.pre-migration-v56-to-v59-20261110T142411614532Z nvr.sqlite3 && ls -la'
+   docker run --rm -v nvr_nvr-data:/data --entrypoint sh ghcr.io/gvsccrc-it/nvr:edge -c 'cd /data && mv nvr.sqlite3 nvr.sqlite3.damaged && cp nvr.sqlite3.pre-migration-v56-to-v59-20261110T142411614532Z nvr.sqlite3 && ls -la'
    ```
    Make sure there is room: the NVR takes another full copy when it starts and migrates the restored file.
 

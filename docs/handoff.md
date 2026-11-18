@@ -42,17 +42,13 @@ Nothing on this page may hold a secret or a real site's address. The owner's pro
 - **Timing races that were fixed in tests, not in the app** (look for the same shape when a journey is flaky: a click or read racing a load): the idle-connection reset in the 200-camera journey, the playback "next appearance" click before the path loaded, the tiering list needing a reload, the failover incident being read after it had already recovered, the expect timeout (now 15 s), a server teardown.
 - The unit tests that read `docs/` are why `verify` still runs for docs-only changes.
 
-## After the repository is transferred to another account
+## After the repository was transferred to another account
 
-GitHub moves issues, pull requests and settings. It does **not** move the container package, and several places name the old owner (`yaboisean319`). Update them in one pull request **after** the transfer (before it, the token cannot write to the new name):
+The repository moved from `yaboisean319` to `gvsccrc-it`. GitHub moved issues, pull requests and settings but **not** the container package. Every place in the code, workflows, docs and tests that named the old owner now names `gvsccrc-it` (the image is `ghcr.io/gvsccrc-it/nvr`, and the in-app update check reads `api.github.com/repos/gvsccrc-it/nvr/releases`). Still for the owner:
 
-- `.github/workflows/ci.yml` lines 192, 194, 196 (`docker build/run` tags) and 288 (`images:`); `.github/workflows/release.yml` lines 3 and 45.
-- `compose.yaml` line 3 (the image), `README.md` line 21.
-- `app/updates.py` lines 32-33 (`DEFAULT_FEED`, `DEFAULT_IMAGE`; the in-app update check reads releases from that API path).
-- Docs: `docs/database-recovery.md` (4 places), `docs/guided-updates.md` (3), `docs/rebuild/spec.md` line 5.
-- Tests and fixtures: `tests/fixtures/release_feed.py` line 12, `tests/browser/updates.spec.cjs` (several lines; they assert the strings).
-- On GitHub: install the apps on the new account (Dependabot, the Claude GitHub app), re-check Actions settings (require approval for outside contributors' workflows) and secret scanning, check the new package's visibility after the first publish, move the open security tickets to a private repository if the repository stays public.
-- On each deployed server: point the stack's `image:` at the new path and pull; the old image keeps working until then. An install that never changes it simply stops getting updates.
+- On GitHub: install the apps on the new account (Dependabot, the Claude GitHub app), re-check Actions settings (require approval for outside contributors' workflows) and secret scanning, check the new package's visibility after the first publish from `main` (a private package means servers cannot pull it without signing in), move the open security tickets to a private repository if the repository stays public.
+- The new image only exists after the first successful `publish` job on `main` after this change. Until then the old image is the latest one there is.
+- On each deployed server: point the stack's `image:` at `ghcr.io/gvsccrc-it/nvr:edge` (or a version tag) and pull; the old image keeps working until then. An install that never changes it simply stops getting updates, and its Updates page keeps reading the old account's releases until it runs a version with the new address (or `NVR_UPDATE_FEED_URL` and `NVR_UPDATE_IMAGE` are set).
 
 ## Operations: what the production incident taught
 

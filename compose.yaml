@@ -1,6 +1,6 @@
 services:
   nvr:
-    image: ghcr.io/yaboisean319/nvr:edge
+    image: ghcr.io/gvsccrc-it/nvr:edge
     pull_policy: always
     # Camera discovery, ONVIF event delivery, and stream access use the host's
     # camera-network interfaces directly. This is the tested deployment mode.
