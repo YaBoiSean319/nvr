@@ -108,6 +108,15 @@ class LocalStore:
             raise TierError("The cold tier's path would leave its folder")
         return candidate
 
+    def present(self) -> bool:
+        """Whether the tier's folder is there with anything in it. A disk that is not mounted leaves a missing or an empty folder, and a tier
+        that holds footage is never empty: so "nothing there at all" means the tier is away, not that its footage was deleted."""
+        try:
+            with os.scandir(self.root) as entries:
+                return next(entries, None) is not None
+        except OSError:
+            return False
+
     def put(self, source: Path, key: str, sha256: str, size: int, rate: Callable[[int], None] | None = None) -> None:
         target = self.path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -317,8 +326,12 @@ def local_files(row: sqlite3.Row | dict[str, Any], hot: Path | None) -> list[Pat
         with connect() as db:
             tier = load_tier(db, row["tier_id"])
         if tier is not None and tier.kind == "local":
+            store = LocalStore(tier)
+            if not store.present():
+                from .storage import StorageUnavailable
+                raise StorageUnavailable("The cold tier's folder is not there")  # Not mounted: its footage is not gone (#338)
             try:
-                path = LocalStore(tier).path(row["tier_key"])
+                path = store.path(row["tier_key"])
                 if path.exists():
                     found.append(path)
             except TierError:

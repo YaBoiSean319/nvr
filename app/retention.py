@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import sqlite3
 import shutil
@@ -206,7 +207,7 @@ def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, polic
     """Delete one segment's files and row, inside the caller's write transaction, unless something protects it.
 
     Returns ("removed", row) or the reason it stayed: "gone" (no such row), "held" (a hold), "alarm" (an open or recent alarm's clip), "reserved" (a queued or running export),
-    "young" (still inside its retention policy, only when ``policy_applies``) or "leased" (being played). Retention removes only what is past its policy; keeping a volume's headroom
+    "young" (still inside its retention policy, only when ``policy_applies``), "leased" (being played) or "unavailable" (its storage cannot be reached now). Retention removes only what is past its policy; keeping a volume's headroom
     (``policy_applies=False``) removes the oldest footage whatever its policy says, but never what is held, reserved or being played."""
     current=db.execute("SELECT id,camera_id,relative_path,starts_at,ends_at,size_bytes,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE id=?",(segment_id,)).fetchone()
     if current is None:
@@ -229,32 +230,91 @@ def remove_segment(db, segment_id: int, now: datetime, kept_since: str, *, polic
         if current_end.tzinfo is None: current_end=current_end.replace(tzinfo=timezone.utc)
         if current_end>now-timedelta(days=days):
             return "young", None
-    from .storage import remove_segment_files
-    if not remove_segment_files([current]):
-        return "leased", None
+    from .storage import StorageUnavailable, remove_segment_files
+    try:
+        if not remove_segment_files([current]):
+            return "leased", None
+    except StorageUnavailable:
+        return "unavailable", None  # The row stays until its storage is back (#338)
     db.execute("DELETE FROM recording_segments WHERE id=?", (segment_id,))
     record_deletion(db,current["camera_id"],int(current["size_bytes"]),current["starts_at"],current["ends_at"],now)
     return "removed", current
 
 
+MAX_EXPIRED_PER_CAMERA = 20000
+
+
+def _expired_candidates(db, now: datetime) -> list:
+    """The segments old enough to be past their camera's retention policy, oldest first, read without a transaction.
+
+    The pass used to load every stored segment and take the write lock once for each, expired or not: 30 s and 16,000 write locks to remove
+    nothing from 16,000 segments (#337). Each camera's candidates are now found through the (camera, start) index, so a pass over footage that
+    is all inside its policy reads a few index entries per camera and locks nothing. ``remove_segment`` still decides, inside its transaction,
+    whether each one really goes; footage under a hold is left out here, so a long run of it cannot use up the pass.
+
+    The bound is a second later than the policy's, compared as text: stored times may differ in how they write a whole second or UTC, and one
+    that is not yet due is only found "young" and left."""
+    moment = now.astimezone(timezone.utc)
+    found = []
+    for camera in db.execute("SELECT id FROM cameras").fetchall():
+        days, _ = effective_retention(db, camera["id"])
+        bound = (moment - timedelta(days=days) + timedelta(seconds=1)).isoformat()
+        found.extend(db.execute(
+            "SELECT s.id,s.camera_id,s.relative_path,s.ends_at,s.size_bytes FROM recording_segments s WHERE s.camera_id=? AND s.starts_at<? AND s.ends_at<? "
+            "AND NOT EXISTS (SELECT 1 FROM recording_holds h WHERE h.segment_id=s.id AND h.released_at IS NULL AND (h.expires_at IS NULL OR h.expires_at>?)) "
+            "ORDER BY s.starts_at LIMIT ?", (camera["id"], bound, bound, moment.isoformat(), MAX_EXPIRED_PER_CAMERA)).fetchall())
+    return sorted(found, key=lambda row: row["ends_at"])
+
+
+def prune_motion_events(now: datetime) -> int:
+    """Remove motion events that have no footage and are older than their camera's retention period; returns how many.
+
+    An event that produced a clip goes with its segment (a trigger). One that never did (a failed capture) explains a gap for as long as the
+    camera's footage is kept, and no longer (#333). A camera with nothing due is only read, never locked (#280)."""
+    from .store import has_row
+
+    removed = 0
+    with connect() as db:
+        cameras = [row[0] for row in db.execute("SELECT DISTINCT camera_id FROM motion_events WHERE segment_id IS NULL AND status!='recording'")]
+        for camera_id in cameras:
+            days, _ = effective_retention(db, camera_id)
+            cutoff = (now.astimezone(timezone.utc) - timedelta(days=days)).isoformat()
+            due = "FROM motion_events WHERE segment_id IS NULL AND status!='recording' AND camera_id=? AND received_at<?"
+            if has_row(db, f"SELECT 1 {due} LIMIT 1", (camera_id, cutoff)):
+                removed += db.execute(f"DELETE {due}", (camera_id, cutoff)).rowcount
+    return removed
+
+
+def prune_ai_observations(now: datetime) -> int:
+    """Remove grouped AI observations older than their camera's retention period that no remaining footage covers; returns how many.
+
+    Individual detections already followed retention; these did not, and every analysed frame searches them (#345). The same rule as detections:
+    past the policy, and not inside footage that is still kept (a hold, a longer-lived clip). A camera with nothing due is only read (#280)."""
+    from .store import has_row
+
+    removed = 0
+    with connect() as db:
+        for camera in db.execute("SELECT id FROM cameras").fetchall():
+            days, _ = effective_retention(db, camera["id"])
+            cutoff = (now.astimezone(timezone.utc) - timedelta(days=days)).isoformat()
+            due = ("FROM ai_observations WHERE camera_id=? AND first_seen_at<? AND NOT EXISTS (SELECT 1 FROM recording_segments s "
+                   "WHERE s.camera_id=ai_observations.camera_id AND s.starts_at<=ai_observations.first_seen_at AND s.ends_at>ai_observations.first_seen_at)")
+            if has_row(db, f"SELECT 1 {due} LIMIT 1", (camera["id"], cutoff)):
+                removed += db.execute(f"DELETE {due}", (camera["id"], cutoff)).rowcount
+    return removed
+
+
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
-    removed_segments = removed_bytes = skipped_leased = skipped_alarm = failed = 0
+    removed_segments = removed_bytes = skipped_leased = skipped_alarm = skipped_unavailable = failed = 0
     with connect() as db:
         kept_since = resolved_kept_since(db, now)
         expired=db.execute("SELECT id,segment_id FROM recording_holds WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?",(now.astimezone(timezone.utc).isoformat(),)).fetchall()
         for hold in expired:
             db.execute("UPDATE recording_holds SET released_at=expires_at WHERE id=?",(hold["id"],))
             db.execute("INSERT INTO audit_log(action,resource_type,resource_id,details_json) VALUES('expire_hold','recording_segment',?,'{}')",(str(hold["segment_id"] or "unknown"),))
-        rows = db.execute("SELECT s.id,s.camera_id,s.relative_path,s.ends_at,s.size_bytes FROM recording_segments s ORDER BY s.ends_at").fetchall()
+        rows = _expired_candidates(db, now)
     for row in rows:
-        try:
-            end = datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00"))
-            if end.tzinfo is None:
-                end = end.replace(tzinfo=timezone.utc)
-        except ValueError:
-            failed += 1
-            continue
         try:
             with connect() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -264,6 +324,9 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                 if outcome == "alarm":
                     skipped_alarm += 1
                     continue
+                if outcome == "unavailable":
+                    skipped_unavailable += 1
+                    continue
                 if outcome != "removed":
                     skipped_leased += 1
                     continue
@@ -271,7 +334,12 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             discard_objects([current])  # A copy in an object store goes once the row is gone (outside the write lock)
             removed_segments += 1
             removed_bytes += int(current["size_bytes"])
-        except (OSError,sqlite3.Error):
+        except (OSError,sqlite3.Error,ValueError):  # ValueError: a stored time that cannot be read
+            failed += 1
+    for prune in (prune_motion_events, prune_ai_observations):
+        try:
+            prune(now)
+        except sqlite3.Error:
             failed += 1
     # Deleting footage deletes its detections; detections no footage covers expire on the same schedule.
     from .tracks import purge_expired_detections
@@ -284,5 +352,7 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
                 purge_expired_detections(db,camera_id,now-timedelta(days=days))
         except sqlite3.Error:
             failed += 1
+    if skipped_unavailable:
+        logging.getLogger("nvr.retention").warning("%d expired recordings were not removed because their storage is not available; they are kept until it is back", skipped_unavailable)
     return {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "skipped_playback": skipped_leased,
-            "kept_for_alarms": skipped_alarm, "failed": failed}
+            "kept_for_alarms": skipped_alarm, "waiting_for_storage": skipped_unavailable, "failed": failed}

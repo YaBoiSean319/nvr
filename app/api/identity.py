@@ -332,7 +332,7 @@ def list_sessions(_: Administrator) -> dict[str, object]:
     with connect() as db:
         rows = db.execute(
             "SELECT s.session_id,s.created_at,s.expires_at,u.username,u.role FROM sessions s JOIN users u ON u.id=s.user_id "
-            "WHERE s.expires_at>? ORDER BY s.created_at DESC", (datetime.now(timezone.utc).isoformat(),)
+            "WHERE s.expires_at>? ORDER BY s.created_at DESC", (stamp(),)
         ).fetchall()
     return {"sessions": [dict(row) for row in rows]}
 

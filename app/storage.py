@@ -66,6 +66,11 @@ def camera_recordings_dir(camera_id: str) -> Path:
     return path / camera_id
 
 
+class StorageUnavailable(OSError):
+    """The storage a segment is on cannot be reached right now (a volume that is not mounted, a local cold tier that is not there). Its footage is
+    not gone: nothing that removes footage may treat it as already removed (#338)."""
+
+
 def _hot_file_path(relative_path: str) -> Path:
     """Where a segment's file is on the hot storage: the path, checked to be inside a configured and available volume."""
     root=recordings_path()
@@ -82,7 +87,7 @@ def _hot_file_path(relative_path: str) -> Path:
         raise OSError("Recorded file does not belong to a configured storage volume")
     _,name,base=max(matches)
     if name!="default" and (not base.is_dir() or not os.path.ismount(base)):
-        raise OSError("Recorded file storage volume is unavailable")
+        raise StorageUnavailable("Recorded file storage volume is unavailable")
     return candidate
 
 
@@ -118,7 +123,10 @@ def segment_available(relative_path: str) -> bool:
 def remove_segment_files(rows) -> bool:
     """Delete the files of segments wherever they are on this machine (hot file, local cold file, cached copy): False, and nothing deleted, while any is being played.
 
-    A segment's copy in an object store is not here: once its row is gone the caller passes the rows to ``tiering.discard_objects``."""
+    A segment's copy in an object store is not here: once its row is gone the caller passes the rows to ``tiering.discard_objects``.
+
+    Raises ``StorageUnavailable``, and deletes nothing, when a segment's storage cannot be reached: "no file found" on a disk that is not mounted
+    is not "already deleted", and the caller must keep the segment's row (#338)."""
     from . import tiering
     from .retention import unlink_many_if_unleased
 
@@ -126,6 +134,10 @@ def remove_segment_files(rows) -> bool:
     for row in rows:
         try:
             hot=_hot_file_path(row["relative_path"])
+        except StorageUnavailable:
+            if not row["tier_id"]:
+                raise  # Its only copy is on the volume that is not there
+            hot=None  # It has moved to a cold tier; that copy is looked for below
         except OSError:
             hot=None
         paths.extend(tiering.local_files(row, hot))

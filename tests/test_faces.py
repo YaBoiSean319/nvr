@@ -319,6 +319,19 @@ class SightingTests(Case):
             self.assertEqual(self.client.get("/api/faces/sightings/s1/picture").status_code, 200)
         self.assertEqual(self.audit_actions().count("face_sighting_picture_viewed"), 1)
 
+    def test_the_interval_between_recorded_looks_is_ten_minutes_as_the_log_stores_time(self):
+        # The log's own time form, not a hand-written one: compared as text, the two forms made any look on the same day count as recent (#368).
+        self.sighting_with_picture()
+        self.client.get("/api/faces/sightings/s1/picture")
+        with connect() as db:
+            db.execute("UPDATE audit_log SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes') WHERE action='face_sighting_picture_viewed'")
+        self.client.get("/api/faces/sightings/s1/picture")
+        self.assertEqual(self.audit_actions().count("face_sighting_picture_viewed"), 1)
+        with connect() as db:
+            db.execute("UPDATE audit_log SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-11 minutes') WHERE action='face_sighting_picture_viewed'")
+        self.client.get("/api/faces/sightings/s1/picture")
+        self.assertEqual(self.audit_actions().count("face_sighting_picture_viewed"), 2)
+
     def test_a_picture_looked_at_again_much_later_is_recorded_again(self):
         self.sighting_with_picture()
         self.client.get("/api/faces/sightings/s1/picture")

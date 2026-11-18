@@ -149,6 +149,125 @@ class RunContinuousTests(unittest.TestCase):
         self.assertIsNotNone(row["recording_fault_since"])
         self.assertNotEqual(row["recording_status"], "recording")
 
+    # One error must not end a camera's recording, or leave its FFmpeg running beside a new one (#335).
+
+    def pid_ffmpeg(self) -> Path:
+        """An FFmpeg stand-in that records its process id and then runs until it is ended."""
+        return self.fake_ffmpeg(f"import os\nopen({str(self.root / 'pids')!r}, 'a').write(str(os.getpid()) + '\\n')\nsys.stdin.read()\ntime.sleep(60)")
+
+    def alive(self) -> list[int]:
+        running = []
+        for pid in (self.root / "pids").read_text().split():
+            try:
+                os.kill(int(pid), 0)
+                running.append(int(pid))
+            except ProcessLookupError:
+                pass
+        return running
+
+    def started(self) -> int:
+        return len((self.root / "pids").read_text().split())
+
+    def run_with_one_failing_watch(self, error: Exception):
+        from app.recording import RecordingManager
+
+        camera_id = self.camera()
+        real = RecordingManager._watch_continuous_output
+        calls = {"count": 0}
+
+        async def watch(manager, *args):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                await asyncio.sleep(0.5)  # FFmpeg is up and has recorded its process id
+                raise error
+            await real(manager, *args)
+
+        with patch.object(RecordingManager, "_watch_continuous_output", watch):
+            raised = self.run_loop(camera_id, self.pid_ffmpeg(), seconds=5)
+        return camera_id, raised
+
+    def test_a_database_error_while_recording_ends_that_ffmpeg_and_starts_again(self):
+        import sqlite3
+
+        camera_id, raised = self.run_with_one_failing_watch(sqlite3.OperationalError("database is locked"))
+        self.assertIsNone(raised, f"the recording loop died: {raised!r}")
+        self.assertGreaterEqual(self.started(), 2, "recording was not started again")
+        self.assertEqual(self.alive(), [], "an FFmpeg was left running")
+
+    def test_a_file_error_while_recording_does_not_leave_a_second_ffmpeg(self):
+        camera_id, raised = self.run_with_one_failing_watch(FileNotFoundError("segment removed while it was being looked at"))
+        self.assertIsNone(raised, f"the recording loop died: {raised!r}")
+        self.assertGreaterEqual(self.started(), 2)
+        self.assertEqual(self.alive(), [], "an FFmpeg was left running")
+
+    def test_an_error_outside_the_recording_pass_restarts_the_camera_task(self):
+        import sqlite3
+        from app.recording import RecordingManager
+
+        camera_id = self.camera()
+        manager = RecordingManager()
+        attempts = []
+
+        async def once(camera, mode):
+            attempts.append(camera)
+            if len(attempts) == 1:
+                raise sqlite3.OperationalError("database is locked")
+
+        real_sleep = asyncio.sleep
+
+        async def body():
+            with patch.object(manager, "_run_once", once), patch("app.recording.asyncio.sleep", lambda seconds: real_sleep(0)):
+                await asyncio.wait_for(manager._run(camera_id, "continuous"), timeout=5)
+
+        asyncio.run(body())
+        self.assertEqual(attempts, [camera_id, camera_id])
+
+    def test_the_reconcile_restarts_a_task_that_ended_with_an_error(self):
+        from app.recording import RecordingManager
+
+        camera_id = self.camera()
+        manager = RecordingManager()
+        started = []
+
+        async def failed():
+            raise RuntimeError("ended badly")
+
+        async def run(camera, mode):
+            started.append(mode)
+
+        async def body():
+            dead = asyncio.create_task(failed())
+            await asyncio.gather(dead, return_exceptions=True)
+            manager.tasks[camera_id], manager.task_modes[camera_id] = dead, "continuous"
+            with patch.object(manager, "_run", run):
+                await manager.sync_camera(camera_id)
+                await asyncio.gather(manager.tasks[camera_id])
+                finished = manager.tasks[camera_id]
+                await manager.sync_camera(camera_id)  # One that ended without an error is left alone
+                self.assertIs(manager.tasks[camera_id], finished)
+
+        asyncio.run(body())
+        self.assertEqual(started, ["continuous"])
+
+    def test_a_file_that_vanishes_while_the_folder_is_listed_is_not_an_error(self):
+        from app.recording import newest_is_fresh
+
+        folder = self.root / "spool"
+        folder.mkdir()
+        (folder / "segment-1.ts").write_bytes(b"x")
+        (folder / "segment-2.ts").write_bytes(b"x")
+        real = Path.stat
+
+        def stat(path, *args, **kwargs):
+            if path.name == "segment-1.ts":
+                raise FileNotFoundError(path)  # FFmpeg deleted it after the listing
+            return real(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", stat):
+            self.assertTrue(newest_is_fresh(folder, "segment-*.ts"))
+        self.assertFalse(newest_is_fresh(folder, "nothing-*.ts"))
+        self.assertFalse(newest_is_fresh(self.root / "no-such-folder", "segment-*.ts"))
+
 
 if __name__ == "__main__":
     unittest.main()

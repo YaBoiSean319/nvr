@@ -12,6 +12,7 @@ from app.api.ai_settings import ai_runtime_model_view, ensure_ai_settings
 from app.api.cameras import camera_view
 from app.principal import Administrator, CurrentUser, requires_scope
 from app.store import connect
+from app import track_privacy
 from app.health import recording_health
 from app.scheduling import effective_policy
 from app.preservation import delete_segment as delete_preserved_segment, get_segment_hold, preserve_segment, release_segment_hold
@@ -99,12 +100,21 @@ def search_ai_observations(
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail="Search timestamps must include a timezone") from exc
             clauses.append(f"{column}{operator}?")
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    values.append(limit)
     with connect() as db:
+        # Nothing seen behind a privacy mask is listed (#375), as on the Playback timeline: an observation whose box touches a mask, or cannot be
+        # compared with one, is left out. Checked in the query, so the limit never counts what was hidden.
+        if camera_id:
+            in_scope = [camera_id]
+        elif not user.access.unrestricted:
+            in_scope = sorted(user.access.cameras or ())
+        else:
+            in_scope = [row[0] for row in db.execute("SELECT id FROM cameras")]
+        visible, visible_values = track_privacy.box_json_visible_sql(track_privacy.zones_by_camera(db, in_scope), "o")
+        clauses.append(visible)
+        values.extend(visible_values)
         rows = db.execute(
-            "SELECT o.*,c.name AS camera_name FROM ai_observations o JOIN cameras c ON c.id=o.camera_id" + where + " ORDER BY o.first_seen_at DESC LIMIT ?",
-            values,
+            "SELECT o.*,c.name AS camera_name FROM ai_observations o JOIN cameras c ON c.id=o.camera_id WHERE " + " AND ".join(clauses) + " ORDER BY o.first_seen_at DESC LIMIT ?",
+            (*values, limit),
         ).fetchall()
     events = []
     for row in rows:

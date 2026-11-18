@@ -229,6 +229,23 @@ def _record_motion_source(camera_id: str, value: str, reason: str, fallback_enab
                    (value, "waiting" if healthy and fallback_enabled else ("disabled" if not fallback_enabled else "detecting"), error, error, camera_id))
 
 
+def newest_is_fresh(folder: Path, pattern: str, seconds: float = 10) -> bool:
+    """Whether the most recently written file matching ``pattern`` was written within ``seconds``.
+
+    FFmpeg, retention and tiering remove files from these folders while they are being listed, so a file that has gone between the listing and
+    the look at it is simply not counted (#335): it used to raise, which tore down a motion camera's buffer a few times a day."""
+    newest = 0.0
+    try:
+        for path in folder.glob(pattern):
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        return False
+    return bool(newest) and datetime.now().timestamp() - newest <= seconds
+
+
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -238,6 +255,7 @@ class RecordingManager:
         self.headroom_task: asyncio.Task[None] | None = None
         self.tamper = tamper.TamperManager()
         self._dropped: set[str] = set()  # Segments already counted as dropped: the index is re-read every few seconds.
+        self._indexed_lines: dict[Path, tuple[int, str]] = {}  # Per FFmpeg segment list: how many lines have been dealt with, and the last of them (#334)
         self.storage_task: asyncio.Task[None] | None = None
         self.stopping = False
 
@@ -296,7 +314,8 @@ class RecordingManager:
         desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] and not row["archived_at"] else "disabled"
         task = self.tasks.get(camera_id)
         if task is not None and self.task_modes.get(camera_id) == desired:
-            if not task.done() or not force_restart:
+            failed = task.done() and not task.cancelled() and task.exception() is not None
+            if not failed and (not task.done() or not force_restart):
                 return
         await self.remove(camera_id)
         if desired in {"motion", "continuous"} and not self.stopping:
@@ -476,13 +495,29 @@ class RecordingManager:
             metrics.segment_dropped(camera_id)
 
     def _index_csv(self, camera_id: str, index_path: Path, output_dir: Path) -> int:
-        indexed = 0
+        """Index the segments FFmpeg has finished since the last pass over this list, and return how many were new.
+
+        FFmpeg adds a line per finished segment and never trims the list, so the lines already dealt with are remembered per list: a pass costs
+        what is new, not how long the camera has been connected (#334). A pass with nothing new touches no database; new segments and their
+        counters are stored in one transaction, and if that fails nothing is remembered, so the same lines are tried again next pass."""
         try:
             with index_path.open(newline="", encoding="utf-8") as source:
-                rows = list(csv.reader(source))
-        except (OSError, UnicodeError, csv.Error):
+                lines = source.read().splitlines(keepends=True)
+        except (OSError, UnicodeError):
+            return 0
+        done, last = self._indexed_lines.get(index_path, (0, ""))
+        if done > len(lines) or (done and lines[done - 1] != last):  # Not the list that was remembered: start again
+            done = 0
+        # A last line without its line end may still be being written: it is read, and read again next pass, never remembered.
+        complete = len(lines) if not lines or lines[-1].endswith(("\n", "\r")) else len(lines) - 1
+        if len(lines) <= done:
+            return 0
+        try:
+            rows = list(csv.reader(lines[done:]))
+        except csv.Error:
             return 0
         root = recordings_path()
+        found: list[tuple[str, datetime, datetime, int]] = []
         for row in rows:
             if len(row) < 3:
                 continue
@@ -490,9 +525,13 @@ class RecordingManager:
             if candidate.is_absolute() or candidate.name != row[0] or candidate.suffix.lower() != ".mp4":
                 continue
             media = (output_dir / candidate.name).resolve()
-            if root not in media.parents or not media.is_file() or media.stat().st_size < 128:
+            try:
+                size = media.stat().st_size if root in media.parents and media.is_file() else None
+            except OSError:  # Removed between the two looks (retention): gone, not lost
+                size = None
+            if size is None or size < 128:
                 # A file that is there but too small to be video was dropped; one that is gone was removed (retention), not lost.
-                if root in media.parents and media.is_file():
+                if size is not None:
                     self._count_dropped(camera_id, candidate.name)
                 continue
             try:
@@ -501,31 +540,49 @@ class RecordingManager:
             except (ValueError, OverflowError):
                 self._count_dropped(camera_id, candidate.name)
                 continue
-            relative = media.relative_to(root).as_posix()
+            found.append((media.relative_to(root).as_posix(), started, started + timedelta(seconds=duration), size))
+        indexed = 0
+        if found:
             try:
                 with connect() as db:
-                    db.execute("BEGIN IMMEDIATE")  # The segment and its counters are one change.
+                    db.execute("BEGIN IMMEDIATE")  # The segments and their counters are one change.
                     try:
-                        cur = db.execute(
-                            "INSERT OR IGNORE INTO recording_segments(camera_id, relative_path, starts_at, ends_at, size_bytes) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (camera_id, relative, started.isoformat(), (started + timedelta(seconds=duration)).isoformat(), media.stat().st_size),
-                        )
-                        if cur.rowcount:
-                            metrics.segment_written(db, camera_id, started + timedelta(seconds=duration))
+                        for relative, started, ended, size in found:
+                            cur = db.execute(
+                                "INSERT OR IGNORE INTO recording_segments(camera_id, relative_path, starts_at, ends_at, size_bytes) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (camera_id, relative, started.isoformat(), ended.isoformat(), size),
+                            )
+                            if cur.rowcount:
+                                metrics.segment_written(db, camera_id, ended)
+                                indexed += 1
+                        if indexed:
+                            db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (camera_id,))
                     except BaseException:
                         db.execute("ROLLBACK")
                         raise
                     db.execute("COMMIT")
-                    indexed += cur.rowcount
             except sqlite3.Error:
-                continue
-        if indexed:
-            with connect() as db:
-                db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (camera_id,))
+                return 0  # Nothing is remembered: these lines are read again next pass
+        self._indexed_lines[index_path] = (complete, lines[complete - 1] if complete else "")
         return indexed
 
     async def _run(self, camera_id: str, expected_mode: str) -> None:
+        """A camera's recording task. An error inside it (the database busy for longer than its timeout, a file gone) is logged and the camera is
+        tried again after a wait: it used to end the task, and the camera then stayed unrecorded until its settings changed (#335)."""
+        errors = 0
+        while not self.stopping:
+            try:
+                await self._run_once(camera_id, expected_mode)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - see the docstring
+                errors += 1
+                logging.getLogger("nvr.recording").exception("The recording task for camera %s failed; starting it again", camera_id)
+                await asyncio.sleep(min(2 ** min(errors, 5), RECONNECT_MAX_SECONDS))
+
+    async def _run_once(self, camera_id: str, expected_mode: str) -> None:
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
@@ -651,13 +708,8 @@ class RecordingManager:
         """Poll the clip assembler once a second until the manager stops or FFmpeg exits; a fresh segment marks the video live."""
         while not self.stopping:
             await assembler.poll()
-            newest = max(spool.glob("segment-*.ts"), key=lambda path: path.stat().st_mtime, default=None)
-            if newest is not None:
-                try:
-                    if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
-                        self._mark_video_fresh(camera_id)
-                except OSError:
-                    pass
+            if newest_is_fresh(spool, "segment-*.ts"):
+                self._mark_video_fresh(camera_id)
             if proc.returncode is not None:
                 self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=await _stream_fault(source))
                 break
@@ -776,14 +828,9 @@ class RecordingManager:
         """Every two seconds while FFmpeg runs: index the finished segments, mark the video fresh when a file is being written, and say whether the
         recording is current ("recording") or has stalled (the start of the fault is kept)."""
         while process.returncode is None and not self.stopping:
-            self._index_csv(camera_id, list_path, output_dir)
-            newest = max(output_dir.glob("segment-*.mp4"), key=lambda path: path.stat().st_mtime, default=None)
-            if newest is not None:
-                try:
-                    if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
-                        self._mark_video_fresh(camera_id)
-                except OSError:
-                    pass
+            await asyncio.to_thread(self._index_csv, camera_id, list_path, output_dir)
+            if await asyncio.to_thread(newest_is_fresh, output_dir, "segment-*.mp4"):
+                self._mark_video_fresh(camera_id)
             recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
             with connect() as db:
                 latest = db.execute(
@@ -851,7 +898,17 @@ class RecordingManager:
             except OSError:
                 failures += 1
                 self._set_status(camera_id, "reconnecting", "Camera stream could not start; retrying", fault=await _stream_fault(source))
+            except Exception:  # noqa: BLE001 - a database error (or anything else) must not end a camera's recording for good (#335)
+                failures += 1
+                logging.getLogger("nvr.recording").exception("Recording for camera %s was interrupted; retrying", camera_id)
+                try:
+                    self._set_status(camera_id, "reconnecting", "Recording was interrupted; retrying")
+                except sqlite3.Error:
+                    pass
             finally:
+                # However the watch ended, the FFmpeg this pass started is ended before another is started beside it (#335).
+                await self._end_ffmpeg(process)
+                self._indexed_lines.pop(list_path, None)  # Each run writes a new list
                 if progress_task:
                     progress_task.cancel()
                     await asyncio.gather(progress_task, return_exceptions=True)

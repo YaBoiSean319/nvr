@@ -142,6 +142,28 @@ class PrivacyTests(PrivacyCase):
         inside, _ = brightness(operator.get(self.media).content)
         self.assertLess(inside, 30)
 
+    def test_unmasked_viewing_is_recorded_again_after_a_minute_not_once_a_day(self):
+        # The cutoff is written in the log's own time form (#368): as text, a hand-written one made every view on the same day count as recent.
+        self.mask()
+        self.assertEqual(self.client.post(f"/api/cameras/{self.camera_id}/privacy/unmasked", json={"reason": "Police request 2026-1123 for the doorway incident"}).status_code, 200)
+
+        def views() -> int:
+            with connect() as db:
+                return db.execute("SELECT COUNT(*) FROM audit_log WHERE action='privacy_unmasked_viewed' AND resource_id=?", (self.camera_id,)).fetchone()[0]
+
+        def age(modifier: str) -> None:
+            with connect() as db:
+                db.execute("UPDATE audit_log SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?) WHERE action='privacy_unmasked_viewed'", (modifier,))
+
+        self.assertEqual(self.client.get(self.media, params={"unmasked": "true"}).status_code, 200)
+        self.assertEqual(views(), 1)
+        age("-20 seconds")
+        self.client.get(self.media, params={"unmasked": "true"})
+        self.assertEqual(views(), 1)
+        age("-2 minutes")
+        self.client.get(self.media, params={"unmasked": "true"})
+        self.assertEqual(views(), 2)
+
     def test_unmasked_viewing_needs_a_reason_and_is_audited(self):
         self.mask()
         self.assertEqual(self.client.get(self.media, params={"unmasked": "true"}).status_code, 403)
