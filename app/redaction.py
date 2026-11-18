@@ -329,7 +329,6 @@ def get_review(review_id: str, requester_id: int, is_admin: bool = False) -> sql
 
 
 def create_review(requested_by: int, camera_ids: list[str], start: datetime, end: datetime, kinds: list[str]) -> str:
-    from .exports import _parse_time, _unique_output_spans  # noqa: F401 - the review samples the same footage an export would render
     wanted = [word for word in kinds if word in KINDS]
     if not wanted or len(set(wanted)) != len(wanted) or len(wanted) != len(kinds):
         raise ValueError("Choose faces, plates or both")

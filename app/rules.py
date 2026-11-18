@@ -610,7 +610,7 @@ def replay(rule: Rule, start: datetime, end: datetime) -> list[dict[str, Any]]:
         candidates = []
         for track in tracks:
             camera_groups = groups.setdefault(track["camera_id"], _camera_groups(db, track["camera_id"]))
-            if rule.condition_type == "occupancy" or not rule.watches(track["camera_id"], camera_groups, track["label"]):
+            if not rule.watches(track["camera_id"], camera_groups, track["label"]):
                 continue
             # The whole track, as the worker sees it; only moments inside the window count.
             moments = eligible_moments(rule, _track_path(db, track["id"]), since=start, until=end)

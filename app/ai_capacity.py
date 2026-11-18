@@ -228,9 +228,6 @@ class Capacity:
     def note_late(self, camera_id: str) -> None:
         self.late[camera_id] = self.clock() + LATE_SECONDS
 
-    def forget(self, camera_id: str) -> None:
-        self.late.pop(camera_id, None)
-
     def sample(self, analysed: int) -> Sample:
         now = self.clock()
         mark_at, mark_busy = self._busy_mark

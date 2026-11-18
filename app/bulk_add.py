@@ -34,7 +34,6 @@ CONCURRENCY = 3  # Cameras checked at once, however long the list; inspections a
 KEEP_DAYS = 7
 RECENT_HOURS = 1
 POLL_SECONDS = 2.0
-ACTIVE = ("queued", "checking", "adding")
 _ADDRESS = re.compile(r"^(?:\[([0-9A-Fa-f:.]+)\]|([^:\s\[\]]+)):(\d{1,5})$")
 
 

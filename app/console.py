@@ -44,7 +44,6 @@ TIMEOUT = httpx.Timeout(6.0, connect=2.0)
 MAX_JSON_BYTES = 16 * 1024 * 1024  # The largest answer taken from a site to be read and merged
 MAX_FRAME_BYTES = 8 * 1024 * 1024  # The largest message relayed in either direction of a live video
 MAX_SITES = 50
-SITE_ID = re.compile(r"^[a-z0-9]{8}$")
 NEEDED_SCOPES = ("read", "media")
 # The only fields of a site's camera that reach a console user: what the interface needs to list, group and judge a camera, and nothing about how the site reaches it.
 CAMERA_FIELDS = ("name", "archived_at", "enabled", "recording_mode", "recording_enabled", "recording_status", "last_video_at", "last_footage_write_at", "recording_fault_since",
@@ -96,7 +95,6 @@ class SiteLink:
     open_alarms: int | None = None
     cameras: list[dict[str, Any]] = field(default_factory=list)
     cameras_at: float = 0.0
-    persisted_at: float = 0.0
 
     @property
     def state(self) -> str:

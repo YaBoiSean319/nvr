@@ -23,7 +23,6 @@ from pathlib import Path
 
 import numpy as np
 
-MOUNTS = ("ceiling", "wall", "floor")
 MODES = ("view", "panorama", "double_panorama")
 MIN_VIEW_FOV = 20.0
 MAX_VIEW_FOV = 120.0

@@ -202,11 +202,6 @@ class CameraUpdateRequest(BaseModel):
             raise ValueError("Camera name is required")
         return value
 
-    @field_validator("recording_mode")
-    @classmethod
-    def require_update_fields(cls, value: str | None) -> str | None:
-        return value
-
 
 @router.post("/api/cameras/onvif-profiles")
 async def camera_onvif_profiles(
