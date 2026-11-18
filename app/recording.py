@@ -229,6 +229,23 @@ def _record_motion_source(camera_id: str, value: str, reason: str, fallback_enab
                    (value, "waiting" if healthy and fallback_enabled else ("disabled" if not fallback_enabled else "detecting"), error, error, camera_id))
 
 
+def newest_is_fresh(folder: Path, pattern: str, seconds: float = 10) -> bool:
+    """Whether the most recently written file matching ``pattern`` was written within ``seconds``.
+
+    FFmpeg, retention and tiering remove files from these folders while they are being listed, so a file that has gone between the listing and
+    the look at it is simply not counted (#335): it used to raise, which tore down a motion camera's buffer a few times a day."""
+    newest = 0.0
+    try:
+        for path in folder.glob(pattern):
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        return False
+    return bool(newest) and datetime.now().timestamp() - newest <= seconds
+
+
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -297,7 +314,8 @@ class RecordingManager:
         desired = policy["mode"] if row and row["enabled"] and row["recording_enabled"] and not row["archived_at"] else "disabled"
         task = self.tasks.get(camera_id)
         if task is not None and self.task_modes.get(camera_id) == desired:
-            if not task.done() or not force_restart:
+            failed = task.done() and not task.cancelled() and task.exception() is not None
+            if not failed and (not task.done() or not force_restart):
                 return
         await self.remove(camera_id)
         if desired in {"motion", "continuous"} and not self.stopping:
@@ -550,6 +568,21 @@ class RecordingManager:
         return indexed
 
     async def _run(self, camera_id: str, expected_mode: str) -> None:
+        """A camera's recording task. An error inside it (the database busy for longer than its timeout, a file gone) is logged and the camera is
+        tried again after a wait: it used to end the task, and the camera then stayed unrecorded until its settings changed (#335)."""
+        errors = 0
+        while not self.stopping:
+            try:
+                await self._run_once(camera_id, expected_mode)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - see the docstring
+                errors += 1
+                logging.getLogger("nvr.recording").exception("The recording task for camera %s failed; starting it again", camera_id)
+                await asyncio.sleep(min(2 ** min(errors, 5), RECONNECT_MAX_SECONDS))
+
+    async def _run_once(self, camera_id: str, expected_mode: str) -> None:
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
@@ -675,13 +708,8 @@ class RecordingManager:
         """Poll the clip assembler once a second until the manager stops or FFmpeg exits; a fresh segment marks the video live."""
         while not self.stopping:
             await assembler.poll()
-            newest = max(spool.glob("segment-*.ts"), key=lambda path: path.stat().st_mtime, default=None)
-            if newest is not None:
-                try:
-                    if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
-                        self._mark_video_fresh(camera_id)
-                except OSError:
-                    pass
+            if newest_is_fresh(spool, "segment-*.ts"):
+                self._mark_video_fresh(camera_id)
             if proc.returncode is not None:
                 self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=await _stream_fault(source))
                 break
@@ -801,13 +829,8 @@ class RecordingManager:
         recording is current ("recording") or has stalled (the start of the fault is kept)."""
         while process.returncode is None and not self.stopping:
             await asyncio.to_thread(self._index_csv, camera_id, list_path, output_dir)
-            newest = max(output_dir.glob("segment-*.mp4"), key=lambda path: path.stat().st_mtime, default=None)
-            if newest is not None:
-                try:
-                    if datetime.now().timestamp() - newest.stat().st_mtime <= 10:
-                        self._mark_video_fresh(camera_id)
-                except OSError:
-                    pass
+            if await asyncio.to_thread(newest_is_fresh, output_dir, "segment-*.mp4"):
+                self._mark_video_fresh(camera_id)
             recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
             with connect() as db:
                 latest = db.execute(
@@ -875,7 +898,16 @@ class RecordingManager:
             except OSError:
                 failures += 1
                 self._set_status(camera_id, "reconnecting", "Camera stream could not start; retrying", fault=await _stream_fault(source))
+            except Exception:  # noqa: BLE001 - a database error (or anything else) must not end a camera's recording for good (#335)
+                failures += 1
+                logging.getLogger("nvr.recording").exception("Recording for camera %s was interrupted; retrying", camera_id)
+                try:
+                    self._set_status(camera_id, "reconnecting", "Recording was interrupted; retrying")
+                except sqlite3.Error:
+                    pass
             finally:
+                # However the watch ended, the FFmpeg this pass started is ended before another is started beside it (#335).
+                await self._end_ffmpeg(process)
                 self._indexed_lines.pop(list_path, None)  # Each run writes a new list
                 if progress_task:
                     progress_task.cancel()
