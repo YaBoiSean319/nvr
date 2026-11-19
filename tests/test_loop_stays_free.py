@@ -11,6 +11,8 @@ import threading
 import time
 import uuid
 
+from unittest.mock import patch
+
 import httpx
 
 from app import external_events
@@ -128,3 +130,14 @@ class LoopStaysFreeTests(GrantCase):
         self.stand_in_workers()
         cookies = dict(self.admin.cookies)
         self.assert_free("archive", lambda client: client.delete(f"/api/cameras/{self.loose}", cookies=cookies), 204)
+
+    def test_a_ptz_command_waits_for_the_lock_without_stopping_the_loop(self):
+        """The pad sends a command every second, and each takes the write lock for the control lease."""
+
+        class Camera:
+            async def stop(self) -> None:
+                return None
+
+        cookies = dict(self.admin.cookies)
+        with patch("app.api.ptz._client", return_value=Camera()):
+            self.assert_free("PTZ", lambda client: client.post(f"/api/cameras/{self.d1}/ptz/stop", cookies=cookies), 200)
