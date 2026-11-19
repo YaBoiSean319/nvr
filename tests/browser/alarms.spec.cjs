@@ -99,9 +99,10 @@ test("only administrators delete alarms, and the alarm footage period is a setti
   await page.getByRole("tab", { name: "Retention" }).click();
   const footage = page.getByRole("form", { name: "Alarm footage" });
   await footage.getByLabel("Days to keep after resolution").fill("45");
+  await footage.getByLabel("Days to keep resolved alarms and rule events").fill("120");
   await footage.getByRole("button", { name: "Save" }).click();
   await expect(footage.getByRole("status")).toHaveText("Saved.");
-  expect((await (await page.request.get("/api/alarm-settings")).json()).resolved_footage_days).toBe(45);
+  expect(await (await page.request.get("/api/alarm-settings")).json()).toEqual({ resolved_footage_days: 45, history_days: 120 });
 
   await openAlarm(page);
   await detail(page).getByRole("button", { name: "Delete alarm…" }).click();

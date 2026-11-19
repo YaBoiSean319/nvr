@@ -26,6 +26,10 @@ class AlarmError(Exception):
     """An action that does not apply to the alarm in its current state."""
 
 
+HISTORY_DAYS = 90  # How long resolved alarms and rule events are kept unless an administrator changes it (#349)
+UNHANDLED_DAYS = 30  # An alarm nobody has resolved in this long is closed by the history pass
+
+
 def _now() -> str:
     return _stamp()
 
@@ -178,6 +182,11 @@ def resolved_footage_days(db: sqlite3.Connection) -> int:
     return int(row[0]) if row else 30
 
 
+def settings(db: sqlite3.Connection) -> dict[str, int]:
+    row = db.execute("SELECT resolved_footage_days,history_days FROM alarm_settings WHERE singleton_id=1").fetchone()
+    return {"resolved_footage_days": int(row[0]) if row else 30, "history_days": int(row[1]) if row else HISTORY_DAYS}
+
+
 def resolved_kept_since(db: sqlite3.Connection, now: datetime) -> str:
     """Alarms resolved after this time still keep their footage."""
     return _stamp(now - timedelta(days=resolved_footage_days(db)))  # Compared with resolved_at, so in the same form
@@ -192,17 +201,24 @@ def protects_footage(db: sqlite3.Connection, camera_id: str, starts_at: str, end
 
 
 def alarm_view(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    names = {user["id"]: user["username"] for user in db.execute(
-        "SELECT id,username FROM users WHERE id IN (?,?,?)", (row["assigned_to"], row["acknowledged_by"], row["resolved_by"]))}
-    camera = db.execute("SELECT name FROM cameras WHERE id=?", (row["camera_id"],)).fetchone()
-    return {
+    return alarm_views(db, [row])[0]
+
+
+def alarm_views(db: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """The views of many alarms with two queries in all, for the names of the people and cameras they mention: the alarm list, which every
+    open browser tab asks for every five seconds, used to make two queries for each alarm it returned (#349)."""
+    people = {row[key] for row in rows for key in ("assigned_to", "acknowledged_by", "resolved_by") if row[key] is not None}
+    cameras = {row["camera_id"] for row in rows}
+    names = dict(db.execute(f"SELECT id,username FROM users WHERE id IN ({','.join('?' * len(people))})", tuple(people)).fetchall()) if people else {}
+    camera_names = dict(db.execute(f"SELECT id,name FROM cameras WHERE id IN ({','.join('?' * len(cameras))})", tuple(cameras)).fetchall()) if cameras else {}
+    return [{
         "id": row["id"], "state": row["state"], "occurred_at": row["occurred_at"], "rule_id": row["rule_id"], "rule_name": row["rule_name"],
-        "condition_type": row["condition_type"], "camera_id": row["camera_id"], "camera_name": camera["name"] if camera else None,
+        "condition_type": row["condition_type"], "camera_id": row["camera_id"], "camera_name": camera_names.get(row["camera_id"]),
         "track_id": row["track_id"], "label": row["label"], "box": json.loads(row["box_json"]),
         "assigned_to": names.get(row["assigned_to"]), "acknowledged_by": names.get(row["acknowledged_by"]), "acknowledged_at": row["acknowledged_at"],
         "resolved_by": names.get(row["resolved_by"]), "resolved_at": row["resolved_at"], "created_at": row["created_at"], "updated_at": row["updated_at"],
         "maintenance": {"id": row["maintenance_window_id"], "name": row["maintenance_name"]} if row["maintenance_window_id"] else None,
-    }
+    } for row in rows]
 
 
 def alarm_detail(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
@@ -231,3 +247,75 @@ def alarm_detail(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         "comments": [dict(comment) for comment in comments],
         "history": [{"action": entry["action"], "actor": entry["actor"], "occurred_at": entry["occurred_at"], "details": json.loads(entry["details_json"])} for entry in history],
     }
+
+
+# --- History (#349) ----------------------------------------------------------------------------------------------------------------------
+
+HISTORY_BATCH = 500  # Rows changed per write transaction, so the pass never holds the write lock for long
+
+# An alarm in a case, or whose clip has footage under a hold, is evidence someone chose to keep: the pass leaves it as it is.
+_KEPT = ("(EXISTS (SELECT 1 FROM case_items i WHERE i.kind='alarm' AND i.ref=alarms.id AND i.removed_at IS NULL) OR EXISTS ("
+         "SELECT 1 FROM recording_holds h JOIN recording_segments s ON s.id=h.segment_id WHERE h.released_at IS NULL "
+         "AND (h.expires_at IS NULL OR h.expires_at>?) AND s.camera_id=alarms.camera_id AND s.starts_at<alarms.clip_ends_at AND s.ends_at>alarms.clip_starts_at))")
+
+
+def prune_history(now: datetime | None = None) -> dict[str, int]:
+    """Close alarms nobody has resolved in ``UNHANDLED_DAYS``, then remove resolved alarms and rule events older than the history period.
+
+    A resolved alarm also keeps its footage for ``resolved_footage_days``; it is kept at least that long too, so removing it never shortens
+    what was promised. Alarms in a case or over held footage are neither closed nor removed. Each step reads what is due first and takes the
+    write lock only when there is something to do (#280), a batch at a time."""
+    from .store import connect, has_row
+
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    moment = now.isoformat()
+    done = {"closed": 0, "removed_alarms": 0, "removed_rule_events": 0}
+    with connect() as db:
+        configured = settings(db)
+        unhandled_before = (now - timedelta(days=UNHANDLED_DAYS)).isoformat()
+        resolved_before = _stamp(now - timedelta(days=max(configured["history_days"], configured["resolved_footage_days"])))
+        events_before = (now - timedelta(days=configured["history_days"])).isoformat()
+
+        open_due = f"FROM alarms WHERE state IN ('new','acknowledged','assigned') AND occurred_at<? AND NOT {_KEPT}"
+        while has_row(db, f"SELECT 1 {open_due} LIMIT 1", (unhandled_before, moment)):
+            ids = [row[0] for row in db.execute(f"SELECT id {open_due} LIMIT ?", (unhandled_before, moment, HISTORY_BATCH))]
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                stamp = _now()
+                for alarm_id in ids:
+                    db.execute("UPDATE alarms SET state='resolved',resolved_by=NULL,resolved_at=?,updated_at=? WHERE id=? AND state!='resolved'", (stamp, stamp, alarm_id))
+                    _record(db, alarm_id, None, "auto_resolved", {"after_days": UNHANDLED_DAYS})
+                    _notify(db, alarm_id, "alarm.resolved", None)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            done["closed"] += len(ids)
+
+        resolved_due = f"FROM alarms WHERE resolved_at IS NOT NULL AND resolved_at<? AND NOT {_KEPT}"
+        while has_row(db, f"SELECT 1 {resolved_due} LIMIT 1", (resolved_before, moment)):
+            ids = [row[0] for row in db.execute(f"SELECT id {resolved_due} LIMIT ?", (resolved_before, moment, HISTORY_BATCH))]
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.executemany("DELETE FROM alarms WHERE id=?", [(alarm_id,) for alarm_id in ids])  # Comments and history go with them
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            done["removed_alarms"] += len(ids)
+
+        events_due = "FROM rule_events WHERE occurred_at<? AND NOT EXISTS (SELECT 1 FROM alarms a WHERE a.rule_event_id=rule_events.id)"
+        while has_row(db, f"SELECT 1 {events_due} LIMIT 1", (events_before,)):
+            ids = [row[0] for row in db.execute(f"SELECT id {events_due} LIMIT ?", (events_before, HISTORY_BATCH))]
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.executemany("DELETE FROM rule_events WHERE id=?", [(event_id,) for event_id in ids])
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            done["removed_rule_events"] += len(ids)
+        if done["removed_alarms"] or done["removed_rule_events"]:
+            db.execute("INSERT INTO audit_log(action,resource_type,resource_id,details_json) VALUES('alarm_history_pruned','alarm_settings','1',?)",
+                       (json.dumps({**done, "history_days": configured["history_days"]}, separators=(",", ":"), sort_keys=True),))
+    return done

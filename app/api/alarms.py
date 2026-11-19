@@ -6,7 +6,7 @@ import sqlite3
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 from app import console
 from app import alarms
@@ -38,7 +38,15 @@ class ResolveRequest(BaseModel):
 
 
 class AlarmSettingsRequest(BaseModel):
-    resolved_footage_days: int = Field(ge=0, le=3650)
+    resolved_footage_days: int | None = Field(default=None, ge=0, le=3650)
+    # How long resolved alarms and rule events are kept (#349); 90 days unless an administrator changes it.
+    history_days: int | None = Field(default=None, ge=7, le=3650)
+
+    @model_validator(mode="after")
+    def one_given(self) -> "AlarmSettingsRequest":
+        if self.resolved_footage_days is None and self.history_days is None:
+            raise ValueError("Give resolved_footage_days, history_days or both")
+        return self
 
 
 def _visible_alarm(db, alarm_id: str, user: Principal) -> sqlite3.Row:
@@ -98,12 +106,15 @@ def list_alarms(
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     scoped = " WHERE " + " AND ".join(scope) if scope else ""
     with connect() as db:
-        rows = db.execute("SELECT * FROM alarms" + where + " ORDER BY occurred_at DESC,id LIMIT ?", (*values, limit)).fetchall()
+        # The default view (every open alarm, newest first) is read from the index made for it. Without table statistics SQLite would
+        # otherwise take the state index and sort every open alarm on each poll (#349); with a camera or rule filter its own index is better.
+        source = "alarms INDEXED BY alarms_open_order_idx" if state == "open" and not camera_id and not rule_id and user.access.unrestricted else "alarms"
+        rows = db.execute(f"SELECT * FROM {source}" + where + " ORDER BY occurred_at DESC,id LIMIT ?", (*values, limit)).fetchall()
         counts = {row["state"]: row["count"] for row in db.execute("SELECT state,count(*) AS count FROM alarms" + scoped + " GROUP BY state", scope_values)}
         # Every rule that has raised an alarm, for the rule filter (operators cannot list rules).
         rules = db.execute("SELECT rule_id AS id,max(rule_name) AS name FROM alarms WHERE " + "".join(f"{clause} AND " for clause in permission) + "rule_id IS NOT NULL GROUP BY rule_id ORDER BY name COLLATE NOCASE",
                            permission_values).fetchall()
-        return {"alarms": [alarms.alarm_view(db, row) for row in rows],
+        return {"alarms": alarms.alarm_views(db, rows),
                 "counts": {key: counts.get(key, 0) for key in ("new", "acknowledged", "assigned", "resolved")},
                 "rules": [dict(rule) for rule in rules]}
 
@@ -121,24 +132,27 @@ def list_assignees(_: CurrentUser, camera_id: str | None = Query(default=None, m
 @router.get("/api/alarm-settings")
 def get_alarm_settings(_: CurrentUser) -> dict[str, object]:
     with connect() as db:
-        return {"resolved_footage_days": alarms.resolved_footage_days(db)}
+        return alarms.settings(db)
 
 
 @router.put("/api/alarm-settings")
 def put_alarm_settings(payload: AlarmSettingsRequest, user: Administrator) -> dict[str, object]:
+    changes = payload.model_dump(exclude_none=True)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            db.execute("UPDATE alarm_settings SET resolved_footage_days=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
-                       (payload.resolved_footage_days,))
+            before = alarms.settings(db)
+            db.execute(f"UPDATE alarm_settings SET {','.join(f'{key}=?' for key in changes)},updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1",
+                       tuple(changes.values()))
             db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                        (int(user["id"]), "alarm_settings_updated", "alarm_settings", "1",
-                        json.dumps({"resolved_footage_days": payload.resolved_footage_days}, separators=(",", ":"))))
+                        json.dumps({**changes, "before": {key: before[key] for key in changes}}, separators=(",", ":"))))
+            saved = alarms.settings(db)
         except BaseException:
             db.execute("ROLLBACK")
             raise
         db.execute("COMMIT")
-    return {"resolved_footage_days": payload.resolved_footage_days}
+    return saved
 
 
 @router.get("/api/alarms/{alarm_id}")

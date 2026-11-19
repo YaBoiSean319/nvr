@@ -136,7 +136,7 @@ class AlarmTests(SceneTestCase):
         alarm_id = self.alarms()[0]["id"]
         with connect() as db:
             db.execute("INSERT INTO retention_policy_overrides(scope_type,scope_id,retention_days) VALUES('camera',?,1)", (self.camera_id,))
-        self.assertEqual(self.client.put("/api/alarm-settings", json={"resolved_footage_days": 7}).json(), {"resolved_footage_days": 7})
+        self.assertEqual(self.client.put("/api/alarm-settings", json={"resolved_footage_days": 7}).json(), {"resolved_footage_days": 7, "history_days": 90})
         later = self.scene_start + timedelta(days=3)
 
         self.assertEqual(cleanup_expired_recordings(later)["removed_segments"], 0)  # open alarm

@@ -243,7 +243,7 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         for table in ("push_deliveries", "push_subscriptions", "push_preferences"):
             db.execute(f"DELETE FROM {table}")
         db.execute("UPDATE users SET live_alarm_pop_in=0")
-        db.execute("UPDATE alarm_settings SET resolved_footage_days=30 WHERE singleton_id=1")
+        db.execute("UPDATE alarm_settings SET resolved_footage_days=30,history_days=90 WHERE singleton_id=1")
         db.execute("DELETE FROM live_workspace_states")
         db.execute("DELETE FROM viewer_layouts")
         db.execute("DELETE FROM shared_viewer_layouts")

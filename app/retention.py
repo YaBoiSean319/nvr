@@ -354,7 +354,9 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             removed_bytes += int(current["size_bytes"])
         except (OSError,sqlite3.Error,ValueError):  # ValueError: a stored time that cannot be read
             failed += 1
-    for prune in (prune_motion_events, prune_ai_observations, prune_ai_coverage):
+    from .alarms import prune_history as prune_alarm_history  # Resolved alarms and rule events past their history period (#349)
+
+    for prune in (prune_motion_events, prune_ai_observations, prune_ai_coverage, prune_alarm_history):
         try:
             prune(now)
         except sqlite3.Error:
