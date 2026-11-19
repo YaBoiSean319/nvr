@@ -29,7 +29,12 @@ BACKOFF_MAX_SECONDS = 60.0
 STABLE_AFTER_SECONDS = 60.0
 MEMORY_SAMPLE_SECONDS = 5.0
 POLL_SECONDS = 0.5
+# The whole stop, every worker included: under Compose's stop_grace_period (30 s), after which Docker kills everything without cleanup (#410).
 STOP_GRACE_SECONDS = float(os.environ.get("NVR_STOP_GRACE_SECONDS", "25"))
+# The workers other than the recorder stop together within this share of it; the recorder, stopped last, always has the rest to finish
+# and index the segments it is writing.
+OTHERS_SHARE = 0.5
+STATE_WRITE_SECONDS = 2.0  # The most the stop waits, in all, to write the workers' states while the recorder may be writing its last segments
 
 SUMMARIES = {
     "web": "The web interface process stopped unexpectedly; recording continues in its own process",
@@ -242,22 +247,56 @@ class Supervisor:
             logger.exception("Could not record %s worker incident", worker.name)
 
     def _stop_all(self) -> None:
-        # Stop accepting requests first; recording stops last.
-        for worker in sorted(self.workers, key=lambda item: (item.name != "web", item.name == "recorder")):
-            if worker.process and worker.process.poll() is None:
-                _record(worker.name, state="stopping")
-                worker.process.send_signal(signal.SIGTERM)
-                try:
-                    worker.process.wait(timeout=STOP_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    logger.warning("%s worker did not stop in time; killing it", worker.name)
-                    end_group(worker.process)
-                    worker.process.kill()
-                    worker.process.wait()
-                if end_group(worker.process):
-                    logger.warning("Ended processes the %s worker left running when it stopped", worker.name)
-            _record(worker.name, state="stopped")
+        """Stop every worker within STOP_GRACE_SECONDS in all. Every worker but the recorder is asked at once (the web process first, so it
+        stops accepting requests) and given OTHERS_SHARE of the time; the recorder is stopped last with what is left. A worker that has not
+        stopped by its deadline is killed with everything it started. Workers used to be stopped one after another, each given the whole
+        grace period, so a slow one pushed the recorder past Docker's limit and it was killed without finishing its segments (#410)."""
+        started = time.monotonic()
+        deadline = started + STOP_GRACE_SECONDS
+        others = sorted((worker for worker in self.workers if worker.name != "recorder"), key=lambda item: item.name != "web")
+        recorders = [worker for worker in self.workers if worker.name == "recorder"]
+        self._record_states(self.workers, "stopping", started)
+        self._stop_together(others, started + STOP_GRACE_SECONDS * OTHERS_SHARE, started)
+        self._stop_together(recorders, deadline, started)
+        self._record_states(self.workers, "stopped", time.monotonic())
+        logger.info("Every worker stopped %.1f s after the stop was asked for", time.monotonic() - started)
 
+    def _stop_together(self, workers: list[Worker], deadline: float, started: float) -> None:
+        running = [worker for worker in workers if worker.process and worker.process.poll() is None]
+        for worker in running:
+            worker.process.send_signal(signal.SIGTERM)
+        waiting = list(running)
+        while waiting:
+            for worker in list(waiting):
+                code = worker.process.poll()
+                if code is not None:
+                    waiting.remove(worker)
+                    logger.info("%s worker stopped after %.1f s (exit code %s)", worker.name, time.monotonic() - started, code)
+            if not waiting or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        for worker in waiting:
+            logger.warning("%s worker did not stop within %.1f s; killing it", worker.name, time.monotonic() - started)
+            end_group(worker.process)
+            worker.process.kill()
+            worker.process.wait()
+        for worker in running:
+            if end_group(worker.process):
+                logger.warning("Ended processes the %s worker left running when it stopped", worker.name)
+
+    def _record_states(self, workers: list[Worker], state: str, since: float) -> None:
+        """Write each worker's state for the status page, waiting at most STATE_WRITE_SECONDS in all for the database: the stop must not be held
+        up by it. What cannot be written is skipped and logged once."""
+        for worker in workers:
+            left = STATE_WRITE_SECONDS - (time.monotonic() - since)
+            if left <= 0.05:
+                logger.warning("No time left to record the workers' %s state; the status page shows it when they start again", state)
+                return
+            try:
+                liveness.record(worker.name, state=state, busy_seconds=left)
+            except Exception:  # noqa: BLE001 - stopping matters more than the status row
+                logger.exception("Could not record the workers' %s state; carrying on", state)
+                return
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
