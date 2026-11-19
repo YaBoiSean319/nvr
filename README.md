@@ -89,7 +89,7 @@ Privacy masks black out areas of a camera's picture everywhere: written to camer
 
 Access grants limit which cameras an operator sees, by camera group or for everyone holding an Entra role, optionally until an expiry; hidden cameras, their footage, alarms and exports behave as if they did not exist (see [camera access grants](docs/access-grants.md)).
 
-The viewing audit records who watched which camera live or in playback, from when to when, and every export, download and snapshot; administrators report it per person or per camera for a date range, download it as CSV, and set how long it is kept apart from footage (see [viewing audit](docs/viewing-audit.md)).
+The viewing audit records who watched which camera live or in playback, from when to when, and every export, download and snapshot; administrators report it per person or per camera for a date range, download it as CSV, and set how long it is kept apart from footage (see [viewing audit](docs/viewing-audit.md)). The **security log** (Settings › Security log) shows every recorded change to accounts, sign-in, tokens, access and settings, filtered by date, person and action, with a CSV export and its own retention period (see [security log](docs/security-log.md)).
 
 `/metrics` serves Prometheus metrics to an API token with the `metrics` scope, and the logs can be forwarded as syslog (TCP or TLS) or OTLP, scrubbed of camera addresses and credentials and never blocking the NVR (see [metrics and log forwarding](docs/metrics-and-log-forwarding.md)).
 

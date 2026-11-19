@@ -363,7 +363,10 @@ def list_sessions(_: Administrator) -> dict[str, object]:
 
 
 @router.delete("/api/admin/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def terminate_session(session_id: str, _: Administrator) -> Response:
+def terminate_session(session_id: str, admin: Administrator) -> Response:
     with connect() as db:
+        ended = db.execute("SELECT u.id,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.session_id=?", (session_id,)).fetchone()
         db.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
+        if ended is not None:
+            record(db, admin.id, "session_ended", "user", int(ended["id"]), username=ended["username"], session=session_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

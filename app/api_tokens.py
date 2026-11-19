@@ -90,9 +90,9 @@ def authenticate(presented: str) -> sqlite3.Row:
         _check_usable(row, now)
         last_used = _parse(row["last_used_at"]) if row["last_used_at"] else None
         if last_used is None or now - last_used >= LAST_USED_WRITE_INTERVAL:
-            # Bounded writes: record use (and audit it) at most once per interval per token.
+            # Bounded writes: record use at most once per interval per token. The token's last-used time is the record; a security-log row
+            # each time added up to 1,440 rows a day for one token that is polled constantly (#367).
             db.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?", (_iso(now), token_id))
-            _audit(db, row["created_by"], "api_token_used", token_id, {})
     return row
 
 

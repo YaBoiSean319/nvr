@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import access_grants, ai_settings, alarms, alerts, automation, backups, cameras, coverage, detections, export_jobs, footage, identity, installable, mfa, live_alarms, footage_chain, live_media, privacy, ptz, live_views, onboarding, operations, playback, policies, push, rules, site_settings, system, tamper, viewing_audit, scrape, disks, hardening, camera_inspect, camera_bulk, capabilities, search, cases, redaction, backfill, remote_access, insights, digests, camera_health, external_events, notices, native, console, plates, falls, failover, tiering, lens, talk, updates, capacity, email_alerts, maintenance, live_ready, faces
+from . import access_grants, ai_settings, alarms, alerts, automation, backups, cameras, coverage, detections, export_jobs, footage, identity, installable, mfa, live_alarms, footage_chain, live_media, privacy, ptz, live_views, onboarding, operations, playback, policies, push, rules, site_settings, system, tamper, viewing_audit, scrape, disks, hardening, camera_inspect, camera_bulk, capabilities, search, cases, redaction, backfill, remote_access, insights, digests, camera_health, external_events, notices, native, console, plates, falls, failover, tiering, lens, talk, updates, capacity, email_alerts, maintenance, live_ready, faces, security_log
 
 ROUTERS: tuple[APIRouter, ...] = (
     # First: a site's identifiers (<site>~<id>) are matched before this NVR's own routes, which never see them.
@@ -15,6 +15,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     access_grants.router,
     tamper.router,
     viewing_audit.router,
+    security_log.router,
     scrape.router,
     disks.router,
     hardening.router,
