@@ -169,6 +169,7 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
         return
     backchannel: talk.RtspBackchannel | None = None
     reason, recorded, started, codec = "released", False, False, None
+    refusal: tuple[int, dict[str, object]] | None = None  # Sent once the attempt's end is on record, never before
     session: talk.Talking | None = None
     try:
         # Every attempt that gets this far is in the talk history and the audit log, whether or not the camera could be reached.
@@ -182,11 +183,11 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
             codec = track.codec
         except talk.BackchannelUnsupported as exc:
             reason = "unsupported"
-            await refuse(websocket, live_media.CLOSE_UNSUPPORTED, {"type": "unsupported", "detail": str(exc)})
+            refusal = (live_media.CLOSE_UNSUPPORTED, {"type": "unsupported", "detail": str(exc)})
             return
         except (talk.BackchannelError, RuntimeError, ValueError) as exc:
             reason = "camera_failed"
-            await refuse(websocket, live_media.CLOSE_STREAM_FAILED, {"type": "error", "detail": str(exc) if isinstance(exc, talk.BackchannelError) else "Camera stream configuration is invalid"})
+            refusal = (live_media.CLOSE_STREAM_FAILED, {"type": "error", "detail": str(exc) if isinstance(exc, talk.BackchannelError) else "Camera stream configuration is invalid"})
             return
         session = talk.Talking(backchannel, bool(config["record_audio"]))
         await websocket.send_json({"type": "ready", "codec": track.codec, "max_seconds": talk.MAX_TALK_SECONDS})
@@ -239,5 +240,10 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
             recorded = bool(kept)
             await asyncio.shield(asyncio.to_thread(talk.end_record, talking, reason, kept, codec))
         with contextlib.suppress(Exception):
-            await websocket.send_json({"type": "ended", "reason": reason, "recorded": recorded})
-            await websocket.close()
+            if refusal is not None:
+                # The camera could not be talked through. The browser is told only now, after the attempt's end has been recorded: told first, a
+                # reader that looked the moment the connection closed could find the attempt still without its reason.
+                await refuse(websocket, *refusal)
+            else:
+                await websocket.send_json({"type": "ended", "reason": reason, "recorded": recorded})
+                await websocket.close()
