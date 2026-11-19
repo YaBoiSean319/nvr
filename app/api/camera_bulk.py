@@ -34,6 +34,24 @@ class BulkAddRequest(BaseModel):
         return self
 
 
+class DiscoveredBulkAddRequest(BaseModel):
+    """Several devices found by discovery, added with one shared login (#173)."""
+
+    candidate_ids: list[str] = Field(min_length=1, max_length=bulk_add.MAX_CAMERAS)
+    username: str | None = Field(default=None, max_length=256)
+    password: str | None = Field(default=None, max_length=1024)
+    add_anyway: bool = True
+    recording: bool = False
+
+    @model_validator(mode="after")
+    def sensible(self) -> "DiscoveredBulkAddRequest":
+        if bool(self.username) != bool(self.password):
+            raise ValueError("Provide both username and password, or leave both blank")
+        if len(set(self.candidate_ids)) != len(self.candidate_ids):
+            raise ValueError("A device was chosen twice")
+        return self
+
+
 def _view(job_id: str) -> dict[str, Any]:
     with connect() as db:
         view = bulk_add.job_view(db, job_id)
@@ -48,6 +66,19 @@ async def start_bulk_add(payload: BulkAddRequest, request: Request, admin: Admin
     # In a thread: storing a long list is many writes, and a write can wait for the database's lock, which must not stop the web process (#354).
     job_id = await asyncio.to_thread(bulk_add.create_job, [camera.model_dump() for camera in payload.cameras], created_by=admin.id, add_anyway=payload.add_anyway,
                                      recording=payload.recording)
+    request.app.state.bulk_add.wake()
+    return await asyncio.to_thread(_view, job_id)
+
+
+@router.post("/api/cameras/bulk-jobs/discovered", status_code=status.HTTP_201_CREATED)
+async def start_discovered_bulk_add(payload: DiscoveredBulkAddRequest, request: Request, admin: Administrator) -> dict[str, Any]:
+    """Add several discovered devices with one shared login, as a bulk-add job: each is checked and added as adding one discovered device
+    does, and linked to its discovery record. Refused (404, 409) when a chosen device has left the discovery list or is already a camera."""
+    def create() -> str:
+        cameras = bulk_add.discovered_cameras(payload.candidate_ids, payload.username, payload.password)
+        return bulk_add.create_job(cameras, created_by=admin.id, add_anyway=payload.add_anyway, recording=payload.recording)
+
+    job_id = await asyncio.to_thread(create)
     request.app.state.bulk_add.wake()
     return await asyncio.to_thread(_view, job_id)
 

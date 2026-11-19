@@ -6,6 +6,7 @@ import { keys, useCameras } from "@/api/queries";
 import type { Camera } from "@/api/types";
 import { formatRelative } from "@/lib/time";
 import { failureText } from "../../tabDraft";
+import { BULK_LIMIT, startDiscoveredBulkJob } from "./inspect";
 import { useCamerasStore } from "../store";
 import { ConnectionFields, EMPTY_CONNECTION, sourceBody, type Connection } from "./ConnectionFields";
 
@@ -83,8 +84,8 @@ export function candidateLabel(candidate: Candidate): string {
 
 type ScanRequest = { timeout_seconds?: number; ip_range?: string };
 
-/** Scan the camera network, review unadded devices and set one up at a time. */
-export function Discover() {
+/** Scan the camera network, review unadded devices and set one up at a time, or tick several and add them with one shared login. */
+export function Discover({ onBulkStarted }: { onBulkStarted: () => void }) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const cameras = useCameras();
@@ -96,6 +97,7 @@ export function Discover() {
   const [query, setQuery] = useState("");
   const [showAdded, setShowAdded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
   const generation = useRef(0);
 
   // Only the newest candidate list may replace the table.
@@ -138,6 +140,18 @@ export function Discover() {
       .sort((a, b) => candidateLabel(a).localeCompare(candidateLabel(b), undefined, { numeric: true }) || a.id.localeCompare(b.id));
   }, [candidates, query, showAdded]);
   const selected = (candidates ?? []).find(candidate => candidate.id === selectedId) ?? null;
+  // Only devices that can still be added can be ticked; one that was added or claimed since is dropped from the choice.
+  const addable = (candidate: Candidate) => !candidate.linked_camera_id && !candidate.add_in_progress;
+  const chosen = (candidates ?? []).filter(candidate => ticked.has(candidate.id) && addable(candidate));
+  const tickable = visible.filter(addable);
+  const allTicked = tickable.length > 0 && tickable.every(candidate => ticked.has(candidate.id));
+  function tick(id: string, on: boolean) {
+    setTicked(current => {
+      const next = new Set(current);
+      if (on) next.add(id); else next.delete(id);
+      return next;
+    });
+  }
   const notAdded = (candidates ?? []).filter(candidate => !candidate.linked_camera_id).length;
   const byId = new Map((cameras.data ?? []).map(camera => [camera.id, camera]));
 
@@ -175,10 +189,21 @@ export function Discover() {
           {candidates && !visible.length ? <p className="muted inventory-empty">{candidates.length ? "No devices match." : "No devices discovered yet. Run a scan."}</p> : null}
           {visible.length ? (
             <table className="inventory-table" aria-label="Discovered cameras">
-              <thead><tr><th scope="col">Device</th><th scope="col">Address</th><th scope="col">State</th><th scope="col">Last seen</th></tr></thead>
+              <thead>
+                <tr>
+                  <th scope="col" className="select-column">
+                    <input type="checkbox" aria-label="Choose every device shown that is not added" checked={allTicked} disabled={!tickable.length}
+                           onChange={event => setTicked(event.target.checked ? new Set([...ticked, ...tickable.map(candidate => candidate.id)]) : new Set([...ticked].filter(id => !tickable.some(candidate => candidate.id === id))))} />
+                  </th>
+                  <th scope="col">Device</th><th scope="col">Address</th><th scope="col">State</th><th scope="col">Last seen</th>
+                </tr>
+              </thead>
               <tbody>
                 {visible.map(candidate => (
                   <tr key={candidate.id} aria-selected={candidate.id === selectedId} onClick={() => setSelectedId(candidate.id)}>
+                    <td className="select-column" onClick={event => event.stopPropagation()}>
+                      {addable(candidate) ? <input type="checkbox" aria-label={`Choose ${candidateLabel(candidate)}`} checked={ticked.has(candidate.id)} onChange={event => tick(candidate.id, event.target.checked)} /> : null}
+                    </td>
                     <td><button type="button" className="row-select" onClick={() => setSelectedId(candidate.id)}>{candidateLabel(candidate)}</button></td>
                     <td className="mono">{candidateAddress(candidate) || <span className="muted">Not reported</span>}</td>
                     <td>{candidate.linked_camera_id ? "Already added" : candidate.add_in_progress ? "Adding…" : "Not added"}</td>
@@ -191,7 +216,9 @@ export function Discover() {
         </div>
       </section>
       <section className="add-detail" aria-label="Device setup">
-        {selected ? (
+        {chosen.length ? (
+          <SharedLoginSetup chosen={chosen} onClear={() => setTicked(new Set())} onStarted={() => { setTicked(new Set()); onBulkStarted(); }} />
+        ) : selected ? (
           <CandidateSetup key={selected.id} candidate={selected} cameras={cameras.data ?? []} existing={selected.linked_camera_id ? byId.get(selected.linked_camera_id) : undefined}
                           onChanged={async () => { await refresh(); await client.invalidateQueries({ queryKey: keys.cameras }); }}
                           onOpenExisting={id => { useCamerasStore.getState().select(id); navigate("/cameras"); }} />
@@ -300,6 +327,54 @@ function CandidateSetup({ candidate, existing, cameras, onChanged, onOpenExistin
           <button type="button" className="button" data-variant="ghost" disabled={busy} onClick={() => void forget()}>Forget this device</button>
         </div>
       </fieldset>
+    </form>
+  );
+}
+
+/** Several ticked devices, added with one shared login. The NVR checks and adds them in the background, as Bulk Add does, where their progress shows. */
+function SharedLoginSetup({ chosen, onClear, onStarted }: { chosen: Candidate[]; onClear: () => void; onStarted: () => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [addAnyway, setAddAnyway] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const halfLogin = Boolean(username.trim()) !== Boolean(password);
+  const tooMany = chosen.length > BULK_LIMIT;
+  const count = `${chosen.length} device${chosen.length === 1 ? "" : "s"}`;
+
+  async function start() {
+    setBusy(true);
+    setError(null);
+    try {
+      await startDiscoveredBulkJob(chosen.map(candidate => candidate.id), username.trim(), password, addAnyway, recording);
+      onStarted();
+    } catch (failure) {
+      setError(`Not started: ${failureText(failure, "the NVR could not be reached")}.`);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="tab-form" aria-label="Add the chosen devices" noValidate onSubmit={event => { event.preventDefault(); void start(); }}>
+      <h2 className="setup-title">Add {count}</h2>
+      <ul className="muted chosen-devices">
+        {chosen.slice(0, 8).map(candidate => <li key={candidate.id}>{candidateLabel(candidate)}{candidateAddress(candidate) ? <span className="mono"> · {candidateAddress(candidate)}</span> : null}</li>)}
+        {chosen.length > 8 ? <li>and {chosen.length - 8} more</li> : null}
+      </ul>
+      <p className="muted field-hint">One login for all of them. Each is signed in to with it, identified and its video checked, then added, three at a time; one with a different login is reported and can be set up on its own.</p>
+      <label className="field"><span>Username</span><input autoComplete="off" value={username} onChange={event => setUsername(event.target.value)} maxLength={256} /></label>
+      <label className="field"><span>Password</span><input type="password" autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} maxLength={1024} /></label>
+      <label className="inline-field"><input type="checkbox" checked={addAnyway} onChange={event => setAddAnyway(event.target.checked)} /> Also add devices that need attention (recording stays off)</label>
+      <label className="inline-field"><input type="checkbox" checked={recording} onChange={event => setRecording(event.target.checked)} /> Turn on motion recording for devices that check out completely</label>
+      {halfLogin ? <p className="field-error" role="alert">Enter both a username and a password, or leave both blank.</p> : null}
+      {tooMany ? <p className="field-error" role="alert">At most {BULK_LIMIT} devices can be added at once. Choose fewer.</p> : null}
+      {error ? <p className="notice" data-tone="bad" role="alert">{error}</p> : null}
+      <div className="field-actions">
+        <button type="submit" className="button" data-variant="primary" disabled={busy || halfLogin || tooMany}>{busy ? "Starting…" : `Check and add ${count}`}</button>
+        <button type="button" className="button" data-variant="ghost" disabled={busy} onClick={onClear}>Clear the choice</button>
+      </div>
+      <p className="muted field-hint">The progress shows in Bulk Add. You can close this page while it runs. The password is kept, encrypted, only until each device has been checked.</p>
     </form>
   );
 }

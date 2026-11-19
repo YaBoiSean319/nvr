@@ -256,3 +256,41 @@ test("a discovered device that is not wanted can be forgotten (#381)", async ({ 
   await expect(page.getByText("1 not-added device shown")).toBeVisible();
   await expect(setup).toContainText("Select a discovered device to set it up.");
 });
+
+test("several discovered devices are added with one shared login, with the progress in Bulk Add (#173)", async ({ page }) => {
+  // Both unadded fixtures answer at the same fixture camera, so both are named alike: one is added and the other is reported as not added,
+  // whichever is checked first. Without the simulated RTSP camera the one added needs attention; the journey holds either way.
+  const secret = "Shared-Fixture-Secret-37";
+  seedFixtures(1);
+  await signInNext(page);
+  await openAdd(page);
+  await expect(page.getByText("2 not-added devices shown")).toBeVisible();
+  const setup = page.getByRole("region", { name: "Device setup" });
+  await results(page).getByLabel("Choose Unadded Fixture Camera").check();
+  await expect(setup.getByRole("heading", { name: "Add 1 device" })).toBeVisible();
+  await results(page).getByLabel("Choose every device shown that is not added").check();
+  const form = setup.getByRole("form", { name: "Add the chosen devices" });
+  await expect(form.getByRole("heading", { name: "Add 2 devices" })).toBeVisible();
+  await expect(form).toContainText("Linkable Fixture Camera");
+  await form.getByLabel("Username").fill("fixture-user");
+  await expect(form.getByRole("alert")).toHaveText("Enter both a username and a password, or leave both blank.");
+  await expect(form.getByRole("button", { name: "Check and add 2 devices" })).toBeDisabled();
+  await form.getByLabel("Password").fill(secret);
+  await form.getByRole("button", { name: "Check and add 2 devices" }).click();
+
+  await expect(page.getByRole("tab", { name: "Bulk Add" })).toHaveAttribute("aria-selected", "true");
+  const table = page.getByRole("table", { name: "Bulk add results" });
+  await expect(table.getByRole("row")).toHaveCount(3);
+  await expect(table).toContainText("127.0.0.1:8766");
+  await expect(page.getByRole("status").filter({ hasText: /^1 added of 2.*1 not added\.$/ })).toBeVisible({ timeout: 90_000 });
+  await expect(table).toContainText("already exists");
+  expect(await page.locator("body").innerText()).not.toContain(secret);
+  const kept = await page.evaluate(() => JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage), document.cookie]));
+  expect(kept).not.toContain(secret);
+
+  const added = (await cameras(page)).filter(camera => camera.camera_ip === "127.0.0.1");
+  expect(added.length).toBe(1);
+  expect([added[0].recording_enabled, added[0].recording_mode]).toEqual([false, "motion"]);
+  await page.getByRole("tab", { name: "Discover" }).click();
+  await expect(page.getByText("1 not-added device shown")).toBeVisible();  // The one added is linked to its discovery record
+});

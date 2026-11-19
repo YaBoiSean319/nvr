@@ -152,6 +152,12 @@ export const startBulkJob = (cameras: Array<{ host: string; username: string; pa
     method: "POST",
     body: { cameras: cameras.map(camera => ({ host: camera.host, username: camera.username || null, password: camera.password || null, name: camera.name || null })), add_anyway: addAnyway, recording },
   });
+/** Several discovered devices, added with one shared login as a bulk job (#173): each is checked and added as adding one discovered device does. */
+export const startDiscoveredBulkJob = (candidateIds: string[], username: string, password: string, addAnyway: boolean, recording: boolean) =>
+  api<BulkJob>("/api/cameras/bulk-jobs/discovered", {
+    method: "POST",
+    body: { candidate_ids: candidateIds, username: username || null, password: password || null, add_anyway: addAnyway, recording },
+  });
 export const getBulkJob = (id: string) => api<BulkJob>(`/api/cameras/bulk-jobs/${encodeURIComponent(id)}`);
 export const latestBulkJob = () => api<{ job: BulkJob | null }>("/api/cameras/bulk-jobs/latest");
 export const cancelBulkJob = (id: string) => api<BulkJob>(`/api/cameras/bulk-jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });

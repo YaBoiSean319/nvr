@@ -11,11 +11,13 @@ when the job is cancelled. Nothing in a job's view holds a password.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -76,7 +78,8 @@ def _detail_of(exc: BaseException) -> str:
 
 
 def create_job(cameras: list[dict[str, Any]], *, created_by: int | None, add_anyway: bool, recording: bool) -> str:
-    """Store a list of cameras to add. Each is ``{"host", "username", "password", "name"}``; passwords are encrypted. Returns the job's id."""
+    """Store a list of cameras to add. Each is ``{"host", "username", "password", "name"}``, and ``"candidate_id"`` for a device found by discovery
+    (its address and ONVIF service are then taken from the discovery record when it is worked); passwords are encrypted. Returns the job's id."""
     job_id = uuid.uuid4().hex
     now = stamp()
     with connect() as db:
@@ -86,12 +89,50 @@ def create_job(cameras: list[dict[str, Any]], *, created_by: int | None, add_any
         for number, camera in enumerate(cameras, start=1):
             password = camera.get("password") or ""
             db.execute(
-                "INSERT INTO camera_add_items(job_id,row_number,host,name,username,password_ciphertext,status,updated_at) VALUES(?,?,?,?,?,?,'queued',?)",
-                (job_id, number, camera["host"].strip(), (camera.get("name") or "").strip(), camera.get("username") or None, encrypt(password) if password else None, now),
+                "INSERT INTO camera_add_items(job_id,row_number,host,name,username,password_ciphertext,status,updated_at,candidate_id) VALUES(?,?,?,?,?,?,'queued',?,?)",
+                (job_id, number, camera["host"].strip(), (camera.get("name") or "").strip(), camera.get("username") or None, encrypt(password) if password else None, now,
+                 camera.get("candidate_id")),
             )
-        record(db, created_by, "camera_bulk_add_started", "camera_add_job", job_id, cameras=len(cameras), add_anyway=add_anyway, recording=recording)
+        discovered = sum(1 for camera in cameras if camera.get("candidate_id"))
+        details = {"discovered": discovered} if discovered else {}
+        record(db, created_by, "camera_bulk_add_started", "camera_add_job", job_id, cameras=len(cameras), add_anyway=add_anyway, recording=recording, **details)
         db.execute("COMMIT")
     return job_id
+
+
+def discovered_cameras(candidate_ids: list[str], username: str | None, password: str | None) -> list[dict[str, Any]]:
+    """The cameras of a job adding several discovered devices with one shared login (#173). Raises ``HTTPException``: 404 when a device is no
+    longer in the discovery list, 409 when one is already a camera. Each is shown by its address until it is checked and named."""
+    with connect() as db:
+        marks = ",".join("?" for _ in candidate_ids)
+        rows = {row["id"]: row for row in db.execute(f"SELECT id,service_urls,linked_camera_id FROM discovery_candidates WHERE id IN ({marks})", candidate_ids)}
+    missing = [candidate for candidate in candidate_ids if candidate not in rows]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"{len(missing)} of the selected devices are no longer in the discovery list. Scan again and choose again.")
+    linked = [candidate for candidate in candidate_ids if rows[candidate]["linked_camera_id"]]
+    if linked:
+        raise HTTPException(status_code=409, detail=f"{len(linked)} of the selected devices are already cameras. Leave them out and try again.")
+    return [{"host": _candidate_address(rows[candidate]["service_urls"]), "username": username, "password": password, "name": "", "candidate_id": candidate}
+            for candidate in candidate_ids]
+
+
+def _candidate_service(service_urls: str | None) -> str | None:
+    try:
+        urls = json.loads(service_urls or "[]")
+    except ValueError:
+        return None
+    return next((url for url in urls if isinstance(url, str) and urlsplit(url).hostname), None)
+
+
+def _candidate_address(service_urls: str | None) -> str:
+    """The device's address as a person would type it: its host, with the port when it is not the usual one."""
+    service = _candidate_service(service_urls)
+    if not service:
+        return "(address not reported)"
+    parts = urlsplit(service)
+    host = f"[{parts.hostname}]" if parts.hostname and ":" in parts.hostname else parts.hostname or ""
+    usual = 443 if parts.scheme == "https" else 80
+    return f"{host}:{parts.port}" if parts.port and parts.port != usual else host
 
 
 def prune(db) -> None:
@@ -172,6 +213,10 @@ def recover_interrupted() -> None:
     """After a restart: a camera that was only being checked goes back in the queue; one that was being saved may or may not have been, so it is reported, not repeated."""
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
+        # A discovered device that was being added when the server stopped is no longer being added: its claim is let go at once, rather than
+        # five minutes later, so the item put back in the queue (or a person adding it by hand) is not refused as "already being added".
+        db.execute("UPDATE discovery_candidates SET add_claim_token=NULL,add_claimed_until=NULL WHERE linked_camera_id IS NULL AND id IN "
+                   "(SELECT candidate_id FROM camera_add_items WHERE candidate_id IS NOT NULL AND status IN ('checking','adding'))")
         # A camera that was being checked goes back in the queue, but only in a job that is still running. In a cancelled job it was put
         # back and never worked, keeping its encrypted password until the job was pruned (#386): it is skipped, as the others were.
         db.execute("UPDATE camera_add_items SET status='skipped',detail='Stopped before this camera',password_ciphertext=NULL,updated_at=? "
@@ -188,19 +233,38 @@ def recover_interrupted() -> None:
 
 
 async def process(item: dict[str, Any], recorders: Any) -> None:
-    """Check one camera and add it, as the Add Camera form does, and record the outcome. Never raises."""
+    """Check one camera and add it, as the Add Camera form does, and record the outcome. Never raises.
+
+    A device found by discovery (``candidate_id``) is added as adding one discovered device does: its discovery record is claimed while it is
+    worked on, its address and ONVIF service come from that record, its ONVIF identity is saved with it and the new camera is linked to the
+    record. A device that is already a camera, or is being added by someone else, is reported for its row; the claim is let go on any failure."""
     from app.api.cameras import CameraCreateRequest, add_camera
+    from app.api.onboarding import _claim_discovery_add, _give_up_discovery_add, _release_discovery_add
 
     item_id = item["id"]
+    claim: dict[str, Any] | None = None
     try:
         password = decrypt(item["password_ciphertext"]) if item["password_ciphertext"] else ""
         username = item["username"] or ""
         if bool(username) != bool(password):
             raise ValueError("Provide both camera username and password, or leave both blank")
-        host, endpoint = split_address(item["host"])
-        host = normalise_host(host)
+        onvif_uuid = None
+        if item.get("candidate_id"):
+            candidate, token = await asyncio.to_thread(_claim_discovery_add, item["candidate_id"])
+            claim = {"candidate_id": item["candidate_id"], "device_uuid": candidate["device_uuid"], "token": token}
+            endpoint = _candidate_service(candidate["service_urls"])
+            if not endpoint:
+                raise ValueError("The device did not report an address to reach it at")
+            host = normalise_host(urlsplit(endpoint).hostname or "")
+            onvif_uuid = None if candidate["device_uuid"].startswith("ipscan:") else candidate["device_uuid"]
+        else:
+            host, endpoint = split_address(item["host"])
+            host = normalise_host(host)
         report = await camera_inspect.inspect_camera(host, username, password, device_service_url=endpoint, brand="auto", verify=True)
         if not report["ok"] and not item["add_anyway"]:
+            if claim:
+                await asyncio.to_thread(_release_discovery_add, claim["candidate_id"], claim["token"])
+                claim = None
             await asyncio.to_thread(_set, item_id, "failed", f"Not added because it needs attention: {attention_text(report)}", finished=True)
             return
         await asyncio.to_thread(_set, item_id, "adding")
@@ -211,18 +275,24 @@ async def process(item: dict[str, Any], recorders: Any) -> None:
             device_service_url=report.get("device_service_url") or endpoint,
             onvif_profile_token=selection.get("record_token"),
             live_substream_profile_token=selection["live_token"] if selection.get("live_token") and selection.get("live_verified") is not False else None,
-            recording_mode="motion", recording_enabled=bool(item["recording"]) and bool(report["ok"]), save_anyway=not report["ok"],
+            recording_mode="motion", recording_enabled=bool(item["recording"]) and bool(report["ok"]), save_anyway=not report["ok"], onvif_uuid=onvif_uuid,
         )
-        camera = await add_camera(payload, recorders)
+        camera = await add_camera(payload, recorders, discovery_claim=claim)
+        claim = None  # Saved: the claim became the link to the new camera
         if report["ok"]:
             await asyncio.to_thread(_set, item_id, "added", camera["name"], camera["id"], finished=True)
         else:
             await asyncio.to_thread(_set, item_id, "attention", f"{camera['name']}: {attention_text(report)}", camera["id"], finished=True)
     except asyncio.CancelledError:
+        if claim:  # Stopping: the item goes back in the queue after a restart, and the device must not look "already being added" until then
+            await asyncio.shield(asyncio.to_thread(_release_discovery_add, claim["candidate_id"], claim["token"]))
         raise
     except Exception as exc:  # noqa: BLE001 - one camera's failure is that camera's result, never the run's
         if not isinstance(exc, (ValueError, HTTPException, ValidationError)):
             logger.exception("Adding a camera in a bulk job failed")
+        if claim:
+            failed_device = claim["device_uuid"] if isinstance(exc, HTTPException) and exc.status_code == 422 else None
+            await asyncio.to_thread(_give_up_discovery_add, claim["candidate_id"], claim["token"], failed_device)
         await asyncio.to_thread(_set, item_id, "failed", _detail_of(exc), finished=True)
 
 

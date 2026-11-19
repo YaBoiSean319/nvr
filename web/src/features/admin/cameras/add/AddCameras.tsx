@@ -20,7 +20,7 @@ export function AddCameras() {
         <Tabs.Trigger className="tab" value="manual">Manual Add</Tabs.Trigger>
         <Tabs.Trigger className="tab" value="csv">CSV Import</Tabs.Trigger>
       </Tabs.List>
-      <Tabs.Content className="add-panel" value="discover">{mode === "discover" ? <Discover /> : null}</Tabs.Content>
+      <Tabs.Content className="add-panel" value="discover">{mode === "discover" ? <Discover onBulkStarted={() => setMode("bulk")} /> : null}</Tabs.Content>
       <Tabs.Content className="add-panel add-panel-scroll" value="quick">{mode === "quick" ? <QuickAdd /> : null}</Tabs.Content>
       <Tabs.Content className="add-panel" value="bulk">{mode === "bulk" ? <BulkAdd /> : null}</Tabs.Content>
       <Tabs.Content className="add-panel add-panel-scroll" value="manual">{mode === "manual" ? <ManualAdd /> : null}</Tabs.Content>

@@ -409,6 +409,8 @@
 .inventory-table td { padding: 6px var(--n-space-2); border-bottom: 1px solid var(--n-line); white-space: nowrap; }
 .inventory-table tbody tr { cursor: pointer; }
 .inventory-table tbody tr:hover { background: var(--n-raised); }
+.inventory-table .select-column { width: 32px; padding: 6px var(--n-space-2); text-align: center; }
+.chosen-devices { margin: 0 0 var(--n-space-2); padding-left: 1.2em; font-size: 13px; }
 .inventory-table tr[aria-selected="true"] { background: var(--n-soft); box-shadow: inset 3px 0 0 var(--n-accent); }
 .inventory-table tr[data-archived="true"] td { color: var(--n-muted); }
 .check-cell { width: 32px; text-align: center; }
