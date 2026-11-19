@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -220,6 +221,53 @@ class BackupTests(unittest.TestCase):
         self.assertEqual([(gap["state"], gap["reason"]) for gap in timeline["gaps"]],
                          [("failure", "Footage file was not found after a configuration restore")])
 
+    def test_a_restore_writes_only_the_database_and_key_unencrypted(self):
+        # Restoring used to decrypt the whole backup to a tar next to the database, then unpack it: two unencrypted copies again.
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        database = Path(os.environ["NVR_DB_PATH"])
+        listings: list[set[str]] = []
+        real_read = backup._Opener.read
+
+        def watching(opener, size=-1):
+            staging = next(database.parent.glob(".restore-*"), None)
+            if staging is not None:
+                listings.append({item.name for item in staging.iterdir()})
+            return real_read(opener, size)
+
+        with patch.object(backup._Opener, "read", watching):
+            backup.restore(archive, force=True)
+        self.assertTrue(listings)
+        self.assertTrue(all(listing <= {"nvr.sqlite3", "credentials.key"} for listing in listings), listings[:3])
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT name FROM cameras WHERE id='c1'").fetchone()[0], "Dock East")
+
+    def test_a_restore_without_room_is_refused_and_changes_nothing(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        database = Path(os.environ["NVR_DB_PATH"])
+        before = database.read_bytes()
+        real = shutil.disk_usage
+        with patch.object(backup.shutil, "disk_usage", lambda folder: real(folder)._replace(free=1 << 20)), \
+                self.assertRaisesRegex(backup.BackupError, "Not enough free space to restore: it needs about .* and there is 1 MB"):
+            backup.restore(archive, force=True)
+        self.assertEqual(database.read_bytes(), before)
+        self.assertEqual(sorted(item.name for item in database.parent.glob("*before-restore*")), [])
+        self.assertEqual(list(database.parent.glob(".restore-*")), [])
+
+    def test_a_backup_cut_short_is_refused_before_anything_is_replaced(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        cut = self.backups / "cut.nvrbackup"
+        cut.write_bytes(archive.read_bytes()[:-40])  # Its final chunk is lost
+        database = Path(os.environ["NVR_DB_PATH"])
+        before = database.read_bytes()
+        with self.assertRaises(backup.BackupError):
+            backup.restore(cut, force=True)
+        self.assertEqual(database.read_bytes(), before)
+        self.assertEqual(sorted(item.name for item in database.parent.glob("*before-restore*")), [])
+        self.assertEqual(list(database.parent.glob(".restore-*")), [])
+
     def test_restore_refuses_a_running_installation_and_unmounted_recordings_defer_reconciliation(self):
         self._seed()
         archive = self.backups / backup.create_backup("manual")["file_name"]
@@ -298,6 +346,93 @@ class BackupTests(unittest.TestCase):
         files = self._files()
         self.assertEqual(len(files), 1)
         self.assertIn("pre-migration", files[0].name)
+
+    # --- space (#328) ---------------------------------------------------------------
+
+    def _leftovers(self) -> list[str]:
+        """Anything a backup leaves next to the database or among the backups besides finished backups."""
+        database = Path(os.environ["NVR_DB_PATH"])
+        return sorted([item.name for item in database.parent.glob(".backup-*")] + [item.name for item in self.backups.glob(".*.partial")])
+
+    def test_a_backup_without_room_is_refused_up_front_and_leaves_the_good_one_alone(self):
+        good = backup.create_backup("manual")["file_name"]
+        before = (self.backups / good).read_bytes()
+        database = Path(os.environ["NVR_DB_PATH"])
+        real = shutil.disk_usage
+
+        def nearly_full(folder):
+            usage = real(folder)
+            return usage._replace(free=(1 << 20) if Path(folder) == database.parent else usage.free)
+
+        with patch.object(backup.shutil, "disk_usage", nearly_full), self.assertRaises(backup.BackupError) as caught:
+            backup.create_backup("manual")
+        message = str(caught.exception)
+        self.assertIn("Not enough free space for a backup", message)
+        self.assertIn(f"free in {database.parent}", message)
+        self.assertIn("and there is 1 MB", message)
+        self.assertEqual([path.name for path in self._files()], [good])
+        self.assertEqual((self.backups / good).read_bytes(), before)
+        self.assertEqual(self._leftovers(), [])
+
+    def test_on_one_disk_the_check_counts_the_snapshot_and_the_encrypted_backup(self):
+        database = Path(os.environ["NVR_DB_PATH"])
+        self.backups.mkdir(exist_ok=True)
+        snapshot = backup._database_bytes(database)
+        real = shutil.disk_usage
+        # Room for the snapshot and the margin, but not for the encrypted backup as well: the database and the backups share a disk here.
+        with patch.object(backup.shutil, "disk_usage", lambda folder: real(folder)._replace(free=snapshot + backup.SPACE_MARGIN + 1)):
+            with self.assertRaises(backup.BackupError):
+                backup.create_backup("manual")
+        self.assertEqual(self._files(), [])
+        self.assertEqual(self._leftovers(), [])
+
+    def test_a_disk_that_fills_while_writing_leaves_nothing_behind(self):
+        good = backup.create_backup("manual")["file_name"]
+        import errno
+
+        def full(_descriptor):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with patch.object(backup.os, "fsync", full), self.assertRaises(backup.BackupError) as caught:
+            backup.create_backup("manual")
+        self.assertEqual(str(caught.exception), "Could not write the backup: No space left on device")
+        self.assertEqual([path.name for path in self._files()], [good])
+        self.assertEqual(self._leftovers(), [])
+
+    def test_only_the_one_snapshot_is_ever_unencrypted_on_disk(self):
+        # The archive used to be written in full next to the snapshot before it was encrypted: two plaintext copies of the database.
+        database = Path(os.environ["NVR_DB_PATH"])
+        with connect() as db:
+            db.execute("CREATE TABLE padding(value BLOB)")
+            db.executemany("INSERT INTO padding VALUES(?)", [(os.urandom(64 << 10),) for _ in range(64)])  # A database of several megabytes
+        listings: list[dict[str, int]] = []
+        real_write = backup._Sealer.write
+
+        def watching(sealer, data):
+            if len(listings) < 64:  # What is in the staging folder while the backup is being encrypted
+                staging = next(database.parent.glob(".backup-*"))
+                listings.append({item.name: item.stat().st_size for item in staging.iterdir()})
+            return real_write(sealer, data)
+
+        with patch.object(backup._Sealer, "write", watching):
+            result = backup.create_backup("manual")
+        self.assertTrue(listings)
+        self.assertTrue(all(set(listing) == {"nvr.sqlite3"} for listing in listings), listings[:3])
+        restored = io.BytesIO()
+        with (self.backups / result["file_name"]).open("rb") as sealed:
+            backup.decrypt_stream(sealed, restored, PASSPHRASE)
+        self.assertGreater(len(restored.getvalue()), 4 << 20)  # The whole database went in
+
+    def test_the_encrypted_format_round_trips_at_chunk_boundaries(self):
+        for size in (0, 1, backup.CHUNK_BYTES - 1, backup.CHUNK_BYTES, backup.CHUNK_BYTES + 1, 3 * backup.CHUNK_BYTES):
+            plain = os.urandom(size)
+            sealed, opened = io.BytesIO(), io.BytesIO()
+            backup.encrypt_stream(io.BytesIO(plain), sealed, PASSPHRASE)
+            sealed.seek(0)
+            backup.decrypt_stream(sealed, opened, PASSPHRASE)
+            self.assertEqual(opened.getvalue(), plain, size)
+            chunks = max(1, -(-size // backup.CHUNK_BYTES))  # Whole chunks, the last one marked final; an empty backup is one empty chunk
+            self.assertEqual(len(sealed.getvalue()), len(backup.MAGIC) + 36 + chunks * (4 + 16) + size, size)
 
     def test_cli_restore_reports_errors_without_traceback(self):
         missing = self.backups / "none.nvrbackup"

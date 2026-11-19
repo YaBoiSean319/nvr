@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +74,53 @@ class CropAndDecodeTests(unittest.TestCase):
 
     def test_a_crop_the_model_doubts_holds_a_person_gives_nothing(self):
         self.assertIsNone(pose_models.decode(np.zeros(195), 0.1, 720, 1280, 0, 0, 256))
+
+
+class SharedReaderTests(unittest.TestCase):
+    """One reader serves every camera with fall detection on, each from its own worker thread (#408)."""
+
+    def test_cameras_reading_poses_at_the_same_moment_each_get_a_result(self):
+        # Like OpenVINO's compiled model: one inference request, which refuses to run twice at once ("Infer Request is busy").
+        class Output:
+            def __init__(self, shape: list[int]) -> None:
+                self.shape = shape
+
+        landmarks, score = Output([1, 195]), Output([1, 1])
+
+        class OneRequest:
+            outputs = (landmarks, score)
+
+            def __init__(self) -> None:
+                self.busy = threading.Lock()
+                self.calls = 0
+
+            def __call__(self, tensor):
+                if not self.busy.acquire(blocking=False):
+                    raise RuntimeError("Infer Request is busy")
+                try:
+                    time.sleep(0.005)  # Inference takes a while, so calls from several cameras overlap
+                    self.calls += 1
+                    return {landmarks: np.zeros((1, 195), dtype=np.float32), score: np.array([[0.9]], dtype=np.float32)}
+                finally:
+                    self.busy.release()
+
+        model = OneRequest()
+
+        class Core:
+            def read_model(self, path: str) -> str:
+                return path
+
+            def compile_model(self, read: str, provider: str) -> OneRequest:
+                return model
+
+        reader = pose_models.PoseReader(core=Core(), directory=Path("."))
+        frame = np.full((360, 640, 3), 90, dtype=np.uint8)
+        box = {"x": 0.4, "y": 0.2, "width": 0.2, "height": 0.6}
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(lambda _: reader.pose_full(frame, box), range(64)))
+        self.assertEqual(len(results), 64)
+        self.assertTrue(all(result is not None for result in results))
+        self.assertEqual(model.calls, 64)
 
 
 @unittest.skipUnless(real_pose_models.folder() is not None or real_pose_models.required(), "needs the pose model (network)")
