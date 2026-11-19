@@ -11,7 +11,7 @@ async function openSearch(page) {
   await expect(panel(page)).toBeVisible();
 }
 
-test("attribute search finds tracks by what they looked like, lists what was not analysed, and opens Playback at the moment", async ({ page }) => {
+test("attribute search finds tracks by what they looked like, lists what was not analyzed, and opens Playback at the moment", async ({ page }) => {
   seedFixtures(3);
   const tracks = seedSearchTracks();
   await signInNext(page);
@@ -19,7 +19,7 @@ test("attribute search finds tracks by what they looked like, lists what was not
 
   // Red tops, anywhere, in the last day: two people on two cameras, newest first.
   await panel(page).getByLabel("Kind").selectOption("person");
-  await panel(page).getByLabel("Top colour").selectOption("red");
+  await panel(page).getByLabel("Top color").selectOption("red");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
   await expect(cards(page)).toHaveCount(2);
   await expect(cards(page).nth(0)).toContainText("Camera 003");
@@ -30,10 +30,10 @@ test("attribute search finds tracks by what they looked like, lists what was not
 
   // The unanalysed time is listed above the results: camera 1's failed hour and camera 3, never analysed.
   const coverage = panel(page).getByRole("region", { name: "Analysis coverage" });
-  await expect(coverage).toContainText("of the searched time was analysed");
+  await expect(coverage).toContainText("of the searched time was analyzed");
   await expect(coverage).toContainText("not looked at, not empty");
-  await coverage.getByText(/Not analysed: 2 cameras/).click();
-  const gaps = coverage.getByRole("list", { name: "Unanalysed time by camera" });
+  await coverage.getByText(/Not analyzed: 2 cameras/).click();
+  const gaps = coverage.getByRole("list", { name: "Unanalyzed time by camera" });
   await expect(gaps).toContainText("Camera 001");
   await expect(gaps).toContainText("Analysis failed");
   await expect(gaps).toContainText("Camera stream ended");
@@ -42,22 +42,22 @@ test("attribute search finds tracks by what they looked like, lists what was not
   await expect(gaps).not.toContainText("Camera 002");
 
   // Narrowing the filters narrows the results, and a combination nobody matched says so.
-  await panel(page).getByLabel("Lower colour").selectOption("blue");
+  await panel(page).getByLabel("Lower color").selectOption("blue");
   await panel(page).getByLabel("Direction").selectOption("right");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
   await expect(cards(page)).toHaveCount(1);
   await expect(cards(page)).toContainText("Camera 001");
   await panel(page).getByLabel("Direction").selectOption("away");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
-  await expect(panel(page)).toContainText("No matches in the time that was analysed.");
+  await expect(panel(page)).toContainText("No matches in the time that was analyzed.");
 
   // Vehicles: the type filter says why it cannot be used without the attribute model, and colour still works.
   await panel(page).getByRole("button", { name: "Clear" }).click();
   await panel(page).getByLabel("Kind").selectOption("vehicle");
-  await expect(panel(page).getByLabel("Top colour")).toHaveCount(0);
+  await expect(panel(page).getByLabel("Top color")).toHaveCount(0);
   await expect(panel(page).getByLabel("Vehicle type")).toBeDisabled();
   await expect(panel(page)).toContainText("Needs the vehicle attribute model, which is not installed.");
-  await panel(page).getByLabel("Vehicle colour").selectOption("red");
+  await panel(page).getByLabel("Vehicle color").selectOption("red");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
   await expect(cards(page)).toHaveCount(1);
   await expect(cards(page)).toContainText("Camera 002");
@@ -73,7 +73,7 @@ test("attribute search finds tracks by what they looked like, lists what was not
   // A result opens Playback at its moment with its camera selected, by keyboard too.
   await panel(page).getByRole("button", { name: "Clear" }).click();
   await panel(page).getByLabel("Kind").selectOption("person");
-  await panel(page).getByLabel("Top colour").selectOption("green");
+  await panel(page).getByLabel("Top color").selectOption("green");
   await panel(page).getByRole("button", { name: "Search", exact: true }).click();
   await cards(page).first().focus();
   await page.keyboard.press("Enter");
@@ -134,7 +134,7 @@ test("describing what to look for finds it, says what was understood and which m
   await expect(matches).toHaveCount(1);
   await expect(matches.first()).toContainText("Camera 003");
   await expect(matches.first()).toContainText("score 100");
-  await expect(answer).toContainText("not analysed"); // Camera 003 was never analysed: the answer says so
+  await expect(answer).toContainText("not analyzed"); // Camera 003 was never analysed: the answer says so
 
   // Without a camera phrase the red tops on every camera are found, best first.
   await box.fill("red jacket");

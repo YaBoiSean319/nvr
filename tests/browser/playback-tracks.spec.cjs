@@ -220,7 +220,7 @@ test("previous and next appearance land on the object's stored detections, acros
   await expect(group.getByRole("button", { name: /Object ▶/ })).toHaveCount(0);
 });
 
-test("a motion mark says what the AI found in it, and stays unmarked where the AI was not analysing", async ({ page }) => {
+test("a motion mark says what the AI found in it, and stays unmarked where the AI was not analyzing", async ({ page }) => {
   await open(page);
   const marks = page.locator(".timeline-row [data-mark='motion']");
   await expect(marks).toHaveCount(2);

@@ -189,11 +189,11 @@ export function DigestsSettings() {
           </form>
         )}
       </section>
-      <section className="field-group settings-block" aria-label="Summarising model">
-        <h2 className="field-heading">Summarising model (optional)</h2>
+      <section className="field-group settings-block" aria-label="Summarizing model">
+        <h2 className="field-heading">Summarizing model (optional)</h2>
         <p className="muted field-hint">
           Off by default. While it is off, or has no address, digests are complete without it and nothing is sent anywhere. When on, each scheduled digest that asks for a summary sends its text to this
-          OpenAI-compatible endpoint, which you run, and adds the one paragraph it returns, labelled as written by the model. Use a private address only for a model on your own network.
+          OpenAI-compatible endpoint, which you run, and adds the one paragraph it returns, labeled as written by the model. Use a private address only for a model on your own network.
         </p>
         <form className="tab-form" onSubmit={event => { event.preventDefault(); saveModel.mutate(); }}>
           <label className="field"><span>Chat completions address</span>

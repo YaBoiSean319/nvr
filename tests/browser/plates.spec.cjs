@@ -2,7 +2,7 @@
 // and finding a plate in full or in part. The plate reads are seeded as the AI worker leaves them; the plate models themselves are not installed here.
 const { test, expect, seedFixtures, seedPlates, signInNext } = require("./helpers.cjs");
 
-const page_ = page => page.getByRole("region", { name: "Licence plates" });
+const page_ = page => page.getByRole("region", { name: "License plates" });
 const list = (page, name) => page.getByRole("article", { name: `Watch list ${name}` });
 const panel = page => page.getByRole("complementary", { name: "Plate search" });
 const results = page => panel(page).getByRole("list", { name: "Plate results" });

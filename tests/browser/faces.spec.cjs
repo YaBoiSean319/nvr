@@ -107,7 +107,7 @@ test("the rule editor offers the face condition, with the people on the list to 
   await editor.getByLabel("Name").fill("Trespassers");
   await editor.getByRole("checkbox", { name: "Camera 001" }).check();
   await editor.getByLabel("When an object").selectOption("face");
-  await expect(editor).toContainText("Fires when a face on the face watch list is recognised");
+  await expect(editor).toContainText("Fires when a face on the face watch list is recognized");
   await expect(editor.getByRole("checkbox", { name: "Visitor B (off)" })).toBeVisible();
   await editor.getByRole("checkbox", { name: "Visitor A" }).check();
   const saved = page.waitForResponse(response => response.url().endsWith("/api/rules") && response.request().method() === "POST");

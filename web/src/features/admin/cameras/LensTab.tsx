@@ -39,7 +39,7 @@ export function LensTab({ camera, admin }: { camera: Camera; admin: boolean }) {
   const number = (value: string) => (value === "" ? Number.NaN : Number(value));
   const fisheye = draft.kind === "fisheye";
   const invalid = !fisheye ? null
-    : !(draft.center_x >= 0 && draft.center_x <= 1 && draft.center_y >= 0 && draft.center_y <= 1) ? "The centre is a point inside the picture: 0 to 100 %."
+    : !(draft.center_x >= 0 && draft.center_x <= 1 && draft.center_y >= 0 && draft.center_y <= 1) ? "The center is a point inside the picture: 0 to 100 %."
       : !(draft.radius >= 0.1 && draft.radius <= 1) ? "The lens circle's radius is 10 to 100 % of the picture's height."
         : !(draft.fov >= 120 && draft.fov <= 220) ? "The field of view across the circle is 120 to 220 degrees." : null;
   return (
@@ -63,10 +63,10 @@ export function LensTab({ camera, admin }: { camera: Camera; admin: boolean }) {
                 {(Object.keys(MOUNT_LABEL) as Mount[]).map(mount => <option key={mount} value={mount}>{MOUNT_LABEL[mount]}</option>)}
               </select>
             </label>
-            <label className="field"><span>Circle centre, across (%)</span>
+            <label className="field"><span>Circle center, across (%)</span>
               <input type="number" min={0} max={100} step={0.1} value={Number.isNaN(draft.center_x) ? "" : percent(draft.center_x)} onChange={event => set({ center_x: number(event.target.value) / 100 })} />
             </label>
-            <label className="field"><span>Circle centre, down (%)</span>
+            <label className="field"><span>Circle center, down (%)</span>
               <input type="number" min={0} max={100} step={0.1} value={Number.isNaN(draft.center_y) ? "" : percent(draft.center_y)} onChange={event => set({ center_y: number(event.target.value) / 100 })} />
             </label>
             <label className="field"><span>Circle radius (% of the picture's height)</span>
@@ -75,7 +75,7 @@ export function LensTab({ camera, admin }: { camera: Camera; admin: boolean }) {
             <label className="field"><span>Field of view across the circle (degrees)</span>
               <input type="number" min={120} max={220} step={1} value={Number.isNaN(draft.fov) ? "" : draft.fov} onChange={event => set({ fov: number(event.target.value) })} />
             </label>
-            <p className="muted field-hint">Most 360° cameras fill the picture's height with the circle, centred, and see 180°: the defaults. Choose Raw 360° on the Live tile to see the circle and check the numbers.</p>
+            <p className="muted field-hint">Most 360° cameras fill the picture's height with the circle, centered, and see 180°: the defaults. Choose Raw 360° on the Live tile to see the circle and check the numbers.</p>
           </>
         ) : null}
       </fieldset>

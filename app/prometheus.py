@@ -135,7 +135,7 @@ def _ai(out: _Output, db: sqlite3.Connection, scrub: logforward.Scrubber) -> Non
         out.sample("nvr_ai_cameras", count, state=state)
     out.family("nvr_ai_backlog_cameras", "gauge", "Cameras whose analysis is delayed or failing behind real time.")
     out.sample("nvr_ai_backlog_cameras", counts.get("delayed", 0) + counts.get("failed", 0))
-    out.family("nvr_ai_seconds_since_last_analysis", "gauge", "Seconds since the camera's last analysed frame.")
+    out.family("nvr_ai_seconds_since_last_analysis", "gauge", "Seconds since the camera's last analyzed frame.")
     now = datetime.now(timezone.utc).timestamp()
     for row in rows:
         at = _timestamp(row["last_success_at"])

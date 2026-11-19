@@ -111,7 +111,7 @@ test("on a phone a Live tile's controls work by touch, including centring on the
   expect(device.commands[0].pan_tilt).toEqual({ x: "0.0000", y: "0.5000" });
 
   // Centre on click: tapping the top-right quarter of the picture turns the camera up and right.
-  await pad.getByRole("button", { name: "Centre on click" }).tap();
+  await pad.getByRole("button", { name: "Center on click" }).tap();
   const box = await tile.boundingBox();
   await page.touchscreen.tap(box.x + box.width * 0.75, box.y + box.height * 0.25);
   await expect.poll(() => device.ops()).toContain("RelativeMove");

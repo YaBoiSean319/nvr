@@ -72,7 +72,7 @@ def search_tracks(
         results, truncated = search.find_tracks(db, list(searched), start_time, end_time, zone=zone_box, order=order, limit=limit, **filters)
         coverage = search.coverage(db, searched, start_time, searched_until)
     return {"start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(), "results": results, "truncated": truncated,
-            "coverage": coverage, "coverage_note": "No match in time that was not analysed means nothing was looked at; unanalysed time is listed with the results."}
+            "coverage": coverage, "coverage_note": "No match in time that was not analyzed means nothing was looked at; unanalyzed time is listed with the results."}
 
 
 @router.get("/api/ai/search/ask")
@@ -135,12 +135,12 @@ def ask(
             found = {"mode": "browse", "results": [], "candidates": 0, "unindexed": 0, "candidates_truncated": False}
             coverage = search.coverage(db, searched, start_time, start_time)
     notes = {"image-text": "Matched against each object's picture by the image-text model.",
-             "attributes": "No image-text model is installed, so results are ranked by the colours, vehicle type and direction named in the description.",
+             "attributes": "No image-text model is installed, so results are ranked by the colors, vehicle type and direction named in the description.",
              "browse": "Nothing in the description could be matched to an object, so these are the newest in range."}
     return {"query": q, "interpretation": semantic.interpretation(parsed, visible), "mode": found["mode"], "mode_note": notes[str(found["mode"])],
             "start": start_time.astimezone(timezone.utc).isoformat(), "end": end_time.astimezone(timezone.utc).isoformat(), "results": found["results"],
             "not_yet": end_time <= start_time, "candidates": found["candidates"], "unindexed": found["unindexed"], "truncated": found["candidates_truncated"], "coverage": coverage,
-            "coverage_note": "No match in time that was not analysed means nothing was looked at; unanalysed time is listed with the results."}
+            "coverage_note": "No match in time that was not analyzed means nothing was looked at; unanalyzed time is listed with the results."}
 
 
 @router.get("/api/ai/tracks/{track_id}/similar")

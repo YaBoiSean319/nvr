@@ -381,7 +381,7 @@ def test_rule(definition: RuleDefinition, _: Administrator) -> dict[str, object]
     # Listed, never run: test mode performs no action.
     actions = rule_actions.describe([action.model_dump() for action in definition.actions])
     return {"start": start.isoformat(), "end": end.isoformat(), "events": events, "count": len(events), "actions": actions,
-            "coverage_note": "Test mode replays analysed frames only; time a camera was not analysed cannot match."}
+            "coverage_note": "Test mode replays analyzed frames only; time a camera was not analyzed cannot match."}
 
 
 @router.get("/api/rule-events")

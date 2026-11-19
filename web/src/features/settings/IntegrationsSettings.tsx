@@ -35,13 +35,13 @@ function CapacityReport({ status, mode }: { status: CapacityStatus | null; mode:
   const waiting = Math.max(0, status.wanting - status.analysed);
   return (
     <div className="capacity-report" role="status" aria-label="AI capacity now">
-      <p><strong>Analysing {status.analysed} of {status.wanting} camera{status.wanting === 1 ? "" : "s"}.</strong>{" "}
+      <p><strong>Analyzing {status.analysed} of {status.wanting} camera{status.wanting === 1 ? "" : "s"}.</strong>{" "}
         {mode === "auto" && status.mode === "auto"
-          ? (waiting > 0 ? `The limit is ${status.limit_cameras} for now${status.factor ? `, held by ${FACTOR[status.factor as keyof typeof FACTOR] ?? status.factor}` : ""}${status.detail ? ` (${status.detail})` : ""}.` : "Every camera that wants analysis is being analysed.")
+          ? (waiting > 0 ? `The limit is ${status.limit_cameras} for now${status.factor ? `, held by ${FACTOR[status.factor as keyof typeof FACTOR] ?? status.factor}` : ""}${status.detail ? ` (${status.detail})` : ""}.` : "Every camera that wants analysis is being analyzed.")
           : mode === "fixed" && status.mode === "fixed" ? `The fixed limit is ${status.limit_cameras}.` : "This changes when you save."}
       </p>
       {measured ? <p className="muted">Measured now: {measured}.</p> : null}
-      {mode === "auto" && status.mode === "auto" && waiting > 0 ? <p className="muted">It adds a camera only after the machine has had room for a minute, and takes cameras away at once when it is short of CPU, AI model time or memory. Cameras with rules, fall detection or plate reading are analysed first.</p> : null}
+      {mode === "auto" && status.mode === "auto" && waiting > 0 ? <p className="muted">It adds a camera only after the machine has had room for a minute, and takes cameras away at once when it is short of CPU, AI model time or memory. Cameras with rules, fall detection or plate reading are analyzed first.</p> : null}
     </div>
   );
 }
@@ -93,12 +93,12 @@ export function IntegrationsSettings() {
       </p>
       <fieldset className="field-group">
         <legend>Person and vehicle detection</legend>
-        <fieldset className="field-group" aria-label="How many cameras are analysed">
-          <legend>How many cameras are analysed</legend>
+        <fieldset className="field-group" aria-label="How many cameras are analyzed">
+          <legend>How many cameras are analyzed</legend>
           <label className="check"><input type="radio" name="capacity-mode" checked={tab.draft.capacity_mode === "auto"} onChange={() => tab.change({ capacity_mode: "auto" })} /> Automatic (recommended): as many as this machine can carry</label>
           <label className="check"><input type="radio" name="capacity-mode" checked={tab.draft.capacity_mode === "fixed"} onChange={() => tab.change({ capacity_mode: "fixed" })} /> A fixed number</label>
           {tab.draft.capacity_mode === "fixed" ? (
-            <label className="field"><span>Cameras analysed at once</span>
+            <label className="field"><span>Cameras analyzed at once</span>
               <input type="number" min={1} step={1} value={Number.isNaN(tab.draft.max_active_cameras) ? "" : tab.draft.max_active_cameras} onChange={event => tab.change({ max_active_cameras: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
             </label>
           ) : null}

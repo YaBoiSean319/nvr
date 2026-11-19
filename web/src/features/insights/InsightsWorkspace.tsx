@@ -62,7 +62,7 @@ function Chart({ report, subject, format }: { report: Report; subject: Subject; 
           const base = CHART.height - CHART.bottom;
           return (
             <g key={bucket.start} data-bucket={bucket.start} data-total={totals[index]} data-analysed={percent ?? "future"}>
-              <title>{`${format(bucket.start)}: ${cell[people] ?? 0} people, ${cell[1 - people] ?? 0} vehicles${percent === null || percent === undefined ? " (not yet)" : partial ? ` (only ${percent}% analysed: counts may be lower than what happened)` : ""}`}</title>
+              <title>{`${format(bucket.start)}: ${cell[people] ?? 0} people, ${cell[1 - people] ?? 0} vehicles${percent === null || percent === undefined ? " (not yet)" : partial ? ` (only ${percent}% analyzed: counts may be lower than what happened)` : ""}`}</title>
               {partial ? <rect x={x} y={CHART.top} width={Math.max(1, slot - 1)} height={plot} className="chart-unanalysed" data-testid="unanalysed-mark" /> : null}
               <rect x={x + 1} y={base - person} width={Math.max(1, slot - 3)} height={person} className="chart-person" />
               <rect x={x + 1} y={base - person - vehicle} width={Math.max(1, slot - 3)} height={vehicle} className="chart-vehicle" />
@@ -71,7 +71,7 @@ function Chart({ report, subject, format }: { report: Report; subject: Subject; 
         })}
       </svg>
       <figcaption className="muted">
-        <span className="legend-swatch chart-person" /> People <span className="legend-swatch chart-vehicle" /> Vehicles <span className="legend-swatch chart-unanalysed" /> Not fully analysed, so counts may be lower than what happened
+        <span className="legend-swatch chart-person" /> People <span className="legend-swatch chart-vehicle" /> Vehicles <span className="legend-swatch chart-unanalysed" /> Not fully analyzed, so counts may be lower than what happened
       </figcaption>
     </figure>
   );
@@ -98,7 +98,7 @@ function Heatmap({ cameraId, period, label }: { cameraId: string; period: { star
           <p className="muted">
             {data.tracks ? `${data.tracks} object${data.tracks === 1 ? "" : "s"} seen; brighter means more time spent there.` : "Nothing was seen in this period."}
             {noFrame ? " There is no recording to show behind it." : ""}
-            {data.coverage.fully_analysed ? "" : " Some of this period was not analysed, so it shows less than happened."}
+            {data.coverage.fully_analysed ? "" : " Some of this period was not analyzed, so it shows less than happened."}
           </p>
         </>
       ) : heat.isPending ? <p className="muted">Loading the heatmap…</p> : null}
@@ -175,7 +175,7 @@ export function InsightsWorkspace() {
         <>
           {data.coverage.fully_analysed ? null : (
             <p className="notice" data-tone="warn" role="status" data-testid="insights-unanalysed">
-              The AI was not analysing all of this time{data.coverage.analysed_percent !== null ? ` (${data.coverage.analysed_percent}% was)` : ""}. Hours that were not fully analysed are marked, and their counts may be lower than what happened.
+              The AI was not analyzing all of this time{data.coverage.analysed_percent !== null ? ` (${data.coverage.analysed_percent}% was)` : ""}. Hours that were not fully analyzed are marked, and their counts may be lower than what happened.
             </p>
           )}
           <table className="insights-table" aria-label="Totals for the period">

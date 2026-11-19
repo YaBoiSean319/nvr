@@ -159,7 +159,7 @@ async def stop(camera_id: str, user: CurrentUser) -> dict[str, object]:
 async def centre(camera_id: str, payload: CentreRequest, user: CurrentUser) -> dict[str, object]:
     found, _ = await ptz.capabilities(camera_id)
     if found is None or not found.centre:
-        raise HTTPException(status_code=409, detail="This camera cannot centre on a point.")
+        raise HTTPException(status_code=409, detail="This camera cannot center on a point.")
     return await _command(camera_id, user, lambda client: client.centre(payload.x, payload.y))
 
 

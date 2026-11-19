@@ -24,7 +24,7 @@ from app.clock import parse as _parse, stamp
 MAX_RANGE = {"hour": timedelta(days=31), "day": search.MAX_RANGE}
 LABELS = search.LABELS
 HEAT_COLUMNS, HEAT_ROWS = 32, 18
-UNANALYSED_NOTE = "Not fully analysed: counts may be lower than what happened"
+UNANALYSED_NOTE = "Not fully analyzed: counts may be lower than what happened"
 CHUNK = 500
 
 

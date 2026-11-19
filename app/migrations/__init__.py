@@ -140,7 +140,7 @@ def migrate(path: Path, connect: Callable[[], sqlite3.Connection]) -> list[int]:
         holds_data = bool(tables - {"schema_migrations"})
         if holds_data and "schema_migrations" not in tables and "users" not in tables:
             raise MigrationError(
-                f"The database at {path} is not a recognised NVR database; refusing to modify it."
+                f"The database at {path} is not a recognized NVR database; refusing to modify it."
             )
         copy_path = None
         if holds_data:

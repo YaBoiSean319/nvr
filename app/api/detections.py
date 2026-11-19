@@ -14,7 +14,7 @@ from app.tracks import detection_view, iter_unanalyzed, track_view
 
 router = APIRouter()
 
-COVERAGE_NOTE = "Detections describe analysed frames only; an unanalysed interval is unknown, not empty."
+COVERAGE_NOTE = "Detections describe analyzed frames only; an unanalyzed interval is unknown, not empty."
 
 
 def _range(start: str, end: str) -> tuple[str, str]:

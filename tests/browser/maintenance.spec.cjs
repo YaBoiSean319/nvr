@@ -39,7 +39,7 @@ test("an administrator starts maintenance on a camera, an alarm in it is kept an
   await expect(bar.getByRole("button", { name: /^Maintenance:/ })).toHaveCount(0);  // No window, no chip
 });
 
-test("a window can be set for later, covers the whole site, and is cancelled before it starts", async ({ page }) => {
+test("a window can be set for later, covers the whole site, and is canceled before it starts", async ({ page }) => {
   seedFixtures(2);
   await signInNext(page);
   await page.goto("/cameras/maintenance");

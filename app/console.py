@@ -587,7 +587,7 @@ async def combine_search(local: dict[str, Any] | None, context: Context) -> dict
     return {"start": (local or {}).get("start") or kwargs["start"], "end": (local or {}).get("end") or kwargs["end"], "results": results[:limit], "truncated": truncated or len(results) > limit,
             "coverage": {**base_coverage, "searched_cameras": searched, "cameras": coverage_cameras, "fully_analysed": fully and not unsearched,
                          "analysed_percent": round(sum(percent * count for percent, count in percents) / weight, 1) if weight else None},
-            "coverage_note": (local or {}).get("coverage_note") or "No match in time that was not analysed means nothing was looked at; unanalysed time is listed with the results.",
+            "coverage_note": (local or {}).get("coverage_note") or "No match in time that was not analyzed means nothing was looked at; unanalyzed time is listed with the results.",
             "sites_not_searched": unsearched}
 
 

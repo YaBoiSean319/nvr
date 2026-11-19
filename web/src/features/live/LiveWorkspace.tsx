@@ -42,7 +42,7 @@ export function LiveWorkspace() {
             </p>
           ) : null}
           <button type="button" className="button" aria-pressed={followAlarms} disabled={!preferences.data || savePreferences.isPending}
-                  title="Bring cameras with new alarms into Live, with their neighbours"
+                  title="Bring cameras with new alarms into Live, with their neighbors"
                   onClick={() => savePreferences.mutate({ live_alarm_pop_in: !followAlarms })}>
             Alarm pop-in {followAlarms ? "on" : "off"}
           </button>

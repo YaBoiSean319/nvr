@@ -256,8 +256,8 @@ def render_text(name: str, body: dict[str, Any], summary: str | None = None) -> 
         lines += ["", f"Summary ({SUMMARY_NOTE})", summary]
     analysis = body["analysis"]
     if not analysis["fully_analysed"]:
-        lines += ["", f"Not all of this time was analysed ({analysis['analysed_percent']}% was): quiet stretches may mean nothing was looked at."]
-        lines += [f"  {item['camera_name']}: {_duration(item['unanalysed_seconds'])} not analysed" for item in analysis["cameras"]]
+        lines += ["", f"Not all of this time was analyzed ({analysis['analysed_percent']}% was): quiet stretches may mean nothing was looked at."]
+        lines += [f"  {item['camera_name']}: {_duration(item['unanalysed_seconds'])} not analyzed" for item in analysis["cameras"]]
     alarms = body["alarms"]
     lines += ["", "ALARMS"]
     lines += [f"  {item['rule_name']}: {item['total']} ({', '.join(f'{count} {state}' for state, count in item['outcomes'].items() if count)})" for item in alarms["by_rule"]] or ["  None"]
@@ -532,7 +532,7 @@ def summarise_now(db: sqlite3.Connection, text: str) -> tuple[str | None, str | 
     try:
         target = validate_target_url(url, allow_private)
         response = httpx.post(target, json={"model": model, "temperature": 0, "messages": [
-            {"role": "system", "content": "Summarise this security digest in one short paragraph for a shift supervisor. Use only the facts given; add nothing."},
+            {"role": "system", "content": "Summarize this security digest in one short paragraph for a shift supervisor. Use only the facts given; add nothing."},
             {"role": "user", "content": text}]}, timeout=httpx.Timeout(SUMMARY_TIMEOUT_SECONDS, connect=5), follow_redirects=False, trust_env=False)
         response.raise_for_status()
         content = str(response.json()["choices"][0]["message"]["content"]).strip()

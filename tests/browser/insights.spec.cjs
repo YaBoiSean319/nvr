@@ -1,7 +1,7 @@
 // Real-browser journey for Insights (#135): counts per camera, unanalysed time marked in the chart and the CSV, and the heatmap on the fixture paths.
 const { test, expect, seedFixtures, signInNext, seedSearchTracks } = require("./helpers.cjs");
 
-test("Insights counts what the tracks show, marks the hours nobody analysed, draws the heatmap on the walked path and exports the same as CSV", async ({ page }) => {
+test("Insights counts what the tracks show, marks the hours nobody analyzed, draws the heatmap on the walked path and exports the same as CSV", async ({ page }) => {
   seedFixtures(3);
   seedSearchTracks(); // Camera 1: two walkers across the middle of the frame and a failed hour of analysis; camera 2: a truck; camera 3: one walker, never analysed.
   await signInNext(page);
@@ -14,7 +14,7 @@ test("Insights counts what the tracks show, marks the hours nobody analysed, dra
   await expect(row("Camera 001").locator('[data-label="vehicle"]')).toHaveText("0");
   await expect(row("Camera 002").locator('[data-label="vehicle"]')).toHaveText("1");
   await expect(row("Camera 003").locator('[data-label="person"]')).toHaveText("1");
-  await expect(page.getByTestId("insights-unanalysed")).toContainText("not analysing all of this time");
+  await expect(page.getByTestId("insights-unanalysed")).toContainText("not analyzing all of this time");
 
   // Camera 1 was analysed except for one failed hour, which touches one or two clock hours; all of camera 3's hours are marked.
   const marks = page.getByTestId("unanalysed-mark");
@@ -35,9 +35,9 @@ test("Insights counts what the tracks show, marks the hours nobody analysed, dra
   expect(lines[0]).toBe("bucket_start_local,bucket_start_utc,kind,name,camera,person,vehicle,analysed_percent,note");
   const camera3 = lines.filter(line => line.includes(",Camera 003,"));
   expect(camera3).toHaveLength(24);
-  expect(camera3.every(line => line.includes("Not fully analysed"))).toBe(true);
+  expect(camera3.every(line => line.includes("Not fully analyzed"))).toBe(true);
   const camera1 = lines.filter(line => line.includes(",camera,Camera 001,"));
-  expect(camera1.filter(line => line.includes("Not fully analysed")).length).toBe(first);
+  expect(camera1.filter(line => line.includes("Not fully analyzed")).length).toBe(first);
 
   // The heatmap of camera 1 concentrates on the row the walkers crossed, at the two ends of their path.
   await page.getByLabel("Heatmap camera").selectOption({ label: "Camera 001" });

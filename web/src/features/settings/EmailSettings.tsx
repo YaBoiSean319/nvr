@@ -57,7 +57,7 @@ export function EmailSettings() {
       setError(null);
       const when = new Date(result.at).toLocaleTimeString();
       setMessage(`Microsoft accepted a test email from ${result.sent_as ?? "the connected account"} to ${result.to} at ${when}.${result.saved_to_sent_items ? ` A copy is in that account's Sent Items.` : ""} `
-        + `If it does not reach ${result.to}: look in its Junk folder, look in ${result.account ?? "the connected account"}'s Inbox for an "Undeliverable" bounce, and ask your Microsoft 365 administrator to run a message trace (Exchange admin centre) for ${result.sent_as ?? "the sender"} to ${result.to} around ${when}.`
+        + `If it does not reach ${result.to}: look in its Junk folder, look in ${result.account ?? "the connected account"}'s Inbox for an "Undeliverable" bounce, and ask your Microsoft 365 administrator to run a message trace (Exchange admin center) for ${result.sent_as ?? "the sender"} to ${result.to} around ${when}.`
         + `${result.request_id ? ` Microsoft's request id: ${result.request_id}.` : ""}`);
       await refresh();
     },

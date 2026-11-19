@@ -112,8 +112,8 @@ test("AI overrides the group or inherits it, with the source visible", async ({ 
   const form = page.getByRole("form", { name: "AI settings" });
   await expect(form.getByLabel("Use the Operations group's AI settings")).toBeChecked();
   await form.getByLabel("Use the Operations group's AI settings").uncheck();
-  await form.getByLabel("Analyse the lower-resolution substream").uncheck();
-  await form.getByLabel("Frames analysed per second").fill("1.5");
+  await form.getByLabel("Analyze the lower-resolution substream").uncheck();
+  await form.getByLabel("Frames analyzed per second").fill("1.5");
   await form.getByLabel("Person confidence threshold").fill("0.7");
   await expect(form.getByLabel("Vehicle confidence threshold")).toHaveAttribute("placeholder", "0.7");
   await form.getByLabel("Vehicle confidence threshold").fill("0.8");
@@ -125,7 +125,7 @@ test("AI overrides the group or inherits it, with the source visible", async ({ 
 
   await page.reload();
   await openTab(page, "Camera 003", "AI");
-  await expect(form.getByLabel("Frames analysed per second")).toHaveValue("1.5");
+  await expect(form.getByLabel("Frames analyzed per second")).toHaveValue("1.5");
   await form.getByLabel("Use the Operations group's AI settings").check();
   await form.getByRole("button", { name: "Save" }).click();
   await expect(form.getByRole("status")).toContainText("Saved AI settings (group)");

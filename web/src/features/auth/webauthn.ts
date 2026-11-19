@@ -48,7 +48,7 @@ const descriptors = (items: DescriptorJson[] | undefined): PublicKeyCredentialDe
 /** A browser refusal in words, for the one that is the person's own doing. */
 function explain(error: unknown): Error {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {
-    return new Error("The passkey request was cancelled or timed out.");
+    return new Error("The passkey request was canceled or timed out.");
   }
   if (error instanceof DOMException && error.name === "InvalidStateError") return new Error("This passkey is already registered.");
   if (error instanceof DOMException && error.name === "SecurityError") return new Error("Passkeys do not work at this web address. Open the NVR at its normal address.");

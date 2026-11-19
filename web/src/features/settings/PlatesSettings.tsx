@@ -97,7 +97,7 @@ export function PlatesSettings() {
       <section className="field-group settings-block" aria-label="Plate reading">
         <h2 className="field-heading">Plate reading</h2>
         <p className="muted field-hint">
-          Cameras designated here have each vehicle they see read for a licence plate: a plate detector and recogniser run on a full-size picture, and each read is kept with its vehicle, a confidence and a picture of the plate.
+          Cameras designated here have each vehicle they see read for a license plate: a plate detector and recognizer run on a full-size picture, and each read is kept with its vehicle, a confidence and a picture of the plate.
           Reads follow footage retention and access grants. Recognition quality depends on the camera and the site: read the confidence, and check a read against the footage before acting on it.
           Turn on AI analysis for a camera as well, because plates are read on the vehicles analysis finds.
         </p>
@@ -138,7 +138,7 @@ export function PlatesSettings() {
       <section className="field-group settings-block" aria-label="Watch lists">
         <h2 className="field-heading">Watch lists</h2>
         <p className="muted field-hint">
-          A rule can watch a list (add one under Rules, condition “A licence plate read”). A rule on a <strong>deny</strong> list raises an alarm when a plate on the list is read; a rule on an <strong>allow</strong> list raises one when a plate that is
+          A rule can watch a list (add one under Rules, condition “A license plate read”). A rule on a <strong>deny</strong> list raises an alarm when a plate on the list is read; a rule on an <strong>allow</strong> list raises one when a plate that is
           <em> not</em> on it is read, and nothing for a plate that is. Write a plate as it appears, or use <code>*</code> for any run of characters and <code>?</code> for one character (<code>AB12*</code>, <code>AB??CDE</code>). Entries can expire.
         </p>
         {(data?.watch_lists ?? []).map(list => <WatchListCard key={list.id} list={list} fail={fail} done={done} />)}

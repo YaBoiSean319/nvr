@@ -199,7 +199,7 @@ class MigrationTests(unittest.TestCase):
         self._load("CREATE TABLE inventory(id INTEGER PRIMARY KEY); INSERT INTO inventory VALUES(7);")
         original = self.path.read_bytes()
 
-        with self.assertRaisesRegex(migrations.MigrationError, "not a recognised NVR database"):
+        with self.assertRaisesRegex(migrations.MigrationError, "not a recognized NVR database"):
             initialize()
 
         db = sqlite3.connect(self.path)

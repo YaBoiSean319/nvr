@@ -277,11 +277,11 @@ export function AiSection({ group, cameras, admin }: SectionProps) {
         <legend>Detection</legend>
         <label className="check"><input type="checkbox" checked={draft.enabled} onChange={event => tab.change({ enabled: event.target.checked })} /> Detect people and vehicles</label>
         <div className="field-row">
-          <label className="field"><span>Frames analysed per second</span><input type="number" min={0.1} max={5} step={0.1} value={draft.analysis_fps} onChange={event => tab.change({ analysis_fps: Number(event.target.value) })} /></label>
+          <label className="field"><span>Frames analyzed per second</span><input type="number" min={0.1} max={5} step={0.1} value={draft.analysis_fps} onChange={event => tab.change({ analysis_fps: Number(event.target.value) })} /></label>
           <label className="field"><span>Person confidence threshold</span><input type="number" min={0.1} max={0.99} step={0.01} value={draft.confidence_threshold} onChange={event => tab.change({ confidence_threshold: Number(event.target.value) })} /></label>
           <label className="field"><span>Vehicle confidence threshold</span><input type="number" min={0.1} max={0.99} step={0.01} value={draft.vehicle_confidence_threshold ?? ""} placeholder={String(query.data.effective_vehicle_confidence_threshold)} onChange={event => tab.change({ vehicle_confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
         </div>
-        <label className="check"><input type="checkbox" checked={draft.use_substream} onChange={event => tab.change({ use_substream: event.target.checked })} /> Analyse the lower-resolution substream</label>
+        <label className="check"><input type="checkbox" checked={draft.use_substream} onChange={event => tab.change({ use_substream: event.target.checked })} /> Analyze the lower-resolution substream</label>
       </fieldset>
       <ZoneEditor cameraId={sample} zones={draft.zones} onChange={zones => tab.change({ zones })} label="Group AI zones" readOnly={!admin} />
       {admin ? <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} /> : null}

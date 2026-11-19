@@ -96,7 +96,7 @@ export function FallsSettings() {
             <button type="button" className="button" data-variant="primary" disabled={createRule.isPending} onClick={() => createRule.mutate(data.unalerted_camera_ids)}>Create an alert rule for these cameras</button>
           </div>
         ) : null}
-        <p className="muted field-hint">Model: {data?.model.model ?? "…"}. Licence: {data?.model.licence ?? "…"}.</p>
+        <p className="muted field-hint">Model: {data?.model.model ?? "…"}. License: {data?.model.licence ?? "…"}.</p>
         <ul className="status-list" aria-label="Cameras for falls">
           {(data?.cameras ?? []).map(camera => <CameraRow key={`${camera.id}:${camera.enabled}:${camera.sensitivity}:${camera.stay_down_seconds}`} camera={camera} modelInstalled={Boolean(data?.model.installed)} leastFps={data?.defaults.least_analysis_fps ?? 1} save={value => save.mutate(value)} pending={save.isPending} />)}
           {data?.cameras.length === 0 ? <li className="muted">No cameras yet.</li> : null}

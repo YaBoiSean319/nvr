@@ -213,8 +213,8 @@ def evaluate(clips: list[Clip], *, sensitivity: str = "high", stay_down: float =
 def render(report: dict[str, Any]) -> str:
     lines = ["Fall detection on recorded clips", ""]
     settings = report["settings"]
-    lines.append(f"Sensitivity {settings['sensitivity']}, stay-down {settings['stay_down_seconds']:g} s, analysed at {settings['analysis_fps']:g} frames a second, "
-                 f"a raised fall counts if it is up to {settings['tolerance_seconds']:g} s after the labelled one.")
+    lines.append(f"Sensitivity {settings['sensitivity']}, stay-down {settings['stay_down_seconds']:g} s, analyzed at {settings['analysis_fps']:g} frames a second, "
+                 f"a raised fall counts if it is up to {settings['tolerance_seconds']:g} s after the labeled one.")
     lines.append("")
     for clip in report["clips"]:
         verdict = "ok" if not clip["missed"] and not clip["false_alarms"] else "CHECK"
@@ -227,7 +227,7 @@ def render(report: dict[str, Any]) -> str:
             lines.append(f"      FALSE ALARM at {item:g} s")
     totals = report["totals"]
     lines += ["", f"{totals['clips']} clips, {totals['camera_hours']:g} camera-hours",
-              f"Labelled falls found: {totals['detected']} of {totals['labelled_falls']}" + (f" ({totals['detection_rate']:.0%})" if totals["detection_rate"] is not None else ""),
+              f"Labeled falls found: {totals['detected']} of {totals['labelled_falls']}" + (f" ({totals['detection_rate']:.0%})" if totals["detection_rate"] is not None else ""),
               f"False alarms: {totals['false_alarms']}" + (f" ({totals['false_alarms_per_camera_day']:g} per camera-day)" if totals["false_alarms_per_camera_day"] is not None else ""),
               "", "A small sample says little: the more ordinary footage (and the more staged falls) the better these numbers can be trusted. This is an aid, not a safety system."]
     return "\n".join(lines)

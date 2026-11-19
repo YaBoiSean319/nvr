@@ -69,7 +69,7 @@ export function PlateSearch({ settings, shownIds }: { settings: DisplaySettings;
           <>
             <p className="muted" role="status">
               {data.results.length ? `${data.results.length}${data.truncated ? "+" : ""} read${data.results.length === 1 ? "" : "s"}, newest first.${data.truncated ? " More matched than are shown: narrow the plate or the time." : ""}` : "No plate read matched."}
-              {data.cameras_reading.length === 0 ? " None of the cameras searched is set to read plates (an administrator turns that on under Settings, Licence plates)." : ""}
+              {data.cameras_reading.length === 0 ? " None of the cameras searched is set to read plates (an administrator turns that on under Settings, License plates)." : ""}
             </p>
             <p className="muted">{data.note}</p>
             <ul className="attr-grid" aria-label="Plate results">

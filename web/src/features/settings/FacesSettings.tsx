@@ -99,7 +99,7 @@ export function FacesSettings() {
           Nothing looks for a face until you switch a camera on below, and only faces on the list below are ever kept: every other face is discarded the moment it is compared.
           A face is added from a recording: open Playback, go to a moment, and choose <strong>Find a face…</strong>. Faces behind a privacy mask are never read. Everything here is for administrators and is recorded in the audit log.
         </p>
-        {models && !models.available ? <p className="notice" data-tone="warn" role="status">The face models are not installed in this image, so no face can be added or recognised. See docs/face-watch.md.</p> : null}
+        {models && !models.available ? <p className="notice" data-tone="warn" role="status">The face models are not installed in this image, so no face can be added or recognized. See docs/face-watch.md.</p> : null}
         <label className="field"><span>How alike a face must be to count as a match: {current.toFixed(2)}</span>
           <input type="range" min={0.25} max={0.9} step={0.01} value={current} aria-label="Match threshold" onChange={event => setThreshold(Number(event.target.value))} />
           <small className="muted field-hint">Lower finds more returns and raises more wrong matches; higher is stricter and misses more. The default is {(status.data?.default_threshold ?? 0.45).toFixed(2)}.</small>

@@ -184,7 +184,7 @@ async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict
     """Repeat a finished-unsuccessfully job as a new attempt; the original stays as it was."""
     row = await asyncio.to_thread(_export_for, job_id, user)
     if row["status"] not in {"failed", "cancelled"}:
-        raise HTTPException(status_code=409, detail="Only failed or cancelled exports can be retried")
+        raise HTTPException(status_code=409, detail="Only failed or canceled exports can be retried")
     original = _job_view(row)
     return await _submit(request, user, lambda: create_export_record(
         int(user["id"]), original["camera_ids"],

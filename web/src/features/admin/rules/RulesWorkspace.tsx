@@ -236,7 +236,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
           {condition.type === "plate" ? (
             <fieldset className="plain">
               <legend className="field-heading">Watch list</legend>
-              <p className="muted field-hint">On a deny list the rule fires when a plate on the list is read on one of its cameras; on an allow list it fires when a plate not on the list is read. Make lists under Settings, Licence plates; turn plate reading on for each camera there.</p>
+              <p className="muted field-hint">On a deny list the rule fires when a plate on the list is read on one of its cameras; on an allow list it fires when a plate not on the list is read. Make lists under Settings, License plates; turn plate reading on for each camera there.</p>
               <label className="field"><span>Watch list for the rule</span>
                 <select value={condition.watch_list_id} onChange={event => setCondition({ ...condition, watch_list_id: event.target.value })}>
                   <option value="">Choose a list</option>
@@ -247,7 +247,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
           ) : condition.type === "face" ? (
             <fieldset className="plain">
               <legend className="field-heading">Watched faces</legend>
-              <p className="muted field-hint">Fires when a face on the face watch list is recognised on one of this rule's cameras. Tick entries to limit the rule to them; tick none for any entry. Turn face watch on for each camera under Settings, Faces. It can miss faces and match the wrong person: check every alert before acting on it.</p>
+              <p className="muted field-hint">Fires when a face on the face watch list is recognized on one of this rule's cameras. Tick entries to limit the rule to them; tick none for any entry. Turn face watch on for each camera under Settings, Faces. It can miss faces and match the wrong person: check every alert before acting on it.</p>
               <div className="check-list">
                 {(faceEntries.data?.entries ?? []).map(entry => (
                   <label key={entry.id}><input type="checkbox" checked={condition.entry_ids.includes(entry.id)}
@@ -342,7 +342,7 @@ function RuleEditor({ rule, onSaved, onClose, onDeleted }: {
           </label>
           <p className="muted field-hint">Each object fires a rule at most once. A cooldown also waits this long after an event on a camera before the next.</p>
           <label className="check"><input type="checkbox" checked={draft.pop_into_live} onChange={event => tab.change({ pop_into_live: event.target.checked })} /> Pop alarms into Live</label>
-          <p className="muted field-hint">Brings the alarm's camera and its neighbours into Live for people who turned alarm pop-in on, and onto video walls.</p>
+          <p className="muted field-hint">Brings the alarm's camera and its neighbors into Live for people who turned alarm pop-in on, and onto video walls.</p>
         </fieldset>
 
         <ActionsEditor actions={draft.actions} cameras={live} onChange={actions => tab.change({ actions })} />

@@ -150,7 +150,7 @@ def _validated(db, body: ScheduleBody) -> tuple[dict[str, Any], dict[str, Any], 
     if db.execute("SELECT 1 FROM users WHERE id=?", (body.recipient_user_id,)).fetchone() is None:
         raise HTTPException(status_code=422, detail="Choose who the digest is for")
     if body.summarise and not digests.model_settings(db)["summary_enabled"]:
-        raise HTTPException(status_code=422, detail="Configure and turn on the summarising model first")
+        raise HTTPException(status_code=422, detail="Configure and turn on the summarizing model first")
     return scope, shift, window
 
 

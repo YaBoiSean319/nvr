@@ -174,7 +174,7 @@ class SendTests(MailCase):
         failed = self.client.post("/api/admin/email/test", json={"to": "me@contoso.com"})
         self.assertEqual(failed.status_code, 409)
         self.assertIn("ErrorAccessDenied: Access is denied", failed.json()["detail"])
-        self.assertIn("no Exchange Online mailbox or licence", failed.json()["detail"])
+        self.assertIn("no Exchange Online mailbox or license", failed.json()["detail"])
         shown = self.client.get("/api/admin/email").json()["error"]  # The page shows the same, and keeps it
         self.assertEqual(shown["detail"], "ErrorAccessDenied: Access is denied. Check credentials and try again.")
         self.assertIn("ErrorAccessDenied", shown["message"])

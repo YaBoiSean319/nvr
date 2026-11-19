@@ -65,7 +65,7 @@ export function AiTab({ camera, admin }: { camera: Camera; admin: boolean }) {
         <fieldset className="plain" disabled={readOnly || inherited}>
           <label className="check"><input type="checkbox" checked={draft.enabled} onChange={event => tab.change({ enabled: event.target.checked })} /> Detect people and vehicles</label>
           <div className="field-row">
-            <label className="field"><span>Frames analysed per second</span>
+            <label className="field"><span>Frames analyzed per second</span>
               <input type="number" min={0.1} max={5} step={0.1} value={draft.analysis_fps} onChange={event => tab.change({ analysis_fps: Number(event.target.value) })} />
             </label>
             <label className="field"><span>Person confidence threshold</span>
@@ -76,7 +76,7 @@ export function AiTab({ camera, admin }: { camera: Camera; admin: boolean }) {
               <small className="muted field-hint">Leave empty for the default (0.70, or the person threshold if that is higher). Raise it if something that is not a vehicle is boxed as one.</small>
             </label>
           </div>
-          <label className="check"><input type="checkbox" checked={draft.use_substream} onChange={event => tab.change({ use_substream: event.target.checked })} /> Analyse the lower-resolution substream</label>
+          <label className="check"><input type="checkbox" checked={draft.use_substream} onChange={event => tab.change({ use_substream: event.target.checked })} /> Analyze the lower-resolution substream</label>
         </fieldset>
       </fieldset>
       <ZoneEditor cameraId={camera.id} zones={draft.zones} onChange={zones => tab.change({ zones })} label="AI zones" readOnly={readOnly || inherited} />

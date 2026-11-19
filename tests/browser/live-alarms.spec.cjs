@@ -15,7 +15,7 @@ async function displayed(page) {
       .map(entry => entry.name));
 }
 
-test("an alarm brings its camera and neighbours into Live for people who opted in, and Return restores their view exactly", async ({ page }) => {
+test("an alarm brings its camera and neighbors into Live for people who opted in, and Return restores their view exactly", async ({ page }) => {
   seedFixtures(6);
   await signInNext(page, "camera-operator");
   await add(page, 5, 6);
@@ -61,18 +61,18 @@ test("an alarm brings its camera and neighbours into Live for people who opted i
   await expect(page.getByRole("button", { name: /^Alarm pop-in/ })).toHaveAttribute("aria-pressed", "true");
 });
 
-test("administrators choose a camera's neighbours and which rules pop into Live", async ({ page }) => {
+test("administrators choose a camera's neighbors and which rules pop into Live", async ({ page }) => {
   const fixtures = seedFixtures(4, { alarm: true });
   await signInNext(page);
   await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Cameras" }).click();
   await page.getByRole("region", { name: "Camera inventory" }).getByRole("button", { name: name(1), exact: true }).click();
-  await page.getByRole("tab", { name: "Neighbours" }).click();
-  const form = page.getByRole("form", { name: "Neighbouring cameras" });
-  await form.getByLabel("Add a neighbour").selectOption({ label: name(3) });
-  await form.getByLabel("Add a neighbour").selectOption({ label: name(2) });
+  await page.getByRole("tab", { name: "Neighbors" }).click();
+  const form = page.getByRole("form", { name: "Neighboring cameras" });
+  await form.getByLabel("Add a neighbor").selectOption({ label: name(3) });
+  await form.getByLabel("Add a neighbor").selectOption({ label: name(2) });
   await form.getByRole("button", { name: `Move ${name(2)} earlier` }).click();
   await form.getByRole("button", { name: "Save" }).click();
-  await expect(form.getByRole("status")).toContainText("Saved 2 neighbouring cameras.");
+  await expect(form.getByRole("status")).toContainText("Saved 2 neighboring cameras.");
   const saved = await (await page.request.get(`/api/cameras/${fixtures.camera_ids[0]}/neighbours`)).json();
   expect(saved.camera_ids).toEqual([fixtures.camera_ids[1], fixtures.camera_ids[2]]);
 
