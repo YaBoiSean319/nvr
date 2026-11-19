@@ -5,10 +5,10 @@ files the command was too long to start. Each tile now reads its camera's files 
 from __future__ import annotations
 
 import asyncio
-import os
 import resource
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -22,6 +22,14 @@ START = datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
 FILES = 400
 SECONDS_EACH = 0.4
 MEMORY_BOUND_MB = 700
+# FFmpeg's own peak memory. On Linux a process's peak (ru_maxrss) carries over the peak of the process it was started from, and Python
+# starts children with vfork, so FFmpeg started from the test process reports the test process's own peak: about 1.8 GB late in a full
+# run, whatever FFmpeg used. Started from this small helper instead, the figure is FFmpeg's alone. Printed on the helper's stdout.
+PEAK_MEMORY_HELPER = ("import os, subprocess, sys\n"
+                      "process = subprocess.Popen(sys.argv[1:], stdout=subprocess.DEVNULL)\n"
+                      "_, status, usage = os.wait4(process.pid, 0)\n"
+                      "print(usage.ru_maxrss)\n"
+                      "sys.exit(os.waitstatus_to_exitcode(status))\n")
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg is required")
@@ -53,16 +61,11 @@ class GridScaleTests(unittest.TestCase):
 
             class Manager:
                 async def _run_ffmpeg(self, job_id, args):
-                    # Each FFmpeg run's own peak memory, from its own exit: the process-wide figure for children is the largest of every
-                    # child the test run ever started, which an earlier test can set (it did, in the full suite).
                     commands.append(args)
-                    process = subprocess.Popen([FFMPEG, *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                    _, status, usage = os.wait4(process.pid, 0)
-                    process.returncode = os.waitstatus_to_exitcode(status)
-                    peaks.append(usage.ru_maxrss / 1024)
-                    if process.returncode:
-                        raise subprocess.CalledProcessError(process.returncode, args, stderr=process.stderr.read())
-                    process.stderr.close()
+                    result = subprocess.run([sys.executable, "-c", PEAK_MEMORY_HELPER, FFMPEG, *args], capture_output=True, text=True)
+                    if result.returncode:
+                        raise subprocess.CalledProcessError(result.returncode, args, stderr=result.stderr)
+                    peaks.append(int(result.stdout.split()[-1]) / 1024)
 
             with patch.object(exports, "recording_file_path", lambda relative: root / relative):
                 output = asyncio.run(exports._render_grid(Manager(), "job", root, cameras, ["a", "b", None, "a"], intervals, "1080p",
