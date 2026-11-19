@@ -326,6 +326,15 @@ class LiveStream:
                 self.ready.set()
                 self._broadcast(None)
 
+    def _note_init(self, fragmenter: "Fragmenter", hardware: bool) -> None:
+        if self.init is None and fragmenter.init is not None:
+            self.init = fragmenter.init
+            self.mime = codec_string(self.init)
+            self._stage("init_ms")
+            if self._hardware_failure and not hardware:
+                acceleration.disable(self._hardware_failure)
+            self.ready.set()
+
     async def _session(self, executable: str, hardware: bool) -> None:
         self.accelerated = hardware
         try:
@@ -343,7 +352,12 @@ class LiveStream:
                 chunk = await asyncio.wait_for(self.process.stdout.read(65536), READ_TIMEOUT_SECONDS)
                 if not chunk:
                     raise RuntimeError("The camera stream ended")
-                for fragment in fragmenter.feed(chunk):
+                fragments = list(fragmenter.feed(chunk))
+                # The header first, then the pictures that came with it. One read can hold both, and often does for a stream that starts
+                # with a keyframe: the header used to be noticed only after that read's pictures had been skipped, so the first keyframe
+                # was thrown away and viewers waited for the next one (or, for a short stream, got nothing at all).
+                self._note_init(fragmenter, hardware)
+                for fragment in fragments:
                     if self.init is None:
                         continue
                     if fragment.keyframe:
@@ -356,13 +370,6 @@ class LiveStream:
                     self._broadcast(fragment.data)
                     if self.on_fragment:
                         self.on_fragment()
-                if self.init is None and fragmenter.init is not None:
-                    self.init = fragmenter.init
-                    self.mime = codec_string(self.init)
-                    self._stage("init_ms")
-                    if self._hardware_failure and not hardware:
-                        acceleration.disable(self._hardware_failure)
-                    self.ready.set()
         finally:
             if self.process and self.process.returncode is None:
                 self.process.terminate()
