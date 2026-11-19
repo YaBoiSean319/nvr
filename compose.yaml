@@ -7,6 +7,18 @@ services:
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 30s
+    # Hardening (#384). The NVR runs as an unprivileged user and needs no Linux capabilities: all are dropped, and nothing in the
+    # container can gain privileges. An init process reaps anything orphaned when a worker is killed, so no zombies are left.
+    # (Disk health is the one exception: the commented cap_add below adds back only what smartctl needs.)
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # A memory limit keeps a runaway process inside the container instead of letting the host choose what to kill. Allow about
+    # 1 GiB, plus 150 MiB per camera, plus 1 GiB per export running at once (one by default); more with AI on many cameras.
+    # Check the use under load with "docker stats" before setting it tightly. See README "Deployment".
+    # mem_limit: 4g
     environment:
       NVR_LISTEN_PORT: ${NVR_PORT:-8280}
       NVR_DB_PATH: /data/nvr.sqlite3

@@ -104,6 +104,16 @@ test("only administrators delete alarms, and the alarm footage period is a setti
   await expect(footage.getByRole("status")).toHaveText("Saved.");
   expect(await (await page.request.get("/api/alarm-settings")).json()).toEqual({ resolved_footage_days: 45, history_days: 120 });
 
+  // Beside it, the disk budget shared by exports, case packages and playback copies, and how long exports are kept (#362).
+  const copies = page.getByRole("form", { name: "Exports and copies" });
+  await expect(copies.getByRole("definition").last()).toContainText(" of ");
+  await copies.getByLabel("Days to keep finished exports").fill("31");
+  await expect(copies.getByRole("button", { name: "Save" })).toBeDisabled();
+  await copies.getByLabel("Days to keep finished exports").fill("30");
+  await copies.getByRole("button", { name: "Save" }).click();
+  await expect(copies.getByRole("status")).toHaveText("Saved.");
+  expect((await (await page.request.get("/api/export-storage")).json()).retention_days).toBe(30);
+
   await openAlarm(page);
   await detail(page).getByRole("button", { name: "Delete alarm…" }).click();
   await page.getByRole("dialog", { name: "Delete this alarm?" }).getByRole("button", { name: "Delete alarm" }).click();

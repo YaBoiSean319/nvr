@@ -251,7 +251,8 @@ class ExportJobTests(unittest.TestCase):
 
     def test_low_free_space_fails_job_and_releases_source_lease(self):
         import shutil as system_shutil
-        tiny_disk = system_shutil._ntuple_diskusage(total=1, used=0, free=1)
+        # A full disk of a real size: the export budget (a share of the volume, #362) lets the job start, and it fails for want of free space.
+        tiny_disk = system_shutil._ntuple_diskusage(total=1 << 40, used=(1 << 40) - 1, free=1)
         with patch("app.exports.shutil.disk_usage", return_value=tiny_disk):
             job_id = self._create()
             failed = self._wait_for_status(job_id, "failed")

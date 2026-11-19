@@ -157,7 +157,12 @@ def remove_segment_files(rows) -> bool:
         except OSError:
             hot=None
         paths.extend(tiering.local_files(row, hot))
-    return unlink_many_if_unleased(paths)
+    removed = unlink_many_if_unleased(paths)
+    if removed:
+        from .privacy import forget_copies
+
+        forget_copies(paths)  # A masked or converted copy does not outlive its footage (#362)
+    return removed
 
 
 def _probe_writable(path: Path) -> tuple[bool, float | None]:

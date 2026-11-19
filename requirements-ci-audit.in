@@ -1,0 +1,2 @@
+# The vulnerability checker CI runs (#385): pip-audit, in a virtual environment of its own, locked with hashes by scripts/lock-requirements.sh.
+pip-audit==2.10.1

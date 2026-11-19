@@ -257,6 +257,7 @@ export function StorageSettings() {
       </section>
 
       <AlarmFootage />
+      <ExportStorage />
       </SectionPanel>
       <SectionPanel id="backups">
       <section className="field-group" aria-label="Configuration backups">
@@ -296,6 +297,58 @@ export function StorageSettings() {
 }
 
 type AlarmSettings = { resolved_footage_days: number; history_days: number };
+
+type ExportStorageInfo = {
+  budget_bytes: number; share: number; total_used_bytes: number; retention_days: number; max_retention_days: number;
+  used_bytes: { exports: number; case_packages: number; playback_copies: number };
+};
+
+/** One disk budget for exports, case packages and playback copies, so making them cannot push recordings out; and how long exports are kept. */
+function ExportStorage() {
+  const client = useQueryClient();
+  const info = useQuery({ queryKey: ["export-storage"], queryFn: ({ signal }) => api<ExportStorageInfo>("/api/export-storage", { signal }) });
+  const tab = useTabDraft(info.data ? { retention_days: info.data.retention_days } : undefined, {
+    label: "Exports and copies",
+    editable: true,
+    save: async (draft, base) => {
+      try {
+        const saved = await api<ExportStorageInfo>("/api/export-storage", { method: "PUT", body: draft });
+        client.setQueryData(["export-storage"], saved);
+        return { ok: true, base: { retention_days: saved.retention_days }, outcome: { tone: "good", text: "Saved." } };
+      } catch (error) {
+        return { ok: false, base, outcome: { tone: "bad", text: `Not saved: ${failureText(error)}.` } };
+      }
+    },
+  });
+  const data = info.data;
+  const days = tab.draft?.retention_days;
+  const max = data?.max_retention_days ?? 30;
+  return (
+    <form className="field-group" aria-label="Exports and copies" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
+      <h2 className="field-heading">Exports and copies</h2>
+      {data && tab.draft ? (
+        <>
+          <p className="muted field-hint">
+            Exports, case packages and playback copies (masked or converted for the browser) share {Math.round(data.share * 100)}% of the recordings disk,
+            so making them never pushes recordings out. At the limit, playback copies are removed first; then a new export is refused, with the reason.
+          </p>
+          <dl className="details" aria-label="Use of the export budget">
+            <dt>Exports</dt><dd>{size(data.used_bytes.exports)}</dd>
+            <dt>Case packages</dt><dd>{size(data.used_bytes.case_packages)}</dd>
+            <dt>Playback copies</dt><dd>{size(data.used_bytes.playback_copies)}</dd>
+            <dt>In all</dt><dd>{size(data.total_used_bytes)} of {size(data.budget_bytes)}</dd>
+          </dl>
+          <label className="field"><span>Days to keep finished exports</span>
+            <input type="number" min={1} max={max} value={days === undefined || Number.isNaN(days) ? "" : days}
+                   onChange={event => tab.change({ retention_days: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
+          </label>
+          <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert}
+                     blocked={wholeDays(days, 1, max) ? null : `Keep exports for a whole number of days from 1 to ${max}.`} />
+        </>
+      ) : <p className="muted">{info.error ? failureText(info.error) : "Loading…"}</p>}
+    </form>
+  );
+}
 
 const wholeDays = (value: number | undefined, low: number, high: number) => value !== undefined && Number.isInteger(value) && value >= low && value <= high;
 
