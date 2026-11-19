@@ -38,21 +38,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image tags and labels
-        id: metadata
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/gvsccrc-it/nvr
-          tags: |
-            type=semver,pattern={{version}}
-
-      - name: Build and publish the image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
+      - name: Publish the tested image under the version
+        # The release is the image CI built and tested for this commit of main (published there as sha-<commit>), given the version tag:
+        # never a new build (#385).
+        run: |
+          short="$(echo "$GITHUB_SHA" | cut -c1-7)"
+          version="${GITHUB_REF_NAME#v}"
+          if ! docker buildx imagetools inspect "ghcr.io/gvsccrc-it/nvr:sha-$short" >/dev/null; then
+            echo "No tested image ghcr.io/gvsccrc-it/nvr:sha-$short yet: wait for CI on main to finish for this commit, then re-run this workflow."
+            exit 1
+          fi
+          docker buildx imagetools create --tag "ghcr.io/gvsccrc-it/nvr:$version" "ghcr.io/gvsccrc-it/nvr:sha-$short"
 
       - name: Create the release
         env:

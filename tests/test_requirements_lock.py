@@ -33,7 +33,7 @@ class LockTests(unittest.TestCase):
         self.assertEqual(dev["ruff"], pins("requirements-dev.in")["ruff"])
 
     def test_every_locked_package_is_pinned_and_carries_hashes(self):
-        for path in ("requirements.txt", "requirements-dev.txt", "requirements-ci-s3.txt"):
+        for path in ("requirements.txt", "requirements-dev.txt", "requirements-ci-s3.txt", "requirements-ci-audit.txt"):
             text = (ROOT / path).read_text()
             blocks = re.split(r"\n(?=[A-Za-z0-9_.\-]+(?:\[[^\]]*\])?==)", text)
             packages = [block for block in blocks if PIN.match(block)]
@@ -42,7 +42,7 @@ class LockTests(unittest.TestCase):
                 self.assertIn("--hash=sha256:", block, f"{path}: {block.splitlines()[0]} has no hash")
 
     def test_nothing_in_the_lock_is_a_loose_requirement_or_a_url(self):
-        for path in ("requirements.txt", "requirements-dev.txt", "requirements-ci-s3.txt"):
+        for path in ("requirements.txt", "requirements-dev.txt", "requirements-ci-s3.txt", "requirements-ci-audit.txt"):
             for line in (ROOT / path).read_text().splitlines():
                 text = line.strip()
                 if text and not text.startswith(("#", "--hash=")):
@@ -54,6 +54,11 @@ class LockTests(unittest.TestCase):
         script = (ROOT / ".github/scripts/start-s3-store.sh").read_text()
         self.assertIn("--require-hashes -r requirements-ci-s3.txt", script)
         self.assertIn("requirements-ci-s3", (ROOT / "scripts/lock-requirements.sh").read_text())
+
+    def test_the_ci_vulnerability_checker_is_locked_and_installed_only_from_its_lock(self):
+        self.assertEqual(pins("requirements-ci-audit.txt")["pip-audit"], pins("requirements-ci-audit.in")["pip-audit"])
+        self.assertIn("--require-hashes -r requirements-ci-audit.txt", (ROOT / ".github/workflows/ci.yml").read_text())
+        self.assertIn("requirements-ci-audit", (ROOT / "scripts/lock-requirements.sh").read_text())
 
     def test_the_image_installs_only_what_was_locked(self):
         dockerfile = (ROOT / "Dockerfile").read_text()

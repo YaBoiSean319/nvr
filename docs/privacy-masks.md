@@ -17,7 +17,7 @@ Exports made before a camera's masks were set or changed can no longer be downlo
 
 - **Live video** for a masked camera is transcoded with the mask drawn in (H.264, so it plays in every browser). Viewers share one transcoded stream per camera and quality. Each viewer counts against the live-view slot limit, as every viewer does.
 - **The MJPEG fallback** draws the mask too.
-- **Recordings** are delivered as a masked copy, rendered on first viewing (two at a time) and kept for a day after its last use, under `.masked` on the recordings volume. Seeking works as usual. The file on disk is never sent.
+- **Recordings** are delivered as a masked copy, rendered on first viewing (two at a time) and kept for a day after its last use, under `.masked` on the recordings volume. Copies are swept on a timer, removed when the footage they were made from is deleted, and count against the disk budget shared with exports (see [evidence packages](evidence-packages.md)). Seeking works as usual. The file on disk is never sent.
 - **Snapshots, alarm pictures, notification thumbnails and tracked objects' keyframes** are masked. If a mask cannot be drawn, no picture is sent at all.
 - **The `ai.detection` webhook** leaves out any detection whose box touches a masked area (or cannot be compared with it): a webhook sends the data to another system. Alarms and rule events raised from inside a mask are kept, as before, for the site's own staff.
 - **Exports** burn the mask into each camera's video and into the grid. `metadata.json` marks masked cameras with `"privacy_masked": true`.

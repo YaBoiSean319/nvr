@@ -17,10 +17,13 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
-from app.principal import CurrentUser, requires_scope
+from app.principal import Administrator, CurrentUser, requires_scope
+from app.audit import record
+from app import exports as export_rules
 from app.store import connect
 from app.retention import acquire_playback, release_playback
 from app import dewarp, footage_chain, viewing_audit
+from app import copies_budget
 from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_file, _job_view, EXPORT_DIRECTORY, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
 from app.recording import recordings_path
 
@@ -94,6 +97,32 @@ class ExportRequest(BaseModel):
         return self
 
 
+class ExportStorageSettings(BaseModel):
+    # How long a finished export's package is kept: 7 days unless an administrator chooses otherwise, at most 30 (#362).
+    retention_days: int = Field(ge=1, le=export_rules.MAX_EXPORT_RETENTION_DAYS)
+
+
+def _export_storage() -> dict[str, object]:
+    with connect() as db:
+        days = export_rules.retention_days(db)
+    return {**copies_budget.view(), "retention_days": days, "max_retention_days": export_rules.MAX_EXPORT_RETENTION_DAYS}
+
+
+@router.get("/api/export-storage")
+def get_export_storage(_: Administrator) -> dict[str, object]:
+    """How much of the recordings disk exports, case packages and playback copies use, against their shared budget, and how long exports are kept."""
+    return _export_storage()
+
+
+@router.put("/api/export-storage")
+def put_export_storage(payload: ExportStorageSettings, admin: Administrator) -> dict[str, object]:
+    with connect() as db:
+        before = export_rules.retention_days(db)
+        db.execute("UPDATE export_settings SET retention_days=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE singleton_id=1", (payload.retention_days,))
+        record(db, admin.id, "export_retention_changed", "export_settings", "1", before=before, after=payload.retention_days)
+    return _export_storage()
+
+
 @router.get("/api/exports")
 @requires_scope("export")
 def get_exports(user: CurrentUser) -> dict[str, object]:
@@ -130,6 +159,8 @@ async def _submit(request: Request, user: dict, create: Callable[[], str]) -> di
         job_id = await asyncio.to_thread(create)
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except copies_budget.BudgetFull as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
     except OverflowError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:

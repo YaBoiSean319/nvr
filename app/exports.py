@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Callable
 
-from . import acceleration, footage_chain, privacy, redaction, viewing_audit
+from . import acceleration, copies_budget, footage_chain, privacy, redaction, viewing_audit
 from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
 from .recording import recordings_path
@@ -45,7 +45,55 @@ EXPORT_DIRECTORY = "exports"
 MAX_VERIFY_PACKAGE_BYTES = 2 * 1024**3
 MAX_EXPORT_PACKAGE_BYTES = 2 * 1024**3
 MIN_EXPORT_FREE_BYTES = 256 * 1024**2
-EXPORT_RETENTION = timedelta(days=7)
+EXPORT_RETENTION = timedelta(days=7)  # The default; an administrator may choose 1 to 30 days (export_settings, #362)
+MAX_EXPORT_RETENTION_DAYS = 30
+
+
+def retention_days(db: sqlite3.Connection) -> int:
+    row = db.execute("SELECT retention_days FROM export_settings WHERE singleton_id=1").fetchone()
+    return int(row[0]) if row else EXPORT_RETENTION.days
+
+
+OPEN_FILE_RESERVE = 256  # Files a process needs for everything else while an export holds its sources open
+
+
+def max_open_sources() -> int:
+    """How many recorded files an export may hold open at once in this process (each source stays reserved, with a file open, for the
+    whole job). The process's own limit is raised to the most the system allows first: a common default of 1,024 failed an export of 1,100
+    files with "Too many open files", while requests of up to 5,000 were accepted (#356)."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = hard if hard != resource.RLIM_INFINITY else max(soft, 1 << 20)
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+            soft = wanted
+        except (ValueError, OSError):
+            pass
+    limit = MAX_EXPORT_SEGMENTS + OPEN_FILE_RESERVE if soft == resource.RLIM_INFINITY else soft
+    return max(0, limit - OPEN_FILE_RESERVE)
+
+
+def _too_many_files(count: int) -> str | None:
+    allowed = max_open_sources()
+    if count <= allowed:
+        return None
+    return (f"This export needs {count} recorded files open at once, more than this system allows ({allowed}). "
+            "Choose a shorter time or fewer cameras, or raise the container's open-file limit (nofile).")
+
+
+def free_floor(directory: Path) -> int:
+    """How much free space an export or case package must leave on the recordings volume: its recording headroom, below which the recorder
+    deletes the oldest footage, and never less than ``MIN_EXPORT_FREE_BYTES`` (#362)."""
+    from . import headroom
+
+    try:
+        capacity = shutil.disk_usage(directory).total
+    except OSError:
+        return MIN_EXPORT_FREE_BYTES
+    with connect() as db:
+        return max(MIN_EXPORT_FREE_BYTES, headroom.effective_headroom(db, "default", capacity))
 
 
 def verify_chain_member(archive: zipfile.ZipFile, installation_key: str | None = None) -> dict[str, Any]:
@@ -186,8 +234,8 @@ def _ensure_export_space(directory: Path, requested_bytes: int = 0) -> None:
     if requested_bytes > MAX_EXPORT_PACKAGE_BYTES:
         raise RuntimeError("Evidence package exceeds the 2 GiB export limit")
     free = shutil.disk_usage(directory).free
-    if free - requested_bytes < MIN_EXPORT_FREE_BYTES:
-        raise RuntimeError("Insufficient free storage for evidence export; at least 256 MiB must remain")
+    if free - requested_bytes < free_floor(directory):
+        raise RuntimeError("Insufficient free storage for evidence export: the recordings volume's headroom must stay free")
 
 
 def _has_audio(path: Path) -> bool:
@@ -207,29 +255,32 @@ async def _render_audio(manager: "ExportManager", job_id: str, spans: list[dict[
     """Render a selected source's audio on output time, leaving missing spans silent."""
     if duration <= 0:
         raise RuntimeError("Audio export has no recorded duration")
-    args = ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000:duration={duration:.6f}"]
-    graph = [f"[0:a]atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[silence]"]
-    labels = ["[silence]"]
-    input_index = 1
+    # One list of the spans that have audio, placed on output time, as the grid's tiles read their video (#356): it used to be one FFmpeg input
+    # per file, all open at once. Spans without audio, and the time between spans, are silence.
     audio_presence: dict[Path, bool] = {}
+    voiced: list[tuple[dict[str, Any], float]] = []
     for span in spans:
-        segment = span["segment"]
-        source_path = await asyncio.to_thread(recording_file_path, segment["relative_path"])
+        source_path = await asyncio.to_thread(recording_file_path, span["segment"]["relative_path"])
         if source_path not in audio_presence:
             audio_presence[source_path] = await asyncio.to_thread(_has_audio, source_path)
-        if not audio_presence[source_path]:
-            continue
-        source_offset = max(0.0, (span["source_start"] - _parse_time(segment["starts_at"])).total_seconds())
-        span_duration = (span["source_end"] - span["source_start"]).total_seconds()
-        out_start = _union_output_time(span["source_start"], grid_intervals) if grid_intervals is not None else span["output_start"]
-        delay_ms = max(0, round(out_start * 1000))
-        args.extend(["-ss", f"{source_offset:.6f}", "-t", f"{span_duration:.6f}", "-i", str(source_path)])
-        label = f"aud{input_index}"
-        graph.append(f"[{input_index}:a:0]aresample=48000,atrim=duration={span_duration:.6f},asetpts=PTS-STARTPTS,adelay={delay_ms}|{delay_ms}[{label}]")
-        labels.append(f"[{label}]")
-        input_index += 1
-    graph.append("".join(labels) + f"amix=inputs={len(labels)}:duration=first:normalize=0,atrim=duration={duration:.6f}[out]")
-    args.extend(["-filter_complex", ";".join(graph), "-map", "[out]", "-c:a", "aac", "-b:a", "128k", "-y", str(output)])
+        if audio_presence[source_path]:
+            voiced.append((span, _union_output_time(span["source_start"], grid_intervals) if grid_intervals is not None else span["output_start"]))
+    args = ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000:duration={duration:.6f}"]
+    graph = [f"[0:a]atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[silence]"]
+    if voiced:
+        starts = await asyncio.to_thread(_first_frame_times, [recording_file_path(span["segment"]["relative_path"]) for span, _ in voiced], "a:0")
+        manifest = output.with_suffix(".ffconcat")
+        keep = _span_list(manifest, [span for span, _ in voiced], [start for _, start in voiced], duration,
+                          inpoint_of=lambda span: starts.get(recording_file_path(span["segment"]["relative_path"]), 0.0) + _source_offset(span))
+        args.extend(["-copyts", "-f", "concat", "-safe", "0", "-i", str(manifest)])
+        graph.append(f"[1:a:0]aselect='{keep}',asetpts=PTS+{voiced[0][1]:.6f}/TB,aformat=channel_layouts=stereo,"
+                     f"aresample=48000:async=1:first_pts=0,apad,atrim=duration={duration:.6f}[voice]")
+        graph.append(f"[silence][voice]amix=inputs=2:duration=first:normalize=0,atrim=duration={duration:.6f}[out]")
+    else:
+        graph.append("[silence]anull[out]")
+    script = output.with_suffix(".filter")
+    script.write_text(";".join(graph), encoding="utf-8")
+    args.extend(["-filter_complex_script", str(script), "-map", "[out]", "-c:a", "aac", "-b:a", "128k", "-y", str(output)])
     await manager._run_ffmpeg(job_id, args)
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError("No playable audio track was produced")
@@ -417,47 +468,113 @@ def _write_grid_subtitles(path: Path, camera_name: str, spans: list[dict[str, An
             "missing_tile_cues": missing_cues}
 
 
+def _span_list(path: Path, spans: list[dict[str, Any]], offsets: list[float], end: float, *, inpoint_of: Any) -> str:
+    """Write a camera's spans as one ffconcat list placed on the output timeline, and return the selection that keeps only their frames.
+
+    Each entry's ``duration`` is the time to the next span's output start, so the list's timestamps leave the camera's gaps empty (the tile
+    then holds the last frame, as before). The concat demuxer still hands back the frames from each file's keyframe to its inpoint, timed
+    just before the entry; read with ``-copyts`` they keep the list's own times, and the returned ``select`` expression keeps only each
+    span's own window (#356)."""
+    first = offsets[0]
+    lines, windows = ["ffconcat version 1.0\n"], []
+    for index, span in enumerate(spans):
+        start = offsets[index] - first
+        span_duration = (span["source_end"] - span["source_start"]).total_seconds()
+        next_start = (offsets[index + 1] if index + 1 < len(spans) else end) - first
+        inpoint = inpoint_of(span)
+        lines.append(_ffconcat_quote(recording_file_path(span["segment"]["relative_path"])))
+        lines.append(f"inpoint {inpoint:.6f}\noutpoint {inpoint + span_duration:.6f}\nduration {max(span_duration, next_start - start):.6f}\n")
+        windows.append(f"gte(t,{start:.6f})*lt(t,{start + span_duration:.6f})")
+    path.write_text("".join(lines), encoding="utf-8")
+    return "+".join(windows)
+
+
+def _source_offset(span: dict[str, Any]) -> float:
+    return max(0.0, (span["source_start"] - _parse_time(span["segment"]["starts_at"])).total_seconds())
+
+
+def _first_frame_times(paths: list[Path], stream: str = "v:0") -> dict[Path, float]:
+    """When each file's first video frame is, on its own clock. A file cut from a camera's stream often starts a little after zero (its
+    B-frames); a list entry's inpoint is on that clock, so it is added to the span's offset, as ``-ss`` on each file used to do (#356)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    probe = shutil.which("ffprobe")
+
+    def first(path: Path) -> float:
+        if not probe:
+            return 0.0
+        try:
+            result = subprocess.run([probe, "-v", "error", "-select_streams", stream, "-show_entries", "stream=start_time", "-of", "csv=p=0", str(path)],
+                                    capture_output=True, text=True, timeout=15, check=False)
+            return max(0.0, float(result.stdout.strip().splitlines()[0]))
+        except (subprocess.TimeoutExpired, ValueError, IndexError):
+            return 0.0
+
+    unique = list(dict.fromkeys(paths))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return dict(zip(unique, pool.map(first, unique)))
+
+
+async def _render_grid_tile(manager: "ExportManager", job_id: str, work_dir: Path, tile_index: int, camera: dict[str, Any] | None,
+                            intervals: list[dict[str, Any]], duration: float, size: tuple[int, int], subtitle_path: Path, hardware: bool) -> Path:
+    """One tile of the grid as its own video, from one list of its camera's files: memory stays flat however many files there are (#356)."""
+    tile_width, tile_height = size
+    encoder = acceleration.encoder(crf=18, speed="ultrafast") if hardware else acceleration.build(None, crf=18, speed="ultrafast")
+    args = ["-hide_banner", "-loglevel", "error", *encoder.pre, "-f", "lavfi", "-i", f"color=c=black:s={tile_width}x{tile_height}:r=15:d={duration:.6f}"]
+    spans = camera["spans"] if camera else []
+    graph: list[str] = []
+    composed = "0:v"
+    if spans:
+        offsets = [_union_output_time(span["source_start"], intervals) for span in spans]
+        manifest = work_dir / f"grid-tile-{tile_index}.ffconcat"
+        starts = await asyncio.to_thread(_first_frame_times, [recording_file_path(span["segment"]["relative_path"]) for span in spans])
+        keep = _span_list(manifest, spans, offsets, duration,
+                          inpoint_of=lambda span: starts.get(recording_file_path(span["segment"]["relative_path"]), 0.0) + _source_offset(span))
+        args.extend(["-copyts", "-f", "concat", "-safe", "0", "-i", str(manifest)])
+        mask = f"{privacy.drawbox_filter(camera['privacy_zones'])}," if camera.get("privacy_zones") else ""
+        graph.append(f"[1:v]select='{keep}',setpts=PTS+{offsets[0]:.6f}/TB,{mask}fps=15,scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                     f"pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2,setsar=1[clip]")
+        # Before the camera's first frame the tile is black; after each span, and after the last, its last frame is held.
+        graph.append("[0:v][clip]overlay=eof_action=repeat:shortest=0[composed]")
+        composed = "composed"
+    graph.append(f"[{composed}]{_subtitle_filter_path(subtitle_path, tile_width, tile_height, OVERLAY_MIN_TILE_TEXT_PX)}" + (f",{encoder.vf_tail}" if encoder.vf_tail else "") + "[out]")
+    script = work_dir / f"grid-tile-{tile_index}.filter"
+    script.write_text(";".join(graph), encoding="utf-8")  # In a file: with hundreds of spans the description is too long for a command line
+    output = work_dir / f"grid-tile-{tile_index}.mp4"
+    args.extend(["-filter_complex_script", str(script), "-map", "[out]", "-an", "-r", "15", *encoder.codec, "-t", f"{duration:.6f}", "-y", str(output)])
+    await manager._run_ffmpeg(job_id, args)
+    if not output.is_file() or output.stat().st_size == 0:
+        raise RuntimeError("No playable video was produced for a grid tile")
+    return output
+
+
 async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, cameras: list[dict[str, Any]],
                        tile_camera_ids: list[str | None], intervals: list[dict[str, Any]], resolution: str,
                        display_settings: dict[str, str], hardware: bool = False) -> Path:
+    """The synchronized grid, a tile at a time (#356): each tile is rendered on its own from one list of its camera's files, then the
+    finished tiles are put side by side. FFmpeg used to open and decode every file of every camera at once (about 64 MB each), and above
+    about 400 files the command was too long to start."""
     encoder = acceleration.encoder(crf=26, speed="ultrafast") if hardware else acceleration.build(None, crf=26, speed="ultrafast")
     width, height = (1920, 1080) if resolution == "1080p" else (3840, 2160)
     columns = int(len(tile_camera_ids) ** 0.5)
     tile_width, tile_height = width // columns, height // columns
     duration = sum((item["source_end"] - item["source_start"]).total_seconds() for item in intervals if not item["skipped"])
     by_id = {camera["camera_id"]: camera for camera in cameras}
-    args = ["-hide_banner", "-loglevel", "error", *encoder.pre, "-f", "lavfi", "-i", f"color=c=black:s={tile_width}x{tile_height}:r=15:d={duration:.6f}"]
-    graph: list[str] = []
-    tile_outputs: list[str] = []
-    next_input = 1
+    tiles: list[Path] = []
     for tile_index, camera_id in enumerate(tile_camera_ids):
-        graph.append(f"[0:v]null[tile{tile_index}_base]" if tile_index == 0 else f"color=c=black:s={tile_width}x{tile_height}:r=15:d={duration:.6f}[tile{tile_index}_base]")
-        current = f"tile{tile_index}_base"
         camera = by_id.get(camera_id) if camera_id else None
-        spans = camera["spans"] if camera else []
         subtitle_path = work_dir / f"grid-tile-{tile_index}.srt"
-        overlay_mapping = _write_grid_subtitles(subtitle_path, camera["name"] if camera else "Selected camera", spans, intervals, duration, display_settings)
+        overlay_mapping = _write_grid_subtitles(subtitle_path, camera["name"] if camera else "Selected camera", camera["spans"] if camera else [], intervals, duration, display_settings)
         if camera:
             camera["grid_overlay"] = overlay_mapping
-        offsets = [(_union_output_time(span["source_start"], intervals), _union_output_time(span["source_end"], intervals)) for span in spans]
-        for span_index, span in enumerate(spans):
-            segment = span["segment"]
-            source_offset = max(0.0, (span["source_start"] - _parse_time(segment["starts_at"])).total_seconds())
-            span_duration = (span["source_end"] - span["source_start"]).total_seconds()
-            output_start = offsets[span_index][0]
-            next_start = offsets[span_index + 1][0] if span_index + 1 < len(spans) else duration
-            args.extend(["-ss", f"{source_offset:.6f}", "-t", f"{span_duration:.6f}", "-i", str(recording_file_path(segment["relative_path"]))])
-            clip, composed = f"tile{tile_index}_clip{span_index}", f"tile{tile_index}_composed{span_index}"
-            mask = f"{privacy.drawbox_filter(camera['privacy_zones'])}," if camera.get("privacy_zones") else ""
-            graph.append(f"[{next_input}:v]{mask}fps=15,scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration={max(0.0, next_start-output_start-span_duration) + CLIP_PADDING_SECONDS:.6f},setpts=PTS-STARTPTS+{output_start:.6f}/TB[{clip}]")
-            # The overlay's enable window keeps each clip to its own stretch; the padding only keeps the clip's real last frame from being its stream's last,
-            # which the overlay drops (a black frame at every seam).
-            graph.append(f"[{current}][{clip}]overlay=eof_action=pass:shortest=0:enable='between(t,{output_start:.6f},{next_start:.6f})'[{composed}]")
-            current = composed
-            next_input += 1
-        subbed = f"tile{tile_index}_subbed"
-        graph.append(f"[{current}]{_subtitle_filter_path(subtitle_path, tile_width, tile_height, OVERLAY_MIN_TILE_TEXT_PX)}[{subbed}]")
-        tile_outputs.append(f"[{subbed}]")
+        tiles.append(await _render_grid_tile(manager, job_id, work_dir, tile_index, camera, intervals, duration, (tile_width, tile_height), subtitle_path, hardware))
+        if job_id in getattr(manager, "_cancelled", ()):  # Between tiles, so a cancelled grid does not render the rest
+            raise ExportCancelled()
+    args = ["-hide_banner", "-loglevel", "error", *encoder.pre]
+    for tile in tiles:
+        args.extend(["-i", str(tile)])
+    graph: list[str] = []
+    tile_outputs = [f"[{index}:v]" for index in range(len(tiles))]
     layout = "|".join(f"{index % columns * tile_width}_{index // columns * tile_height}" for index in range(len(tile_outputs)))
     gaps = work_dir / "grid-gaps.srt"
     with gaps.open("w", encoding="utf-8") as subtitle:
@@ -473,8 +590,12 @@ async def _render_grid(manager: "ExportManager", job_id: str, work_dir: Path, ca
     # Gap notices sit bottom-centre of the whole frame, apart from every tile's top-left label.
     graph.append(f"{final_filter},{_subtitle_filter_path(gaps, width, height)}" + (f"[gridframe];[gridframe]{encoder.vf_tail}[out]" if encoder.vf_tail else "[out]"))
     output = work_dir / "grid.mp4"
-    args.extend(["-filter_complex", ";".join(graph), "-map", "[out]", "-an", "-r", "15", *encoder.codec, "-movflags", "+faststart", "-t", f"{duration:.6f}", "-y", str(output)])
+    script = work_dir / "grid.filter"
+    script.write_text(";".join(graph), encoding="utf-8")
+    args.extend(["-filter_complex_script", str(script), "-map", "[out]", "-an", "-r", "15", *encoder.codec, "-movflags", "+faststart", "-t", f"{duration:.6f}", "-y", str(output)])
     await manager._run_ffmpeg(job_id, args)
+    for tile in tiles:
+        tile.unlink(missing_ok=True)  # The tiles were steps on the way: only the grid is packaged
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError("No playable synchronized grid video was produced")
     return output
@@ -707,6 +828,9 @@ def _reserve_sources(job: "_ExportJob", acquired: list[Path]) -> tuple[list[dict
             raise RuntimeError("No indexed footage is available in the requested interval")
         if total_segments > MAX_EXPORT_SEGMENTS or total_source_bytes > MAX_EXPORT_SOURCE_BYTES:
             raise RuntimeError("Export source exceeds the supported size or segment limit")
+        too_many = _too_many_files(total_segments)
+        if too_many:
+            raise RuntimeError(too_many)
         if include_audio:
             eligible_audio = [camera for camera in per_camera if camera["audio_supported"] and camera["audio_enabled"]]
             if "grid" in output_modes:
@@ -882,6 +1006,7 @@ class ExportManager:
         self._running: str | None = None
 
     async def start(self) -> None:
+        max_open_sources()  # Raise this process's open-file limit now, before any export holds its sources open (#356)
         recover_interrupted_exports()
         redaction.recover()
         expire_exports()
@@ -1049,7 +1174,9 @@ class ExportManager:
             if "grid" in job.output_modes:
                 await self._render_grid_output(job, per_camera, union, metadata)
             chain_path = await _signed_chain(job, per_camera, metadata)
-            expires_at = (datetime.now(timezone.utc) + EXPORT_RETENTION).isoformat()
+            with connect() as db:
+                kept = timedelta(days=retention_days(db))
+            expires_at = (datetime.now(timezone.utc) + kept).isoformat()
             metadata["expires_at"] = expires_at
             # Hashing and copying up to 2 GiB into the zip, and hashing the result: in a thread. On the loop, the exporter's sign of life
             # stopped for as long as it took, and past 30 seconds the supervisor ended the exporter with the export at 85 to 99 percent (#359).
@@ -1284,9 +1411,10 @@ class ExportManager:
         output_path = Path(args[-1])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         free = shutil.disk_usage(output_path.parent).free
-        output_limit = min(MAX_EXPORT_PACKAGE_BYTES, free - MIN_EXPORT_FREE_BYTES)
+        copies_budget.make_room(0)  # Over the budget already: playback copies go first, and then this export is refused (#362)
+        output_limit = min(MAX_EXPORT_PACKAGE_BYTES, free - free_floor(output_path.parent), copies_budget.room_left())
         if output_limit <= 0:
-            raise RuntimeError("Insufficient free storage for evidence export; at least 256 MiB must remain")
+            raise RuntimeError("Insufficient free storage for evidence export: the recordings volume's headroom and the export budget must not be exceeded")
         args = list(args)
         args[-1:-1] = ["-fs", str(output_limit)]
         args[3:3] = ["-progress", "pipe:1", "-nostats"]
@@ -1420,6 +1548,9 @@ def _export_segments(db: sqlite3.Connection, camera_ids: list[str], start: datet
         raise LookupError("No indexed footage is available in the requested interval")
     if len(segments) > MAX_EXPORT_SEGMENTS or sum(int(segment["size_bytes"]) for segment in segments) > MAX_EXPORT_SOURCE_BYTES:
         raise OverflowError("Export source exceeds the supported size or segment limit")
+    too_many = _too_many_files(len(segments))
+    if too_many:
+        raise ValueError(too_many)  # Refused up front, in plain words, rather than failing part-way (#356)
     return segments
 
 
@@ -1449,6 +1580,8 @@ def create_export_record(
     redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None, dewarp_lenses: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     output_modes, tile_camera_ids = _checked_request(camera_ids, output_modes, tile_camera_ids, grid_resolution, include_audio, audio_camera_id)
+    # Refused up front, with the reason, when exports and case packages already fill their share of the disk (#362).
+    copies_budget.make_room(MIN_EXPORT_FREE_BYTES)
     job_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:

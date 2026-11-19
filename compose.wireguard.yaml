@@ -9,7 +9,7 @@
 # set WG_LOCAL_NETWORKS to the tunnel's addresses (for example 10.13.13.0/24), which also silences the warning and lifts that requirement.
 services:
   wireguard:
-    image: lscr.io/linuxserver/wireguard:latest
+    image: lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls130@sha256:10db56ad834f94541307d5dfdbe87370e26d155bb341a5bf65789f970f24ab5c  # Pinned (#384); Dependabot proposes updates
     network_mode: host
     restart: unless-stopped
     cap_add:

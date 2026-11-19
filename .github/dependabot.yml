@@ -17,3 +17,34 @@ updates:
     groups:
       python:
         patterns: ["*"]
+  # The base images in the Dockerfile and the tunnel images in the remote-access overlays are pinned by digest (#384, #385): Dependabot proposes
+  # the new digest and version together.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      compose-images:
+        patterns: ["*"]
+  # The web interface's packages and the root test packages (Playwright), one pull request a week each.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      test-tools:
+        patterns: ["*"]
