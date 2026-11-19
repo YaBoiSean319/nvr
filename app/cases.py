@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sqlite3
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -644,12 +645,20 @@ def package_path(row: sqlite3.Row) -> Path:
 
 
 def verify_package_bytes(content: bytes, case_id: str, package_id: str, installation_key: str | None = None) -> dict[str, Any]:
+    """``verify_package_file`` for a package already in memory (a small one, or a test's)."""
+    return verify_package_file(io.BytesIO(content), case_id, package_id, installation_key)
+
+
+def verify_package_file(package: Any, case_id: str, package_id: str, installation_key: str | None = None) -> dict[str, Any]:
     """Check an uploaded case package offline: every file against its manifest, and every clip's own evidence package, in full.
 
+    The package is read from a file, a piece at a time: nothing of it is held whole in memory, and each clip's own package is copied to a
+    temporary file to be opened (#359). Blocking: callers on an event loop run it in a thread.
+
     ``complete`` says the case's clips are all there (a package of someone with less access can be valid and not complete)."""
-    from .exports import MAX_VERIFY_PACKAGE_BYTES, verify_evidence_bytes
+    from .exports import MAX_VERIFY_PACKAGE_BYTES, member_digest, verify_evidence_file
     try:
-        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        with zipfile.ZipFile(package) as archive:
             infos = archive.infolist()
             names = [item.filename for item in infos]
             if len(names) != len(set(names)) or any(name.startswith("/") or ".." in Path(name).parts for name in names):
@@ -670,10 +679,10 @@ def verify_package_bytes(content: bytes, case_id: str, package_id: str, installa
                 return {"checksums_valid": False, "files": [], "clips": [], "complete": False, "error": "package identity does not match the requested package"}
             files, valid = [], True
             for name in sorted(delivered):
-                body = archive.read(name)
-                matches = len(body) == expected[name].get("size_bytes") and hashlib.sha256(body).hexdigest() == expected[name].get("sha256")
+                size, digest = member_digest(archive, name)
+                matches = size == expected[name].get("size_bytes") and digest == expected[name].get("sha256")
                 valid = valid and matches
-                files.append({"path": name, "size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(), "matches": matches})
+                files.append({"path": name, "size_bytes": size, "sha256": digest, "matches": matches})
             document = json.loads(archive.read("case.json"))
             clips, every_clip = [], True
             for entry in (item for item in document.get("items", []) if item.get("kind") == "clip"):
@@ -682,7 +691,10 @@ def verify_package_bytes(content: bytes, case_id: str, package_id: str, installa
                     clips.append({"item_id": entry.get("id"), "export_id": entry.get("export_id"), "present": False, "valid": False, "error": "the clip's file is missing from the package"})
                     every_clip = False
                     continue
-                inner = verify_evidence_bytes(archive.read(name), entry.get("export_id"), installation_key)
+                with tempfile.TemporaryFile() as spooled, archive.open(name) as member:
+                    shutil.copyfileobj(member, spooled, 1024 * 1024)  # A package inside a package: opened from disk, not from memory
+                    spooled.seek(0)
+                    inner = verify_evidence_file(spooled, entry.get("export_id"), installation_key)
                 inner_valid = bool(inner["checksums_valid"]) and (inner.get("chain") is None or bool(inner["chain"]["valid"]))
                 every_clip = every_clip and inner_valid
                 clips.append({"item_id": entry.get("id"), "export_id": entry.get("export_id"), "present": True, "valid": inner_valid, "error": inner.get("error"),

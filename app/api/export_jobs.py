@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Literal
+from typing import AsyncIterator, Callable, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
@@ -16,7 +20,8 @@ from app.principal import CurrentUser, requires_scope
 from app.store import connect
 from app.retention import acquire_playback, release_playback
 from app import dewarp, footage_chain, viewing_audit
-from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_bytes, _job_view, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
+from app.exports import create_export_record, export_output_path, get_export, list_exports, request_cancel, verify_evidence_file, _job_view, EXPORT_DIRECTORY, MAX_EXPORT_CAMERAS, MAX_EXPORT_WINDOW, MAX_VERIFY_PACKAGE_BYTES
+from app.recording import recordings_path
 
 router = APIRouter()
 
@@ -204,6 +209,35 @@ def download_export(job_id: str, user: CurrentUser) -> FileResponse:
     return FileResponse(path, media_type="application/zip", filename=f"nvr-export-{job_id}.zip", background=BackgroundTask(release_playback, path))
 
 
+@asynccontextmanager
+async def received_package(request: Request, too_large: str) -> AsyncIterator[tuple[Path, str]]:
+    """The uploaded package as a temporary file and its SHA-256, written as it arrives and removed afterwards whatever happens.
+
+    It used to be collected in memory, copied, and each file in it read whole: three times the upload at the peak, about 6 GiB in the web
+    worker for a package near the limit (#359). The file goes beside the exports, on the recordings volume, not on the system disk."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_VERIFY_PACKAGE_BYTES:
+        raise HTTPException(status_code=413, detail=too_large)
+    folder = recordings_path() / EXPORT_DIRECTORY
+    await run_in_threadpool(folder.mkdir, parents=True, exist_ok=True)
+    handle = await run_in_threadpool(lambda: tempfile.NamedTemporaryFile(dir=folder, prefix=".verify-", suffix=".upload", delete=False))
+    path = Path(handle.name)
+    try:
+        digest, size = hashlib.sha256(), 0
+        try:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_VERIFY_PACKAGE_BYTES:
+                    raise HTTPException(status_code=413, detail=too_large)
+                digest.update(chunk)
+                await run_in_threadpool(handle.write, chunk)
+        finally:
+            await run_in_threadpool(handle.close)
+        yield path, digest.hexdigest()
+    finally:
+        await run_in_threadpool(path.unlink, missing_ok=True)
+
+
 @router.post("/api/exports/{job_id}/verify")
 @requires_scope("export")
 async def verify_export_evidence(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
@@ -211,21 +245,12 @@ async def verify_export_evidence(job_id: str, request: Request, user: CurrentUse
     row = _export_for(job_id, user)
     if row["status"] != "completed":
         raise HTTPException(status_code=409, detail="Evidence package is not ready")
-    content_length = request.headers.get("content-length")
-    if content_length and content_length.isdigit() and int(content_length) > MAX_VERIFY_PACKAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Evidence package exceeds the verification size limit")
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > MAX_VERIFY_PACKAGE_BYTES:
-            raise HTTPException(status_code=413, detail="Evidence package exceeds the verification size limit")
-    data = bytes(body)
-    del body
-    result = verify_evidence_bytes(data, job_id, footage_chain.public_key())
+    async with received_package(request, "Evidence package exceeds the verification size limit") as (path, uploaded_sha256):
+        result = await run_in_threadpool(verify_evidence_file, path, job_id, footage_chain.public_key())
     # What a package says about itself is only as good as the package: its bytes are compared with the file this NVR issued (#363).
     issued = row["package_sha256"]
     result["issued_hash_recorded"] = bool(issued)
-    result["matches_issued_package"] = (hashlib.sha256(data).hexdigest() == issued) if issued else None
+    result["matches_issued_package"] = (uploaded_sha256 == issued) if issued else None
     # The job knows which cameras its package was signed for, so a stripped or downgraded chain.json fails.
     expected = (json.loads(row["metadata_json"]) if row["metadata_json"] else {}).get("signed_footage", {})
     chain = result.get("chain")

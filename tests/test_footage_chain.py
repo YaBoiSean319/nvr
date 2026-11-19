@@ -17,6 +17,8 @@ from app.exports import ExportManager, create_export_record, verify_evidence_byt
 from app.preservation import delete_segment
 from app.retention import cleanup_expired_recordings
 from app.store import connect, initialize
+from unittest.mock import patch
+
 from tests.scene_case import SceneTestCase
 
 START = datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
@@ -159,6 +161,31 @@ class FootageChainTests(SceneTestCase):
         self.assertFalse(footage_chain.verify_extract(forged, camera["sources"])["valid"])
         swapped_sources = [{**source, "sha256": "e" * 64} for source in camera["sources"]]
         self.assertIn("do not match", footage_chain.verify_extract(camera["chain"], swapped_sources)["error"])
+
+    def test_packaging_an_export_runs_off_the_exporters_event_loop(self):
+        # Hashing and zipping up to 2 GiB on the loop stopped the exporter's sign of life; past 30 seconds it was ended mid-export (#359).
+        from app import exports
+        self.chain()
+        where: dict[str, bool] = {}
+        real_write, real_record, real_extract = ExportManager._write_package, exports._record_completed, exports._chain_extract
+
+        def write(manager, *args):
+            where["package"] = asyncio._get_running_loop() is None  # True in a worker thread: no event loop runs there
+            return real_write(manager, *args)
+
+        def record(*args):
+            where["completed"] = asyncio._get_running_loop() is None
+            return real_record(*args)
+
+        def extract(*args):
+            where["chain"] = asyncio._get_running_loop() is None
+            return real_extract(*args)
+
+        job_id = create_export_record(1, [self.camera_id], START, START + timedelta(seconds=8), output_modes=["individual"])
+        with patch.object(ExportManager, "_write_package", write), patch.object(exports, "_record_completed", record), patch.object(exports, "_chain_extract", extract):
+            asyncio.run(ExportManager()._execute(job_id))
+        self.assertEqual(self.client.get(f"/api/exports/{job_id}").json()["status"], "completed")
+        self.assertEqual(where, {"package": True, "completed": True, "chain": True})
 
     def test_the_signing_key_survives_backup_and_restore(self):
         self.chain()

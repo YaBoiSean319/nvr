@@ -22,6 +22,7 @@ Nothing on this page may hold a secret or a real site's address. The owner's pro
 - **From the review, fixed (eighth batch)**: #363 (an export keeps the SHA-256 of the package it issued and verification says whether an upload is that package; a chain entry must be its camera's own; migration 72, `exports.package_sha256`).
 - **From the review, fixed (ninth batch)**: #343 (the standby signs its answer to a renewal and the primary obeys only a verified one; a primary told "not yet" for more than five minutes records again and raises an incident, `failover_state.yield_since`, migration 73; a correctly signed request is never refused by the per-address lock-out). Both NVRs must be upgraded together.
 - **From the review, fixed (tenth batch)**: #352 (the signed-footage chain: the "anything new to sign?" check keeps a mark and looks at the whole table every ten minutes, off the event loop and without a write lock when idle; verifying a range checks the signed stretches that hold its links, not the whole chain; an export's chain extract ends at the first signature that covers it).
+- **From the review, fixed (eleventh batch)**: #359 (an uploaded evidence or case package is written to a temporary file and checked in pieces, in a thread: `verify_evidence_file`, `verify_package_file`, `received_package`; packaging an export, writing its chain file and hashing the result run in threads).
 
 ## Open work
 
