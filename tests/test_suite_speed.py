@@ -116,3 +116,38 @@ class EmptyDatabaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackgroundRetentionTests(unittest.TestCase):
+    """The suite switches the recorder's background retention pass off for itself (see ``tests/__init__.py``); this pins the real one."""
+
+    def test_the_servers_own_loop_runs_retention_as_soon_as_it_starts_and_then_every_five_minutes(self):
+        import asyncio
+
+        from app import recording
+
+        calls: list[str] = []
+        waits: list[float] = []
+
+        async def run() -> None:
+            manager = recording.RecordingManager()
+
+            async def sleep(seconds: float) -> None:
+                waits.append(seconds)
+                manager.stopping = True  # One pass is enough to see
+
+            with mock.patch("app.retention.cleanup_expired_recordings", lambda: calls.append("retention")), \
+                    mock.patch.object(recording.RecordingManager, "_prune_viewing_audit", staticmethod(lambda: calls.append("viewing audit"))), \
+                    mock.patch.object(recording.asyncio, "sleep", sleep):
+                await tests.REAL_RETENTION_LOOP(manager)
+
+        asyncio.run(run())
+        self.assertEqual((calls, waits), (["retention", "viewing audit"], [300]))
+
+    def test_the_recorder_starts_that_loop_and_only_the_tests_replace_it(self):
+        from app import recording
+
+        self.assertIsNot(recording.RecordingManager._retention_loop, tests.REAL_RETENTION_LOOP)  # Replaced for the suite
+        self.assertEqual(tests.REAL_RETENTION_LOOP.__qualname__, "RecordingManager._retention_loop")
+        source = Path(recording.__file__).read_text(encoding="utf-8")
+        self.assertIn("asyncio.create_task(self._retention_loop()", source)

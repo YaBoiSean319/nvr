@@ -9,6 +9,15 @@ Measured over the whole suite, two fixed costs were a third of its time, paid ag
   database in a process is still built that way, by the real migrations; later ones start as a copy of it. A database that already exists (an upgrade,
   a damaged file, a restart) always goes through the real migrations, and so does any run whose list of migrations differs from the one copied.
 
+One more thing here is about dates, not speed:
+
+* **The recorder's background retention pass does not run by itself in tests.** Many tests give a camera footage with a fixed date in
+  October 2026 and then run the whole application, whose recorder starts a retention pass at once. That pass rightly deletes footage older
+  than the 30-day default, so from 19 November 2026 at 10:00 UTC those tests began losing their footage in the middle of a test (23 failures
+  in ``tests.test_redaction`` on that day, with more files due the next). Nothing asserted on the background pass: retention is tested by
+  calling ``cleanup_expired_recordings`` with a clock of the test's choosing. ``tests/test_suite_speed.py`` pins that the server's real loop
+  is what the recorder starts outside the tests.
+
 ``python -m unittest tests.<module>`` and ``python -m unittest discover -s tests -t .`` import this package first. A run that does not (``discover -s tests``
 without ``-t .``) is still correct, only slower for the modules that never import ``tests``.
 """
@@ -60,6 +69,19 @@ def _migrate(path: Path, connect: Callable[[], sqlite3.Connection]) -> list[int]
 
 
 _migrations.migrate = _migrate
+
+
+import app.recording as _recording  # noqa: E402 - after the migrations are wrapped
+
+REAL_RETENTION_LOOP = _recording.RecordingManager._retention_loop
+
+
+async def _no_background_retention(self: "_recording.RecordingManager") -> None:
+    """In tests the recorder's periodic retention, viewing-audit and disk pass waits to be called for (see the module docstring)."""
+    return None
+
+
+_recording.RecordingManager._retention_loop = _no_background_retention
 
 
 @contextmanager
