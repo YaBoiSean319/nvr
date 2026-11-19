@@ -256,6 +256,16 @@ class JobTests(unittest.TestCase):
         self.work()
         self.assertEqual(self.job(job["id"])["state"], "done")
 
+    def test_after_a_restart_a_camera_being_checked_in_a_cancelled_job_is_skipped_and_its_password_is_gone(self):
+        job = self.start([{"host": "192.0.2.10", "username": "admin", "password": PASSWORD}])
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:  # Cancelled while its one camera was being checked, and then the server stopped
+            db.execute("UPDATE camera_add_items SET status='checking'")
+            db.execute("UPDATE camera_add_jobs SET state='cancelled'")
+        bulk_add.recover_interrupted()
+        view = self.job(job["id"])
+        self.assertEqual([item["status"] for item in view["items"]], ["skipped"])  # It was put back in the queue of a job nobody works (#386)
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM camera_add_items WHERE password_ciphertext IS NOT NULL")[0][0], 0)
+
     def test_finished_jobs_are_forgotten_after_a_week(self):
         old = self.start([{"host": "192.0.2.10"}])
         self.work()

@@ -1,0 +1,101 @@
+"""Small faults that show only when something else has already gone wrong (#386)."""
+from __future__ import annotations
+
+from tests.test_access_grants import GrantCase
+
+
+class CsvImportTests(GrantCase):
+    def test_a_row_whose_camera_name_is_only_spaces_is_reported_and_the_rest_of_the_import_goes_on(self):
+        text = "name,stream_url\n   ,rtsp://192.0.2.10/live\nNew gate,rtsp://192.0.2.11/live\n"
+        answer = self.admin.post("/api/cameras/import/preview", json={"csv_text": text})
+        self.assertEqual(answer.status_code, 200, answer.text)
+        rows = answer.json()["rows"]
+        self.assertEqual([(row["row"], row["status"]) for row in rows], [(2, "invalid"), (3, "accepted")])
+        self.assertIn("Camera name is required", " ".join(rows[0]["errors"]))
+
+
+class WebhookUpdateTests(GrantCase):
+    def test_an_explicit_empty_value_leaves_the_receivers_name_and_switch_as_they_were(self):
+        created = self.admin.post("/api/webhooks", json={"name": "Operations receiver", "url": "http://192.0.2.5:8090/events", "events": ["recording.failure"],
+                                                         "allow_private_receiver": True})
+        self.assertEqual(created.status_code, 201, created.text)
+        webhook = created.json()["webhook"]
+        changed = self.admin.patch(f"/api/webhooks/{webhook['id']}", json={"name": None, "enabled": None})
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertEqual((changed.json()["webhook"]["name"], changed.json()["webhook"]["enabled"]), ("Operations receiver", True))
+        renamed = self.admin.patch(f"/api/webhooks/{webhook['id']}", json={"name": "Night desk", "enabled": False}).json()["webhook"]
+        self.assertEqual((renamed["name"], renamed["enabled"]), ("Night desk", False))  # A real change still applies
+
+
+class AudioCheckTests(GrantCase):
+    def test_an_audio_check_that_times_out_says_so_without_the_command_or_the_files_path(self):
+        import subprocess
+        from pathlib import Path
+        from unittest import mock
+
+        from app import exports
+
+        path = Path(self.environment["NVR_RECORDINGS_PATH"]) / "a-private-folder" / "segment.mp4"
+
+        def slow(command, *args, **kwargs):
+            raise subprocess.TimeoutExpired(command, 15)
+
+        with mock.patch.object(exports.subprocess, "run", slow), mock.patch.object(exports.shutil, "which", lambda name: "/usr/bin/ffprobe"):
+            with self.assertRaises(RuntimeError) as raised:
+                exports._has_audio(path)
+        self.assertNotIsInstance(raised.exception, subprocess.TimeoutExpired)
+        self.assertNotIn("a-private-folder", str(raised.exception))
+        self.assertNotIn("ffprobe", str(raised.exception))
+
+
+class ObjectStoreDownloadTests(GrantCase):
+    def client(self):
+        import httpx
+
+        from app import s3
+
+        class Breaks(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"the first part of the recording"
+                raise httpx.ReadError("the connection was reset")
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=Breaks())
+
+        return s3.S3Client("https://objects.example.test", "footage", "access", "a-secret-key-0123456789", transport=httpx.MockTransport(answer))
+
+    def test_a_download_that_fails_part_way_is_the_stores_own_kind_of_error(self):
+        from pathlib import Path
+
+        from app import s3
+
+        client = self.client()
+        target = Path(self.environment["NVR_RECORDINGS_PATH"]) / "fetched.mp4"
+        with self.assertRaises(s3.S3Error) as raised:
+            client.download("segment.mp4", target)
+        self.assertIn("part-way", str(raised.exception))
+        with self.assertRaises(s3.S3Error):
+            client.read_digest("segment.mp4")
+
+
+class TalkAudioTests(GrantCase):
+    def test_the_audio_kept_from_a_talk_is_bounded_however_fast_it_is_sent(self):
+        import asyncio
+        from unittest import mock
+
+        from app import talk
+
+        backchannel = mock.Mock()
+        backchannel.track.codec = next(iter(talk.ENCODERS))
+        backchannel.send = mock.AsyncMock()
+
+        async def flood() -> int:
+            with mock.patch.object(talk, "MAX_KEPT_BYTES", 40_000):
+                talking = talk.Talking(backchannel, keep_audio=True)
+                for _ in range(10):  # Ten seconds' worth, sent at once
+                    await talking.feed(b"\x01\x00" * (talk.MAX_INPUT_BYTES // 2))
+                return len(talking.keep)
+
+        self.assertEqual(asyncio.run(flood()), 40_000)
+        self.assertGreater(backchannel.send.await_count, 0)  # The camera still got the audio; only what is kept is bounded
+        self.assertEqual(talk.MAX_KEPT_BYTES, talk.MAX_TALK_SECONDS * talk.SAMPLE_RATE * 2)  # The longest talk at its real rate fits

@@ -429,6 +429,7 @@ class RecordingManager:
     @staticmethod
     def _prune_viewing_audit() -> None:
         with connect() as db:
+            viewing_audit.close_orphans(db)  # What a crash left open, once it has gone quiet; at start alone, a full restart's own were too fresh to close
             viewing_audit.prune(db)
             security_log.prune(db)
 

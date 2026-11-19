@@ -179,6 +179,8 @@ def update_endpoint(endpoint_id: str, fields: dict[str, Any]) -> dict[str, Any] 
             return None
         changes: list[str] = []
         values: list[Any] = []
+        # A field sent as an explicit null means "leave it": it used to rename the receiver to "None", or switch it off (#386).
+        fields = {key: value for key, value in fields.items() if value is not None}
         if "name" in fields:
             name = str(fields["name"]).strip()
             if not name or len(name) > 100:

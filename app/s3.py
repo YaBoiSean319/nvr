@@ -140,7 +140,7 @@ class S3Client:
             self._check(response, 200)
             digest, size = hashlib.sha256(), 0
             with target.open("wb") as handle:
-                for chunk in response.iter_bytes(CHUNK):
+                for chunk in self._body(response):
                     if rate:
                         rate(len(chunk))
                     digest.update(chunk)
@@ -151,13 +151,23 @@ class S3Client:
         finally:
             response.close()
 
+    @staticmethod
+    def _body(response: httpx.Response) -> Iterator[bytes]:
+        """The answer's body, a piece at a time. A connection that fails part-way is this store's own kind of error, like one that fails at
+        the start: it used to escape as a network error nothing expected, so playing cold footage answered with a server error instead of
+        "not available" and the tiering pass stopped without raising the tier's incident (#386)."""
+        try:
+            yield from response.iter_bytes(CHUNK)
+        except httpx.HTTPError as exc:
+            raise S3Error(f"The object store stopped answering part-way: {type(exc).__name__}") from None
+
     def read_digest(self, name: str, *, rate: Callable[[int], None] | None = None) -> tuple[str, int]:
         """Read the object through and return its SHA-256 and size, keeping nothing."""
         response = self._request("GET", name, stream=True)
         try:
             self._check(response, 200)
             digest, size = hashlib.sha256(), 0
-            for chunk in response.iter_bytes(CHUNK):
+            for chunk in self._body(response):
                 if rate:
                     rate(len(chunk))
                 digest.update(chunk)

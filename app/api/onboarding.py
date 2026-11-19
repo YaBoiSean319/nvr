@@ -42,9 +42,12 @@ class CameraImportRow(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def trim_name(cls, value: str | None) -> str | None:
-        value = value.strip() if isinstance(value, str) else value
-        return (value or None) if isinstance(value, str) else value
+    def trim_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            # A name of only spaces became None, and the import then failed whole with a server error instead of reporting the row (#386).
+            raise ValueError("Camera name is required")
+        return value
 
     @field_validator("group_name")
     @classmethod

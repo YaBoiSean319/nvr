@@ -121,5 +121,46 @@ class ExternalHeartbeatTests(unittest.TestCase):
         }).status_code, 403)
 
 
+
+class HeartbeatSurvivesTests(unittest.TestCase):
+    """The heartbeat task carries on when recording its own failure fails (#386)."""
+
+    def test_a_failure_that_cannot_be_recorded_does_not_end_the_task(self):
+        import asyncio
+        import sqlite3
+        from unittest import mock
+
+        from app import heartbeat
+
+        claims = []
+
+        def claim():
+            claims.append(1)
+            if len(claims) == 1:
+                raise RuntimeError("the send path broke")
+            return None
+
+        def busy(**_details):
+            raise sqlite3.OperationalError("database is locked")
+
+        async def run() -> bool:
+            manager = heartbeat.HeartbeatManager()
+            real_sleep = asyncio.sleep
+            with mock.patch.object(heartbeat, "claim_due_heartbeat", claim), mock.patch.object(heartbeat, "record_heartbeat_result", busy), \
+                    mock.patch.object(heartbeat.asyncio, "sleep", lambda _seconds: real_sleep(0.01)):
+                await manager.start()
+                for _ in range(100):
+                    if len(claims) >= 3 or manager.task.done():
+                        break
+                    await real_sleep(0.01)
+                alive = not manager.task.done()
+                await manager.stop()
+            return alive
+
+        with self.assertLogs("app.heartbeat", level="WARNING"):
+            self.assertTrue(asyncio.run(run()), "the heartbeat task ended")
+        self.assertGreaterEqual(len(claims), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
