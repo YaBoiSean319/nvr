@@ -40,6 +40,19 @@ class IdleClaimTests(unittest.TestCase):
             result = call()
         return result, seen
 
+    def test_a_device_secret_that_matches_nothing_takes_no_write_lock(self):
+        from app import device_sessions
+        result, seen = self.statements(lambda: device_sessions.resume(device_sessions.PREFIX + "A" * 43))
+        self.assertIsNone(result)
+        self.assertFalse([statement for statement in seen if statement.upper().startswith(("BEGIN", "INSERT", "UPDATE", "DELETE"))], seen)
+
+    def test_the_delivery_history_is_pruned_once_an_hour_not_after_every_delivery(self):
+        with patch.object(rule_actions, "_pruned_at", None):
+            _, first = self.statements(lambda: rule_actions._finish("no-such-delivery", 1, response_status=200))
+            _, second = self.statements(lambda: rule_actions._finish("no-such-delivery", 1, response_status=200))
+        prunes = [sum(1 for statement in seen if statement.startswith("DELETE FROM rule_action_deliveries")) for seen in (first, second)]
+        self.assertEqual(prunes, [1, 0])
+
     def test_nothing_queued_takes_no_write_lock(self):
         def claim_push():
             with connect() as db:
