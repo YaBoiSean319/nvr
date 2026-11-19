@@ -242,7 +242,9 @@ test("operators see read-only details and the server refuses their changes", asy
   await expect(editor(page).getByRole("textbox")).toHaveCount(0);
   await expect(editor(page).getByRole("button", { name: "Save" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Archive…" })).toHaveCount(0);
-  await expect(editor(page).locator("dl.details")).toContainText("192.0.2.2");
+  // Where a camera is on the network is for administrators only (#377).
+  await expect(editor(page).locator("dl.details")).toContainText("Shown to administrators");
+  await expect(editor(page).locator("dl.details")).not.toContainText("192.0.2.2");
   const rename = await page.request.patch(`/api/cameras/${fixtures.camera_ids[1]}`, { data: { name: "Nope" } });
   expect(rename.status()).toBe(403);
   const archive = await page.request.delete(`/api/cameras/${fixtures.camera_ids[1]}`);

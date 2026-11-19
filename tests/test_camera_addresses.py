@@ -35,6 +35,7 @@ class CameraAddressTests(GrantCase):
         camera = self.camera(self.limited)
         self.assertEqual({field: camera[field] for field in ADDRESS_FIELDS}, dict.fromkeys(ADDRESS_FIELDS))
         self.assertEqual(camera["name"], "Dock 1")  # Everything else is still there
+        self.assertTrue(camera["has_onvif_device"])  # Live still knows it can offer the PTZ pad, without the address
         self.assertIn("recording_health", camera)
         self.assertNotIn("192.0.2.21", self.limited.get("/api/cameras").text)
 

@@ -243,7 +243,7 @@ export const VideoTile = memo(function VideoTile({ camera, active, enlarged, sus
         </div>
       ) : null}
       {/* The focused tile carries PTZ controls when its camera speaks ONVIF; the server says whether it can move. */}
-      {active && camera.device_service_url && !halted ? <PtzPad cameraId={camera.id} keyTarget={root} compact /> : null}
+      {active && camera.has_onvif_device && !halted ? <PtzPad cameraId={camera.id} keyTarget={root} compact /> : null}
       <div className="tile-actions" aria-label={`${camera.name} actions`}>
         <button type="button" className="button icon-button tile-action" onClick={() => (enlarged ? restore() : enlarge(camera.id))} aria-label={enlarged ? `Restore grid` : `Enlarge ${camera.name}`} title={enlarged ? "Restore grid (Esc)" : "Enlarge"}>
           {enlarged ? "⤡" : "⤢"}

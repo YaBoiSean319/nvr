@@ -244,6 +244,8 @@ def camera_view(row: sqlite3.Row) -> dict[str, object]:
         "device_service_url": row["device_service_url"] if "device_service_url" in row.keys() else None,
         "onvif_profile_token": row["onvif_profile_token"] if "onvif_profile_token" in row.keys() else None,
         "live_substream_profile_token": row["live_substream_profile_token"] if "live_substream_profile_token" in row.keys() else None,
+        # Whether the camera has an ONVIF device service (so may have PTZ and the like), without saying where it is: everyone gets this (#377).
+        "has_onvif_device": bool(row["device_service_url"]) if "device_service_url" in row.keys() else False,
         "archived_at": row["archived_at"] if "archived_at" in row.keys() else None,
         "stream_url": visible_url,
         "enabled": bool(row["enabled"]),
