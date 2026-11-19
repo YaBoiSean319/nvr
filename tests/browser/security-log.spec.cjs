@@ -17,11 +17,12 @@ test("an administrator reads the security log, filters it by action and person, 
 
   await log.getByLabel("Action").selectOption("display_settings_changed");
   await log.getByLabel("Person").selectOption({ label: "camera-admin" });
+  // Newest first: the change just made is the first row. Earlier journeys may have changed the display settings too, so the rows are not counted.
   const row = table.getByRole("row").nth(1);
   await expect(row).toContainText("camera-admin");
   await expect(row).toContainText("Display settings changed");
   await expect(row).toContainText(changed.time_zone);
-  await expect(table.getByRole("row")).toHaveCount(2); // The heading and the one change
+  await expect(table.getByRole("row").filter({ hasNotText: "Display settings changed" })).toHaveCount(1); // Only the heading is not that action
 
   await log.getByLabel("Person").selectOption({ label: "camera-operator" });
   await expect(log.getByText("Nothing was recorded in this range.")).toBeVisible();
