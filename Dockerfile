@@ -1,12 +1,16 @@
 # The browser interface is built in its own stage; only the static output ships.
-FROM node:22-slim AS web
+# Base images are pinned by digest, with the version they were in a comment (#385): two builds of one commit start from the same bytes.
+# Dependabot proposes the updates (.github/dependabot.yml).
+# node 22.23.5
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
-FROM python:3.12-slim
+# python 3.12.16
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
