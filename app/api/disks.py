@@ -24,9 +24,12 @@ def get_disk_health(_: Administrator) -> dict[str, object]:
 async def refresh_disk_health(admin: Administrator) -> dict[str, object]:
     """Read every volume's disk now, rather than at the next scheduled reading."""
     states = await asyncio.to_thread(lambda: smart.refresh(smart.volumes_to_read()))
-    with connect() as db:
-        record(db, admin.id, "disk_health_refreshed", "storage", "volumes", states=states)
-        return {"disks": smart.view(db), "refresh_hours": round(smart.REFRESH_SECONDS / 3600, 2)}
+    def view():
+        with connect() as db:
+            record(db, admin.id, "disk_health_refreshed", "storage", "volumes", states=states)
+            return {"disks": smart.view(db), "refresh_hours": round(smart.REFRESH_SECONDS / 3600, 2)}
+
+    return await asyncio.to_thread(view)
 
 
 @router.get("/api/storage/forecast")

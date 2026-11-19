@@ -137,8 +137,11 @@ async def find(payload: FindRequest, user: Administrator) -> dict[str, Any]:
     except faces.FaceError as error:
         _raise(error)
     jpeg = await asyncio.to_thread(faces.frame_jpeg, frame) if found else None  # A frame with no face is not encoded or sent: the drawer shows only that none was found (#313)
-    with connect() as db:
-        faces.audit(db, int(user["id"]), "face_search_viewed", payload.camera_id, {"at": payload.at.astimezone(timezone.utc).isoformat(), "faces": len(found)})
+    def note():
+        with connect() as db:
+            faces.audit(db, int(user["id"]), "face_search_viewed", payload.camera_id, {"at": payload.at.astimezone(timezone.utc).isoformat(), "faces": len(found)})
+
+    await asyncio.to_thread(note)
     return {"camera_id": payload.camera_id, "at": payload.at.astimezone(timezone.utc).isoformat(), "picture": base64.b64encode(jpeg).decode() if jpeg else None, "faces": [{key: value for key, value in item.items() if key != "_face"} for item in found]}
 
 
@@ -155,27 +158,30 @@ async def add(payload: AddRequest, user: Administrator) -> dict[str, Any]:
     face = item["_face"]
     # The picture is made (an FFmpeg run) before the write lock is taken, and off the event loop.
     picture = None if payload.entry_id else await asyncio.to_thread(faces.picture_of, frame, face)
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            if payload.entry_id:
-                faces.get_entry(db, payload.entry_id)
-                entry_id, action = payload.entry_id, "face_watch_picture_added"
-            else:
-                entry_id = faces.create_entry(db, payload.name.strip(), payload.reason.strip(), _expiry(payload.expires_at), picture, int(user["id"]))
-                action = "face_watch_added"
-            faces.add_embedding(db, entry_id, face, payload.camera_id, payload.at)
-            faces.audit(db, int(user["id"]), action, entry_id, {"camera_id": payload.camera_id, "at": payload.at.astimezone(timezone.utc).isoformat(),
-                                                                "name": payload.name.strip() if payload.name else None, "reason": payload.reason.strip() if payload.reason else None,
-                                                                "expires_at": _expiry(payload.expires_at)})
-        except faces.FaceError as error:
-            db.execute("ROLLBACK")
-            _raise(error)
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
-        db.execute("COMMIT")
-        return faces.get_entry(db, entry_id)
+    def save():
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if payload.entry_id:
+                    faces.get_entry(db, payload.entry_id)
+                    entry_id, action = payload.entry_id, "face_watch_picture_added"
+                else:
+                    entry_id = faces.create_entry(db, payload.name.strip(), payload.reason.strip(), _expiry(payload.expires_at), picture, int(user["id"]))
+                    action = "face_watch_added"
+                faces.add_embedding(db, entry_id, face, payload.camera_id, payload.at)
+                faces.audit(db, int(user["id"]), action, entry_id, {"camera_id": payload.camera_id, "at": payload.at.astimezone(timezone.utc).isoformat(),
+                                                                    "name": payload.name.strip() if payload.name else None, "reason": payload.reason.strip() if payload.reason else None,
+                                                                    "expires_at": _expiry(payload.expires_at)})
+            except faces.FaceError as error:
+                db.execute("ROLLBACK")
+                _raise(error)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            return faces.get_entry(db, entry_id)
+
+    return await asyncio.to_thread(save)
 
 
 @router.patch("/api/faces/watch/{entry_id}")

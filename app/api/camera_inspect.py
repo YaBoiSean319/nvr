@@ -1,6 +1,7 @@
 """Inspect a camera from its address and login: who it is, how it signs in, its streams, and whether its video decodes."""
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -46,7 +47,10 @@ async def inspect_camera(payload: InspectRequest, admin: Administrator) -> dict[
             brand=payload.camera_brand, verify=payload.verify_video)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    with connect() as db:
-        record(db, admin.id, "camera_inspected", "camera", payload.host, ok=bool(result["ok"]),
-               failed=[step["id"] for step in result["steps"] if step["state"] == "failed"])
+    def note() -> None:
+        with connect() as db:
+            record(db, admin.id, "camera_inspected", "camera", payload.host, ok=bool(result["ok"]),
+                   failed=[step["id"] for step in result["steps"] if step["state"] == "failed"])
+
+    await asyncio.to_thread(note)
     return result

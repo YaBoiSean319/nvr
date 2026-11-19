@@ -146,7 +146,7 @@ async def talk_stream(websocket: WebSocket, camera_id: str) -> None:
     await websocket.accept()
     refuse = live_media._refuse
     try:
-        principal = current_user(websocket)
+        principal = await asyncio.to_thread(current_user, websocket)
     except HTTPException as exc:
         if exc.status_code == 404:
             await refuse(websocket, live_media.CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})

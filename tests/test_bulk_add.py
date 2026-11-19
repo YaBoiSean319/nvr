@@ -143,7 +143,8 @@ class JobTests(unittest.TestCase):
         job = self.start([{"host": "192.0.2.10:8080", "username": "admin", "password": PASSWORD}, {"host": "192.0.2.11", "username": "admin", "password": PASSWORD, "name": "Dock"}], recording=True)
         inspect = self.work()
         self.assertEqual(inspect.await_count, 2)
-        first, second = self.added
+        # Two cameras are worked on at once, so which is saved first is not fixed: each is found by its address.
+        first, second = sorted(self.added, key=lambda payload: payload.camera_ip)
         self.assertEqual((first.name, first.camera_ip, first.camera_username, first.camera_password), ("Hanwha XNV-6120R 192.0.2.10:8080", "192.0.2.10", "admin", PASSWORD))
         self.assertEqual((first.camera_brand, first.onvif_profile_token, first.live_substream_profile_token), ("hanwha", "profile2", "profile4"))
         self.assertEqual((first.recording_mode, first.recording_enabled, first.save_anyway), ("motion", True, False))

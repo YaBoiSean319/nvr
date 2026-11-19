@@ -41,12 +41,24 @@ def _key() -> tuple[bytes, Fernet]:
     return key, _loaded[str(path)][2]
 
 
+class CredentialKeyMissing(RuntimeError):
+    """The key file is gone and the database holds values encrypted with it: no new key is made in its place."""
+
+
+MISSING_KEY_MESSAGE = ("The NVR's credential key file is missing, and the stored camera passwords and addresses cannot be read without it. "
+                       "Put the original key file back (see docs/database-recovery.md); nothing has been changed.")
+
+
 def _read_or_create(path: Path) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         key = path.read_bytes()
     except FileNotFoundError:
-        _warn_if_secrets_exist(path)
+        if _stored_secrets_exist():
+            # A new key here would be made without a word, everything saved from then on would be encrypted with it, and all of that
+            # would be lost when the real key was put back (#383). This is what restoring the data without the secrets looks like.
+            _say_once(path)
+            raise CredentialKeyMissing(MISSING_KEY_MESSAGE) from None
         key = Fernet.generate_key()
         fd, temporary_name = tempfile.mkstemp(prefix="credentials-", dir=path.parent)
         try:
@@ -70,27 +82,63 @@ def _read_or_create(path: Path) -> bytes:
     return key
 
 
-def _warn_if_secrets_exist(path: Path) -> None:
-    """Say so, loudly, when a new key is about to be made on an installation that already has cameras: everything stored was encrypted with a key
-    that is not here (the data volume was restored or moved without the secrets volume), and nothing saved from now on can be read if the old
-    key is put back."""
-    try:
-        import sqlite3
+_said: set[str] = set()
 
-        database = database_path()
-        if not database.exists():
-            return
+
+def _stored_secrets_exist() -> bool:
+    """Whether the database already holds something encrypted with a credential key. Read-only, and never the reason a key cannot be made:
+    a database that is not there yet, or cannot be read, counts as holding nothing.
+
+    Every column that holds such a value is named ``..._ciphertext``, and every such value begins the same way (the cipher's version byte,
+    as text), so a value that is really encrypted can be told from the stand-in bytes a half-made row may hold."""
+    import sqlite3
+
+    database = database_path()
+    if not database.exists():
+        return False
+    try:
         db = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1)
-        try:
-            has_cameras = db.execute("SELECT 1 FROM cameras LIMIT 1").fetchone() is not None
-        finally:
-            db.close()
-    except Exception:  # noqa: BLE001 - a warning must never stop the key being made
-        return
-    if has_cameras:
-        logger.error("THE CREDENTIAL KEY FILE %s IS MISSING and a new one is being created, although this installation already has cameras. "
-                     "Their stored passwords and addresses cannot be read with the new key. If the data was restored or moved, stop the NVR and "
-                     "put the original key file back before saving anything (see docs/database-recovery.md).", path)
+    except sqlite3.Error:
+        return False
+    try:
+        tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name<>'cameras', name")]
+        for table in tables:
+            for column in [row[1] for row in db.execute(f'PRAGMA table_info("{table}")') if str(row[1]).endswith("_ciphertext")]:
+                if db.execute(f'SELECT 1 FROM "{table}" WHERE CAST(substr("{column}",1,5) AS TEXT)=\'gAAAA\' LIMIT 1').fetchone():
+                    return True
+        return False
+    except sqlite3.Error:
+        return False
+    finally:
+        db.close()
+
+
+def _say_once(path: Path) -> None:
+    if str(path) not in _said:
+        _said.add(str(path))
+        logger.error("THE CREDENTIAL KEY FILE %s IS MISSING, and this installation already has stored camera passwords and addresses encrypted "
+                     "with it. No new key was made. Stop the NVR and put the original key file back (see docs/database-recovery.md); until "
+                     "then cameras cannot be reached and settings that hold a secret cannot be saved.", path)
+
+
+def missing() -> bool:
+    """Whether the key is needed and not there: for the start-up check and its incident."""
+    return not key_path().exists() and _stored_secrets_exist()
+
+
+def report_at_start() -> None:
+    """Raise the incident while the key is missing, and clear it once it is back. Start-up goes on either way: the footage already on
+    disk can still be watched, and the incident is where an operator will see what is wrong."""
+    from .incidents import sync_incident
+    from .store import connect
+
+    absent = missing()
+    if absent:
+        _say_once(key_path())
+    with connect() as db:
+        if absent or db.execute("SELECT 1 FROM incidents WHERE incident_key='credential_key' AND fault_active=1").fetchone():
+            sync_incident(db, incident_key="credential_key", camera_id=None, fault_type="credential_key", active=absent,
+                          summary="The credential key file is missing. Stored camera passwords and addresses cannot be read until the original key file is put back.")
 
 
 def _fernet() -> Fernet:

@@ -1,6 +1,7 @@
 """Case files: a case's items, members and holds, and its evidence packages."""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -290,14 +291,21 @@ def download_package(case_id: str, package_id: str, user: CurrentUser) -> FileRe
 @requires_scope("export")
 async def verify_package(case_id: str, package_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     """Check an uploaded case package: every file against its manifest, and each clip's own evidence package."""
-    with connect() as db:
-        _package(db, case_id, package_id, user)
+    def check():
+        with connect() as db:
+            _package(db, case_id, package_id, user)
+
+    await asyncio.to_thread(check)
     async with received_package(request, "The package exceeds the verification size limit") as (path, uploaded_sha256):
-        result = await run_in_threadpool(cases.verify_package_file, path, case_id, package_id, footage_chain.public_key())
-    with connect() as db:
-        package = db.execute("SELECT * FROM case_packages WHERE id=? AND case_id=?", (package_id, case_id)).fetchone()
-        recorded = {row["export_id"]: row for row in db.execute(
-            "SELECT p.export_id,e.metadata_json FROM case_package_clips p LEFT JOIN exports e ON e.id=p.export_id WHERE p.package_id=?", (package_id,))}
+        result = await run_in_threadpool(lambda: cases.verify_package_file(path, case_id, package_id, footage_chain.public_key()))
+    def read():
+        with connect() as db:
+            package = db.execute("SELECT * FROM case_packages WHERE id=? AND case_id=?", (package_id, case_id)).fetchone()
+            recorded = {row["export_id"]: row for row in db.execute(
+                "SELECT p.export_id,e.metadata_json FROM case_package_clips p LEFT JOIN exports e ON e.id=p.export_id WHERE p.package_id=?", (package_id,))}
+        return package, recorded
+
+    package, recorded = await asyncio.to_thread(read)
     # What the package's own manifest says is only as good as the package: it is checked against what this NVR built.
     result["matches_issued_package"] = bool(package and package["sha256"] and uploaded_sha256 == package["sha256"])
     result["clips_match_request"] = {clip["export_id"] for clip in result["clips"]} == set(recorded)
@@ -311,8 +319,11 @@ async def verify_package(case_id: str, package_id: str, request: Request, user: 
     result["complete"] = bool(result["complete"]) and result["clips_valid"] and result["clips_match_request"]
     valid = bool(result["checksums_valid"] and result["clips_valid"] and result["clips_match_request"] and result["matches_issued_package"])
     result["verified"] = valid
-    with connect() as db:
-        cases.audit(db, case_id, int(user["id"]), "package_verified" if valid else "package_verification_failed", package=package_id,
-                    clips=len(result["clips"]), complete=bool(result["complete"]), matches_issued_package=result["matches_issued_package"])
+    def note() -> None:
+        with connect() as db:
+            cases.audit(db, case_id, int(user["id"]), "package_verified" if valid else "package_verification_failed", package=package_id,
+                        clips=len(result["clips"]), complete=bool(result["complete"]), matches_issued_package=result["matches_issued_package"])
+
+    await asyncio.to_thread(note)
     return {**result, "authenticity": "A package verifies when it is byte-for-byte the one this NVR built for this request, and every clip's own package and signed chain verify. "
                                       "Checksums inside a file are unsigned: on their own they detect changes only if the manifest is untouched."}

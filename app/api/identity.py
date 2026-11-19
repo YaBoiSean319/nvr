@@ -1,6 +1,7 @@
 """First-run setup, local and Entra sign-in, and session administration."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -321,34 +322,40 @@ async def oidc_callback(request: Request) -> RedirectResponse:
     subject = claims["sub"]
     role = _mapped_role(claims)
     if role is None:
-        _entra_role_removed(issuer, subject)
+        await asyncio.to_thread(_entra_role_removed, issuer, subject)
         raise HTTPException(status_code=403, detail="Your Entra account has no NVR role assignment")
     display = claims.get("preferred_username")
     username = display.strip()[:128] if isinstance(display, str) and display.strip() else f"entra-{subject[:112]}"
-    with connect() as db:
-        user = db.execute("SELECT id, username, role, disabled_at FROM users WHERE provider_issuer=? AND provider_subject=?", (issuer, subject)).fetchone()
-        if user is not None and user["disabled_at"] is not None:
-            raise HTTPException(status_code=403, detail="This account has been disabled on this NVR. Ask an administrator.")
-        if user is None:
-            if db.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone():
-                username = f"entra-{subject[:112]}"
-            try:
-                cur = db.execute(
-                    "INSERT INTO users(username,password_hash,role,provider_issuer,provider_subject,provider_roles_json) VALUES (?,?,?,?,?,?)",
-                    (username, hash_password(secrets.token_urlsafe(48)), role, issuer, subject, json.dumps(_claimed_roles(claims))),
-                )
-                user_id = int(cur.lastrowid)
-            except sqlite3.IntegrityError as exc:
-                raise HTTPException(status_code=403, detail="Unable to provision this Entra identity") from exc
-        else:
-            user_id = int(user["id"])
-            db.execute("UPDATE users SET role=?,provider_roles_json=? WHERE id=?", (role, json.dumps(_claimed_roles(claims)), user_id))
-            if user["role"] != "operator":
-                # Someone who has just become an operator has the access operators always had, until narrowed. Only then:
-                # an operator an administrator left with no grant stays with none at their next sign-in.
-                ensure_default_grant(db, user_id)
+    def sign_in():
+        nonlocal username
+        with connect() as db:
+            user = db.execute("SELECT id, username, role, disabled_at FROM users WHERE provider_issuer=? AND provider_subject=?", (issuer, subject)).fetchone()
+            if user is not None and user["disabled_at"] is not None:
+                raise HTTPException(status_code=403, detail="This account has been disabled on this NVR. Ask an administrator.")
+            if user is None:
+                if db.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone():
+                    username = f"entra-{subject[:112]}"
+                try:
+                    cur = db.execute(
+                        "INSERT INTO users(username,password_hash,role,provider_issuer,provider_subject,provider_roles_json) VALUES (?,?,?,?,?,?)",
+                        (username, hash_password(secrets.token_urlsafe(48)), role, issuer, subject, json.dumps(_claimed_roles(claims))),
+                    )
+                    user_id = int(cur.lastrowid)
+                except sqlite3.IntegrityError as exc:
+                    raise HTTPException(status_code=403, detail="Unable to provision this Entra identity") from exc
+            else:
+                user_id = int(user["id"])
+                db.execute("UPDATE users SET role=?,provider_roles_json=? WHERE id=?", (role, json.dumps(_claimed_roles(claims)), user_id))
+                if user["role"] != "operator":
+                    # Someone who has just become an operator has the access operators always had, until narrowed. Only then:
+                    # an operator an administrator left with no grant stays with none at their next sign-in.
+                    ensure_default_grant(db, user_id)
+        return user_id
+
+    # Off the event loop: database writes at every Entra sign-in, and a slow password hash at a person's first (#354).
+    user_id = await asyncio.to_thread(sign_in)
     redirect = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    start_session(redirect, user_id)
+    await asyncio.to_thread(start_session, redirect, user_id)
     return redirect
 
 

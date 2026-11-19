@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import console
 from app.principal import Administrator, CurrentUser
-from app.store import connect
+from app.store import connect, read_one
 from app.credentials import encrypt, decrypt
 from app.recording import masked_stream_url, probe_stream, safe_stream_url
 from app.health import recording_health
@@ -355,7 +355,7 @@ async def test_camera_stream(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     started = time.monotonic()
     result = await probe_stream(stream_url)
-    diagnostics.record_event(
+    await asyncio.to_thread(diagnostics.record_event, 
         "stream_probe", outcome="success" if result.get("reachable") else "unavailable",
         elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
     )
@@ -575,12 +575,10 @@ async def add_camera(payload: CameraCreateRequest, recorders: Any, *, discovery_
     capability, video_problem = await _probe_new_camera_stream(payload, stream_url, unresolved)
     live_substream_url = await _resolve_live_substream(payload, resolved_service_url, capability, video_problem)
     health = await _initial_health(payload, resolved_service_url) if onvif_resolved else None
-    camera_id = _store_new_camera(discovery_claim, payload, name=name, stream_url=stream_url, resolved_service_url=resolved_service_url, capability=capability, video_problem=video_problem,
+    camera_id = await asyncio.to_thread(_store_new_camera, discovery_claim, payload, name=name, stream_url=stream_url, resolved_service_url=resolved_service_url, capability=capability, video_problem=video_problem,
                                   live_substream_url=live_substream_url, motion_username=motion_username, motion_password=motion_password, health=health)
     await recorders.sync_camera(camera_id, force_restart=True)
-    with connect() as db:
-        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return camera_view(row)
+    return await asyncio.to_thread(_saved_view, camera_id)
 
 
 @router.post("/api/cameras", status_code=status.HTTP_201_CREATED)
@@ -612,14 +610,20 @@ def _reuse_source_credentials(current: sqlite3.Row, payload: CameraSourceUpdateR
     return payload
 
 
+def _saved_view(camera_id: str) -> dict[str, object]:
+    """The camera as it is stored now, for the answer to a change. Run in a thread by the asynchronous handlers (#354)."""
+    with connect() as db:
+        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
+    return camera_view(row)
+
+
 @router.post("/api/cameras/{camera_id}/source/test")
 async def test_camera_source_update(
     camera_id: str,
     payload: CameraSourceUpdateRequest,
     _: Administrator,
 ) -> dict[str, object]:
-    with connect() as db:
-        current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,))
     if current is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     payload = _reuse_source_credentials(current, payload)
@@ -632,7 +636,7 @@ async def test_camera_source_update(
             raise
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     result = await probe_stream(stream_url)
-    diagnostics.record_event("stream_probe", outcome="success" if result.get("reachable") else "unavailable", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)))
+    await asyncio.to_thread(diagnostics.record_event, "stream_probe", outcome="success" if result.get("reachable") else "unavailable", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)))
     return result
 
 
@@ -644,8 +648,7 @@ async def list_camera_source_update_profiles(
 ) -> dict[str, object]:
     if not payload.camera_ip:
         raise HTTPException(status_code=422, detail="Enter the camera IP address before loading ONVIF profiles")
-    with connect() as db:
-        current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,))
     if current is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     payload = _reuse_source_credentials(current, payload)
@@ -666,8 +669,7 @@ async def update_camera_source(
     request: Request,
     _: Administrator,
 ) -> dict[str, object]:
-    with connect() as db:
-        current = db.execute("SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    current = await asyncio.to_thread(read_one, "SELECT camera_ip,stream_url_ciphertext FROM cameras WHERE id=?", (camera_id,))
     if current is None:
         raise HTTPException(status_code=404, detail="Camera not found")
 
@@ -706,26 +708,27 @@ async def update_camera_source(
         live_substream_url = substream.stream_url
 
     selected_service_url = resolved_service_url or payload.device_service_url
-    with connect() as db:
-        db.execute(
-            "UPDATE cameras SET camera_ip=?,camera_brand=?,device_service_url=?,onvif_profile_token=?,live_substream_profile_token=?,"
-            "motion_service_url=COALESCE(?,motion_service_url),"
-            "stream_url_ciphertext=?,live_substream_url_ciphertext=?,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,"
-            "video_codec=?,video_width=?,video_height=?,last_probe_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
-            "WHERE id=?",
-            (payload.camera_ip, payload.camera_brand, selected_service_url, payload.onvif_profile_token,
-             payload.live_substream_profile_token, selected_service_url, encrypt(stream_url.strip()),
-             encrypt(live_substream_url.strip()) if live_substream_url else None,
-             int(bool(capability.get("audio"))), int(bool(capability.get("audio"))),
-             (capability.get("video") or {}).get("codec"), (capability.get("video") or {}).get("width"),
-             (capability.get("video") or {}).get("height"), camera_id),
-        )
-        camera_capabilities.record(db, camera_id, "video", "ok", "Video is flowing")
-        camera_capabilities.record(db, camera_id, "audio", "available" if capability.get("audio") else "unsupported", "The camera carries audio" if capability.get("audio") else "No audio on the stream")
+    def save():
+        with connect() as db:
+            db.execute(
+                "UPDATE cameras SET camera_ip=?,camera_brand=?,device_service_url=?,onvif_profile_token=?,live_substream_profile_token=?,"
+                "motion_service_url=COALESCE(?,motion_service_url),"
+                "stream_url_ciphertext=?,live_substream_url_ciphertext=?,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,"
+                "video_codec=?,video_width=?,video_height=?,last_probe_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE id=?",
+                (payload.camera_ip, payload.camera_brand, selected_service_url, payload.onvif_profile_token,
+                 payload.live_substream_profile_token, selected_service_url, encrypt(stream_url.strip()),
+                 encrypt(live_substream_url.strip()) if live_substream_url else None,
+                 int(bool(capability.get("audio"))), int(bool(capability.get("audio"))),
+                 (capability.get("video") or {}).get("codec"), (capability.get("video") or {}).get("width"),
+                 (capability.get("video") or {}).get("height"), camera_id),
+            )
+            camera_capabilities.record(db, camera_id, "video", "ok", "Video is flowing")
+            camera_capabilities.record(db, camera_id, "audio", "available" if capability.get("audio") else "unsupported", "The camera carries audio" if capability.get("audio") else "No audio on the stream")
+
+    await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
-    with connect() as db:
-        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return camera_view(row)
+    return await asyncio.to_thread(_saved_view, camera_id)
 
 
 @router.patch("/api/cameras/{camera_id}")
@@ -739,55 +742,57 @@ async def update_camera(
         raise HTTPException(status_code=422, detail="Camera name is required")
     if not any(name in payload.model_fields_set for name in ("name", "recording_mode", "recording_enabled", "motion_pre_roll_seconds", "motion_post_roll_seconds", "audio_enabled")):
         raise HTTPException(status_code=422, detail="Specify a camera name, recording setting, buffer duration, or audio setting")
-    with connect() as db:
-        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Camera not found")
-        if payload.audio_enabled and row["audio_supported"] is not True and row["audio_supported"] != 1:
-            message = "Probe the camera audio capability before enabling audio" if row["audio_supported"] is None else "This camera stream has no supported audio track"
-            raise HTTPException(status_code=422, detail=message)
-        name_only = payload.model_fields_set == {"name"}
-        mode = payload.recording_mode or row["recording_mode"]
-        enabled = payload.recording_enabled if payload.recording_enabled is not None else bool(row["recording_enabled"])
-        if mode == "disabled":
-            enabled = False
-        if name_only:
-            assignments = ["name=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
-            values: list[object] = [payload.name]
-        else:
-            assignments = ["recording_mode=?", "recording_enabled=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
-            values = [mode, int(enabled)]
-            if payload.name is not None:
-                assignments.append("name=?")
-                values.append(payload.name)
-        audio_enabled = payload.audio_enabled if payload.audio_enabled is not None else bool(row["audio_enabled"])
-        if not name_only:
-            if payload.audio_enabled is not None:
-                assignments.append("audio_enabled=?"); values.append(int(audio_enabled))
-                if bool(row["audio_enabled"]) != audio_enabled:
-                    db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                               (int(user["id"]), "camera_audio_enabled" if audio_enabled else "camera_audio_disabled", "camera", camera_id,
-                                json.dumps({"audio_supported": bool(row["audio_supported"])}, separators=(",", ":"))))
-            if payload.motion_pre_roll_seconds is not None:
-                assignments.append("motion_pre_roll_seconds=?"); values.append(payload.motion_pre_roll_seconds)
-            if payload.motion_post_roll_seconds is not None:
-                assignments.append("motion_post_roll_seconds=?"); values.append(payload.motion_post_roll_seconds)
-            if not enabled:
-                assignments.extend(("recording_status='stopped'", "last_error=NULL"))
-            elif mode == "motion" and not row["motion_service_url"] and not row["motion_fallback_enabled"]:
-                assignments.extend(("recording_status='unsupported'", "last_error='Configure an ONVIF event service or enable server motion fallback'"))
+    def save():
+        with connect() as db:
+            row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,audio_supported,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Camera not found")
+            if payload.audio_enabled and row["audio_supported"] is not True and row["audio_supported"] != 1:
+                message = "Probe the camera audio capability before enabling audio" if row["audio_supported"] is None else "This camera stream has no supported audio track"
+                raise HTTPException(status_code=422, detail=message)
+            name_only = payload.model_fields_set == {"name"}
+            mode = payload.recording_mode or row["recording_mode"]
+            enabled = payload.recording_enabled if payload.recording_enabled is not None else bool(row["recording_enabled"])
+            if mode == "disabled":
+                enabled = False
+            if name_only:
+                assignments = ["name=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
+                values: list[object] = [payload.name]
             else:
-                assignments.extend(("recording_status='connecting'", "last_error=NULL"))
-        values.append(camera_id)
-        try:
-            db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values)
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(status_code=409, detail="A camera with that name already exists") from exc
+                assignments = ["recording_mode=?", "recording_enabled=?", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"]
+                values = [mode, int(enabled)]
+                if payload.name is not None:
+                    assignments.append("name=?")
+                    values.append(payload.name)
+            audio_enabled = payload.audio_enabled if payload.audio_enabled is not None else bool(row["audio_enabled"])
+            if not name_only:
+                if payload.audio_enabled is not None:
+                    assignments.append("audio_enabled=?"); values.append(int(audio_enabled))
+                    if bool(row["audio_enabled"]) != audio_enabled:
+                        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                                   (int(user["id"]), "camera_audio_enabled" if audio_enabled else "camera_audio_disabled", "camera", camera_id,
+                                    json.dumps({"audio_supported": bool(row["audio_supported"])}, separators=(",", ":"))))
+                if payload.motion_pre_roll_seconds is not None:
+                    assignments.append("motion_pre_roll_seconds=?"); values.append(payload.motion_pre_roll_seconds)
+                if payload.motion_post_roll_seconds is not None:
+                    assignments.append("motion_post_roll_seconds=?"); values.append(payload.motion_post_roll_seconds)
+                if not enabled:
+                    assignments.extend(("recording_status='stopped'", "last_error=NULL"))
+                elif mode == "motion" and not row["motion_service_url"] and not row["motion_fallback_enabled"]:
+                    assignments.extend(("recording_status='unsupported'", "last_error='Configure an ONVIF event service or enable server motion fallback'"))
+                else:
+                    assignments.extend(("recording_status='connecting'", "last_error=NULL"))
+            values.append(camera_id)
+            try:
+                db.execute(f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values)
+            except sqlite3.IntegrityError as exc:
+                raise HTTPException(status_code=409, detail="A camera with that name already exists") from exc
+        return name_only
+
+    name_only = await asyncio.to_thread(save)
     if not name_only:
         await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
-    with connect() as db:
-        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return camera_view(row)
+    return await asyncio.to_thread(_saved_view, camera_id)
 
 
 @router.post("/api/cameras/{camera_id}/credentials")
@@ -802,23 +807,23 @@ async def rotate_camera_credentials(
         safe_stream_url(stream_url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    with connect() as db:
-        camera = db.execute("SELECT id,recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    camera = await asyncio.to_thread(read_one, "SELECT id,recording_mode FROM cameras WHERE id=?", (camera_id,))
     if camera is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     capability = await probe_stream(stream_url)
     if not capability.get("reachable"):
         raise HTTPException(status_code=422, detail=str(capability.get("reason", "Updated camera stream could not be opened")))
     video = capability["video"]
-    with connect() as db:
-        db.execute(
-            "UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
-            (encrypt(stream_url), int(bool(capability.get("audio"))), int(bool(capability.get("audio"))), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
-        )
+    def save():
+        with connect() as db:
+            db.execute(
+                "UPDATE cameras SET stream_url_ciphertext=?,live_substream_url_ciphertext=NULL,audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,video_codec=?,video_width=?,video_height=?,last_probe_at=?,last_error=NULL,updated_at=? WHERE id=?",
+                (encrypt(stream_url), int(bool(capability.get("audio"))), int(bool(capability.get("audio"))), video["codec"], video["width"], video["height"], datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id),
+            )
+
+    await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
-    with connect() as db:
-        row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return camera_view(row)
+    return await asyncio.to_thread(_saved_view, camera_id)
 
 
 @router.post("/api/cameras/{camera_id}/audio/probe")
@@ -827,8 +832,7 @@ async def probe_camera_audio(
     request: Request,
     user: Administrator,
 ) -> dict[str, object]:
-    with connect() as db:
-        camera = db.execute("SELECT stream_url_ciphertext,audio_enabled FROM cameras WHERE id=?", (camera_id,)).fetchone()
+    camera = await asyncio.to_thread(read_one, "SELECT stream_url_ciphertext,audio_enabled FROM cameras WHERE id=?", (camera_id,))
     if camera is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     try:
@@ -838,12 +842,15 @@ async def probe_camera_audio(
     if not capability.get("reachable"):
         raise HTTPException(status_code=503, detail=str(capability.get("reason", "Camera stream could not be opened")))
     supported = bool(capability.get("audio"))
-    with connect() as db:
-        db.execute("UPDATE cameras SET audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,last_probe_at=?,updated_at=? WHERE id=?",
-                   (int(supported), int(supported), datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id))
-        if not supported and camera["audio_enabled"]:
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                       (int(user["id"]), "camera_audio_disabled", "camera", camera_id, '{"reason":"audio_capability_lost"}'))
+    def save():
+        with connect() as db:
+            db.execute("UPDATE cameras SET audio_supported=?,audio_enabled=CASE WHEN ?=0 THEN 0 ELSE audio_enabled END,last_probe_at=?,updated_at=? WHERE id=?",
+                       (int(supported), int(supported), datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), camera_id))
+            if not supported and camera["audio_enabled"]:
+                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                           (int(user["id"]), "camera_audio_disabled", "camera", camera_id, '{"reason":"audio_capability_lost"}'))
+
+    await asyncio.to_thread(save)
     if not supported and camera["audio_enabled"]:
         # If the recorder was retaining an audio track, restart it with the safe muted setting.
         await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
@@ -860,31 +867,32 @@ async def configure_motion_source(
     credentials_supplied = payload.username is not None or payload.password is not None
     if credentials_supplied and bool(payload.username) != bool(payload.password):
         raise HTTPException(status_code=422, detail="Provide both ONVIF motion username and password")
-    with connect() as db:
-        row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity,motion_pre_roll_seconds,motion_post_roll_seconds FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Camera not found")
-        service_url = payload.service_url if "service_url" in payload.model_fields_set else row["motion_service_url"]
-        fallback_enabled = payload.fallback_enabled if payload.fallback_enabled is not None else bool(row["motion_fallback_enabled"])
-        if not service_url and not fallback_enabled:
-            raise HTTPException(status_code=422, detail="Configure an ONVIF event service or enable server motion fallback")
-        assignments = ["motion_service_url=?", "motion_pre_roll_seconds=?", "motion_post_roll_seconds=?", "motion_source_status=?"]
-        pre_roll_seconds = payload.pre_roll_seconds if payload.pre_roll_seconds is not None else row["motion_pre_roll_seconds"]
-        post_roll_seconds = payload.post_roll_seconds if payload.post_roll_seconds is not None else row["motion_post_roll_seconds"]
-        values: list[object] = [service_url, pre_roll_seconds, post_roll_seconds, "untested" if service_url else "unsupported"]
-        if credentials_supplied:
-            assignments.append("motion_credentials_ciphertext=?")
-            values.append(encrypt(json.dumps({"username": payload.username or "", "password": payload.password or ""}, separators=(",", ":"))))
-        zones = payload.zones if payload.zones is not None else [MotionZoneRequest.model_validate(zone) for zone in json.loads(row["motion_zones_json"])]
-        sensitivity = payload.sensitivity if payload.sensitivity is not None else row["motion_sensitivity"]
-        assignments.extend(("motion_fallback_enabled=?", "motion_zones_json=?", "motion_sensitivity=?", "server_motion_status=?"))
-        values.extend((int(fallback_enabled), json.dumps([zone.model_dump() for zone in zones], separators=(",", ":")), sensitivity, "waiting" if fallback_enabled else "disabled"))
-        assignments.extend(("recording_status=CASE WHEN recording_enabled=1 AND recording_mode='motion' THEN 'connecting' ELSE recording_status END", "last_error=NULL", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"))
-        values.append(camera_id)
-        db.execute(
-            f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values,
-        )
+    def save():
+        with connect() as db:
+            row = db.execute("SELECT recording_mode,recording_enabled,motion_service_url,motion_fallback_enabled,motion_zones_json,motion_sensitivity,motion_pre_roll_seconds,motion_post_roll_seconds FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Camera not found")
+            service_url = payload.service_url if "service_url" in payload.model_fields_set else row["motion_service_url"]
+            fallback_enabled = payload.fallback_enabled if payload.fallback_enabled is not None else bool(row["motion_fallback_enabled"])
+            if not service_url and not fallback_enabled:
+                raise HTTPException(status_code=422, detail="Configure an ONVIF event service or enable server motion fallback")
+            assignments = ["motion_service_url=?", "motion_pre_roll_seconds=?", "motion_post_roll_seconds=?", "motion_source_status=?"]
+            pre_roll_seconds = payload.pre_roll_seconds if payload.pre_roll_seconds is not None else row["motion_pre_roll_seconds"]
+            post_roll_seconds = payload.post_roll_seconds if payload.post_roll_seconds is not None else row["motion_post_roll_seconds"]
+            values: list[object] = [service_url, pre_roll_seconds, post_roll_seconds, "untested" if service_url else "unsupported"]
+            if credentials_supplied:
+                assignments.append("motion_credentials_ciphertext=?")
+                values.append(encrypt(json.dumps({"username": payload.username or "", "password": payload.password or ""}, separators=(",", ":"))))
+            zones = payload.zones if payload.zones is not None else [MotionZoneRequest.model_validate(zone) for zone in json.loads(row["motion_zones_json"])]
+            sensitivity = payload.sensitivity if payload.sensitivity is not None else row["motion_sensitivity"]
+            assignments.extend(("motion_fallback_enabled=?", "motion_zones_json=?", "motion_sensitivity=?", "server_motion_status=?"))
+            values.extend((int(fallback_enabled), json.dumps([zone.model_dump() for zone in zones], separators=(",", ":")), sensitivity, "waiting" if fallback_enabled else "disabled"))
+            assignments.extend(("recording_status=CASE WHEN recording_enabled=1 AND recording_mode='motion' THEN 'connecting' ELSE recording_status END", "last_error=NULL", "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')"))
+            values.append(camera_id)
+            db.execute(
+                f"UPDATE cameras SET {','.join(assignments)} WHERE id=?", values,
+            )
+
+    await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
-    with connect() as db:
-        camera = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
-    return camera_view(camera)
+    return await asyncio.to_thread(_saved_view, camera_id)

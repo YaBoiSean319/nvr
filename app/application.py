@@ -17,7 +17,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import acceleration, api, db_health, network, request_guards
+from . import acceleration, api, credentials, db_health, network, request_guards
 from .bulk_add import BulkAddRunner
 from .api import web_interface
 from .backup import BackupManager
@@ -98,6 +98,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
     async def lifespan(app: FastAPI):
         os.umask(0o077)
         initialize()
+        credentials.report_at_start()
         updates.note_start()
         started = {}
         heartbeat = None
@@ -151,6 +152,10 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(detail)})
 
     damaged_logged = {"at": 0.0}
+
+    @app.exception_handler(credentials.CredentialKeyMissing)
+    async def credential_key_missing(_: Request, exc: credentials.CredentialKeyMissing) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     @app.exception_handler(sqlite3.DatabaseError)
     async def database_failed(_: Request, exc: sqlite3.DatabaseError) -> JSONResponse:

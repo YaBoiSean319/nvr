@@ -328,7 +328,7 @@ async def live_through_console(websocket: WebSocket, camera_id: str) -> None:
         return
     await websocket.accept()
     try:
-        principal = current_user(websocket)
+        principal = await asyncio.to_thread(current_user, websocket)
     except HTTPException as exc:
         if exc.status_code == 404:
             await _refuse(websocket, live_media.CLOSE_NOT_FOUND, "not_found", "Camera not found")

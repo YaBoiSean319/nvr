@@ -1,6 +1,7 @@
 """Administrator-defined rules over detections and tracks, their events, and test mode."""
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -277,21 +278,26 @@ def list_rules(_: Administrator) -> dict[str, object]:
 @router.post("/api/rules", status_code=status.HTTP_201_CREATED)
 async def create_rule(definition: RuleDefinition, request: Request, user: Administrator) -> dict[str, object]:
     rule_id = str(uuid.uuid4())
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            _check_scope(db, definition)
-            db.execute(
-                "INSERT INTO rules(name,enabled,camera_ids_json,group_ids_json,condition_type,condition_json,classes_json,schedule_json,cooldown_seconds,pop_into_live,"
-                "id,active_from,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (*_columns(definition), rule_id, _now(), int(user["id"])))
-            _save_actions(db, rule_id, definition)
-            _audit(db, user, "rule_created", rule_id, {"name": definition.name, "actions": len(definition.actions)})
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
-        db.execute("COMMIT")
-        row = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
-        view = rule_view(row, db)
+
+    def save() -> dict[str, object]:
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                _check_scope(db, definition)
+                db.execute(
+                    "INSERT INTO rules(name,enabled,camera_ids_json,group_ids_json,condition_type,condition_json,classes_json,schedule_json,cooldown_seconds,pop_into_live,"
+                    "id,active_from,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (*_columns(definition), rule_id, _now(), int(user["id"])))
+                _save_actions(db, rule_id, definition)
+                _audit(db, user, "rule_created", rule_id, {"name": definition.name, "actions": len(definition.actions)})
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            row = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
+            view = rule_view(row, db)
+        return view
+
+    view = await asyncio.to_thread(save)  # Off the event loop: the write can wait seconds for the lock (#354)
     _nudge(request)
     return view
 
@@ -316,24 +322,28 @@ def get_rule_deliveries(rule_id: str, _: Administrator, limit: int = Query(defau
 
 @router.put("/api/rules/{rule_id}")
 async def update_rule(rule_id: str, definition: RuleDefinition, request: Request, user: Administrator) -> dict[str, object]:
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            if db.execute("SELECT 1 FROM rules WHERE id=?", (rule_id,)).fetchone() is None:
-                raise HTTPException(status_code=404, detail="Rule not found")
-            _check_scope(db, definition)
-            now = _now()
-            db.execute(
-                "UPDATE rules SET name=?,enabled=?,camera_ids_json=?,group_ids_json=?,condition_type=?,condition_json=?,classes_json=?,schedule_json=?,cooldown_seconds=?,"
-                "pop_into_live=?,active_from=?,updated_at=? WHERE id=?", (*_columns(definition), now, now, rule_id))
-            _save_actions(db, rule_id, definition)
-            _audit(db, user, "rule_updated", rule_id, {"name": definition.name, "enabled": definition.enabled, "actions": len(definition.actions)})
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
-        db.execute("COMMIT")
-        row = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
-        view = rule_view(row, db)
+    def save() -> dict[str, object]:
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if db.execute("SELECT 1 FROM rules WHERE id=?", (rule_id,)).fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Rule not found")
+                _check_scope(db, definition)
+                now = _now()
+                db.execute(
+                    "UPDATE rules SET name=?,enabled=?,camera_ids_json=?,group_ids_json=?,condition_type=?,condition_json=?,classes_json=?,schedule_json=?,cooldown_seconds=?,"
+                    "pop_into_live=?,active_from=?,updated_at=? WHERE id=?", (*_columns(definition), now, now, rule_id))
+                _save_actions(db, rule_id, definition)
+                _audit(db, user, "rule_updated", rule_id, {"name": definition.name, "enabled": definition.enabled, "actions": len(definition.actions)})
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            row = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
+            view = rule_view(row, db)
+        return view
+
+    view = await asyncio.to_thread(save)
     _nudge(request)
     return view
 

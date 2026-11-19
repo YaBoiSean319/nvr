@@ -11,6 +11,8 @@ import threading
 import time
 import uuid
 
+from unittest.mock import patch
+
 import httpx
 
 from app import external_events
@@ -87,3 +89,55 @@ class LoopStaysFreeTests(GrantCase):
         cookies = dict(self.admin.cookies)
         body = {"cameras": [{"host": f"192.0.2.{number}", "username": "viewer", "password": "camera-pass-1"} for number in range(10, 20)]}
         self.assert_free("bulk add", lambda client: client.post("/api/cameras/bulk-jobs", json=body, cookies=cookies), 201)
+
+    # The handlers moved off the loop in the second half of the ticket: one of each kind is held to the same proof.
+
+    def stand_in_workers(self) -> None:
+        """This application runs without its workers; the handlers that tell one about a change get something to tell."""
+
+        class Told:
+            async def sync_camera(self, camera_id: str, force_restart: bool = False) -> None:
+                return None
+
+        for name in ("recorders", "detectors"):
+            if not hasattr(self.app.state, name):
+                setattr(self.app.state, name, Told())
+                self.addCleanup(delattr, self.app.state, name)
+
+    def test_saving_a_rule_waits_for_the_lock_without_stopping_the_loop(self):
+        cookies = dict(self.admin.cookies)
+        body = {"name": "Gate entry", "enabled": True, "camera_ids": [self.d1], "group_ids": [], "classes": ["vehicle"],
+                "condition": {"type": "zone_entry", "zone": {"x": 0.0, "y": 0.5, "width": 0.5, "height": 0.5}}, "schedule": None, "cooldown_seconds": 0}
+        self.assert_free("rule", lambda client: client.post("/api/rules", json=body, cookies=cookies), 201)
+
+    def test_renaming_a_camera_waits_for_the_lock_without_stopping_the_loop(self):
+        cookies = dict(self.admin.cookies)
+        self.assert_free("camera rename", lambda client: client.patch(f"/api/cameras/{self.d1}", json={"name": "Dock one"}, cookies=cookies), 200)
+
+    def test_saving_a_schedule_waits_for_the_lock_without_stopping_the_loop(self):
+        self.stand_in_workers()
+        cookies = dict(self.admin.cookies)
+        body = {"timezone": "UTC", "intervals": [{"days": [0], "start": "00:00", "end": "12:00", "mode": "motion"}]}
+        self.assert_free("schedule", lambda client: client.put(f"/api/cameras/{self.d2}/schedule", json=body, cookies=cookies), 200)
+
+    def test_saving_ai_settings_waits_for_the_lock_without_stopping_the_loop(self):
+        self.stand_in_workers()
+        cookies = dict(self.admin.cookies)
+        body = {"enabled": False, "analysis_fps": 0.5, "confidence_threshold": 0.6, "use_substream": False, "zones": []}
+        self.assert_free("AI settings", lambda client: client.put(f"/api/cameras/{self.y1}/ai", json=body, cookies=cookies), 200)
+
+    def test_archiving_a_camera_waits_for_the_lock_without_stopping_the_loop(self):
+        self.stand_in_workers()
+        cookies = dict(self.admin.cookies)
+        self.assert_free("archive", lambda client: client.delete(f"/api/cameras/{self.loose}", cookies=cookies), 204)
+
+    def test_a_ptz_command_waits_for_the_lock_without_stopping_the_loop(self):
+        """The pad sends a command every second, and each takes the write lock for the control lease."""
+
+        class Camera:
+            async def stop(self) -> None:
+                return None
+
+        cookies = dict(self.admin.cookies)
+        with patch("app.api.ptz._client", return_value=Camera()):
+            self.assert_free("PTZ", lambda client: client.post(f"/api/cameras/{self.d1}/ptz/stop", cookies=cookies), 200)

@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.principal import Administrator
-from app.store import connect
+from app.store import connect, read_one
 from app.recording import probe_stream, safe_stream_url
 from app.discovery import discover_onvif, discover_onvif_ip_range
 from app import diagnostics
@@ -195,7 +195,7 @@ async def apply_camera_import(
     request: Request,
     _: Administrator,
 ) -> dict[str, object]:
-    preview_rows, validated = _camera_import_preview(payload.csv_text)
+    preview_rows, validated = await asyncio.to_thread(_camera_import_preview, payload.csv_text)
     probe_limit = asyncio.Semaphore(8)
 
     async def check(item: CameraImportRow | None) -> dict[str, object] | None:
@@ -220,35 +220,38 @@ async def apply_camera_import(
             results.append(result)
 
     inserted: list[tuple[int, str, str]] = []
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            for index, item, capability in pending:
-                group_id = None
-                if item.group_name:
-                    found = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (item.group_name,)).fetchone()
-                    if found:
-                        group_id = found["id"]
-                    else:
-                        group_id = str(uuid.uuid4())
-                        db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, item.group_name))
-                mode = item.recording_mode
-                try:
-                    camera_id = insert_camera(
-                        db, name=item.name, stream_url=item.stream_url, recording_mode=mode,
-                        capability=capability, onvif_uuid=item.onvif_uuid, group_id=group_id,
-                    )
-                    record_discovery_probe(db, item.onvif_uuid, capability)
-                    if item.onvif_uuid:
-                        db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE device_uuid=?",(camera_id,datetime.now(timezone.utc).isoformat(),item.onvif_uuid))
-                    inserted.append((index,camera_id,mode))
-                except sqlite3.IntegrityError:
-                    results[index]["status"] = "duplicate"
-                    results[index]["errors"] = ["Camera name or ONVIF identity now exists"]
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
+    def save():
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for index, item, capability in pending:
+                    group_id = None
+                    if item.group_name:
+                        found = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (item.group_name,)).fetchone()
+                        if found:
+                            group_id = found["id"]
+                        else:
+                            group_id = str(uuid.uuid4())
+                            db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, item.group_name))
+                    mode = item.recording_mode
+                    try:
+                        camera_id = insert_camera(
+                            db, name=item.name, stream_url=item.stream_url, recording_mode=mode,
+                            capability=capability, onvif_uuid=item.onvif_uuid, group_id=group_id,
+                        )
+                        record_discovery_probe(db, item.onvif_uuid, capability)
+                        if item.onvif_uuid:
+                            db.execute("UPDATE discovery_candidates SET linked_camera_id=?,reviewed_at=? WHERE device_uuid=?",(camera_id,datetime.now(timezone.utc).isoformat(),item.onvif_uuid))
+                        inserted.append((index,camera_id,mode))
+                    except sqlite3.IntegrityError:
+                        results[index]["status"] = "duplicate"
+                        results[index]["errors"] = ["Camera name or ONVIF identity now exists"]
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+    await asyncio.to_thread(save)
     for index,camera_id,mode in inserted:
         await request.app.state.recorders.sync_camera(camera_id)
         results[index]["status"] = "created"
@@ -370,7 +373,7 @@ async def scan_cameras(
                 os.environ.get("NVR_DISCOVERY_INTERFACE", "").strip() or None,
             )
     except ValueError as exc:
-        diagnostics.record_event(
+        await asyncio.to_thread(diagnostics.record_event, 
             "discovery_scan", outcome="failed", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
             interface_configured=interface_configured,
             error_category="configuration",
@@ -378,7 +381,7 @@ async def scan_cameras(
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OSError as exc:
-        diagnostics.record_event(
+        await asyncio.to_thread(diagnostics.record_event, 
             "discovery_scan", outcome="failed", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
             interface_configured=interface_configured, error_category="network", scan_mode=scan_mode,
         )
@@ -386,7 +389,7 @@ async def scan_cameras(
 
     rows = await asyncio.to_thread(_store_scan, list(result.devices))
     partial_failures = [f"Ignored {result.ignored_responses} malformed or unrecognized response(s)"] if result.ignored_responses else []
-    diagnostics.record_event(
+    await asyncio.to_thread(diagnostics.record_event, 
         "discovery_scan", outcome="completed", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
         interface_configured=interface_configured, discovered_count=len(result.devices), ignored_responses=result.ignored_responses,
         scan_mode=scan_mode, targets_scanned=result.targets_scanned,
@@ -453,7 +456,7 @@ async def add_discovered_camera(
     request: Request,
     user: Administrator,
 ) -> dict[str, object]:
-    candidate, claim_token = _claim_discovery_add(candidate_id)
+    candidate, claim_token = await asyncio.to_thread(_claim_discovery_add, candidate_id)
     request.state.discovery_add_claim = {
         "candidate_id": candidate_id,
         "device_uuid": candidate["device_uuid"],
@@ -485,15 +488,19 @@ async def add_discovered_camera(
             user,
         )
     except HTTPException as exc:
-        if exc.status_code == 422:
-            with connect() as db:
-                record_discovery_failure(db, candidate["device_uuid"])
-        _release_discovery_add(candidate_id, claim_token)
+        await asyncio.to_thread(_give_up_discovery_add, candidate_id, claim_token, candidate["device_uuid"] if exc.status_code == 422 else None)
         raise
     except Exception:
-        _release_discovery_add(candidate_id, claim_token)
+        await asyncio.to_thread(_release_discovery_add, candidate_id, claim_token)
         raise
     return camera
+
+
+def _give_up_discovery_add(candidate_id: str, claim_token: str, failed_device: str | None) -> None:
+    if failed_device:
+        with connect() as db:
+            record_discovery_failure(db, failed_device)
+    _release_discovery_add(candidate_id, claim_token)
 
 
 @router.post("/api/cameras/bulk-update")
@@ -508,61 +515,67 @@ async def bulk_update_cameras(
         raise HTTPException(status_code=422, detail="Camera IDs must be unique")
     results: list[dict[str, object]] = []
     updated: list[dict[str, object]] = []
+    def save(camera_id: str):
+        """Change one camera. Answers the failure to report, or whether enabling was held back by a disabled recording mode."""
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT id,archived_at,recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if current is None:
+                return {"camera_id": camera_id, "status": "failed", "code": "missing", "detail": "Camera is no longer available."}
+            if current["archived_at"]:
+                return {"camera_id": camera_id, "status": "failed", "code": "archived", "detail": "Archived cameras are excluded from bulk changes."}
+
+            group_id = None
+            if "group_name" in payload.model_fields_set and payload.group_name:
+                group = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (payload.group_name,)).fetchone()
+                if group:
+                    group_id = group["id"]
+                else:
+                    group_id = str(uuid.uuid4())
+                    db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, payload.group_name))
+
+            assignments = []
+            values: list[object] = []
+            if "group_name" in payload.model_fields_set:
+                assignments.append("group_id=?")
+                values.append(group_id)
+            if payload.recording_mode is not None:
+                assignments.append("recording_mode=?")
+                values.append(payload.recording_mode)
+                if payload.recording_mode == "disabled":
+                    assignments.extend(("recording_enabled=0", "recording_status='stopped'", "last_error=NULL"))
+            enablement_blocked_by_mode = False
+            if payload.recording_enabled is not None:
+                assignments.append("recording_enabled=?")
+                effective_mode = payload.recording_mode or current["recording_mode"]
+                effective_enabled = int(payload.recording_enabled and effective_mode != "disabled")
+                enablement_blocked_by_mode = payload.recording_enabled and effective_mode == "disabled"
+                values.append(effective_enabled)
+                assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL AND motion_fallback_enabled=0 THEN 'Configure an ONVIF event service or enable server motion fallback' ELSE NULL END"))
+                values.extend((effective_enabled, effective_enabled))
+            elif payload.recording_mode is not None and payload.recording_mode != "disabled":
+                assignments.extend(("recording_status=CASE WHEN recording_enabled=1 THEN 'connecting' ELSE 'stopped' END", "last_error=NULL"))
+            assignments.append("updated_at=?")
+            values.extend((datetime.now(timezone.utc).isoformat(), camera_id))
+            changed = db.execute(
+                f"UPDATE cameras SET {','.join(assignments)} WHERE id=? AND archived_at IS NULL",
+                values,
+            )
+            if changed.rowcount != 1:
+                return {"camera_id": camera_id, "status": "failed", "code": "unavailable", "detail": "Camera became unavailable before the update."}
+        return enablement_blocked_by_mode
+
     for camera_id in payload.camera_ids:
         try:
-            with connect() as db:
-                db.execute("BEGIN IMMEDIATE")
-                current = db.execute("SELECT id,archived_at,recording_mode FROM cameras WHERE id=?", (camera_id,)).fetchone()
-                if current is None:
-                    results.append({"camera_id": camera_id, "status": "failed", "code": "missing", "detail": "Camera is no longer available."})
-                    continue
-                if current["archived_at"]:
-                    results.append({"camera_id": camera_id, "status": "failed", "code": "archived", "detail": "Archived cameras are excluded from bulk changes."})
-                    continue
-
-                group_id = None
-                if "group_name" in payload.model_fields_set and payload.group_name:
-                    group = db.execute("SELECT id FROM camera_groups WHERE name=? COLLATE NOCASE", (payload.group_name,)).fetchone()
-                    if group:
-                        group_id = group["id"]
-                    else:
-                        group_id = str(uuid.uuid4())
-                        db.execute("INSERT INTO camera_groups(id,name) VALUES(?,?)", (group_id, payload.group_name))
-
-                assignments = []
-                values: list[object] = []
-                if "group_name" in payload.model_fields_set:
-                    assignments.append("group_id=?")
-                    values.append(group_id)
-                if payload.recording_mode is not None:
-                    assignments.append("recording_mode=?")
-                    values.append(payload.recording_mode)
-                    if payload.recording_mode == "disabled":
-                        assignments.extend(("recording_enabled=0", "recording_status='stopped'", "last_error=NULL"))
-                enablement_blocked_by_mode = False
-                if payload.recording_enabled is not None:
-                    assignments.append("recording_enabled=?")
-                    effective_mode = payload.recording_mode or current["recording_mode"]
-                    effective_enabled = int(payload.recording_enabled and effective_mode != "disabled")
-                    enablement_blocked_by_mode = payload.recording_enabled and effective_mode == "disabled"
-                    values.append(effective_enabled)
-                    assignments.extend(("recording_status=CASE WHEN ?=1 THEN 'connecting' ELSE 'stopped' END", "last_error=CASE WHEN ?=1 AND recording_mode='motion' AND motion_service_url IS NULL AND motion_fallback_enabled=0 THEN 'Configure an ONVIF event service or enable server motion fallback' ELSE NULL END"))
-                    values.extend((effective_enabled, effective_enabled))
-                elif payload.recording_mode is not None and payload.recording_mode != "disabled":
-                    assignments.extend(("recording_status=CASE WHEN recording_enabled=1 THEN 'connecting' ELSE 'stopped' END", "last_error=NULL"))
-                assignments.append("updated_at=?")
-                values.extend((datetime.now(timezone.utc).isoformat(), camera_id))
-                changed = db.execute(
-                    f"UPDATE cameras SET {','.join(assignments)} WHERE id=? AND archived_at IS NULL",
-                    values,
-                )
-                if changed.rowcount != 1:
-                    results.append({"camera_id": camera_id, "status": "failed", "code": "unavailable", "detail": "Camera became unavailable before the update."})
-                    continue
+            outcome = await asyncio.to_thread(save, camera_id)  # Off the event loop: each write can wait for the lock (#354)
         except Exception:
             # A failed commit can leave the caller unable to know whether SQLite committed.
             results.append({"camera_id": camera_id, "status": "unknown", "code": "outcome_unknown", "detail": "The server could not confirm whether this camera's changes were saved."})
             continue
+        if isinstance(outcome, dict):
+            results.append(outcome)
+            continue
+        enablement_blocked_by_mode = outcome
 
         warnings = []
         if enablement_blocked_by_mode:
@@ -573,8 +586,7 @@ async def bulk_update_cameras(
             # Configuration is committed. Do not invite a retry that could duplicate side effects;
             # make the operational warning visible while reporting the durable update as successful.
             warnings.append("Settings were saved, but the recorder could not be refreshed. Check camera status.")
-        with connect() as db:
-            row = db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,)).fetchone()
+        row = await asyncio.to_thread(read_one, "SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id WHERE c.id=?", (camera_id,))
         if row is None:
             results.append({"camera_id": camera_id, "status": "unknown", "code": "outcome_unknown", "detail": "Settings were saved, but the camera is no longer available."})
             continue

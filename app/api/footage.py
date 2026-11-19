@@ -1,6 +1,7 @@
 """Indexed footage, coverage, events, archiving and preservation holds."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -141,20 +142,25 @@ async def archive_camera(
     request: Request,
     user: Administrator,
 ) -> Response:
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        camera = db.execute("SELECT archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if camera is None:
-            raise HTTPException(status_code=404, detail="Camera not found")
-        if camera["archived_at"]:
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
-        archived_at = datetime.now(timezone.utc).isoformat()
-        db.execute(
-            "UPDATE cameras SET archived_at=?,enabled=0,recording_enabled=0,recording_status='archived',last_error=NULL,updated_at=? WHERE id=?",
-            (archived_at, archived_at, camera_id),
-        )
-        db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                   (int(user["id"]), "archive", "camera", camera_id, "{}"))
+    def save():
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            camera = db.execute("SELECT archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
+            if camera is None:
+                raise HTTPException(status_code=404, detail="Camera not found")
+            if camera["archived_at"]:
+                return True
+            archived_at = datetime.now(timezone.utc).isoformat()
+            db.execute(
+                "UPDATE cameras SET archived_at=?,enabled=0,recording_enabled=0,recording_status='archived',last_error=NULL,updated_at=? WHERE id=?",
+                (archived_at, archived_at, camera_id),
+            )
+            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                       (int(user["id"]), "archive", "camera", camera_id, "{}"))
+        return False
+
+    if await asyncio.to_thread(save):  # Off the event loop: the write can wait seconds for the lock (#354)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     # Archive state prevents new ingest after restart and the existing task is now cancelled. If this fails, the durable enabled=0 flag
     # still keeps the recorder supervisor from restarting ingest.
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)

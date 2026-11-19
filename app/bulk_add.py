@@ -201,9 +201,9 @@ async def process(item: dict[str, Any], recorders: Any) -> None:
         host = normalise_host(host)
         report = await camera_inspect.inspect_camera(host, username, password, device_service_url=endpoint, brand="auto", verify=True)
         if not report["ok"] and not item["add_anyway"]:
-            _set(item_id, "failed", f"Not added because it needs attention: {attention_text(report)}", finished=True)
+            await asyncio.to_thread(_set, item_id, "failed", f"Not added because it needs attention: {attention_text(report)}", finished=True)
             return
-        _set(item_id, "adding")
+        await asyncio.to_thread(_set, item_id, "adding")
         selection = report.get("selection") or {}
         payload = CameraCreateRequest(
             name=item["name"] or suggested_name(report, item["host"]), camera_ip=host, camera_username=username or None, camera_password=password or None,
@@ -215,15 +215,15 @@ async def process(item: dict[str, Any], recorders: Any) -> None:
         )
         camera = await add_camera(payload, recorders)
         if report["ok"]:
-            _set(item_id, "added", camera["name"], camera["id"], finished=True)
+            await asyncio.to_thread(_set, item_id, "added", camera["name"], camera["id"], finished=True)
         else:
-            _set(item_id, "attention", f"{camera['name']}: {attention_text(report)}", camera["id"], finished=True)
+            await asyncio.to_thread(_set, item_id, "attention", f"{camera['name']}: {attention_text(report)}", camera["id"], finished=True)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - one camera's failure is that camera's result, never the run's
         if not isinstance(exc, (ValueError, HTTPException, ValidationError)):
             logger.exception("Adding a camera in a bulk job failed")
-        _set(item_id, "failed", _detail_of(exc), finished=True)
+        await asyncio.to_thread(_set, item_id, "failed", _detail_of(exc), finished=True)
 
 
 class BulkAddRunner:

@@ -1,6 +1,7 @@
 """Configuration backup status and on-demand backups."""
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.backup import BackupError, queue_backup, status as backup_status
@@ -18,7 +19,7 @@ def get_backups(_: Administrator) -> dict[str, object]:
 async def post_backup(request: Request, user: Administrator) -> dict[str, object]:
     # Async so the wake-up runs on the event loop that owns the backup manager.
     try:
-        run = queue_backup(int(user["id"]))
+        run = await asyncio.to_thread(queue_backup, int(user["id"]))  # The write waits for the lock in a thread (#354)
     except BackupError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     backups = getattr(request.app.state, "backups", None)
