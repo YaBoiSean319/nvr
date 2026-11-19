@@ -8,7 +8,8 @@ import shutil
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -297,7 +298,7 @@ def live_camera(
         watching = viewing_audit.LiveSession(user.id, camera_id, quality)
         try:
             async for frame in _mjpeg_frames(camera_id, source, quality, zones):
-                if not guard.still_valid():
+                if not await guard.check():
                     return  # Masks or grants changed: the viewer reconnects under the new ones.
                 await watching.delivered()
                 yield frame
@@ -344,6 +345,38 @@ async def _ended(websocket: WebSocket, reason: str | None) -> None:
         await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": "Your access to this camera has ended"})
 
 
+@dataclass(frozen=True)
+class _Refusal:
+    code: int
+    message: dict[str, object]
+
+
+def _admit(websocket: WebSocket, camera_id: str, unmasked: bool) -> "_Refusal | tuple[Any, Any, list | None, privacy.StreamGuard]":
+    """Everything decided from the database when a viewer connects: who they are, the camera, its masks for them, and the guard that
+    keeps checking. Blocking; the handler runs it in a thread."""
+    try:
+        principal = current_user(websocket)
+    except HTTPException as exc:
+        if exc.status_code == 404:  # A camera this person may not see, refused exactly as one that does not exist.
+            return _Refusal(CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
+        code = CLOSE_UNAUTHORIZED if exc.status_code == 401 else CLOSE_FORBIDDEN
+        return _Refusal(code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
+    with connect() as db:
+        camera = db.execute(
+            "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at FROM cameras WHERE id=?",
+            (camera_id,),
+        ).fetchone()
+    if camera is None:
+        return _Refusal(CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
+    if camera["archived_at"]:
+        return _Refusal(CLOSE_ARCHIVED, {"type": "archived", "detail": "Camera is archived"})
+    try:
+        zones = privacy.zones_for(principal, camera_id, unmasked=unmasked)
+    except privacy.UnmaskedRefused as exc:
+        return _Refusal(CLOSE_FORBIDDEN, {"type": "forbidden", "detail": str(exc)})
+    return principal, camera, zones, privacy.StreamGuard(principal, camera_id, unmasked)
+
+
 @router.websocket("/api/cameras/{camera_id}/live/stream")
 @requires_scope("media")
 async def live_stream(
@@ -372,33 +405,14 @@ async def live_stream(
         return
     asked_at = time.monotonic()
     await websocket.accept()
-    try:
-        principal = current_user(websocket)
-    except HTTPException as exc:
-        if exc.status_code == 404:  # A camera this person may not see, refused exactly as one that does not exist.
-            await _refuse(websocket, CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
-            return
-        code = CLOSE_UNAUTHORIZED if exc.status_code == 401 else CLOSE_FORBIDDEN
-        await _refuse(websocket, code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
+    # Who is asking, the camera and its masks are database reads (and, for an API token, a write): in a thread, so that a viewer
+    # connecting while the database is busy does not stop every other viewer's video (#355).
+    admitted = await asyncio.to_thread(_admit, websocket, camera_id, unmasked)
+    if isinstance(admitted, _Refusal):
+        await _refuse(websocket, admitted.code, admitted.message)
         return
-    with connect() as db:
-        camera = db.execute(
-            "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at FROM cameras WHERE id=?",
-            (camera_id,),
-        ).fetchone()
+    principal, camera, zones, guard = admitted
     fallback = f"/api/cameras/{camera_id}/live?quality={quality}" + ("&unmasked=true" if unmasked else "")
-    if camera is None:
-        await _refuse(websocket, CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
-        return
-    if camera["archived_at"]:
-        await _refuse(websocket, CLOSE_ARCHIVED, {"type": "archived", "detail": "Camera is archived"})
-        return
-    try:
-        zones = privacy.zones_for(principal, camera_id, unmasked=unmasked)
-    except privacy.UnmaskedRefused as exc:
-        await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": str(exc)})
-        return
-    guard = privacy.StreamGuard(principal, camera_id, unmasked)
     # A masked camera is transcoded with the mask drawn in (H.264, so any camera codec plays).
     variant = live_variant.choose(camera, zones, quality, hevc)
     video_filter, profile, codec, camera_is_hevc = variant.video_filter, variant.profile, variant.codec, variant.camera_is_hevc
@@ -471,7 +485,7 @@ async def live_stream(
             # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once.
             done, _ = await asyncio.wait({getter, receiver}, timeout=privacy.ACCESS_RECHECK_SECONDS, return_when=asyncio.FIRST_COMPLETED)
             if not done:
-                if not guard.still_valid() and guard.reason in {"access", "credential"}:
+                if not await guard.check() and guard.reason in {"access", "credential"}:
                     await _ended(websocket, guard.reason)
                     return
                 continue
@@ -494,7 +508,7 @@ async def live_stream(
                 continue
             item = getter.result()
             getter = None
-            if not guard.still_valid():
+            if not await guard.check():
                 if guard.reason in {"access", "credential"}:
                     await _ended(websocket, guard.reason)
                 else:

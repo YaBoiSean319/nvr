@@ -215,32 +215,34 @@ def _scoped(request: HTTPConnection, row: sqlite3.Row, *, wall: bool = False) ->
     )
 
 
-def refresh(principal: Principal) -> Principal | None:
+def refresh(principal: Principal, db: sqlite3.Connection | None = None) -> Principal | None:
     """The same person as they stand now, for a connection that has been open a while (#298): ``None`` once the session, token or wall that
     admitted them has ended (signed out, expired, revoked, its phone taken away, its owner removed or demoted), otherwise a principal with the
-    role and camera access they hold at this moment. A principal that carries no credential (built by hand, in a test) is returned as it is."""
+    role and camera access they hold at this moment. A principal that carries no credential (built by hand, in a test) is returned as it is.
+
+    It reads only, on one connection: ``db`` when the caller has one open, as an open live stream does every second (#355)."""
     if getattr(principal, "credential", None) is None:
         return principal
+    if db is None:
+        with connect() as own:
+            return refresh(principal, own)
     kind, ref = principal.credential
     now = stamp()
-    with connect() as db:
-        if kind == "session":
-            row = db.execute("SELECT u.id,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.disabled_at IS NULL", (ref, now)).fetchone()
-            if row is None:
-                return None
-            return replace(principal, id=row["id"], role=row["role"], access=resolve_access(db, int(row["id"]), row["role"]))
-        if kind == "wall":
-            session = db.execute("SELECT api_token_id FROM wall_sessions WHERE token_hash=? AND expires_at>?", (ref, now)).fetchone()
-            if session is None:
-                return None
-            ref = session["api_token_id"]
+    if kind == "session":
+        row = db.execute("SELECT u.id,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.disabled_at IS NULL", (ref, now)).fetchone()
+        if row is None:
+            return None
+        return replace(principal, id=row["id"], role=row["role"], access=resolve_access(db, int(row["id"]), row["role"]))
+    if kind == "wall":
+        session = db.execute("SELECT api_token_id FROM wall_sessions WHERE token_hash=? AND expires_at>?", (ref, now)).fetchone()
+        if session is None:
+            return None
+        ref = session["api_token_id"]
     try:
-        token = usable_token(ref)
+        token = usable_token(ref, db)
     except TokenRejected:
         return None
-    with connect() as db:
-        access = resolve_access(db, int(token["created_by"]), token["owner_role"])
-    return replace(principal, id=token["created_by"], role=token["owner_role"], access=access)
+    return replace(principal, id=token["created_by"], role=token["owner_role"], access=resolve_access(db, int(token["created_by"]), token["owner_role"]))
 
 
 def _unauthorized(detail: str) -> HTTPException:
