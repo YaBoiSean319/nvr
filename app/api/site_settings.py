@@ -101,7 +101,7 @@ def save_display_settings(payload: DisplaySettingsRequest, admin: Administrator)
         before = dict(db.execute("SELECT time_zone,date_format,clock_format FROM site_display_settings WHERE singleton_id=1").fetchone())
         after = {"time_zone": payload.time_zone, "date_format": payload.date_format, "clock_format": payload.clock_format}
         if after != before:
-            record(db, admin.id, "display_settings_changed", "site_display_settings", 1, before=before, after=after)
+            record(db, int(admin["id"]), "display_settings_changed", "site_display_settings", 1, before=before, after=after)
         db.execute(
             "UPDATE site_display_settings SET time_zone=?,date_format=?,clock_format=?,updated_at=? WHERE singleton_id=1",
             (payload.time_zone, payload.date_format, payload.clock_format, updated_at),

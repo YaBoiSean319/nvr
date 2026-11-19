@@ -368,5 +368,5 @@ def terminate_session(session_id: str, admin: Administrator) -> Response:
         ended = db.execute("SELECT u.id,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.session_id=?", (session_id,)).fetchone()
         db.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
         if ended is not None:
-            record(db, admin.id, "session_ended", "user", int(ended["id"]), username=ended["username"], session=session_id)
+            record(db, int(admin["id"]), "session_ended", "user", int(ended["id"]), username=ended["username"], session=session_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
