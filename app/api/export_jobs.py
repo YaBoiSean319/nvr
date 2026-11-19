@@ -1,6 +1,7 @@
 """Background export jobs, downloads and evidence verification."""
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -218,7 +219,13 @@ async def verify_export_evidence(job_id: str, request: Request, user: CurrentUse
         body.extend(chunk)
         if len(body) > MAX_VERIFY_PACKAGE_BYTES:
             raise HTTPException(status_code=413, detail="Evidence package exceeds the verification size limit")
-    result = verify_evidence_bytes(bytes(body), job_id, footage_chain.public_key())
+    data = bytes(body)
+    del body
+    result = verify_evidence_bytes(data, job_id, footage_chain.public_key())
+    # What a package says about itself is only as good as the package: its bytes are compared with the file this NVR issued (#363).
+    issued = row["package_sha256"]
+    result["issued_hash_recorded"] = bool(issued)
+    result["matches_issued_package"] = (hashlib.sha256(data).hexdigest() == issued) if issued else None
     # The job knows which cameras its package was signed for, so a stripped or downgraded chain.json fails.
     expected = (json.loads(row["metadata_json"]) if row["metadata_json"] else {}).get("signed_footage", {})
     chain = result.get("chain")
@@ -226,13 +233,17 @@ async def verify_export_evidence(job_id: str, request: Request, user: CurrentUse
     unsigned = sorted(camera_id for camera_id, state in expected.items() if state == "signed" and camera_id not in still_signed)
     if unsigned and (chain is None or chain["valid"]):
         result["chain"] = {**(chain or {"cameras": []}), "valid": False, "error": f"cameras {unsigned} were signed when exported, but are not signed in this chain.json"}
-    valid = result["checksums_valid"] and (result.get("chain") is None or result["chain"]["valid"])
+    valid = result["checksums_valid"] and (result.get("chain") is None or result["chain"]["valid"]) and result["matches_issued_package"] is not False
     action = "evidence_verified" if valid else "evidence_verification_failed"
     with connect() as db:
         db.execute(
             "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
             (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if valid else "invalid", "file_count": len(result["files"]),
-                                                                   "chain": None if result.get("chain") is None else ("valid" if result["chain"]["valid"] else "invalid")})),
+                                                                   "chain": None if result.get("chain") is None else ("valid" if result["chain"]["valid"] else "invalid"),
+                                                                   "issued_package": "not_recorded" if not issued else "matches" if result["matches_issued_package"] else "differs"})),
         )
-    return {**result, "media_validation": "not_performed", "authenticity": "Checksums are unsigned. A matching manifest detects accidental or subsequent byte changes but does not prove package origin, creation time, or camera timestamp accuracy. "
+    origin = ("This is the package this NVR issued, byte for byte. " if result["matches_issued_package"] else
+              "This is NOT the package this NVR issued: its bytes differ, whatever its own list of checksums says. " if result["matches_issued_package"] is False else
+              "This export was made before the NVR kept the hash of what it issued, so the package can only be checked against its own list. ")
+    return {**result, "media_validation": "not_performed", "authenticity": origin + "The checksums inside a package are unsigned: on their own they detect accidental or later byte changes but do not prove package origin, creation time, or camera timestamp accuracy. "
                                                                 "The signed chain (chain.json) shows the source recordings match what this NVR hashed when they were written, if signed_by_this_installation is true."}

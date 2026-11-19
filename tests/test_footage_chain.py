@@ -271,6 +271,18 @@ class FootageChainTests(SceneTestCase):
             outcomes = [json.loads(row[0])["outcome"] for row in db.execute("SELECT details_json FROM audit_log WHERE action LIKE 'evidence_%' ORDER BY id")]
         self.assertEqual(outcomes, ["invalid"] * 4)
 
+    def test_a_valid_chain_placed_under_another_cameras_name_is_not_that_cameras(self):
+        # A chain is signed for one camera. Its entry in a package is checked to be that camera's (#363).
+        self.chain()
+        _, package = self.export_package()
+        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+            chain = json.loads(archive.read("chain.json"))
+        self.assertEqual(verify_evidence_bytes(package)["chain"]["cameras"][0]["status"], "valid")
+        chain["cameras"][0]["camera_id"] = "another-camera"  # The genuine, signed chain of this camera, relabelled
+        checked = verify_evidence_bytes(self.repack(package, chain))["chain"]
+        self.assertFalse(checked["valid"])
+        self.assertEqual((checked["cameras"][0]["status"], checked["cameras"][0]["error"]), ("invalid", "the chain under this camera belongs to another camera"))
+
     def test_ranges_in_other_timezones_select_the_same_footage(self):
         self.chain()
         offset = timezone(timedelta(hours=2))
