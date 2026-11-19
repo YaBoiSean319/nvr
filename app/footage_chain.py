@@ -88,6 +88,24 @@ def _head(db: sqlite3.Connection, camera_id: str) -> tuple[int, str]:
     return (int(row["seq"]), row["link_hash"]) if row else (0, GENESIS)
 
 
+def _heads(db: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Each camera's newest link number, stepping from camera to camera through the index: a row read per camera, not per link."""
+    return db.execute(
+        "WITH RECURSIVE c(camera_id) AS (SELECT MIN(camera_id) FROM footage_chain UNION ALL "
+        "SELECT (SELECT MIN(camera_id) FROM footage_chain WHERE camera_id>c.camera_id) FROM c WHERE c.camera_id IS NOT NULL) "
+        "SELECT camera_id,(SELECT MAX(seq) FROM footage_chain f WHERE f.camera_id=c.camera_id) AS seq FROM c WHERE camera_id IS NOT NULL").fetchall()
+
+
+def _signature_at_or_after(db: sqlite3.Connection, camera_id: str, seq: int) -> sqlite3.Row | None:
+    """The first signature that covers link ``seq``."""
+    return db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? AND upto_seq>=? ORDER BY upto_seq LIMIT 1", (camera_id, seq)).fetchone()
+
+
+def _signature_before(db: sqlite3.Connection, camera_id: str, seq: int) -> sqlite3.Row | None:
+    """The last signature made before link ``seq`` existed: a signed point to start checking from."""
+    return db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? AND upto_seq<? ORDER BY upto_seq DESC LIMIT 1", (camera_id, seq)).fetchone()
+
+
 def _latest_signature(db: sqlite3.Connection, camera_id: str) -> sqlite3.Row | None:
     return db.execute("SELECT * FROM footage_chain_signatures WHERE camera_id=? ORDER BY upto_seq DESC LIMIT 1", (camera_id,)).fetchone()
 
@@ -102,16 +120,41 @@ def _append(db: sqlite3.Connection, link: dict[str, Any]) -> None:
                 link["size_bytes"], link["sha256"], link["prev_hash"], link["link_hash"], _now()))
 
 
+# Every segment up to this id (per database file) was found chained the last time it was looked at, so a pass looks only at newer ones.
+# The check used to read every segment the camera ever recorded, every five seconds and for every export: 0.37 s a time for sixteen
+# cameras and thirty days, with nothing new (#352). A segment below the mark can still need a link later (its storage came back, or its
+# file became readable), so the whole table is looked at again every FULL_SCAN_SECONDS.
+FULL_SCAN_SECONDS = 600.0
+_looked: dict[str, tuple[int, float]] = {}  # Database file -> (the mark, when the whole table was last looked at)
+
+
+def _removals_waiting() -> bool:
+    from .store import has_row
+
+    with connect() as db:
+        return has_row(db, "SELECT 1 FROM footage_removals LIMIT 1")
+
+
 def _unchained(db: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
     now = time.monotonic()
     for segment_id, tried in list(_unreadable.items()):
         if now - tried >= UNREADABLE_RETRY_SECONDS:
             del _unreadable[segment_id]
     skipped = json.dumps(sorted(_unreadable))
-    return db.execute(
-        "SELECT s.* FROM recording_segments s, footage_chain_start c WHERE s.id>c.after_segment_id AND s.unavailable_at IS NULL "
+    database = str(db.execute("PRAGMA database_list").fetchone()[2])
+    mark, scanned = _looked.get(database, (0, None))
+    whole = scanned is None or now - scanned >= FULL_SCAN_SECONDS
+    # Read before the look, so a segment indexed while it runs is not counted as looked at.
+    newest = int(db.execute("SELECT COALESCE(MAX(id),0) FROM recording_segments").fetchone()[0])
+    start = db.execute("SELECT after_segment_id FROM footage_chain_start").fetchone()
+    after = max(int(start[0]) if start else 0, 0 if whole else mark)  # One plain bound, so the look begins there instead of reading up to it
+    rows = db.execute(
+        "SELECT s.* FROM recording_segments s WHERE s.id>? AND s.unavailable_at IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM footage_chain f WHERE f.kind='segment' AND f.segment_id=s.id AND f.relative_path=s.relative_path) "
-        "AND s.id NOT IN (SELECT value FROM json_each(?)) ORDER BY s.id LIMIT ?", (skipped, limit)).fetchall()
+        "AND s.id NOT IN (SELECT value FROM json_each(?)) ORDER BY s.id LIMIT ?", (after, skipped, limit)).fetchall()
+    # Everything below the first one still waiting has its link, or is set aside (unreadable, storage away) until the next whole look.
+    _looked[database] = (int(rows[0]["id"]) - 1 if rows else newest, now if whole else scanned)
+    return rows
 
 
 async def append_pending() -> int:
@@ -121,8 +164,14 @@ async def append_pending() -> int:
     from .storage import recording_file_path
 
     appended = 0
-    with connect() as db:
-        pending = _unchained(db, BATCH)
+
+    def waiting() -> list[sqlite3.Row]:
+        with connect() as db:
+            return _unchained(db, BATCH)
+
+    pending = await asyncio.to_thread(waiting)  # Off the event loop: the background worker's other loops and its heartbeat share it
+    if not pending and not await asyncio.to_thread(_removals_waiting):
+        return 0
     hashed: list[tuple[sqlite3.Row, str]] = []
     for segment in pending:
         try:
@@ -131,41 +180,48 @@ async def append_pending() -> int:
         except (OSError, ValueError):
             _unreadable[segment["id"]] = time.monotonic()  # Missing at hashing time: tried again later, reported as pending until then.
             appended += 1
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            for segment, digest in hashed:
-                still = db.execute("SELECT 1 FROM recording_segments WHERE id=? AND relative_path=?", (segment["id"], segment["relative_path"])).fetchone()
-                if still is None or db.execute("SELECT 1 FROM footage_chain WHERE kind='segment' AND segment_id=? AND relative_path=?",
-                                               (segment["id"], segment["relative_path"])).fetchone():
-                    continue
-                _append(db, {"camera_id": segment["camera_id"], "kind": "segment", "segment_id": segment["id"], "relative_path": segment["relative_path"],
-                             "starts_at": segment["starts_at"], "ends_at": segment["ends_at"], "size_bytes": int(segment["size_bytes"]), "sha256": digest})
-                appended += 1
-            for removal in db.execute("SELECT * FROM footage_removals ORDER BY removed_at, segment_id").fetchall():
-                link = db.execute("SELECT * FROM footage_chain f WHERE f.kind='segment' AND f.segment_id=? AND f.camera_id=? AND NOT EXISTS "
-                                  "(SELECT 1 FROM footage_chain r WHERE r.kind='removed' AND r.segment_id=f.segment_id AND r.relative_path=f.relative_path AND r.seq>f.seq) "
-                                  "ORDER BY f.seq DESC LIMIT 1", (removal["segment_id"], removal["camera_id"])).fetchone()
-                if link is not None:
-                    _append(db, {"camera_id": link["camera_id"], "kind": "removed", "segment_id": link["segment_id"], "relative_path": link["relative_path"],
-                                 "starts_at": link["starts_at"], "ends_at": link["ends_at"], "size_bytes": link["size_bytes"], "sha256": link["sha256"]})
-                    appended += 1
-                db.execute("DELETE FROM footage_removals WHERE segment_id=?", (removal["segment_id"],))
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
-        db.execute("COMMIT")
-    return appended
+    def store() -> int:
+        added = 0
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for segment, digest in hashed:
+                    still = db.execute("SELECT 1 FROM recording_segments WHERE id=? AND relative_path=?", (segment["id"], segment["relative_path"])).fetchone()
+                    if still is None or db.execute("SELECT 1 FROM footage_chain WHERE kind='segment' AND segment_id=? AND relative_path=?",
+                                                   (segment["id"], segment["relative_path"])).fetchone():
+                        continue
+                    _append(db, {"camera_id": segment["camera_id"], "kind": "segment", "segment_id": segment["id"], "relative_path": segment["relative_path"],
+                                 "starts_at": segment["starts_at"], "ends_at": segment["ends_at"], "size_bytes": int(segment["size_bytes"]), "sha256": digest})
+                    added += 1
+                for removal in db.execute("SELECT * FROM footage_removals ORDER BY removed_at, segment_id").fetchall():
+                    link = db.execute("SELECT * FROM footage_chain f WHERE f.kind='segment' AND f.segment_id=? AND f.camera_id=? AND NOT EXISTS "
+                                      "(SELECT 1 FROM footage_chain r WHERE r.kind='removed' AND r.segment_id=f.segment_id AND r.relative_path=f.relative_path AND r.seq>f.seq) "
+                                      "ORDER BY f.seq DESC LIMIT 1", (removal["segment_id"], removal["camera_id"])).fetchone()
+                    if link is not None:
+                        _append(db, {"camera_id": link["camera_id"], "kind": "removed", "segment_id": link["segment_id"], "relative_path": link["relative_path"],
+                                     "starts_at": link["starts_at"], "ends_at": link["ends_at"], "size_bytes": link["size_bytes"], "sha256": link["sha256"]})
+                        added += 1
+                    db.execute("DELETE FROM footage_removals WHERE segment_id=?", (removal["segment_id"],))
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+        return added
+
+    return appended + await asyncio.to_thread(store)
 
 
 def sign_heads() -> int:
     """Sign every camera head that changed since its last signature, only where the new links extend the signed ones intact."""
     signed = 0
     with connect() as db:
+        # Read first which heads moved: with nothing new, nothing is written and the write lock is not taken (#280, #352).
+        if not any((last := _latest_signature(db, row["camera_id"])) is None or int(last["upto_seq"]) < int(row["seq"]) for row in _heads(db)):
+            return 0
         db.execute("BEGIN IMMEDIATE")
         try:
             private, public = _key(db)
-            for row in db.execute("SELECT camera_id, MAX(seq) AS seq FROM footage_chain GROUP BY camera_id").fetchall():
+            for row in _heads(db):
                 last = _latest_signature(db, row["camera_id"])
                 if last is not None and int(last["upto_seq"]) >= int(row["seq"]):
                     continue
@@ -213,6 +269,43 @@ def check_links(links: list[dict[str, Any]], first_prev: str | None = None) -> s
     return None
 
 
+LONGEST_LINK = timedelta(hours=24)  # No recorded segment is longer: a link that touches a range starts within this of it
+
+
+def _signature_error(db: sqlite3.Connection, camera_id: str, signature: sqlite3.Row, installation_key: str) -> str | None:
+    """None when a stored signature is this installation's, is valid, and is over the link it names as that link stands now."""
+    link = db.execute("SELECT link_hash FROM footage_chain WHERE camera_id=? AND seq=?", (camera_id, signature["upto_seq"])).fetchone()
+    if signature["public_key"] != installation_key or link is None or link["link_hash"] != signature["head_hash"] \
+            or not verify_signature(signature["public_key"], camera_id, int(signature["upto_seq"]), signature["head_hash"], signature["signature"]):
+        return "the chain's signature does not match it"
+    return None
+
+
+def _check_stretches(db: sqlite3.Connection, camera_id: str, seqs: list[int], installation_key: str) -> str | None:
+    """Check the parts of the chain that hold these links: each from the signature before a link to the first signature that covers it.
+
+    A camera's head is signed about once a minute, so a link sits in a short stretch between two signed points. Hashing that stretch
+    from one valid signature to the next proves the link is what was signed, without reading the chain from the camera's first link."""
+    checked_upto = 0
+    for seq in seqs:
+        if seq <= checked_upto:
+            continue
+        before, covering = _signature_before(db, camera_id, seq), _signature_at_or_after(db, camera_id, seq)
+        for signature in (before, covering):
+            if signature is not None and (error := _signature_error(db, camera_id, signature, installation_key)):
+                return error
+        first = int(before["upto_seq"]) if before is not None else 1
+        last = int(covering["upto_seq"]) if covering is not None else None  # Not signed yet: checked to the head, and reported as unsigned
+        stretch = [dict(row) for row in db.execute("SELECT * FROM footage_chain WHERE camera_id=? AND seq>=? AND seq<=? ORDER BY seq",
+                                                   (camera_id, first, last if last is not None else 1 << 62))]
+        if error := check_links(stretch, GENESIS if before is None else None):
+            return error
+        if before is not None and (not stretch or stretch[0]["seq"] != first or stretch[0]["link_hash"] != before["head_hash"]):
+            return f"link {first} no longer matches its signature"
+        checked_upto = stretch[-1]["seq"] if stretch else seq
+    return None
+
+
 def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
     """Check a camera's footage in [start, end) against its signed chain."""
     from .storage import recording_file_path, segment_available
@@ -221,24 +314,34 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
     start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
     overdue = (datetime.now(timezone.utc) - OVERDUE).isoformat()
     with connect() as db:
-        links = [dict(row) for row in db.execute("SELECT * FROM footage_chain WHERE camera_id=? ORDER BY seq", (camera_id,))]
-        signature = _latest_signature(db, camera_id)
         after = db.execute("SELECT after_segment_id FROM footage_chain_start").fetchone()["after_segment_id"]
         segments = [dict(row) for row in db.execute(
             "SELECT * FROM recording_segments WHERE camera_id=? AND starts_at<? AND ends_at>? ORDER BY starts_at, id",
             (camera_id, end.isoformat(), start.isoformat()))]
         _, installation_key = _key(db)
-    chain_error = check_links(links, GENESIS)
-    signed_upto = 0
-    if signature is not None:
-        signed_link = next((link for link in links if link["seq"] == signature["upto_seq"]), None)
-        if signature["public_key"] != installation_key or signed_link is None or signed_link["link_hash"] != signature["head_hash"] \
-                or not verify_signature(signature["public_key"], camera_id, int(signature["upto_seq"]), signature["head_hash"], signature["signature"]):
-            chain_error = chain_error or "the chain's signature does not match it"
-        else:
-            signed_upto = int(signature["upto_seq"])
+        # Only the links this range is about: those of its segments, and those whose own time falls in it (footage since removed). The
+        # whole chain used to be loaded and re-hashed for any range: 69 MB to check one hour of a month-old camera (#352).
+        links: dict[int, dict[str, Any]] = {}
+        ids = [segment["id"] for segment in segments]
+        for offset in range(0, len(ids), 500):
+            part = ids[offset:offset + 500]
+            for row in db.execute(f"SELECT * FROM footage_chain WHERE camera_id=? AND segment_id IN ({','.join('?' * len(part))})", (camera_id, *part)):
+                links[int(row["seq"])] = dict(row)
+        for row in db.execute("SELECT * FROM footage_chain WHERE camera_id=? AND starts_at<? AND starts_at>=? AND ends_at>?",
+                              (camera_id, end.isoformat(), (start - LONGEST_LINK).isoformat(), start.isoformat())):
+            links[int(row["seq"])] = dict(row)
+        chain_error = _check_stretches(db, camera_id, sorted(links), installation_key)
+        signature = _latest_signature(db, camera_id)
+        signed_upto = 0
+        if signature is not None:
+            error = _signature_error(db, camera_id, signature, installation_key)
+            if error:
+                chain_error = chain_error or error
+            else:
+                signed_upto = int(signature["upto_seq"])
+    links = list(links.values())
     removed = {(link["segment_id"], link["relative_path"]) for link in links if link["kind"] == "removed"}
-    chained = {(link["segment_id"], link["relative_path"]): link for link in links if link["kind"] == "segment"}
+    chained = {(link["segment_id"], link["relative_path"]): link for link in sorted(links, key=lambda link: link["seq"]) if link["kind"] == "segment"}
     in_range = [link for link in chained.values() if link["starts_at"] < end.isoformat() and link["ends_at"] > start.isoformat()]
     present = {(segment["id"], segment["relative_path"]): segment for segment in segments}
     results = []
@@ -281,12 +384,18 @@ def verify(camera_id: str, start: datetime, end: datetime) -> dict[str, Any]:
 
 
 def extract(db: sqlite3.Connection, camera_id: str, segment_ids: Iterable[int]) -> dict[str, Any] | None:
-    """The chain from the first exported segment's link to the latest signature, for offline verification."""
+    """The chain from the first exported segment's link to the first signature that covers the last one, for offline verification.
+
+    It used to run on to the latest signature, so a one-minute export of month-old footage carried a month of links for each camera:
+    25.7 MB a camera (#352). Segments not signed yet when the export is made are simply past the end, and reported as unsigned."""
     wanted = set(segment_ids)
-    signature = _latest_signature(db, camera_id)
-    first = db.execute(f"SELECT MIN(seq) FROM footage_chain WHERE camera_id=? AND kind='segment' AND segment_id IN ({','.join('?' * len(wanted)) or 'NULL'})",
-                       (camera_id, *wanted)).fetchone()[0] if wanted else None
-    if signature is None or first is None or first > signature["upto_seq"]:
+    first, last = db.execute(f"SELECT MIN(seq),MAX(seq) FROM footage_chain WHERE camera_id=? AND kind='segment' AND segment_id IN ({','.join('?' * len(wanted)) or 'NULL'})",
+                             (camera_id, *wanted)).fetchone() if wanted else (None, None)
+    if first is None:
+        return None
+    # The first signature covering the last segment; if that one is not signed yet, the newest signature covers those that are.
+    signature = _signature_at_or_after(db, camera_id, int(last)) or _latest_signature(db, camera_id)
+    if signature is None or first > signature["upto_seq"]:
         return None
     links = [dict(row) for row in db.execute("SELECT camera_id,seq,kind,segment_id,relative_path,starts_at,ends_at,size_bytes,sha256,prev_hash,link_hash "
                                              "FROM footage_chain WHERE camera_id=? AND seq BETWEEN ? AND ? ORDER BY seq", (camera_id, first, signature["upto_seq"]))]
