@@ -52,6 +52,13 @@ def has_row(db: sqlite3.Connection, sql: str, params: tuple[object, ...] = ()) -
     return db.execute(sql, params).fetchone() is not None
 
 
+def read_one(sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
+    """One row, on a connection of its own. For an asynchronous web handler, which must not touch the database on the event loop (#354):
+    ``row = await asyncio.to_thread(read_one, "SELECT ...", (camera_id,))``."""
+    with connect() as db:
+        return db.execute(sql, params).fetchone()
+
+
 def initialize() -> None:
     from app.migrations import migrate
 

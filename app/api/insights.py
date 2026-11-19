@@ -106,13 +106,16 @@ async def reference_frame(camera_id: str, user: CurrentUser, at: str | None = Qu
             raise ValueError
     except ValueError:
         raise HTTPException(status_code=422, detail="at must be a timestamp with a time zone") from None
-    with connect() as db:
-        row = db.execute("SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE camera_id=? AND starts_at<=? ORDER BY starts_at DESC LIMIT 1",
-                         (camera_id, moment.astimezone(timezone.utc).isoformat())).fetchone() or db.execute(
-            "SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE camera_id=? ORDER BY starts_at DESC LIMIT 1", (camera_id,)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="There is no recording to draw over")
-    zones = _segment_zones(user, camera_id, row["starts_at"], False)
+    def read():
+        with connect() as db:
+            row = db.execute("SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE camera_id=? AND starts_at<=? ORDER BY starts_at DESC LIMIT 1",
+                             (camera_id, moment.astimezone(timezone.utc).isoformat())).fetchone() or db.execute(
+                "SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE camera_id=? ORDER BY starts_at DESC LIMIT 1", (camera_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="There is no recording to draw over")
+        return row, _segment_zones(user, camera_id, row["starts_at"], False)
+
+    row, zones = await run_in_threadpool(read)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise HTTPException(status_code=503, detail="A still cannot be extracted without FFmpeg")

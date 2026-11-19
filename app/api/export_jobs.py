@@ -1,6 +1,7 @@
 """Background export jobs, downloads and evidence verification."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import tempfile
@@ -115,7 +116,7 @@ async def create_export(
     def swap(camera_id: str) -> str:
         return unknown.get(camera_id, camera_id)
 
-    return _submit(request, user, lambda: create_export_record(
+    return await _submit(request, user, lambda: create_export_record(
         int(user["id"]), [swap(camera_id) for camera_id in payload.camera_ids], start, end, payload.output_modes,
         [None if camera_id is None else swap(camera_id) for camera_id in payload.tile_camera_ids],
         payload.grid_resolution, payload.include_audio, swap(payload.audio_camera_id) if payload.audio_camera_id else None,
@@ -123,10 +124,10 @@ async def create_export(
         dewarp={swap(camera_id): view.model_dump() for camera_id, view in payload.dewarp.items()}))
 
 
-def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str, object]:
-    """Validate and record a job, then hand it to the export worker."""
+async def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str, object]:
+    """Validate and record a job, then hand it to the export worker. The database work runs in a thread; the hand-over needs the event loop (#354)."""
     try:
-        job_id = create()
+        job_id = await asyncio.to_thread(create)
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OverflowError as exc:
@@ -136,23 +137,25 @@ def _submit(request: Request, user: dict, create: Callable[[], str]) -> dict[str
     try:
         request.app.state.exports.enqueue(job_id)
     except (AttributeError, RuntimeError) as exc:
-        with connect() as db:
-            db.execute("UPDATE exports SET status='failed',error=?,completed_at=?,updated_at=? WHERE id=?", ("Export worker is unavailable", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
-            db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (int(user["id"]), "export_failed", "export", job_id, '{"reason":"worker_unavailable"}'))
+        def failed() -> None:
+            with connect() as db:
+                db.execute("UPDATE exports SET status='failed',error=?,completed_at=?,updated_at=? WHERE id=?", ("Export worker is unavailable", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), job_id))
+                db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (int(user["id"]), "export_failed", "export", job_id, '{"reason":"worker_unavailable"}'))
+
+        await asyncio.to_thread(failed)
         raise HTTPException(status_code=503, detail="Export worker is unavailable") from exc
-    row = get_export(job_id, int(user["id"]))
-    return _job_view(row)
+    return await asyncio.to_thread(lambda: _job_view(get_export(job_id, int(user["id"]))))
 
 
 @router.post("/api/exports/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
 @requires_scope("export")
 async def retry_export(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     """Repeat a finished-unsuccessfully job as a new attempt; the original stays as it was."""
-    row = _export_for(job_id, user)
+    row = await asyncio.to_thread(_export_for, job_id, user)
     if row["status"] not in {"failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="Only failed or cancelled exports can be retried")
     original = _job_view(row)
-    return _submit(request, user, lambda: create_export_record(
+    return await _submit(request, user, lambda: create_export_record(
         int(user["id"]), original["camera_ids"],
         datetime.fromisoformat(original["start"]).astimezone(timezone.utc), datetime.fromisoformat(original["end"]).astimezone(timezone.utc),
         original["output_modes"], original["tile_camera_ids"], original["grid_resolution"], original["include_audio"],
@@ -169,15 +172,16 @@ def get_export_status(job_id: str, user: CurrentUser) -> dict[str, object]:
 @router.post("/api/exports/{job_id}/cancel")
 @requires_scope("export")
 async def cancel_export(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
-    _export_for(job_id, user)
-    try:
-        state = request_cancel(job_id, int(user["id"]), user["role"] == "administrator")
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if state == "cancel_requested":
+    def ask() -> str:
+        _export_for(job_id, user)
+        try:
+            return request_cancel(job_id, int(user["id"]), user["role"] == "administrator")
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if await asyncio.to_thread(ask) == "cancel_requested":
         await request.app.state.exports.cancel(job_id)
-    row = get_export(job_id, int(user["id"]), user["role"] == "administrator")
-    return _job_view(row)
+    return await asyncio.to_thread(lambda: _job_view(get_export(job_id, int(user["id"]), user["role"] == "administrator")))
 
 
 @router.get("/api/exports/{job_id}/download")
@@ -242,11 +246,11 @@ async def received_package(request: Request, too_large: str) -> AsyncIterator[tu
 @requires_scope("export")
 async def verify_export_evidence(job_id: str, request: Request, user: CurrentUser) -> dict[str, object]:
     """Check manifest checksums against uploaded package bytes; media probing is separate."""
-    row = _export_for(job_id, user)
+    row = await asyncio.to_thread(_export_for, job_id, user)
     if row["status"] != "completed":
         raise HTTPException(status_code=409, detail="Evidence package is not ready")
     async with received_package(request, "Evidence package exceeds the verification size limit") as (path, uploaded_sha256):
-        result = await run_in_threadpool(verify_evidence_file, path, job_id, footage_chain.public_key())
+        result = await run_in_threadpool(lambda: verify_evidence_file(path, job_id, footage_chain.public_key()))
     # What a package says about itself is only as good as the package: its bytes are compared with the file this NVR issued (#363).
     issued = row["package_sha256"]
     result["issued_hash_recorded"] = bool(issued)
@@ -260,13 +264,16 @@ async def verify_export_evidence(job_id: str, request: Request, user: CurrentUse
         result["chain"] = {**(chain or {"cameras": []}), "valid": False, "error": f"cameras {unsigned} were signed when exported, but are not signed in this chain.json"}
     valid = result["checksums_valid"] and (result.get("chain") is None or result["chain"]["valid"]) and result["matches_issued_package"] is not False
     action = "evidence_verified" if valid else "evidence_verification_failed"
-    with connect() as db:
-        db.execute(
-            "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-            (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if valid else "invalid", "file_count": len(result["files"]),
-                                                                   "chain": None if result.get("chain") is None else ("valid" if result["chain"]["valid"] else "invalid"),
-                                                                   "issued_package": "not_recorded" if not issued else "matches" if result["matches_issued_package"] else "differs"})),
-        )
+    def note():
+        with connect() as db:
+            db.execute(
+                "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                (int(user["id"]), action, "export", job_id, json.dumps({"outcome": "valid" if valid else "invalid", "file_count": len(result["files"]),
+                                                                       "chain": None if result.get("chain") is None else ("valid" if result["chain"]["valid"] else "invalid"),
+                                                                       "issued_package": "not_recorded" if not issued else "matches" if result["matches_issued_package"] else "differs"})),
+            )
+
+    await asyncio.to_thread(note)
     origin = ("This is the package this NVR issued, byte for byte. " if result["matches_issued_package"] else
               "This is NOT the package this NVR issued: its bytes differ, whatever its own list of checksums says. " if result["matches_issued_package"] is False else
               "This export was made before the NVR kept the hash of what it issued, so the package can only be checked against its own list. ")

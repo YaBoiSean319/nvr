@@ -303,16 +303,20 @@ def get_group_storage_volume(group_id: str, _: Administrator) -> dict[str, objec
 
 @router.put("/api/camera-groups/{group_id}/storage-volume")
 async def set_group_storage_volume(group_id: str, payload: StorageAssignmentRequest, request: Request, _: Administrator) -> dict[str, object]:
-    try:
-        assign_group_volume(group_id,payload.volume_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404,detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422,detail=str(exc)) from exc
-    with connect() as db:
-        camera_ids=[row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?",(group_id,)).fetchall()]
+    def save():
+        try:
+            assign_group_volume(group_id,payload.volume_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404,detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422,detail=str(exc)) from exc
+        with connect() as db:
+            camera_ids=[row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?",(group_id,)).fetchall()]
+        return camera_ids
+
+    camera_ids = await asyncio.to_thread(save)
     await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id,force_restart=True) for camera_id in camera_ids))
-    return get_group_storage_volume(group_id,_=None)
+    return await asyncio.to_thread(get_group_storage_volume, group_id, _=None)
 
 
 def _schedule_document(timezone_name: str, intervals: list[dict[str, object]]) -> dict[str, object]:
@@ -350,15 +354,19 @@ async def update_group_schedule(
     _: Administrator,
 ) -> dict[str, object]:
     intervals = validate_schedule(payload.timezone, [item.model_dump() for item in payload.intervals])
-    with connect() as db:
-        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Camera group not found")
-        db.execute(
-            "INSERT INTO recording_policy_overrides(scope_type,scope_id,timezone_name,schedule_json) VALUES('group',?,?,?) "
-            "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
-            (group_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
-        )
-        camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
+    def save():
+        with connect() as db:
+            if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Camera group not found")
+            db.execute(
+                "INSERT INTO recording_policy_overrides(scope_type,scope_id,timezone_name,schedule_json) VALUES('group',?,?,?) "
+                "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                (group_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
+            )
+            camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
+        return camera_ids
+
+    camera_ids = await asyncio.to_thread(save)
     await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id, force_restart=True) for camera_id in camera_ids))
     return {"group_id": group_id, "configured": True, **_schedule_document(payload.timezone, intervals)}
 
@@ -369,11 +377,15 @@ async def delete_group_schedule(
     request: Request,
     _: Administrator,
 ) -> Response:
-    with connect() as db:
-        if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Camera group not found")
-        db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
-        camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
+    def save():
+        with connect() as db:
+            if db.execute("SELECT 1 FROM camera_groups WHERE id=?", (group_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Camera group not found")
+            db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='group' AND scope_id=?", (group_id,))
+            camera_ids = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE group_id=?", (group_id,)).fetchall()]
+        return camera_ids
+
+    camera_ids = await asyncio.to_thread(save)
     await asyncio.gather(*(request.app.state.recorders.sync_camera(camera_id, force_restart=True) for camera_id in camera_ids))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -416,19 +428,22 @@ async def update_camera_schedule(
         intervals = []
     else:
         intervals = validate_schedule(payload.timezone, [item.model_dump() for item in payload.intervals])
-    with connect() as db:
-        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Camera not found")
-        if payload.inherit_group:
-            db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
-        else:
-            db.execute(
-                "INSERT INTO recording_policy_overrides(scope_type,scope_id,timezone_name,schedule_json) VALUES('camera',?,?,?) "
-                "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
-                (camera_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
-            )
+    def save():
+        with connect() as db:
+            if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Camera not found")
+            if payload.inherit_group:
+                db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+            else:
+                db.execute(
+                    "INSERT INTO recording_policy_overrides(scope_type,scope_id,timezone_name,schedule_json) VALUES('camera',?,?,?) "
+                    "ON CONFLICT(scope_type,scope_id) DO UPDATE SET timezone_name=excluded.timezone_name,schedule_json=excluded.schedule_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                    (camera_id, payload.timezone, json.dumps(intervals, separators=(",", ":"))),
+                )
+
+    await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
-    return get_camera_schedule(camera_id, _=None)
+    return await asyncio.to_thread(get_camera_schedule, camera_id, _=None)
 
 
 @router.delete("/api/cameras/{camera_id}/schedule", status_code=status.HTTP_204_NO_CONTENT)
@@ -437,9 +452,12 @@ async def delete_camera_schedule(
     request: Request,
     _: Administrator,
 ) -> Response:
-    with connect() as db:
-        if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
-            raise HTTPException(status_code=404, detail="Camera not found")
-        db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+    def save():
+        with connect() as db:
+            if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Camera not found")
+            db.execute("DELETE FROM recording_policy_overrides WHERE scope_type='camera' AND scope_id=?", (camera_id,))
+
+    await asyncio.to_thread(save)
     await request.app.state.recorders.sync_camera(camera_id, force_restart=True)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

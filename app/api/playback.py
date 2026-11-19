@@ -102,6 +102,15 @@ def _segment_zones(user, camera_id: str, starts_at: str, unmasked: bool) -> list
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+def _segment_and_zones(columns: str, segment_id: int, camera_id: str, user, unmasked: bool) -> tuple:
+    """A recording's row and the privacy zones this person sees it through. Run in a thread by the asynchronous handlers (#354)."""
+    with connect() as db:
+        row = db.execute(f"SELECT {columns} FROM recording_segments WHERE id=? AND camera_id=?", (segment_id, camera_id)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Recorded interval is unavailable")
+    return row, _segment_zones(user, camera_id, row["starts_at"], unmasked)
+
+
 @router.get("/api/cameras/{camera_id}/segments/{segment_id}/media")
 @requires_scope("media")
 async def play_segment(
@@ -112,14 +121,7 @@ async def play_segment(
     compat: Annotated[Literal["h264"] | None, Query()] = None,
 ) -> FileResponse:
     """The recording. ``compat=h264`` asks for it converted to H.264, for a browser that cannot play the camera's H.265."""
-    with connect() as db:
-        row = db.execute(
-            "SELECT relative_path,starts_at FROM recording_segments WHERE id=? AND camera_id=?",
-            (segment_id, camera_id),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Recorded interval is unavailable")
-    zones = _segment_zones(user, camera_id, row["starts_at"], unmasked)
+    row, zones = await asyncio.to_thread(_segment_and_zones, "relative_path,starts_at", segment_id, camera_id, user, unmasked)
     from app.storage import recording_file_path
     try:
         path = await run_in_threadpool(recording_file_path, row["relative_path"])  # Footage on a cold tier may have to be fetched: not on the event loop
@@ -154,11 +156,7 @@ async def snapshot_segment(
 ) -> Response:
     if at.tzinfo is None:
         raise HTTPException(status_code=422, detail="Snapshot time must include a timezone")
-    with connect() as db:
-        row = db.execute("SELECT relative_path,starts_at,ends_at FROM recording_segments WHERE id=? AND camera_id=?", (segment_id,camera_id)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Recorded interval is unavailable")
-    zones = _segment_zones(user, camera_id, row["starts_at"], unmasked)
+    row, zones = await asyncio.to_thread(_segment_and_zones, "relative_path,starts_at,ends_at", segment_id, camera_id, user, unmasked)
     start = datetime.fromisoformat(row["starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
     end = datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
     at = at.astimezone(timezone.utc)
@@ -187,14 +185,18 @@ async def snapshot_segment(
         if process.returncode != 0 or not image.startswith(b"\xff\xd8"):
             raise HTTPException(status_code=422, detail="A snapshot could not be extracted from this interval")
         source_time = at.isoformat()
-        with connect() as db:
-            cursor = db.execute(
-                "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
-                (int(user["id"]), "snapshot_downloaded", "recording_segment", str(segment_id),
-                 json.dumps({"camera_id": camera_id, "source_time": source_time})),
-            )
-            audit_reference = f"audit-{cursor.lastrowid}"
-            viewing_audit.record_events(db, int(user["id"]), [camera_id], "snapshot", audit_reference)
+        def note():
+            with connect() as db:
+                cursor = db.execute(
+                    "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
+                    (int(user["id"]), "snapshot_downloaded", "recording_segment", str(segment_id),
+                     json.dumps({"camera_id": camera_id, "source_time": source_time})),
+                )
+                audit_reference = f"audit-{cursor.lastrowid}"
+                viewing_audit.record_events(db, int(user["id"]), [camera_id], "snapshot", audit_reference)
+            return audit_reference
+
+        audit_reference = await asyncio.to_thread(note)
         return Response(image, media_type="image/jpeg", headers={
             "Cache-Control": "no-store", "X-Source-Time": source_time, "X-Audit-Reference": audit_reference,
         })

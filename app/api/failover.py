@@ -162,6 +162,11 @@ def _epoch(request: Request) -> int:
         raise failover.PeerError(422, "An epoch is needed") from None
 
 
+def _shared_secret() -> str | None:
+    with connect() as db:
+        return failover.shared_secret(db)
+
+
 @router.post("/api/inbound/failover/lease")
 async def lease(request: Request) -> Response:
     """The primary renews its lease. The standby's answer says whether it is granted and whether footage waits to be brought back."""
@@ -169,8 +174,7 @@ async def lease(request: Request) -> Response:
         await _signed(request)
         answer = json.dumps(await run_in_threadpool(failover.standby_lease, {}), separators=(",", ":")).encode()
         # Signed, and bound to the request it answers: the primary yields only to an answer it can prove came from its standby.
-        with connect() as db:
-            secret = failover.shared_secret(db)
+        secret = await run_in_threadpool(_shared_secret)
         signed = failover.sign_answer(secret or "", "/api/inbound/failover/lease", answer, request.headers.get("x-failover-signature", ""))
         return Response(answer, media_type="application/json", headers=signed)
     except failover.PeerError as exc:

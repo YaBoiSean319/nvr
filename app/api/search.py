@@ -1,6 +1,7 @@
 """Attribute search across cameras: filters, results with thumbnails, and the unanalysed coverage of the range searched."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -193,11 +194,15 @@ def similar_tracks(
 @requires_scope("media")  # A picture from a camera: the scope the federated variant and every other picture route already need (#295)
 async def track_thumbnail(track_id: str, user: CurrentUser) -> Response:
     """The frame an object was first analysed in, with the camera's privacy masks drawn over it; if a mask cannot be drawn, no picture."""
-    with connect() as db:
-        row = db.execute("SELECT t.camera_id,k.jpeg,k.captured_at FROM ai_tracks t JOIN track_keyframes k ON k.track_id=t.id WHERE t.id=?", (track_id,)).fetchone()
-        if row is None or not user.access.can_see(row["camera_id"]):
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
-        zones = privacy.server_zones(db, row["camera_id"], datetime.fromisoformat(row["captured_at"]))
+    def read():
+        with connect() as db:
+            row = db.execute("SELECT t.camera_id,k.jpeg,k.captured_at FROM ai_tracks t JOIN track_keyframes k ON k.track_id=t.id WHERE t.id=?", (track_id,)).fetchone()
+            if row is None or not user.access.can_see(row["camera_id"]):
+                raise HTTPException(status_code=404, detail="Thumbnail not found")
+            zones = privacy.server_zones(db, row["camera_id"], datetime.fromisoformat(row["captured_at"]))
+        return row, zones
+
+    row, zones = await asyncio.to_thread(read)
     try:
         picture = await privacy.mask_jpeg(bytes(row["jpeg"]), zones)
     except Exception:  # noqa: BLE001 - never the unmasked picture

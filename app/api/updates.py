@@ -5,6 +5,7 @@ pre-update configuration backup, and return commands for an administrator to run
 """
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -48,7 +49,7 @@ def post_check(user: Administrator) -> dict[str, object]:
 async def post_prepare(request: Request, payload: PrepareRequest, user: Administrator) -> dict[str, object]:
     # Async so the wake-up runs on the event loop that owns the backup manager.
     try:
-        result = updates.prepare(user.id, without_backup=payload.without_backup)
+        result = await asyncio.to_thread(updates.prepare, user.id, without_backup=payload.without_backup)
     except (BackupError, updates.PlanNotReady) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     backups = getattr(request.app.state, "backups", None)

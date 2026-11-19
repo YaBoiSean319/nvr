@@ -18,7 +18,7 @@ from app.api.rules import RuleSchedule
 from app.audit import record
 from app.onvif_ptz import PtzUnsupported
 from app.principal import Administrator, CurrentUser, Principal
-from app.store import connect
+from app.store import connect, read_one
 
 router = APIRouter()
 
@@ -117,12 +117,15 @@ async def _command(camera_id: str, user: Principal, action) -> dict[str, object]
 async def get_ptz(camera_id: str, user: CurrentUser) -> dict[str, object]:
     await _visible_camera(camera_id, user)
     found, reason = await ptz.capabilities(camera_id)
-    with connect() as db:
-        return {"supported": found is not None, "reason": reason, "capabilities": ptz.capability_view(found),
-                "lease": ptz.lease_view(db, camera_id, int(user["id"])), "lease_seconds": ptz.LEASE_SECONDS,
-                "presets": ptz.presets(db, camera_id), "tours": ptz.tours(db, camera_id),
-                "tracking": ptz_tracking.current(db, camera_id),
-                "tracking_settings": ptz_tracking.settings_for(db, camera_id)}
+    def view():
+        with connect() as db:
+            return {"supported": found is not None, "reason": reason, "capabilities": ptz.capability_view(found),
+                    "lease": ptz.lease_view(db, camera_id, int(user["id"])), "lease_seconds": ptz.LEASE_SECONDS,
+                    "presets": ptz.presets(db, camera_id), "tours": ptz.tours(db, camera_id),
+                    "tracking": ptz_tracking.current(db, camera_id),
+                    "tracking_settings": ptz_tracking.settings_for(db, camera_id)}
+
+    return await asyncio.to_thread(view)
 
 
 @router.post("/api/cameras/{camera_id}/ptz/lease")
@@ -200,7 +203,7 @@ async def stop_tracking(camera_id: str, user: CurrentUser) -> Response:
     if await asyncio.to_thread(_tracking_now, camera_id) is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     await _command(camera_id, user, lambda client: client.stop())  # A manual command: it ends the tracking and stops the camera
-    ptz.release(camera_id, int(user["id"]))
+    await asyncio.to_thread(ptz.release, camera_id, int(user["id"]))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -228,8 +231,7 @@ def save_tracking_settings(camera_id: str, payload: TrackingSettingsRequest, use
 
 @router.post("/api/cameras/{camera_id}/ptz/presets/{preset_id}/go")
 async def go_to_preset(camera_id: str, preset_id: str, user: CurrentUser) -> dict[str, object]:
-    with connect() as db:
-        preset = db.execute("SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (preset_id, camera_id)).fetchone()
+    preset = await asyncio.to_thread(read_one, "SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (preset_id, camera_id))
     if preset is None:
         raise HTTPException(status_code=404, detail="Preset not found")
     return await _command(camera_id, user, lambda client: client.goto_preset(preset["token"]))
@@ -238,19 +240,25 @@ async def go_to_preset(camera_id: str, preset_id: str, user: CurrentUser) -> dic
 @router.post("/api/cameras/{camera_id}/ptz/presets", status_code=status.HTTP_201_CREATED)
 async def create_preset(camera_id: str, payload: PresetRequest, user: Administrator) -> dict[str, object]:
     """Save where the camera points now under a name."""
-    with connect() as db:
-        if db.execute("SELECT 1 FROM ptz_presets WHERE camera_id=? AND name=? COLLATE NOCASE", (camera_id, payload.name)).fetchone():
-            raise HTTPException(status_code=409, detail="A preset with this name exists")
-    client = _client(camera_id)
+    def client_if_new():
+        with connect() as db:
+            if db.execute("SELECT 1 FROM ptz_presets WHERE camera_id=? AND name=? COLLATE NOCASE", (camera_id, payload.name)).fetchone():
+                raise HTTPException(status_code=409, detail="A preset with this name exists")
+        return _client(camera_id)
+
+    client = await asyncio.to_thread(client_if_new)
     try:
         token = await client.set_preset(payload.name)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail="The camera did not save the preset.") from exc
     preset_id = ptz.new_id()
-    try:
+    def save():
         with connect() as db:
             db.execute("INSERT INTO ptz_presets(id,camera_id,name,token) VALUES(?,?,?,?)", (preset_id, camera_id, payload.name, token))
             return ptz.preset_view(db.execute("SELECT * FROM ptz_presets WHERE id=?", (preset_id,)).fetchone())
+
+    try:
+        return await asyncio.to_thread(save)
     except sqlite3.IntegrityError as exc:
         # Someone saved this name at the same moment: keep theirs and forget ours on the camera too.
         try:
@@ -270,26 +278,34 @@ def rename_preset(camera_id: str, preset_id: str, payload: PresetRequest, _: Adm
         return ptz.preset_view(db.execute("SELECT * FROM ptz_presets WHERE id=?", (preset_id,)).fetchone())
 
 
+def _client_or_error(camera_id: str):
+    with connect() as db:
+        return ptz.client_for(db, camera_id)
+
+
 @router.delete("/api/cameras/{camera_id}/ptz/presets/{preset_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_preset(camera_id: str, preset_id: str, _: Administrator) -> Response:
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            preset = db.execute("SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (preset_id, camera_id)).fetchone()
-            if preset is None:
-                raise HTTPException(status_code=404, detail="Preset not found")
-            for tour in db.execute("SELECT name,steps_json FROM ptz_tours WHERE camera_id=?", (camera_id,)):
-                if any(step["preset_id"] == preset_id for step in json.loads(tour["steps_json"])):
-                    raise HTTPException(status_code=409, detail=f"The tour {tour['name']} uses this preset")
-            db.execute("DELETE FROM ptz_presets WHERE id=?", (preset_id,))
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
-        db.execute("COMMIT")
+    def remove():
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                preset = db.execute("SELECT token FROM ptz_presets WHERE id=? AND camera_id=?", (preset_id, camera_id)).fetchone()
+                if preset is None:
+                    raise HTTPException(status_code=404, detail="Preset not found")
+                for tour in db.execute("SELECT name,steps_json FROM ptz_tours WHERE camera_id=?", (camera_id,)):
+                    if any(step["preset_id"] == preset_id for step in json.loads(tour["steps_json"])):
+                        raise HTTPException(status_code=409, detail=f"The tour {tour['name']} uses this preset")
+                db.execute("DELETE FROM ptz_presets WHERE id=?", (preset_id,))
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+        return preset
+
+    preset = await asyncio.to_thread(remove)
     # Best effort on the camera: a camera that is unreachable, or no longer ONVIF, keeps a stale preset nobody can pick.
     try:
-        with connect() as db:
-            client = ptz.client_for(db, camera_id)
+        client = await asyncio.to_thread(_client_or_error, camera_id)
         await client.remove_preset(preset["token"])
     except Exception:  # noqa: BLE001
         pass
