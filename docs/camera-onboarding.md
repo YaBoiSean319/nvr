@@ -49,6 +49,8 @@ Video and motion events are separate: if events fail, recording and live view ca
 
 ## Capability health and saving a camera that is not fully working
 
+Where a camera is on the network (its address, ONVIF device address, profile tokens and the host and port of its stream) is shown only to administrators: in the camera list (`GET /api/cameras`) these fields are empty for operators, video walls and API tokens without the `admin` scope.
+
 Each saved camera has a state and a message for discovery, authentication, video, audio, motion events and PTZ (`GET /api/cameras/{id}/capabilities`). States are `ok`, `available`, `unsupported`, `failed` and `unknown`. Messages are the NVR's own plain sentences and never hold a login or a credentialed address.
 
 - `POST /api/cameras` accepts `save_anyway: true`. If the camera's video will not open, or ONVIF will not give a stream address at all (a media service error, say), the camera is still saved, with recording off, the video marked `failed` with the reason, and no live sub-stream, instead of the request being refused. When no address could be had, a stand-in address with no login is stored and the real one is asked for again in the background. Without `save_anyway`, a stream that will not open is refused as before.

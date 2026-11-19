@@ -218,6 +218,17 @@ async def camera_onvif_profiles(
     return {"device_service_url": service_url, "profiles": [profile.__dict__ for profile in profiles]}
 
 
+# Where a camera is on the network: its address, ONVIF device address, profile tokens, and the scheme, host and port of its stream. Only
+# administrators are given these (#377): everyone else (operators, read-scope API tokens, video walls) gets them empty.
+ADDRESS_FIELDS = ("camera_ip", "device_service_url", "onvif_profile_token", "live_substream_profile_token", "stream_url")
+
+
+def sees_camera_addresses(user: Any) -> bool:
+    """An administrator in their own session, or an API token given the administration scope. Every token belongs to an administrator, so
+    the owner's role alone would hand a read-only token or a video wall the whole map."""
+    return user.is_administrator and not user.wall and (user.scopes is None or "admin" in user.scopes)
+
+
 def camera_view(row: sqlite3.Row) -> dict[str, object]:
     try:
         visible_url = masked_stream_url(decrypt(row["stream_url_ciphertext"]))
@@ -392,8 +403,11 @@ def list_cameras(user: CurrentUser) -> dict[str, object]:
         rows = [row for row in db.execute("SELECT c.*,g.name AS group_name FROM cameras c LEFT JOIN camera_groups g ON g.id=c.group_id ORDER BY c.name COLLATE NOCASE")
                 if user.access.can_see(row["id"])]
         cameras = []
+        addresses_shown = sees_camera_addresses(user)
         for row in rows:
             camera = camera_view(row)
+            if not addresses_shown:
+                camera.update(dict.fromkeys(ADDRESS_FIELDS))  # A map of the camera network is for administrators only (#377)
             if row["group_id"] and not user.access.can_see_group(row["group_id"]):
                 camera["group_name"] = None  # Visible through another group; the name of the one that is not is not theirs to see.
             schedule = effective_schedule_view(db, row["id"])

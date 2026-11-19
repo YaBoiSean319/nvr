@@ -63,8 +63,8 @@ export interface Camera {
   device_service_url: string | null;
   onvif_profile_token: string | null;
   live_substream_profile_token: string | null;
-  /** Masked: credentials are never returned. */
-  stream_url: string;
+  /** Masked: credentials are never returned. This and the other address fields are null for anyone but an administrator (#377). */
+  stream_url: string | null;
   video: { codec: string | null; width: number | null; height: number | null };
   audio_supported: boolean | null;
   last_probe_at: string | null;
