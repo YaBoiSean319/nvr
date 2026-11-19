@@ -51,6 +51,9 @@ def delete_segment(camera_id: str, segment_id: int, actor_id: int) -> None:
         segment=db.execute("SELECT id,relative_path,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE id=? AND camera_id=?",(segment_id,camera_id)).fetchone()
         if segment is None: raise LookupError("Recorded interval not found")
         if active_hold(db,segment_id): raise PermissionError("Preserved footage cannot be deleted")
+        # The camera-wide delete and retention both leave footage a queued or running export will read; this one did not (#361).
+        if db.execute("SELECT 1 FROM export_sources s JOIN exports e ON e.id=s.export_id WHERE s.segment_id=? AND e.status IN ('queued','running') LIMIT 1",(segment_id,)).fetchone():
+            raise PermissionError("This footage is in a queued or running export; delete it once the export has finished")
         if not remove_segment_files([segment]): raise BlockingIOError("Recorded interval is currently being played")
         db.execute("DELETE FROM recording_segments WHERE id=?",(segment_id,))
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",

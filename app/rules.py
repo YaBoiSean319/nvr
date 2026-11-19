@@ -41,6 +41,7 @@ import json
 import logging
 import math
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -124,106 +125,141 @@ def _inside(zone: dict[str, float], point: PathPoint) -> bool:
     return zone["x"] <= point.x <= zone["x"] + zone["width"] and zone["y"] <= point.y <= zone["y"] + zone["height"]
 
 
-def _zone_entries(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoint]:
+# Each condition is a small state machine fed one point of an object's path at a time: ``step(point)`` says whether that point is a
+# moment the condition is met. Evaluating a whole path is feeding it every point in order, so a path read in pieces across passes
+# (see ``_Follower``) gives exactly the moments the whole path would.
+Step = Callable[[PathPoint], bool]
+
+
+def _zone_entry_steps(condition: dict[str, Any]) -> Step:
     zone = condition["zone"]
-    moments, was_inside = [], False
-    for point in path:
+    was_inside = False
+
+    def step(point: PathPoint) -> bool:
+        nonlocal was_inside
         inside = _inside(zone, point)
-        if inside and not was_inside:
-            moments.append(point)
+        entered = inside and not was_inside
         was_inside = inside
-    return moments
+        return entered
+    return step
 
 
-def _line_crossings(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoint]:
+def _line_crossing_steps(condition: dict[str, Any]) -> Step:
     line, direction = condition["line"], condition["direction"]
     ax, ay, bx, by = line["x1"], line["y1"], line["x2"], line["y2"]
     dx, dy = bx - ax, by - ay
     length_squared = dx * dx + dy * dy
     # The forward normal (screen coordinates, y grows downwards).
     nx, ny = dy, -dx
-    moments = []
-    for before, after in zip(path, path[1:]):
-        side_before = (before.x - ax) * nx + (before.y - ay) * ny
+    before: PathPoint | None = None
+
+    def step(after: PathPoint) -> bool:
+        nonlocal before
+        previous, before = before, after
+        if previous is None:
+            return False
+        side_before = (previous.x - ax) * nx + (previous.y - ay) * ny
         side_after = (after.x - ax) * nx + (after.y - ay) * ny
         forward = side_before < 0 <= side_after
         reverse = side_before >= 0 > side_after
         if not (forward or reverse) or (direction == "forward" and not forward) or (direction == "reverse" and not reverse):
-            continue
+            return False
         fraction = side_before / (side_before - side_after)
-        cross_x = before.x + (after.x - before.x) * fraction
-        cross_y = before.y + (after.y - before.y) * fraction
+        cross_x = previous.x + (after.x - previous.x) * fraction
+        cross_y = previous.y + (after.y - previous.y) * fraction
         along = ((cross_x - ax) * dx + (cross_y - ay) * dy) / length_squared
-        if 0 <= along <= 1:
-            moments.append(after)
-    return moments
+        return 0 <= along <= 1
+    return step
 
 
-def _loitering(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoint]:
+def _loitering_steps(condition: dict[str, Any]) -> Step:
     zone, dwell = condition["zone"], timedelta(seconds=condition["dwell_seconds"])
-    moments: list[PathPoint] = []
     entered: datetime | None = None
     reported = False
-    for point in path:
+
+    def step(point: PathPoint) -> bool:
+        nonlocal entered, reported
         if not _inside(zone, point):
             entered, reported = None, False
-            continue
+            return False
         entered = entered or point.at
         if not reported and point.at - entered >= dwell:
-            moments.append(point)
             reported = True
-    return moments
+            return True
+        return False
+    return step
 
 
-def _wrong_way(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoint]:
+def _wrong_way_steps(condition: dict[str, Any]) -> Step:
     zone = condition["zone"]
     ex, ey = DIRECTIONS[condition["direction"]]
-    moments: list[PathPoint] = []
     furthest: float | None = None
     reported = False
-    for point in path:
+
+    def step(point: PathPoint) -> bool:
+        nonlocal furthest, reported
         if not _inside(zone, point):
             furthest, reported = None, False
-            continue
+            return False
         progress = point.x * ex + point.y * ey
         furthest = progress if furthest is None else max(furthest, progress)
         if not reported and furthest - progress >= WRONG_WAY_DISTANCE:
-            moments.append(point)
             reported = True
-    return moments
+            return True
+        return False
+    return step
+
+
+def _inactivity_steps(condition: dict[str, Any]) -> Step:
+    """The first moment an object has stayed put (inside the zone, if there is one) for the set time; it can fire again only after the object has moved."""
+    zone, still_for = condition.get("zone"), timedelta(seconds=condition["still_seconds"])
+    anchor: PathPoint | None = None
+    reported = False
+
+    def step(point: PathPoint) -> bool:
+        nonlocal anchor, reported
+        if zone is not None and not _inside(zone, point):
+            anchor, reported = None, False
+            return False
+        if anchor is None or math.hypot(point.x - anchor.x, point.y - anchor.y) > STILL_RADIUS:
+            anchor, reported = point, False
+            return False
+        if not reported and point.at - anchor.at >= still_for:
+            reported = True
+            return True
+        return False
+    return step
+
+
+_CONDITIONS: dict[str, Callable[[dict[str, Any]], Step]] = {"zone_entry": _zone_entry_steps, "line_crossing": _line_crossing_steps, "loitering": _loitering_steps,
+                                                            "wrong_way": _wrong_way_steps, "inactivity": _inactivity_steps}
+
+
+def _moments(steps: Step, path: Iterable[PathPoint]) -> list[PathPoint]:
+    return [point for point in path if steps(point)]
 
 
 def _inactivity(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPoint]:
-    """The first moment an object has stayed put (inside the zone, if there is one) for the set time; it can fire again only after the object has moved."""
-    zone, still_for = condition.get("zone"), timedelta(seconds=condition["still_seconds"])
-    moments: list[PathPoint] = []
-    anchor: PathPoint | None = None
-    reported = False
-    for point in path:
-        if zone is not None and not _inside(zone, point):
-            anchor, reported = None, False
-            continue
-        if anchor is None or math.hypot(point.x - anchor.x, point.y - anchor.y) > STILL_RADIUS:
-            anchor, reported = point, False
-            continue
-        if not reported and point.at - anchor.at >= still_for:
-            moments.append(point)
-            reported = True
-    return moments
+    return _moments(_inactivity_steps(condition), path)
 
 
-_CONDITIONS = {"zone_entry": _zone_entries, "line_crossing": _line_crossings, "loitering": _loitering, "wrong_way": _wrong_way, "inactivity": _inactivity}
+def condition_steps(rule: Rule) -> Step:
+    """The rule's condition as a machine to feed a path's points to, one at a time and in order, without holding the path."""
+    return _CONDITIONS[rule.condition_type](rule.condition)
 
 
 def condition_moments(rule: Rule, path: list[PathPoint]) -> list[PathPoint]:
     """Every moment along a track's path that meets the rule's condition, in order."""
-    return _CONDITIONS[rule.condition_type](rule.condition, path)
+    return _moments(_CONDITIONS[rule.condition_type](rule.condition), path)
+
+
+def _eligible(rule: Rule, point: PathPoint, since: datetime | None, until: datetime | None = None) -> bool:
+    return (since is None or point.at >= since) and (until is None or point.at < until) and rule.scheduled(point.at)
 
 
 def eligible_moments(rule: Rule, path: list[PathPoint], *, since: datetime | None, until: datetime | None = None) -> list[PathPoint]:
     """Moments that meet the condition inside the schedule and [since, until); the cooldown is applied after."""
-    return [point for point in condition_moments(rule, path)
-            if (since is None or point.at >= since) and (until is None or point.at < until) and rule.scheduled(point.at)]
+    return [point for point in condition_moments(rule, path) if _eligible(rule, point, since, until)]
 
 
 def choose_moment(rule: Rule, moments: list[PathPoint], cooled: Callable[[datetime], bool]) -> PathPoint | None:
@@ -244,6 +280,104 @@ def load_rules(db: sqlite3.Connection) -> list[Rule]:
 def _track_path(db: sqlite3.Connection, track_id: str) -> list[PathPoint]:
     return path_from_rows(db.execute(
         "SELECT id,detected_at,box_x,box_y,box_width,box_height FROM ai_detections WHERE track_id=? ORDER BY detected_at,id", (track_id,)))
+
+
+class _Follower:
+    """How far one rule has got along one object's path: the condition's state, the moments found so far, and the last point it was fed.
+
+    The live pass used to read an object's whole path, from the first moment it was seen, for every new frame: 2 seconds a pass for twenty
+    vehicles parked for a day, with a frame arriving every two seconds, so alarms on every camera ran late (#347). A follower is fed only
+    the points stored since the last pass. It is kept in memory: after a restart, or whenever what it remembers no longer matches the
+    stored path, it is rebuilt from the whole path once."""
+    __slots__ = ("fingerprint", "steps", "moments", "count", "last")
+
+    def __init__(self, rule: Rule) -> None:
+        self.fingerprint = _fingerprint(rule)
+        self.steps = _CONDITIONS[rule.condition_type](rule.condition)
+        self.moments: list[PathPoint] = []
+        self.count = 0  # Points fed so far; equal to the track's stored count when nothing was missed or removed
+        self.last: tuple[str, int] | None = None  # (detected_at as stored, id) of the last point fed: the path's order
+
+    def feed(self, rule: Rule, rows: Iterable[sqlite3.Row]) -> None:
+        for row in rows:
+            key = (row["detected_at"], row["id"])
+            if self.last is not None and key <= self.last:
+                continue
+            self.last = key
+            self.count += 1
+            point = path_from_rows((row,))[0]
+            if self.steps(point) and _eligible(rule, point, rule.active_from):
+                self.moments.append(point)
+        del self.moments[:-MAX_REMEMBERED_MOMENTS]
+
+
+def _fingerprint(rule: Rule) -> str:
+    """What a follower's state depends on. A rule that is edited starts again from the whole path."""
+    return json.dumps([rule.condition_type, rule.condition, rule.schedule, rule.active_from.isoformat()], sort_keys=True, default=str)
+
+
+MAX_FOLLOWERS = 20_000  # Rules times objects in view; the least recently used go first
+MAX_REMEMBERED_MOMENTS = 1_000  # For an object that meets a condition again and again while the rule is cooling down
+_followers: dict[tuple[str, str, str], _Follower] = {}
+_followers_lock = threading.Lock()
+_ROW_SQL = "SELECT id,detected_at,box_x,box_y,box_width,box_height FROM ai_detections WHERE track_id=?"
+
+
+def _track_moments(db: sqlite3.Connection, database: str, track: sqlite3.Row, watching: list[Rule]) -> list[tuple[Rule, list[PathPoint]]]:
+    """The eligible moments of each watching rule along this track, reading only the points none of them has seen yet."""
+    with _followers_lock:
+        return _follow(db, database, track, watching)
+
+
+def _stored_count(db: sqlite3.Connection, track_id: str) -> int:
+    row = db.execute("SELECT detection_count FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _follow(db: sqlite3.Connection, database: str, track: sqlite3.Row, watching: list[Rule]) -> list[tuple[Rule, list[PathPoint]]]:
+    followers: list[tuple[Rule, _Follower]] = []
+    for rule in watching:
+        key = (database, rule.id, track["id"])
+        try:
+            follower = _followers.pop(key, None)
+            if follower is None or follower.fingerprint != _fingerprint(rule):
+                follower = _Follower(rule)
+        except Exception:  # noqa: BLE001 - one unreadable rule must not stop the others
+            logger.exception("Rule %s could not be evaluated; it is skipped", rule.id)
+            continue
+        _followers[key] = follower  # Re-inserted: the most recently used are last
+        followers.append((rule, follower))
+    starts = [follower.last for _, follower in followers]
+    everything = _ROW_SQL + " ORDER BY detected_at,id"
+    # The AI worker stores points while this reads, so the count is taken before and after: a follower that missed nothing has been fed
+    # at least the first and at most the second.
+    fewest = _stored_count(db, track["id"])
+    if followers and all(start is not None for start in starts):
+        earliest = min(start[0] for start in starts if start is not None)
+        rows = db.execute(_ROW_SQL + " AND detected_at>=? ORDER BY detected_at,id", (track["id"], earliest)).fetchall()
+        whole: list[sqlite3.Row] | None = None
+    else:
+        rows = whole = db.execute(everything, (track["id"],)).fetchall()
+    most = _stored_count(db, track["id"])
+    found = []
+    for rule, follower in followers:
+        try:
+            follower.feed(rule, rows)
+            if not fewest <= follower.count <= most:
+                # A point was stored out of order, or points were removed: what it remembers is not the stored path. Start again from all of it.
+                if whole is None:
+                    whole = db.execute(everything, (track["id"],)).fetchall()
+                follower = _followers[(database, rule.id, track["id"])] = _Follower(rule)
+                follower.feed(rule, whole)
+        except Exception:  # noqa: BLE001 - one unreadable rule must not stop the others
+            logger.exception("Rule %s could not be evaluated; it is skipped", rule.id)
+            _followers.pop((database, rule.id, track["id"]), None)
+            continue
+        if follower.moments:
+            found.append((rule, list(follower.moments)))
+    while len(_followers) > MAX_FOLLOWERS:
+        del _followers[next(iter(_followers))]
+    return found
 
 
 def _camera_groups(db: sqlite3.Connection, camera_id: str) -> set[str]:
@@ -306,6 +440,7 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
             return 0
         rules = load_rules(db)
         pending: list[tuple[Rule, sqlite3.Row, list[PathPoint]]] = []
+        database = str(db.execute("PRAGMA database_list").fetchone()[2])  # Followers are kept per database file
         for track_id in dict.fromkeys(row["track_id"] for row in fresh) if rules else ():
             track = db.execute("SELECT id,camera_id,label FROM ai_tracks WHERE id=?", (track_id,)).fetchone()
             if track is None:
@@ -315,15 +450,8 @@ def process_pending(batch_size: int = BATCH_SIZE) -> int:
                         and db.execute("SELECT 1 FROM rule_events WHERE rule_id=? AND track_id=?", (rule.id, track_id)).fetchone() is None]
             if not watching:
                 continue
-            path = _track_path(db, track_id)
-            for rule in watching:
-                try:
-                    moments = eligible_moments(rule, path, since=rule.active_from)
-                except Exception:  # noqa: BLE001 - one unreadable rule must not stop the others
-                    logger.exception("Rule %s could not be evaluated; it is skipped", rule.id)
-                    continue
-                if moments:
-                    pending.append((rule, track, moments))
+            for rule, moments in _track_moments(db, database, track, watching):
+                pending.append((rule, track, moments))
 
         occupied = _occupancy_moments(db, rules, cursor, fresh[-1]["id"])
 

@@ -24,8 +24,18 @@ from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
 from .storage import fetch_cold_sources, recording_file_path
 from .store import connect
+from app.clock import parse as clock_parse
 
 POLL_SECONDS = 2
+# A job marked running that nothing here is rendering is failed once it has shown no sign of life (a claim, a progress step) for this long.
+ORPHAN_AFTER_SECONDS = 60
+
+
+def _silent_for(updated_at: str | None, now: datetime, seconds: float) -> bool:
+    try:
+        return updated_at is None or (now - clock_parse(updated_at)).total_seconds() >= seconds
+    except (TypeError, ValueError):
+        return True
 MAX_ACTIVE_EXPORTS = 4
 MAX_EXPORT_CAMERAS = 16
 MAX_EXPORT_WINDOW = timedelta(hours=24)
@@ -884,10 +894,11 @@ class ExportManager:
                     running = [row[0] for row in db.execute("SELECT id FROM exports WHERE status='running'")]
                     if self._running is None and running and not self._stopping:
                         # Nothing is being rendered, yet a job says it is: its end could not be recorded (#357). Say so rather than leave it for ever.
-                        now = datetime.now(timezone.utc).isoformat()
-                        for row in db.execute("SELECT id,requested_by FROM exports WHERE status='running'").fetchall():
-                            if row["id"] == self._running:
-                                continue
+                        moment = datetime.now(timezone.utc)
+                        now = moment.isoformat()
+                        for row in db.execute("SELECT id,requested_by,updated_at FROM exports WHERE status='running'").fetchall():
+                            if row["id"] == self._running or not _silent_for(row["updated_at"], moment, ORPHAN_AFTER_SECONDS):
+                                continue  # A job that showed life a moment ago is not called abandoned on one look
                             db.execute("UPDATE exports SET status='failed',error=?,updated_at=?,completed_at=? WHERE id=? AND status='running'", ("Export was interrupted by an internal error; start it again", now, now, row["id"]))
                             db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)", (row["requested_by"], "export_failed", "export", row["id"], '{"reason":"worker_error"}'))
             except sqlite3.Error:

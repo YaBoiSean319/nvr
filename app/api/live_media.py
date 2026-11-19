@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import shutil
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -39,18 +39,35 @@ def live_counts() -> tuple[int, int]:
         return _live_view_count, _live_audio_count
 
 
-def transcode_counts() -> tuple[int, int]:
-    """Conversions of H.265 to H.264 running, and the viewers they serve."""
+def transcode_counts(hub: LiveHub | None = None) -> tuple[int, int]:
+    """Conversions of H.265 to H.264 with viewers, and the viewers they serve. Given the hub, the first number is every conversion
+    running, including one that is closing because its last viewer has just left."""
     with _live_view_lock:
-        return len(_transcodes), sum(_transcodes.values())
+        watched, viewers = set(_transcodes), sum(_transcodes.values())
+    return len(watched | {stream.key for stream in hub.conversions()} if hub is not None else watched), viewers
 
 
-def _acquire_transcode(key: tuple[str, ...]) -> bool:
+def _count_transcode(key: tuple[str, ...], limit: int) -> bool:
     with _live_view_lock:
-        if key not in _transcodes and len(_transcodes) >= MAX_LIVE_TRANSCODES:
+        if key not in _transcodes and len(_transcodes) >= limit:
             return False
         _transcodes[key] = _transcodes.get(key, 0) + 1
         return True
+
+
+async def _acquire_transcode(key: tuple[str, ...], hub: LiveHub) -> bool:
+    """A place for a viewer of the conversion with this stream key. Joining one that is running costs nothing more; a new one needs a free
+    place among ``MAX_LIVE_TRANSCODES``, counting conversions that are still running after their last viewer left. Those are closed to
+    make room, so the number running never passes the limit (#344)."""
+    while True:
+        running = hub.conversions()
+        if any(stream.key == key for stream in running) or len(running) < MAX_LIVE_TRANSCODES:
+            # The place is taken in the same step as the look, with nothing awaited between: two viewers cannot both take the last one.
+            return _count_transcode(key, MAX_LIVE_TRANSCODES)
+        unwatched = [stream for stream in running if not stream.viewers]
+        if not unwatched:
+            return False
+        await hub.evict(unwatched[0])
 
 
 def _release_transcode(key: tuple[str, ...]) -> None:
@@ -297,7 +314,7 @@ def live_camera(
         watching = viewing_audit.LiveSession(user.id, camera_id, quality)
         try:
             async for frame in _mjpeg_frames(camera_id, source, quality, zones):
-                if not guard.still_valid():
+                if not await guard.check():
                     return  # Masks or grants changed: the viewer reconnects under the new ones.
                 await watching.delivered()
                 yield frame
@@ -344,6 +361,38 @@ async def _ended(websocket: WebSocket, reason: str | None) -> None:
         await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": "Your access to this camera has ended"})
 
 
+@dataclass(frozen=True)
+class _Refusal:
+    code: int
+    message: dict[str, object]
+
+
+def _admit(websocket: WebSocket, camera_id: str, unmasked: bool) -> "_Refusal | tuple[Any, Any, list | None, privacy.StreamGuard]":
+    """Everything decided from the database when a viewer connects: who they are, the camera, its masks for them, and the guard that
+    keeps checking. Blocking; the handler runs it in a thread."""
+    try:
+        principal = current_user(websocket)
+    except HTTPException as exc:
+        if exc.status_code == 404:  # A camera this person may not see, refused exactly as one that does not exist.
+            return _Refusal(CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
+        code = CLOSE_UNAUTHORIZED if exc.status_code == 401 else CLOSE_FORBIDDEN
+        return _Refusal(code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
+    with connect() as db:
+        camera = db.execute(
+            "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at FROM cameras WHERE id=?",
+            (camera_id,),
+        ).fetchone()
+    if camera is None:
+        return _Refusal(CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
+    if camera["archived_at"]:
+        return _Refusal(CLOSE_ARCHIVED, {"type": "archived", "detail": "Camera is archived"})
+    try:
+        zones = privacy.zones_for(principal, camera_id, unmasked=unmasked)
+    except privacy.UnmaskedRefused as exc:
+        return _Refusal(CLOSE_FORBIDDEN, {"type": "forbidden", "detail": str(exc)})
+    return principal, camera, zones, privacy.StreamGuard(principal, camera_id, unmasked)
+
+
 @router.websocket("/api/cameras/{camera_id}/live/stream")
 @requires_scope("media")
 async def live_stream(
@@ -372,33 +421,14 @@ async def live_stream(
         return
     asked_at = time.monotonic()
     await websocket.accept()
-    try:
-        principal = current_user(websocket)
-    except HTTPException as exc:
-        if exc.status_code == 404:  # A camera this person may not see, refused exactly as one that does not exist.
-            await _refuse(websocket, CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
-            return
-        code = CLOSE_UNAUTHORIZED if exc.status_code == 401 else CLOSE_FORBIDDEN
-        await _refuse(websocket, code, {"type": "unauthorized" if code == CLOSE_UNAUTHORIZED else "forbidden", "detail": exc.detail})
+    # Who is asking, the camera and its masks are database reads (and, for an API token, a write): in a thread, so that a viewer
+    # connecting while the database is busy does not stop every other viewer's video (#355).
+    admitted = await asyncio.to_thread(_admit, websocket, camera_id, unmasked)
+    if isinstance(admitted, _Refusal):
+        await _refuse(websocket, admitted.code, admitted.message)
         return
-    with connect() as db:
-        camera = db.execute(
-            "SELECT stream_url_ciphertext,live_substream_url_ciphertext,video_codec,audio_enabled,archived_at FROM cameras WHERE id=?",
-            (camera_id,),
-        ).fetchone()
+    principal, camera, zones, guard = admitted
     fallback = f"/api/cameras/{camera_id}/live?quality={quality}" + ("&unmasked=true" if unmasked else "")
-    if camera is None:
-        await _refuse(websocket, CLOSE_NOT_FOUND, {"type": "not_found", "detail": "Camera not found"})
-        return
-    if camera["archived_at"]:
-        await _refuse(websocket, CLOSE_ARCHIVED, {"type": "archived", "detail": "Camera is archived"})
-        return
-    try:
-        zones = privacy.zones_for(principal, camera_id, unmasked=unmasked)
-    except privacy.UnmaskedRefused as exc:
-        await _refuse(websocket, CLOSE_FORBIDDEN, {"type": "forbidden", "detail": str(exc)})
-        return
-    guard = privacy.StreamGuard(principal, camera_id, unmasked)
     # A masked camera is transcoded with the mask drawn in (H.264, so any camera codec plays).
     variant = live_variant.choose(camera, zones, quality, hevc)
     video_filter, profile, codec, camera_is_hevc = variant.video_filter, variant.profile, variant.codec, variant.camera_is_hevc
@@ -417,19 +447,18 @@ async def live_stream(
         await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
         return
     include_audio = variant.include_audio
-    conversion_key = (camera_id, profile, "audio" if include_audio else "video", "h264", hashlib.sha256(source.encode()).hexdigest()[:16])
-    if transcode and not _acquire_transcode(conversion_key):
+    hub: LiveHub = websocket.app.state.live_hub
+    stream_key = conversion_key = live_variant.key_of(camera_id, variant, source)  # A conversion is counted by the stream that does it
+    if transcode and not await _acquire_transcode(conversion_key, hub):
         _release_live_view(camera_id)
         await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted view and retry"})
         return
     listening = audio and include_audio and _acquire_live_audio()
-    hub: LiveHub = websocket.app.state.live_hub
     viewer = Viewer()
 
     def mark_fresh() -> None:
         mark_camera_fresh(camera_id)
 
-    stream_key = live_variant.key_of(camera_id, variant, source)
     joined_running = (running := hub.streams.get(stream_key)) is not None and running.ready.is_set() and not running.failed
     stream = hub.join(stream_key, source, include_audio, viewer, mark_fresh, video_filter, transcode, hevc_copy)
     mode = variant.mode
@@ -471,7 +500,7 @@ async def live_stream(
             # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once.
             done, _ = await asyncio.wait({getter, receiver}, timeout=privacy.ACCESS_RECHECK_SECONDS, return_when=asyncio.FIRST_COMPLETED)
             if not done:
-                if not guard.still_valid() and guard.reason in {"access", "credential"}:
+                if not await guard.check() and guard.reason in {"access", "credential"}:
                     await _ended(websocket, guard.reason)
                     return
                 continue
@@ -494,7 +523,7 @@ async def live_stream(
                 continue
             item = getter.result()
             getter = None
-            if not guard.still_valid():
+            if not await guard.check():
                 if guard.reason in {"access", "credential"}:
                     await _ended(websocket, guard.reason)
                 else:

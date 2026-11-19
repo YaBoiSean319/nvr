@@ -96,14 +96,16 @@ def authenticate(presented: str) -> sqlite3.Row:
     return row
 
 
-def usable_token(token_id: str) -> sqlite3.Row:
-    """A token by id, for a session it signed in (a video wall), or raise TokenRejected."""
-    with connect() as db:
-        row = db.execute(
-            "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
-            "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
-            (token_id,),
-        ).fetchone()
+def usable_token(token_id: str, db: sqlite3.Connection | None = None) -> sqlite3.Row:
+    """A token by id, for a session it signed in (a video wall), or raise TokenRejected. ``db`` is a connection the caller already has open."""
+    if db is None:
+        with connect() as own:
+            return usable_token(token_id, own)
+    row = db.execute(
+        "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
+        "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
+        (token_id,),
+    ).fetchone()
     if row is None:
         raise TokenRejected("Invalid API token")
     _check_usable(row, _now())

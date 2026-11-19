@@ -7,6 +7,7 @@ whenever a privacy mask is in force, the NVR converts the stream to H.264 here. 
 snapshot stream just because a camera sends H.265; that only happens if both pass-through and conversion fail.
 
 - One conversion is shared by every viewer of the same stream, and counts once toward `MAX_LIVE_TRANSCODES` (4). A
+- A conversion closes a few seconds after its last viewer leaves, whatever **keep live video ready** is set to: only streams that are copied (or masked) are kept ready. While it is closing it still counts toward the limit, and it is closed at once if a new conversion needs its place, so no more than the limit ever run. **Settings › General › System status** shows how many are running.
   fifth different stream is refused with "busy" until one ends. Privacy-masked streams are already re-encoded and are not counted.
 - A camera's low-quality stream, whose codec is not recorded, is converted whenever the camera is H.265 and the browser is not given H.265 as it is.
 - The tile reads "converted" when the video was converted on the server.

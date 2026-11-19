@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, model_validator
 
 from app import console
-from app import clip_labels, external_events, privacy, track_privacy, viewing_audit
+from app import ai_coverage, clip_labels, external_events, privacy, track_privacy, viewing_audit
 from app.clock import canon
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
@@ -75,17 +75,14 @@ def synchronized_playback_timeline(
                 "SELECT id,label,confidence,first_seen_at,last_seen_at,box_json FROM ai_observations "
                 "WHERE camera_id=? AND first_seen_at>=? AND first_seen_at<? ORDER BY first_seen_at LIMIT 1000",
                 (camera_id, start_text, end_text)) if not (masks and track_privacy.box_touches(json.loads(row["box_json"]), masks))]
-            ai_unanalyzed = [dict(row) for row in db.execute(
-                "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
-                "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
-                (camera_id, canon(end_text), canon(start_text)))]
+            ai_unanalyzed = [{key: row[key] for key in ("state", "starts_at", "ends_at", "detail")}
+                             for row in ai_coverage.overlapping(db, camera_id, canon(start_text), canon(end_text)) if row["state"] != "analyzed"][:500]
             padded_start, padded_end = (start - timedelta(minutes=1)).isoformat(), (end + timedelta(minutes=1)).isoformat()
             seen, seen_values = track_privacy.track_visible_sql(track_privacy.zones_by_camera(db, [camera_id]), alias="t", window=(padded_start, padded_end))
             clip_labels.label_events(events, [dict(row) for row in db.execute(
                 f"SELECT t.label,t.first_seen_at,t.last_seen_at FROM ai_tracks t WHERE t.camera_id=? AND t.first_seen_at<? AND t.last_seen_at>=? AND {seen}",
-                (camera_id, padded_end, padded_start, *seen_values))], [dict(row) for row in db.execute(
-                "SELECT starts_at,ends_at FROM ai_coverage WHERE camera_id=? AND state='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?)",
-                (camera_id, canon(padded_end), canon(padded_start)))])
+                (camera_id, padded_end, padded_start, *seen_values))], [{"starts_at": row["starts_at"], "ends_at": row["ends_at"]}
+                for row in ai_coverage.overlapping(db, camera_id, canon(padded_start), canon(padded_end)) if row["state"] == "analyzed"])
             building_events = [{"id": row["id"], "type": row["type"], "label": external_events.label(row["type"]), "subject": row["subject"], "message": row["message"],
                                 "occurred_at": row["occurred_at"], "source_name": row["source_name"]} for row in db.execute(
                 "SELECT e.id,e.type,e.subject,e.message,e.occurred_at,e.source_name FROM external_events e JOIN external_event_cameras k ON k.event_id=e.id "

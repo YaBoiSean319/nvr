@@ -11,7 +11,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import track_privacy
+from . import ai_coverage, track_privacy
 from .attributes import DIRECTIONS, PALETTE, VEHICLE_TYPES, attribute_model_available, zone_cells
 from app.clock import parse as _parse, stamp
 
@@ -129,12 +129,8 @@ def coverage(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, e
     if not cameras or total == 0:
         return {"range_seconds": total, "searched_cameras": len(cameras), "analysed_percent": None, "fully_analysed": not cameras, "cameras": []}
     rows: dict[str, list[sqlite3.Row]] = {camera_id: [] for camera_id in cameras}
-    ids = list(cameras)
-    for chunk in range(0, len(ids), 500):
-        part = ids[chunk:chunk + 500]
-        for row in db.execute(f"SELECT camera_id,state,starts_at,ends_at,detail FROM ai_coverage WHERE camera_id IN ({','.join('?' * len(part))}) "
-                              "AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at", (*part, stamp(end), stamp(start))):
-            rows[row["camera_id"]].append(row)
+    for camera_id in cameras:
+        rows[camera_id] = ai_coverage.overlapping(db, camera_id, stamp(start), stamp(end))  # Only the part of each camera's history the range touches (#351)
     report = []
     analysed_total = 0.0
     for camera_id, name in cameras.items():

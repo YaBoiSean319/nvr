@@ -199,21 +199,49 @@ class StreamGuard:
             self.until = datetime.fromisoformat(grant["expires_at"]) if grant else _now()
 
     def still_valid(self) -> bool:
+        """Blocking: the once-a-second part reads the database. On an event loop use ``check`` instead."""
         if self.reason is not None:
             return False
-        if time.monotonic() - self._access_checked >= ACCESS_RECHECK_SECONDS:
-            self._access_checked = time.monotonic()
-            from .principal import refresh  # Late: principal imports this package's neighbours
+        if self._access_due():
+            self._recheck_access()
+        return self._masks_valid()
 
-            current = refresh(self.principal)
+    async def check(self) -> bool:
+        """``still_valid`` for code on an event loop: the database read runs in a thread, so a slow or busy database delays this one viewer's
+        check and not every other viewer's video, every asynchronous route and the worker's heartbeat (#355). The mask check is in memory."""
+        if self.reason is not None:
+            return False
+        if self._access_due():
+            await asyncio.to_thread(self._recheck_access)
+        return self._masks_valid()
+
+    def _access_due(self) -> bool:
+        if time.monotonic() - self._access_checked < ACCESS_RECHECK_SECONDS:
+            return False
+        self._access_checked = time.monotonic()
+        return True
+
+    def _recheck_access(self) -> None:
+        """Whether the sign-in still stands and still reaches this camera, on one connection, from the access the sign-in check just loaded."""
+        from .principal import refresh  # Late: principal imports this package's neighbours
+
+        with connect() as db:
+            current = refresh(self.principal, db)
             if current is None:  # Signed out, expired, revoked or removed: a quiet stream is cut as promptly as a busy one (#298)
                 self.reason = "credential"
-                return False
+                return
             self.user_id = int(current.id)
-            with connect() as db:
-                if not may_view_camera(db, self.user_id, self.camera_id):
-                    self.reason = "access"
-                    return False
+            access = getattr(current, "access", None)
+            if access is None or getattr(current, "credential", None) is None:
+                allowed = may_view_camera(db, self.user_id, self.camera_id)  # A principal built by hand carries no access of its own
+            else:
+                allowed = access.can_see(self.camera_id) and db.execute("SELECT 1 FROM cameras WHERE id=?", (self.camera_id,)).fetchone() is not None
+            if not allowed:
+                self.reason = self.reason or "access"
+
+    def _masks_valid(self) -> bool:
+        if self.reason is not None:
+            return False
         if generation(self.camera_id) != self.generation or (self.until is not None and _now() >= self.until):
             self.reason = "masks"
             return False

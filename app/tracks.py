@@ -223,10 +223,9 @@ def track_view(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def iter_unanalyzed(db: sqlite3.Connection, camera_id: str, start: str, end: str) -> Iterable[dict[str, Any]]:
-    return (dict(row) for row in db.execute(
-        "SELECT state,starts_at,ends_at,detail FROM ai_coverage "
-        "WHERE camera_id=? AND state!='analyzed' AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at LIMIT 500",
-        (camera_id, canon(end), canon(start))))  # ai_coverage is written in the canonical form
+    from .ai_coverage import overlapping
+    rows = [row for row in overlapping(db, camera_id, canon(start), canon(end)) if row["state"] != "analyzed"][:500]  # ai_coverage is written in the canonical form
+    return ({key: row[key] for key in ("state", "starts_at", "ends_at", "detail")} for row in rows)
 
 
 def encode_jpeg(frame: bytes) -> bytes | None:

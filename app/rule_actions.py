@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -281,7 +282,21 @@ def _finish(delivery_id: str, attempt: int, *, response_status: int | None = Non
             next_at = now + timedelta(seconds=RETRY_SECONDS[min(attempt - 1, len(RETRY_SECONDS) - 1)])
             db.execute("UPDATE rule_action_deliveries SET status=?,response_status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?",
                        ("queued" if retry else "failed", response_status, error, next_at.isoformat(), now.isoformat(), delivery_id))
-        db.execute("DELETE FROM rule_action_deliveries WHERE status IN ('delivered','failed') AND updated_at<?", ((now - KEEP_DELIVERIES).isoformat(),))
+        _prune_history(db, now)
+
+
+PRUNE_EVERY_SECONDS = 3600.0
+_pruned_at: float | None = None
+
+
+def _prune_history(db: sqlite3.Connection, now: Any) -> None:
+    """Drop finished deliveries past ``KEEP_DELIVERIES``. It ran after every delivery, reading the whole history each time; what it removes
+    is days old, so once an hour is as good (#353)."""
+    global _pruned_at
+    if _pruned_at is not None and time.monotonic() - _pruned_at < PRUNE_EVERY_SECONDS:
+        return
+    _pruned_at = time.monotonic()
+    db.execute("DELETE FROM rule_action_deliveries WHERE status IN ('delivered','failed') AND updated_at<?", ((now - KEEP_DELIVERIES).isoformat(),))
 
 
 def _message(payload: dict[str, Any]) -> str:

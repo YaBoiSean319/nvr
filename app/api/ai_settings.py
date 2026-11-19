@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.principal import Administrator, CurrentUser
-from app.store import connect
+from app.store import connect, has_row
 from app.detection import detector_availability, effective_camera_config, effective_vehicle_threshold, model_options, openvino_provider_options, validate_detector, MODEL_ID, MODEL_RUNTIME, MODEL_VERSION
 from app.api.cameras import MotionZoneRequest
 
@@ -44,7 +44,9 @@ def ensure_ai_settings(camera_id: str) -> sqlite3.Row:
     with connect() as db:
         if db.execute("SELECT 1 FROM cameras WHERE id=?", (camera_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="Camera not found")
-        db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
+        # Read first: this is behind a GET that every camera's AI tab polls, and even an insert that adds nothing takes the write lock (#348).
+        if not has_row(db, "SELECT 1 FROM ai_camera_settings WHERE camera_id=?", (camera_id,)):
+            db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
         row = db.execute("SELECT * FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
     return row
 

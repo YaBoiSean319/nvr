@@ -265,7 +265,10 @@ class LiveStream:
     def remove(self, viewer: Viewer, on_idle: Callable[[], None]) -> None:
         self.viewers.discard(viewer)
         if not self.viewers and self.linger is None:
-            self.linger = asyncio.get_running_loop().call_later(LINGER_SECONDS if self.linger_seconds is None else self.linger_seconds, on_idle)
+            # A conversion from H.265 is a full decode and re-encode: it is never kept for the next viewer, whatever "keep live video ready"
+            # says, or someone clicking through H.265 cameras leaves one running for ten minutes behind each (#344).
+            seconds = LINGER_SECONDS if self.transcode or self.linger_seconds is None else self.linger_seconds
+            self.linger = asyncio.get_running_loop().call_later(seconds, on_idle)
 
     def _broadcast(self, item: object) -> None:
         for viewer in list(self.viewers):
@@ -411,6 +414,20 @@ class LiveHub:
                 task.add_done_callback(self._closing.discard)
 
         stream.remove(viewer, close_if_idle)
+
+    def conversions(self) -> list[LiveStream]:
+        """The H.265 conversions running now, including one whose last viewer has just left and that has not closed yet."""
+        return [stream for stream in self.streams.values() if stream.transcode and not stream.failed]
+
+    async def evict(self, stream: LiveStream) -> None:
+        """Close a stream nobody is watching now, without waiting for it to close itself."""
+        if stream.viewers or self.streams.get(stream.key) is not stream:
+            return
+        if stream.linger:
+            stream.linger.cancel()
+            stream.linger = None
+        self.streams.pop(stream.key, None)
+        await stream.stop()
 
     async def close(self) -> None:
         streams = list(self.streams.values())

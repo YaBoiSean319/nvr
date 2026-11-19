@@ -17,7 +17,7 @@ from datetime import timedelta
 from typing import Any
 
 from .security import new_session_token, token_digest
-from .store import connect
+from .store import connect, has_row
 from app.clock import now as _now, parse, stamp
 
 LIFETIME = timedelta(days=30)
@@ -93,6 +93,9 @@ def resume(token: str) -> dict[str, Any] | None:
     digest, now = token_digest(token), _now()
     raw = PREFIX + new_session_token()
     with connect() as db:
+        # Read first: this route needs no sign-in, and a secret that matches nothing must not take the write lock (#353).
+        if not has_row(db, "SELECT 1 FROM device_sessions WHERE token_hash=? OR previous_hash=?", (digest, digest)):
+            return None
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute("SELECT s.*,u.username,u.role,u.provider_issuer FROM device_sessions s JOIN users u ON u.id=s.user_id "
