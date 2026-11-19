@@ -34,6 +34,7 @@ SAMPLE_RATE = 8000
 FRAME_SAMPLES = 160  # 20 ms
 MAX_INPUT_BYTES = 16000  # One message from the browser: a second of audio is far more than it sends
 MAX_TALK_SECONDS = 300
+MAX_KEPT_BYTES = MAX_TALK_SECONDS * SAMPLE_RATE * 2  # The longest talk, as 16-bit samples: all that is ever kept of one
 IDLE_SECONDS = 10
 RECORDING_KEEP_DAYS = 30
 ROLES = ("administrator", "operator")
@@ -412,8 +413,10 @@ class Talking:
     async def feed(self, data: bytes) -> None:
         if not data or len(data) > MAX_INPUT_BYTES or len(data) % 2:
             raise ValueError("Audio must be 16-bit samples, in pieces of up to a second")
-        if self.keep is not None:
-            self.keep += data
+        if self.keep is not None and len(self.keep) < MAX_KEPT_BYTES:
+            # What is kept is bounded by size as well as by time: a client can send faster than it speaks, and everything it sent in
+            # five minutes used to be held in memory and written out (#386). The longest talk at its real rate fits exactly.
+            self.keep += data[:MAX_KEPT_BYTES - len(self.keep)]
         self._pending = np.concatenate([self._pending, np.frombuffer(data, dtype="<i2")])
         while len(self._pending) >= FRAME_SAMPLES:
             frame, self._pending = self._pending[:FRAME_SAMPLES], self._pending[FRAME_SAMPLES:]

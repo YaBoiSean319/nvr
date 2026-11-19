@@ -76,3 +76,26 @@ class ObjectStoreDownloadTests(GrantCase):
         self.assertIn("part-way", str(raised.exception))
         with self.assertRaises(s3.S3Error):
             client.read_digest("segment.mp4")
+
+
+class TalkAudioTests(GrantCase):
+    def test_the_audio_kept_from_a_talk_is_bounded_however_fast_it_is_sent(self):
+        import asyncio
+        from unittest import mock
+
+        from app import talk
+
+        backchannel = mock.Mock()
+        backchannel.track.codec = next(iter(talk.ENCODERS))
+        backchannel.send = mock.AsyncMock()
+
+        async def flood() -> int:
+            with mock.patch.object(talk, "MAX_KEPT_BYTES", 40_000):
+                talking = talk.Talking(backchannel, keep_audio=True)
+                for _ in range(10):  # Ten seconds' worth, sent at once
+                    await talking.feed(b"\x01\x00" * (talk.MAX_INPUT_BYTES // 2))
+                return len(talking.keep)
+
+        self.assertEqual(asyncio.run(flood()), 40_000)
+        self.assertGreater(backchannel.send.await_count, 0)  # The camera still got the audio; only what is kept is bounded
+        self.assertEqual(talk.MAX_KEPT_BYTES, talk.MAX_TALK_SECONDS * talk.SAMPLE_RATE * 2)  # The longest talk at its real rate fits
