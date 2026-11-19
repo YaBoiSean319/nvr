@@ -21,9 +21,12 @@ SUPERVISED_WORKERS = ("web", "recorder", "exporter", "ai", "rules", "background"
 
 
 def record(name: str, *, state: str, pid: int | None = None, started: bool = False,
-           exit_code: int | None = None, exited: bool = False, restarted: bool = False) -> None:
+           exit_code: int | None = None, exited: bool = False, restarted: bool = False, busy_seconds: float | None = None) -> None:
+    """``busy_seconds``: how long to wait for another process's write to finish, when less than the usual ten seconds will do."""
     now = _now()
     with connect() as db:
+        if busy_seconds is not None:
+            db.execute(f"PRAGMA busy_timeout = {max(1, int(busy_seconds * 1000))}")
         db.execute("INSERT OR IGNORE INTO worker_status(name,state) VALUES(?,?)", (name, state))
         db.execute(
             "UPDATE worker_status SET state=?,pid=COALESCE(?,pid),"
