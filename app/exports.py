@@ -62,6 +62,10 @@ def verify_chain_member(archive: zipfile.ZipFile, installation_key: str | None =
             result = footage_chain.verify_extract(camera["chain"], camera.get("sources", []))
             entry = {"camera_id": camera.get("camera_id"), "status": "valid" if result["valid"] else "invalid", "error": result["error"],
                      "public_key": result["public_key"], "unsigned_segments": result["unsigned"]}
+            # A chain is signed for one camera. Another camera's valid chain placed under this camera's name proves nothing about it (#363).
+            owners = {camera["chain"].get("camera_id")} | {link.get("camera_id") for link in camera["chain"].get("links") or []}
+            if entry["status"] == "valid" and owners != {camera.get("camera_id")}:
+                entry.update(status="invalid", error="the chain under this camera belongs to another camera")
             if installation_key is not None:
                 entry["signed_by_this_installation"] = result["public_key"] == installation_key
                 if entry["status"] == "valid" and not entry["signed_by_this_installation"]:
@@ -799,9 +803,11 @@ def _record_completed(job: "_ExportJob", metadata: dict[str, Any], expires_at: s
     job_id = job.id
     requester = job.requester
     completed_at = datetime.now(timezone.utc)
+    # The hash of the file handed out: what a later check compares an uploaded package with, since the list inside a package is not signed (#363).
+    package_sha256 = footage_chain.file_sha256(job.final_path)
     with connect() as db:
-        updated = db.execute("UPDATE exports SET status='completed',progress=100,expires_at=?,metadata_json=?,output_relative_path=?,updated_at=?,completed_at=?,error=NULL WHERE id=? AND status='running' AND cancel_requested=0",
-                   (expires_at, json.dumps(metadata, separators=(",", ":")), f"{EXPORT_DIRECTORY}/{job_id}.zip", completed_at.isoformat(), completed_at.isoformat(), job_id))
+        updated = db.execute("UPDATE exports SET status='completed',progress=100,expires_at=?,metadata_json=?,output_relative_path=?,package_sha256=?,updated_at=?,completed_at=?,error=NULL WHERE id=? AND status='running' AND cancel_requested=0",
+                   (expires_at, json.dumps(metadata, separators=(",", ":")), f"{EXPORT_DIRECTORY}/{job_id}.zip", package_sha256, completed_at.isoformat(), completed_at.isoformat(), job_id))
         if updated.rowcount != 1:
             raise ExportCancelled()
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",

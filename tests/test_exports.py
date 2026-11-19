@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests.test_support import principal
 
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -784,6 +785,54 @@ class ExportJobTests(unittest.TestCase):
         self.assertEqual(row["actor_id"], self.user_id)
         self.assertEqual(row["action"], "evidence_verification_failed")
         self.assertEqual(json.loads(row["details_json"])["outcome"], "invalid")
+
+    def test_a_replaced_video_with_a_rewritten_checksum_list_is_not_the_package_that_was_issued(self):
+        # The list of checksums inside a package is not signed, so a forger rewrites it to match the video they put in (#363).
+        if not self.ffmpeg:
+            self.skipTest("FFmpeg is required to create an evidence export")
+        job_id = self._create()
+        completed = self._wait_for_status(job_id, "completed", "failed")
+        self.assertEqual(completed["status"], "completed", completed)
+        original = self.client.get(completed["download_url"]).content
+        genuine = self.client.post(f"/api/exports/{job_id}/verify", content=original, headers={"content-type": "application/zip"}).json()
+        self.assertEqual((genuine["checksums_valid"], genuine["issued_hash_recorded"], genuine["matches_issued_package"]), (True, True, True))
+        self.assertIn("is the package this NVR issued", genuine["authenticity"])
+
+        forged = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(original)) as source, zipfile.ZipFile(forged, "w", compression=zipfile.ZIP_STORED) as altered:
+            video_name = json.loads(source.read("metadata.json"))["cameras"][0]["video_file"]
+            replacement = source.read(video_name)[:-1] + b"\x00\x01"
+            integrity = json.loads(source.read("integrity.json"))
+            for item in integrity["files"]:
+                if item["path"] == video_name:
+                    item.update(sha256=hashlib.sha256(replacement).hexdigest(), size_bytes=len(replacement))
+            for name in source.namelist():
+                altered.writestr(name, replacement if name == video_name else json.dumps(integrity, indent=2, sort_keys=True) if name == "integrity.json" else source.read(name))
+        response = self.client.post(f"/api/exports/{job_id}/verify", content=forged.getvalue(), headers={"content-type": "application/zip"})
+        result = response.json()
+        self.assertTrue(result["checksums_valid"], "the forged list agrees with the forged video: this check alone is fooled")
+        self.assertIs(result["matches_issued_package"], False)
+        self.assertIn("NOT the package this NVR issued", result["authenticity"])
+        with connect() as db:
+            rows = db.execute("SELECT action,details_json FROM audit_log WHERE resource_id=? AND action LIKE 'evidence_%' ORDER BY id", (job_id,)).fetchall()
+        self.assertEqual([(row["action"], json.loads(row["details_json"])["issued_package"]) for row in rows],
+                         [("evidence_verified", "matches"), ("evidence_verification_failed", "differs")])
+
+    def test_an_export_made_before_the_issued_hash_was_kept_verifies_as_before_and_says_so(self):
+        if not self.ffmpeg:
+            self.skipTest("FFmpeg is required to create an evidence export")
+        job_id = self._create()
+        completed = self._wait_for_status(job_id, "completed", "failed")
+        payload = self.client.get(completed["download_url"]).content
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT package_sha256 FROM exports WHERE id=?", (job_id,)).fetchone()[0], hashlib.sha256(payload).hexdigest())
+            db.execute("UPDATE exports SET package_sha256=NULL WHERE id=?", (job_id,))
+        result = self.client.post(f"/api/exports/{job_id}/verify", content=payload, headers={"content-type": "application/zip"}).json()
+        self.assertEqual((result["checksums_valid"], result["issued_hash_recorded"], result["matches_issued_package"]), (True, False, None))
+        self.assertIn("before the NVR kept the hash", result["authenticity"])
+        with connect() as db:
+            row = db.execute("SELECT action,details_json FROM audit_log WHERE resource_id=? ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+        self.assertEqual((row["action"], json.loads(row["details_json"])["issued_package"]), ("evidence_verified", "not_recorded"))
 
     def test_evidence_verification_is_authenticated_and_scoped_to_export_owner(self):
         job_id = self._create()
