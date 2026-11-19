@@ -1,7 +1,6 @@
 """Case files: a case's items, members and holds, and its evidence packages."""
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -13,7 +12,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from app import cases, footage_chain
-from app.exports import MAX_VERIFY_PACKAGE_BYTES
+from app.api.export_jobs import received_package
 from app.principal import CurrentUser, requires_scope
 from app.retention import acquire_playback, release_playback
 from app.store import connect
@@ -293,23 +292,14 @@ async def verify_package(case_id: str, package_id: str, request: Request, user: 
     """Check an uploaded case package: every file against its manifest, and each clip's own evidence package."""
     with connect() as db:
         _package(db, case_id, package_id, user)
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MAX_VERIFY_PACKAGE_BYTES:
-        raise HTTPException(status_code=413, detail="The package exceeds the verification size limit")
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > MAX_VERIFY_PACKAGE_BYTES:
-            raise HTTPException(status_code=413, detail="The package exceeds the verification size limit")
-    data = bytes(body)
-    del body
-    result = await run_in_threadpool(cases.verify_package_bytes, data, case_id, package_id, footage_chain.public_key())
+    async with received_package(request, "The package exceeds the verification size limit") as (path, uploaded_sha256):
+        result = await run_in_threadpool(cases.verify_package_file, path, case_id, package_id, footage_chain.public_key())
     with connect() as db:
         package = db.execute("SELECT * FROM case_packages WHERE id=? AND case_id=?", (package_id, case_id)).fetchone()
         recorded = {row["export_id"]: row for row in db.execute(
             "SELECT p.export_id,e.metadata_json FROM case_package_clips p LEFT JOIN exports e ON e.id=p.export_id WHERE p.package_id=?", (package_id,))}
     # What the package's own manifest says is only as good as the package: it is checked against what this NVR built.
-    result["matches_issued_package"] = bool(package and package["sha256"] and hashlib.sha256(data).hexdigest() == package["sha256"])
+    result["matches_issued_package"] = bool(package and package["sha256"] and uploaded_sha256 == package["sha256"])
     result["clips_match_request"] = {clip["export_id"] for clip in result["clips"]} == set(recorded)
     for clip in result["clips"]:
         row = recorded.get(clip["export_id"])

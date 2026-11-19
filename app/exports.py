@@ -15,7 +15,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import IO, Any, Callable
 
 from . import acceleration, footage_chain, privacy, redaction, viewing_audit
 from . import dewarp as dewarp_geometry
@@ -76,13 +76,31 @@ def verify_chain_member(archive: zipfile.ZipFile, installation_key: str | None =
     return {"valid": all(item["status"] != "invalid" for item in cameras), "cameras": cameras, "error": None}
 
 
-def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None, installation_key: str | None = None) -> dict[str, Any]:
-    """Verify the evidence manifest against the exact uploaded ZIP member bytes.
+HASH_CHUNK = 1024 * 1024
 
-    This deliberately does not extract files or validate that media is playable.
+
+def member_digest(archive: zipfile.ZipFile, name: str) -> tuple[int, str]:
+    """A member's size and SHA-256, read a piece at a time: a package's video is never held whole in memory (#359)."""
+    digest, size = hashlib.sha256(), 0
+    with archive.open(name) as member:
+        while chunk := member.read(HASH_CHUNK):
+            digest.update(chunk)
+            size += len(chunk)
+    return size, digest.hexdigest()
+
+
+def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None, installation_key: str | None = None) -> dict[str, Any]:
+    """``verify_evidence_file`` for a package already in memory (a small one, or a test's)."""
+    return verify_evidence_file(io.BytesIO(package), expected_export_id, installation_key)
+
+
+def verify_evidence_file(package: "str | os.PathLike[str] | IO[bytes]", expected_export_id: str | None = None, installation_key: str | None = None) -> dict[str, Any]:
+    """Verify the evidence manifest against the exact uploaded ZIP member bytes, reading the package from a file.
+
+    This deliberately does not extract files or validate that media is playable. Blocking: callers on an event loop run it in a thread.
     """
     try:
-        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        with zipfile.ZipFile(package) as archive:
             infos = archive.infolist()
             names = [item.filename for item in infos]
             if len(names) != len(set(names)) or any(name.startswith("/") or ".." in Path(name).parts for name in names):
@@ -107,12 +125,11 @@ def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None,
             files = []
             valid = True
             for name in sorted(delivered):
-                content = archive.read(name)
-                digest = hashlib.sha256(content).hexdigest()
+                size, digest = member_digest(archive, name)
                 entry = expected[name]
-                matches = len(content) == entry.get("size_bytes") and digest == entry.get("sha256")
+                matches = size == entry.get("size_bytes") and digest == entry.get("sha256")
                 valid = valid and matches
-                files.append({"path": name, "size_bytes": len(content), "sha256": digest, "matches": matches})
+                files.append({"path": name, "size_bytes": size, "sha256": digest, "matches": matches})
             chain = verify_chain_member(archive, installation_key) if "chain.json" in delivered else None
             return {"checksums_valid": valid, "files": files, "chain": chain,
                     "error": None if valid else "one or more file checksums do not match"}
@@ -775,6 +792,11 @@ def _grid_timeline(job: "_ExportJob", union: list[dict[str, Any]]) -> dict[str, 
                          "global_gaps_compressed": global_gaps}
 
 
+def _chain_extract(camera_id: str, segment_ids: list[int]) -> dict[str, Any] | None:
+    with connect() as db:
+        return footage_chain.extract(db, camera_id, segment_ids)
+
+
 async def _signed_chain(job: "_ExportJob", per_camera: list[dict[str, Any]], metadata: dict[str, Any]) -> Path:
     """The signed footage chain for the sources used, written beside the videos; notes in the manifest which cameras' footage was signed."""
     work_dir = job.work_dir
@@ -789,11 +811,10 @@ async def _signed_chain(job: "_ExportJob", per_camera: list[dict[str, Any]], met
         sources = [{"segment_id": int(segment["id"]), "relative_path": segment["relative_path"],
                     "sha256": await asyncio.to_thread(footage_chain.file_sha256, recording_file_path(segment["relative_path"]))}
                    for segment in camera["segments"]]
-        with connect() as db:
-            extract = footage_chain.extract(db, camera["camera_id"], [source["segment_id"] for source in sources])
+        extract = await asyncio.to_thread(_chain_extract, camera["camera_id"], [source["segment_id"] for source in sources])
         chain_package["cameras"].append({"camera_id": camera["camera_id"], "sources": sources, "chain": extract})
     chain_path = work_dir / "chain.json"
-    chain_path.write_text(json.dumps(chain_package, indent=2, sort_keys=True), encoding="utf-8")
+    await asyncio.to_thread(chain_path.write_text, json.dumps(chain_package, indent=2, sort_keys=True), "utf-8")
     metadata["signed_footage"] = {camera["camera_id"]: ("signed" if camera["chain"] else "not_signed") for camera in chain_package["cameras"]}
     return chain_path
 
@@ -1026,8 +1047,10 @@ class ExportManager:
             chain_path = await _signed_chain(job, per_camera, metadata)
             expires_at = (datetime.now(timezone.utc) + EXPORT_RETENTION).isoformat()
             metadata["expires_at"] = expires_at
-            self._write_package(job, metadata, chain_path)
-            _record_completed(job, metadata, expires_at, total_segments)
+            # Hashing and copying up to 2 GiB into the zip, and hashing the result: in a thread. On the loop, the exporter's sign of life
+            # stopped for as long as it took, and past 30 seconds the supervisor ended the exporter with the export at 85 to 99 percent (#359).
+            await asyncio.to_thread(self._write_package, job, metadata, chain_path)
+            await asyncio.to_thread(_record_completed, job, metadata, expires_at, total_segments)
         except ExportCancelled:
             _record_cancelled(job)
         except asyncio.CancelledError:

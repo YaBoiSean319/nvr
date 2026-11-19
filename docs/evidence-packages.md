@@ -13,6 +13,8 @@ Content-Type: application/zip
 
 The verifier checks the SHA-256 and byte count of every listed member against the delivered bytes. It does not extract files or determine whether the MP4 files are playable. Playability remains a separate media validation step. Each verification records the actor and valid/invalid outcome in the audit log.
 
+An uploaded package is written to a temporary file beside the exports as it arrives, checked from there a piece at a time, and removed afterwards whether the check passes, fails or is refused. Checking a package therefore takes about the same memory whatever its size, and does not hold up the rest of the server while it runs. A case package's clips are checked the same way.
+
 Exports default to both individual camera videos and the synchronized grid. The ZIP manifest records each source interval and its output-clock mapping, selected outputs, display settings, audio policy, and package expiry. Optional audio is off by default and is available only when an administrator has enabled a camera's supported recorded audio. Individual videos use each camera's own audio. A grid uses one selected camera's audio, aligned to the grid output clock; missing source spans and globally compressed time remain silent.
 
 Individual outputs concatenate that camera's covered spans and compress each of its own gaps, so individual MP4s can have different durations. A grid output follows the union of selected-camera coverage and compresses only intervals where every selected camera lacks footage; retained camera tiles use a shared source clock and show gaps within each tile. These time-compression rules are distinct and are recorded in the package mapping and metadata.
