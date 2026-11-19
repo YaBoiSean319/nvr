@@ -46,3 +46,33 @@ class AudioCheckTests(GrantCase):
         self.assertNotIsInstance(raised.exception, subprocess.TimeoutExpired)
         self.assertNotIn("a-private-folder", str(raised.exception))
         self.assertNotIn("ffprobe", str(raised.exception))
+
+
+class ObjectStoreDownloadTests(GrantCase):
+    def client(self):
+        import httpx
+
+        from app import s3
+
+        class Breaks(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"the first part of the recording"
+                raise httpx.ReadError("the connection was reset")
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=Breaks())
+
+        return s3.S3Client("https://objects.example.test", "footage", "access", "a-secret-key-0123456789", transport=httpx.MockTransport(answer))
+
+    def test_a_download_that_fails_part_way_is_the_stores_own_kind_of_error(self):
+        from pathlib import Path
+
+        from app import s3
+
+        client = self.client()
+        target = Path(self.environment["NVR_RECORDINGS_PATH"]) / "fetched.mp4"
+        with self.assertRaises(s3.S3Error) as raised:
+            client.download("segment.mp4", target)
+        self.assertIn("part-way", str(raised.exception))
+        with self.assertRaises(s3.S3Error):
+            client.read_digest("segment.mp4")
