@@ -34,7 +34,7 @@ from .detection import box_iou
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback
 from .storage import fetch_cold_sources, recording_file_path
-from .store import connect
+from .store import connect, has_row
 from app.clock import now as _now
 
 MODEL_DIR = Path(os.environ.get("NVR_AI_REDACTION_MODEL_DIR", "/opt/nvr/models/redaction"))
@@ -498,6 +498,8 @@ def expire_reviews(now: datetime | None = None) -> None:
     """Reviews nobody used are forgotten after a day; one attached to an export stays with it."""
     cutoff = ((now or _now()) - REVIEW_TTL).isoformat()
     with connect() as db:
+        if not has_row(db, "SELECT 1 FROM redaction_reviews WHERE state NOT IN ('queued','analysing') AND updated_at<? LIMIT 1", (cutoff,)):
+            return  # Read first: an idle pass takes no write lock (#280, #353). Wider than the two deletes below, never narrower.
         db.execute("DELETE FROM redaction_reviews WHERE state NOT IN ('used','queued','analysing') AND updated_at<?", (cutoff,))
         # A used review stays for a retry only while its export can still be used; its boxes are not kept longer than that.
         db.execute("DELETE FROM redaction_reviews WHERE state='used' AND updated_at<? AND NOT EXISTS ("

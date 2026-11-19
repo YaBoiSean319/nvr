@@ -82,9 +82,17 @@ def _blocked(db: sqlite3.Connection, buckets: list[tuple[str, str]], now: dateti
 def _count(db: sqlite3.Connection, buckets: list[tuple[str, str]], address: str, now: datetime) -> None:
     db.execute("DELETE FROM auth_failures WHERE last_failure_at<? AND (blocked_until IS NULL OR blocked_until<?)",
                ((now - FORGET_AFTER).isoformat(), now.isoformat()))
+    address_is_past_its_own_allowance = False
     for scope, key in buckets:
         row = db.execute("SELECT failures,last_failure_at FROM auth_failures WHERE scope=? AND key=?", (scope, key)).fetchone()
         failures = 1 if row is None or now - _parse(row["last_failure_at"]) > FORGET_AFTER else int(row["failures"]) + 1
+        if scope == "pair":
+            address_is_past_its_own_allowance = failures > LIMITS["pair"][0]
+        elif scope == "account" and address_is_past_its_own_allowance:
+            # This address is already being slowed for this account. Its further tries are not added to the count that slows everyone: one
+            # address sending a wrong password every few minutes used to fill it, and then the real person waited too (#365). Reaching the
+            # account-wide limit takes guesses from several addresses, which is what that limit is for.
+            continue
         wait = _wait(scope, failures)
         db.execute("INSERT INTO auth_failures(scope,key,failures,last_failure_at,blocked_until) VALUES(?,?,?,?,?) "
                    "ON CONFLICT(scope,key) DO UPDATE SET failures=excluded.failures,last_failure_at=excluded.last_failure_at,blocked_until=excluded.blocked_until",
@@ -97,6 +105,10 @@ def _attempt(account: str, address: str, include_address: bool) -> None:
     now = _now()
     buckets = _buckets(account, address, include_address)
     with connect() as db:
+        waiting = _blocked(db, buckets, now)  # Read first: an attempt that is already being slowed is refused without taking the write lock (#353)
+        if waiting is not None:
+            raise HTTPException(status_code=429, detail=f"Too many failed attempts. Try again in {waiting.retry_after} seconds.",
+                                headers={"Retry-After": str(waiting.retry_after)})
         db.execute("BEGIN IMMEDIATE")
         try:
             throttle = _blocked(db, buckets, now)
@@ -149,9 +161,9 @@ def release(account: str, address: str, include_address: bool = True) -> None:
                 if failures == 0:
                     db.execute("DELETE FROM auth_failures WHERE scope=? AND key=?", (scope, key))
                     continue
-                wait = _wait(scope, failures)
-                until = (_parse(row["last_failure_at"]) + timedelta(seconds=wait)).isoformat() if wait else None
-                db.execute("UPDATE auth_failures SET failures=?,blocked_until=? WHERE scope=? AND key=?", (failures, until, scope, key))
+                # The attempt was let in, so nothing was waiting when it was made: taking it back leaves nothing waiting either. It used to start
+                # a new wait from this moment, which refused the second-factor step that follows a right password (#365).
+                db.execute("UPDATE auth_failures SET failures=?,blocked_until=NULL WHERE scope=? AND key=?", (failures, scope, key))
         except BaseException:
             db.execute("ROLLBACK")
             raise

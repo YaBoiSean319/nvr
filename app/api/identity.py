@@ -21,7 +21,7 @@ from app.clock import stamp
 from app.access import ensure_default_grant
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
 from app.security import hash_password, new_session_token, spend_password_time, token_digest, verify_password
-from app.store import connect
+from app.store import connect, has_row
 
 router = APIRouter()
 
@@ -148,6 +148,8 @@ def bootstrap(payload: BootstrapRequest, response: Response) -> dict[str, str]:
     if len(payload.password) < 14 or not any(c.isalpha() for c in payload.password) or not any(c.isdigit() for c in payload.password):
         raise HTTPException(status_code=422, detail="Password must be at least 14 characters and include a letter and a number")
     with connect() as db:
+        if has_row(db, "SELECT 1 FROM users LIMIT 1"):  # Read first: this route needs no sign-in, and a refusal must not take the write lock (#353)
+            raise HTTPException(status_code=409, detail="Initial setup is already complete")
         try:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT EXISTS(SELECT 1 FROM users)").fetchone()[0]:

@@ -1,6 +1,7 @@
 """Bulk camera adding as a job the server runs (#173): start one, watch it, stop it. Administrators only."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -44,13 +45,15 @@ def _view(job_id: str) -> dict[str, Any]:
 @router.post("/api/cameras/bulk-jobs", status_code=status.HTTP_201_CREATED)
 async def start_bulk_add(payload: BulkAddRequest, request: Request, admin: Administrator) -> dict[str, Any]:
     """Store the list and start working through it. The answer is the job as it stands; ``GET`` it to follow the progress. Passwords are kept encrypted until each camera is done."""
-    job_id = bulk_add.create_job([camera.model_dump() for camera in payload.cameras], created_by=admin.id, add_anyway=payload.add_anyway, recording=payload.recording)
+    # In a thread: storing a long list is many writes, and a write can wait for the database's lock, which must not stop the web process (#354).
+    job_id = await asyncio.to_thread(bulk_add.create_job, [camera.model_dump() for camera in payload.cameras], created_by=admin.id, add_anyway=payload.add_anyway,
+                                     recording=payload.recording)
     request.app.state.bulk_add.wake()
-    return _view(job_id)
+    return await asyncio.to_thread(_view, job_id)
 
 
 @router.get("/api/cameras/bulk-jobs/latest")
-async def latest_bulk_add(_: Administrator) -> dict[str, Any]:
+def latest_bulk_add(_: Administrator) -> dict[str, Any]:
     """The job still running, or the newest one finished within the last hour, so a page opened again can pick it up."""
     with connect() as db:
         job_id = bulk_add.latest_job_id(db)
@@ -58,12 +61,12 @@ async def latest_bulk_add(_: Administrator) -> dict[str, Any]:
 
 
 @router.get("/api/cameras/bulk-jobs/{job_id}")
-async def bulk_add_job(job_id: str, _: Administrator) -> dict[str, Any]:
+def bulk_add_job(job_id: str, _: Administrator) -> dict[str, Any]:
     return _view(job_id)
 
 
 @router.post("/api/cameras/bulk-jobs/{job_id}/cancel")
-async def cancel_bulk_add(job_id: str, _: Administrator) -> dict[str, Any]:
+def cancel_bulk_add(job_id: str, _: Administrator) -> dict[str, Any]:
     if not bulk_add.cancel_job(job_id):
         raise HTTPException(status_code=404, detail="No such bulk add")
     return _view(job_id)

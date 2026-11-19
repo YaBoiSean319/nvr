@@ -11,7 +11,7 @@ import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from .store import connect
+from .store import connect, has_row
 
 GIB = 1 << 30
 DEFAULT_SHARE = 0.05
@@ -123,7 +123,9 @@ def keep_headroom(now: datetime | None = None) -> dict[str, dict[str, int]]:
                            (volume_id, now.isoformat(), removed_segments, removed_bytes, newest))
         _record_check(volume_id, now, max(0, wanted - free))
         with connect() as db:
-            db.execute("DELETE FROM storage_headroom_removals WHERE removed_at<?", ((now - timedelta(days=KEEP_LOG_DAYS)).isoformat(),))
+            old = ((now - timedelta(days=KEEP_LOG_DAYS)).isoformat(),)
+            if has_row(db, "SELECT 1 FROM storage_headroom_removals WHERE removed_at<? LIMIT 1", old):  # Read first (#280, #353)
+                db.execute("DELETE FROM storage_headroom_removals WHERE removed_at<?", old)
         results[volume_id] = {"removed_segments": removed_segments, "removed_bytes": removed_bytes, "short_bytes": max(0, wanted - free)}
     return results
 

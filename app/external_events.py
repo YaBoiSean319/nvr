@@ -152,8 +152,10 @@ def ingest(db: sqlite3.Connection, source: sqlite3.Row, event: dict[str, Any], *
     return {"id": row_id, "cameras": cameras, "alarms": fired}
 
 
-def receive_http(source_id: str, body: bytes, headers: Any, *, now: datetime | None = None) -> dict[str, Any]:
-    """Accept a signed event for an HTTP source. Everything wrong with the sender is answered 401 alike, so nothing says which sources exist."""
+def receive_http(source_id: str, body: bytes, headers: Any, *, now: datetime | None = None, admit: Any = None) -> dict[str, Any]:
+    """Accept a signed event for an HTTP source. Everything wrong with the sender is answered 401 alike, so nothing says which sources exist.
+
+    ``admit`` is called once the signature has been checked and before anything is stored: it may raise ``EventRefused`` (the source's rate limit)."""
     if len(body) > MAX_BODY_BYTES:
         raise EventRefused(413, "The event is too large")
     now = now or _now()
@@ -163,6 +165,8 @@ def receive_http(source_id: str, body: bytes, headers: Any, *, now: datetime | N
     # An unknown source is checked against a secret that cannot match, so the work done is the same.
     if not verify_signature(secret or uuid.uuid4().hex, body, headers.get("x-nvr-timestamp"), headers.get("x-nvr-signature"), now.timestamp()) or source is None:
         raise EventRefused(401, "Not signed, or signed wrongly, or stale")
+    if admit is not None:
+        admit()
     try:
         event = parse_event(json.loads(body.decode("utf-8")), now=now)
     except (UnicodeDecodeError, json.JSONDecodeError):

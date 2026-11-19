@@ -1,6 +1,7 @@
 """External events in (#138): the signed inbound endpoint, event sources and their camera mappings (administrators), Home Assistant, and the events on cameras."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import deque
@@ -10,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import external_events, home_assistant
+from app import external_events, home_assistant, network
 from app.external_events import EventRefused, SourceError
 from app.principal import Administrator, CurrentUser
 from app.store import connect
@@ -52,18 +53,27 @@ def _audit(db, actor, action: str, resource_id: str, details: dict[str, object])
                (int(actor["id"]), action, "event_source", resource_id, json.dumps(details, separators=(",", ":"))))
 
 
-def _limited(source_id: str) -> bool:
-    """More than RATE_PER_MINUTE events a minute for one source are refused (429), so a runaway sender cannot fill the database."""
+UNVERIFIED_PER_MINUTE = 120  # Requests from one caller that fail the signature check before it is answered "too many" instead of "not accepted"
+_swept = {"at": 0.0}
+
+
+def _limited(key: str, allowance: int | None = None) -> bool:
+    """Whether ``key`` has used its allowance for this minute; otherwise this use is counted.
+
+    A source's allowance (``RATE_PER_MINUTE``) is used only by events whose signature was right, so a runaway sender cannot fill the database
+    and nobody else can use the allowance up: requests were once counted before their signature was checked, by the connecting address, which
+    behind a proxy is the same for everyone, so anyone who knew a source's address could have the real sender's events refused (#380)."""
     now = time.monotonic()
-    window = _recent.setdefault(source_id, deque())
+    if now - _swept["at"] > 60:  # On a timer, not on every request
+        _swept["at"] = now
+        for stale in [name for name, times in _recent.items() if not times or now - times[-1] > 60]:
+            del _recent[stale]
+    window = _recent.setdefault(key, deque())
     while window and now - window[0] > 60:
         window.popleft()
-    if len(window) >= RATE_PER_MINUTE:
+    if len(window) >= (RATE_PER_MINUTE if allowance is None else allowance):
         return True
     window.append(now)
-    if len(_recent) > 1000:
-        for key in [key for key, times in _recent.items() if not times or now - times[-1] > 60]:
-            del _recent[key]
     return False
 
 
@@ -72,9 +82,6 @@ def _limited(source_id: str) -> bool:
 @router.post("/api/inbound/events/{source_id}", status_code=202)
 async def inbound(source_id: str, request: Request) -> JSONResponse:
     """Accept an event from a building system. It must be signed with the source's secret (see docs/external-events.md); anything else is refused."""
-    # Counted per sender address as well as per source, so someone who only knows a source's id cannot use up the real sender's allowance.
-    if _limited(f"{source_id[:64]}|{request.client.host if request.client else ''}"):
-        return JSONResponse({"detail": "Too many events"}, status_code=429)
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > external_events.MAX_BODY_BYTES:
         return JSONResponse({"detail": "The event is too large"}, status_code=413)
@@ -85,9 +92,18 @@ async def inbound(source_id: str, request: Request) -> JSONResponse:
         if len(body) > external_events.MAX_BODY_BYTES:
             return JSONResponse({"detail": "The event is too large"}, status_code=413)
     body = bytes(body)
+    def admit() -> None:  # The signature was right: this event counts against its source's allowance
+        if _limited(f"source|{source_id}"):
+            raise EventRefused(429, "Too many events")
+
     try:
-        result = external_events.receive_http(source_id, body, request.headers)
+        # In a thread: storing the event takes the database's write lock, and waiting for it must not stop the web process (#354).
+        result = await asyncio.to_thread(external_events.receive_http, source_id, body, request.headers, admit=admit)
     except EventRefused as exc:
+        if exc.status == 401 and _limited(f"unverified|{network.client_address(request)}", UNVERIFIED_PER_MINUTE):
+            # A caller that keeps failing the check is told to slow down. Its requests are still checked, never dropped unread: a correctly signed
+            # event from the same address (the real sender behind the same proxy) is always accepted.
+            return JSONResponse({"detail": "Too many events"}, status_code=429)
         # The reason a sender is not trusted is never told; once it is trusted, why its event was refused is.
         detail = "Not accepted" if exc.status == 401 else exc.reason
         return JSONResponse({"detail": detail}, status_code=exc.status)

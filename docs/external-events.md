@@ -33,7 +33,7 @@ sig = hmac.new(SECRET.encode(), stamp.encode() + b"." + body, hashlib.sha256).he
 urllib.request.urlopen(urllib.request.Request(URL, body, {"Content-Type": "application/json", "X-NVR-Timestamp": stamp, "X-NVR-Signature": "sha256=" + sig}))
 ```
 
-The same answer (401) is given for an unknown source, a disabled one, a missing or wrong signature and a timestamp more than 5 minutes off. A repeated signature or `event_id` is 409, a body too large 413, more than 600 events a minute from one source 429.
+The same answer (401) is given for an unknown source, a disabled one, a missing or wrong signature and a timestamp more than 5 minutes off. A repeated signature or `event_id` is 409, a body too large 413, more than 600 events a minute from one source 429. A source may send 600 events a minute; only events whose signature is right count towards that, so nobody else can use a source's allowance up. More are answered 429. A caller whose requests keep failing the signature check (more than 120 a minute) is answered 429 as well; its requests are still checked, so a correctly signed event from the same address is always accepted.
 
 ## MQTT
 
