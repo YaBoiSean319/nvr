@@ -194,7 +194,11 @@ def _has_audio(path: Path) -> bool:
     probe = shutil.which("ffprobe")
     if not probe:
         raise RuntimeError("ffprobe is unavailable; optional audio cannot be verified")
-    result = subprocess.run([probe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=15, check=False)
+    try:
+        result = subprocess.run([probe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=15, check=False)
+    except subprocess.TimeoutExpired:
+        # The export's stored error was this exception's text, which includes the command line and the file's path (#386).
+        raise RuntimeError("The recording's audio could not be checked in time") from None
     return result.returncode == 0 and bool(result.stdout.strip())
 
 

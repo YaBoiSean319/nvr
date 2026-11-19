@@ -25,3 +25,24 @@ class WebhookUpdateTests(GrantCase):
         self.assertEqual((changed.json()["webhook"]["name"], changed.json()["webhook"]["enabled"]), ("Operations receiver", True))
         renamed = self.admin.patch(f"/api/webhooks/{webhook['id']}", json={"name": "Night desk", "enabled": False}).json()["webhook"]
         self.assertEqual((renamed["name"], renamed["enabled"]), ("Night desk", False))  # A real change still applies
+
+
+class AudioCheckTests(GrantCase):
+    def test_an_audio_check_that_times_out_says_so_without_the_command_or_the_files_path(self):
+        import subprocess
+        from pathlib import Path
+        from unittest import mock
+
+        from app import exports
+
+        path = Path(self.environment["NVR_RECORDINGS_PATH"]) / "a-private-folder" / "segment.mp4"
+
+        def slow(command, *args, **kwargs):
+            raise subprocess.TimeoutExpired(command, 15)
+
+        with mock.patch.object(exports.subprocess, "run", slow), mock.patch.object(exports.shutil, "which", lambda name: "/usr/bin/ffprobe"):
+            with self.assertRaises(RuntimeError) as raised:
+                exports._has_audio(path)
+        self.assertNotIsInstance(raised.exception, subprocess.TimeoutExpired)
+        self.assertNotIn("a-private-folder", str(raised.exception))
+        self.assertNotIn("ffprobe", str(raised.exception))

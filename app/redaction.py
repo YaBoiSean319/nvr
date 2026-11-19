@@ -648,9 +648,13 @@ def preview_frame(review_id: str, row: sqlite3.Row, camera_id: str, at: float) -
         if span is None:
             raise LookupError("No picture at that time")
         offset = (span["source_start"] - _parse_time(span["segment"]["starts_at"])).total_seconds() + (at - span["output_start"])
-        decoded = subprocess.run([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(recording_file_path(span["segment"]["relative_path"])),
-                                  "-map", "0:v:0", "-frames:v", "1", "-vf", _decode_filter(plan["zones"], None), "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"],
-                                 capture_output=True, timeout=120, check=False)
+        try:
+            decoded = subprocess.run([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(recording_file_path(span["segment"]["relative_path"])),
+                                      "-map", "0:v:0", "-frames:v", "1", "-vf", _decode_filter(plan["zones"], None), "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"],
+                                     capture_output=True, timeout=120, check=False)
+        except subprocess.TimeoutExpired:
+            # FFmpeg taking too long is "no picture", like any other way it fails; it used to be a server error (#386).
+            raise LookupError("No picture at that time") from None
         if decoded.returncode != 0 or len(decoded.stdout) < FRAME_BYTES:
             raise LookupError("No picture at that time")
         image = np.frombuffer(decoded.stdout[:FRAME_BYTES], dtype=np.uint8).reshape(FRAME_HEIGHT, FRAME_WIDTH, 3).copy()
@@ -661,8 +665,11 @@ def preview_frame(review_id: str, row: sqlite3.Row, camera_id: str, at: float) -
         for region in regions.get("manual", []):
             if region["camera_id"] == camera_id and (box := _manual_box(region, tracks, at)) is not None:
                 _outline(image, box, (0, 140, 255))
-        encoded = subprocess.run([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
-                                  "-i", "pipe:0", "-frames:v", "1", "-f", "mjpeg", "pipe:1"], input=image.tobytes(), capture_output=True, timeout=60, check=False)
+        try:
+            encoded = subprocess.run([_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
+                                      "-i", "pipe:0", "-frames:v", "1", "-f", "mjpeg", "pipe:1"], input=image.tobytes(), capture_output=True, timeout=60, check=False)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("The picture could not be encoded") from None
         if encoded.returncode != 0 or not encoded.stdout:
             raise RuntimeError("The picture could not be encoded")
         return encoded.stdout

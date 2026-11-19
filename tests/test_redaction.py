@@ -301,6 +301,20 @@ class ReviewTests(RedactionCase):
         self.assertIsNone(review["confirmed_at"])
         self.assertNotIn("samples", review["tracks"][0])
 
+    def test_a_preview_picture_that_ffmpeg_cannot_make_in_time_is_no_picture_not_a_server_error(self):
+        review = self.analysed()
+        real = redaction.subprocess.run
+
+        def slow(command, *args, **kwargs):
+            if "rawvideo" in command:
+                raise redaction.subprocess.TimeoutExpired(command, kwargs.get("timeout", 0))
+            return real(command, *args, **kwargs)
+
+        with mock.patch.object(redaction.subprocess, "run", slow):
+            answer = self.client.get(f"/api/redaction/reviews/{review['id']}/frame", params={"camera_id": self.camera, "t": 1.0})
+        self.assertEqual(answer.status_code, 404, answer.text)
+        self.assertEqual(answer.json()["detail"], "No picture at that time")
+
     def test_only_the_kinds_asked_for_are_looked_for(self):
         review = self.analysed(self.review(kinds=["plates"]))
         self.assertEqual([track["kind"] for track in review["tracks"]], ["plate"])
