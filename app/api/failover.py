@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import failover
@@ -113,7 +113,9 @@ _failures: dict[str, deque[float]] = {}
 
 
 def _blocked(host: str) -> bool:
-    """A sender that has failed the signature too often in the last minute is refused (429) without being checked, so guessing the secret is not worth trying."""
+    """Whether an address has sent too many badly signed requests in the last minute. Its further bad requests get 429. A correctly signed
+    request is never refused for this: the count is by address, and the primary may share one with others behind a proxy or NAT, who could
+    otherwise shut out its renewals and make a healthy primary look silent (#343)."""
     now = time.monotonic()
     window = _failures.setdefault(host, deque())
     while window and now - window[0] > 60:
@@ -130,8 +132,6 @@ def _target(request: Request) -> str:
 
 async def _signed(request: Request) -> bytes:
     host = request.client.host if request.client else ""
-    if _blocked(host):
-        raise failover.PeerError(429, "Too many refused requests")
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
         raise failover.PeerError(413, "The request is too large")
@@ -144,6 +144,8 @@ async def _signed(request: Request) -> bytes:
     try:
         await run_in_threadpool(failover.authenticate, request.method, _target(request), body, request.headers.get("x-failover-timestamp"), request.headers.get("x-failover-signature"))
     except failover.PeerError:
+        if _blocked(host):
+            raise failover.PeerError(429, "Too many refused requests") from None
         _failures.setdefault(host, deque()).append(time.monotonic())
         raise
     return body
@@ -161,11 +163,16 @@ def _epoch(request: Request) -> int:
 
 
 @router.post("/api/inbound/failover/lease")
-async def lease(request: Request) -> JSONResponse:
+async def lease(request: Request) -> Response:
     """The primary renews its lease. The standby's answer says whether it is granted and whether footage waits to be brought back."""
     try:
         await _signed(request)
-        return JSONResponse(await run_in_threadpool(failover.standby_lease, {}))
+        answer = json.dumps(await run_in_threadpool(failover.standby_lease, {}), separators=(",", ":")).encode()
+        # Signed, and bound to the request it answers: the primary yields only to an answer it can prove came from its standby.
+        with connect() as db:
+            secret = failover.shared_secret(db)
+        signed = failover.sign_answer(secret or "", "/api/inbound/failover/lease", answer, request.headers.get("x-failover-signature", ""))
+        return Response(answer, media_type="application/json", headers=signed)
     except failover.PeerError as exc:
         return _refusal(exc)
 

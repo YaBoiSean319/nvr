@@ -304,7 +304,9 @@ class PeerEndpointTests(FailoverCase):
         for _ in range(api.MAX_FAILURES_PER_MINUTE):
             self.assertEqual(client.post("/api/inbound/failover/lease", content=b"{}").status_code, 401)
         self.assertEqual(client.post("/api/inbound/failover/lease", content=b"{}").status_code, 429)
-        self.assertEqual(self.request("POST", "/api/inbound/failover/lease", b"{}", client=client).status_code, 429)  # Even a good request, for a minute
+        # A correctly signed request is still accepted: the primary may share its address with whoever is flooding (#343). It used to be refused for a minute.
+        self.assertEqual(self.request("POST", "/api/inbound/failover/lease", b"{}", client=client).status_code, 200)
+        self.assertEqual(client.post("/api/inbound/failover/lease", content=b"{}").status_code, 429)  # And the flood is still refused
         api._failures.clear()
         self.assertEqual(self.request("POST", "/api/inbound/failover/lease", b"{}", client=client).status_code, 200)
 
