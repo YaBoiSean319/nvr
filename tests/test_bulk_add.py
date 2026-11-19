@@ -267,6 +267,124 @@ class JobTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in view["items"]], ["skipped"])  # It was put back in the queue of a job nobody works (#386)
         self.assertEqual(self.rows("SELECT COUNT(*) FROM camera_add_items WHERE password_ciphertext IS NOT NULL")[0][0], 0)
 
+    # --- several discovered devices with one login (#173) ------------------------------------------------------------------------
+
+    def discovered(self, candidate_id: str, device_uuid: str, service_url: str, *, linked: str | None = None, claimed_until: str | None = None) -> str:
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
+            if linked:
+                db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext) VALUES(?,?,?)", (linked, f"Existing {linked}", b""))
+            db.execute("INSERT INTO discovery_candidates(id,device_uuid,service_urls,scopes,capabilities,linked_camera_id,add_claim_token,add_claimed_until) "
+                       "VALUES(?,?,?,'[]','{}',?,?,?)",
+                       (candidate_id, device_uuid, json.dumps([service_url]), linked, "someone-else" if claimed_until else None, claimed_until))
+        return candidate_id
+
+    def start_discovered(self, candidate_ids, **options):
+        return self.client.post("/api/cameras/bulk-jobs/discovered", json={"candidate_ids": candidate_ids, "username": "admin", "password": PASSWORD, **options})
+
+    def linking_add(self):
+        """add_camera as it treats a discovery claim: the new camera is linked to the record the claim holds, and the claim ends."""
+        claims: list = []
+
+        async def add(payload, recorders, *, discovery_claim=None):
+            claims.append(discovery_claim)
+            camera = await self.fake_add(payload, recorders)
+            if discovery_claim:
+                with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
+                    linked = db.execute("UPDATE discovery_candidates SET linked_camera_id=?,add_claim_token=NULL,add_claimed_until=NULL WHERE id=? AND add_claim_token=?",
+                                        (camera["id"], discovery_claim["candidate_id"], discovery_claim["token"])).rowcount
+                self.assertEqual(linked, 1, "the claim given to add_camera was not the one held")
+            return camera
+
+        return add, claims
+
+    def test_discovered_devices_are_added_with_one_login_from_their_discovery_records(self):
+        gate = self.discovered("cand-gate", "5f1c0a52-0000-4000-8000-000000000001", "http://192.0.2.20:8080/onvif/device_service")
+        dock = self.discovered("cand-dock", "ipscan:192.0.2.21", "http://192.0.2.21/onvif/device_service")
+        response = self.start_discovered([gate, dock], recording=True)
+        self.assertEqual(response.status_code, 201, response.text)
+        job = response.json()
+        self.assertEqual([(item["row"], item["host"], item["status"]) for item in job["items"]], [(1, "192.0.2.20:8080", "queued"), (2, "192.0.2.21", "queued")])
+        self.assertNotIn(PASSWORD, json.dumps(job))
+        add, claims = self.linking_add()
+        inspect = self.work(add=add)
+        # Each device is reached at the ONVIF service its discovery record holds, with the shared login.
+        calls = sorted((call.args[0], call.args[1], call.args[2], call.kwargs["device_service_url"]) for call in inspect.await_args_list)
+        self.assertEqual(calls, [("192.0.2.20", "admin", PASSWORD, "http://192.0.2.20:8080/onvif/device_service"),
+                                 ("192.0.2.21", "admin", PASSWORD, "http://192.0.2.21/onvif/device_service")])
+        saved = {payload.camera_ip: payload for payload in self.added}
+        self.assertEqual(saved["192.0.2.20"].onvif_uuid, "5f1c0a52-0000-4000-8000-000000000001")  # Its ONVIF identity is kept
+        self.assertIsNone(saved["192.0.2.21"].onvif_uuid)  # A device found by address has none
+        self.assertEqual(saved["192.0.2.20"].name, "Hanwha XNV-6120R 192.0.2.20:8080")
+        self.assertTrue(all(payload.recording_enabled for payload in self.added))
+        self.assertEqual(sorted(claim["candidate_id"] for claim in claims), [dock, gate])
+        links = {row["id"]: (row["linked_camera_id"], row["add_claim_token"]) for row in self.rows("SELECT id,linked_camera_id,add_claim_token FROM discovery_candidates")}
+        self.assertTrue(all(camera and token is None for camera, token in links.values()), links)  # Both linked to their new cameras
+        view = self.job(job["id"])
+        self.assertEqual((view["state"], view["counts"]), ("done", {"added": 2}))
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM camera_add_items WHERE password_ciphertext IS NOT NULL")[0][0], 0)
+        started = self.rows("SELECT details_json FROM audit_log WHERE action='camera_bulk_add_started'")
+        self.assertEqual(json.loads(started[0][0])["discovered"], 2)
+        self.assertNotIn(PASSWORD, json.dumps([tuple(row) for row in self.rows("SELECT * FROM audit_log")]))
+
+    def test_a_choice_of_discovered_devices_must_still_be_valid(self):
+        gate = self.discovered("cand-gate", "5f1c0a52-0000-4000-8000-000000000001", "http://192.0.2.20/onvif/device_service")
+        self.discovered("cand-done", "5f1c0a52-0000-4000-8000-000000000002", "http://192.0.2.22/onvif/device_service", linked="camera-old")
+        missing = self.start_discovered([gate, "cand-forgotten"])
+        self.assertEqual(missing.status_code, 404)
+        self.assertIn("1 of the selected devices are no longer in the discovery list", missing.json()["detail"])
+        already = self.start_discovered([gate, "cand-done"])
+        self.assertEqual(already.status_code, 409)
+        self.assertIn("already cameras", already.json()["detail"])
+        for body in ({"candidate_ids": []}, {"candidate_ids": [gate, gate]}, {"candidate_ids": [gate], "username": "admin"}, {"candidate_ids": [gate], "password": "x"}):
+            self.assertEqual(self.client.post("/api/cameras/bulk-jobs/discovered", json=body).status_code, 422, body)
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM camera_add_jobs")[0][0], 0)  # Nothing was started
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:
+            db.execute("INSERT INTO users(username,password_hash,role) VALUES (?,?,?)", ("bulk-operator", hash_password(TEST_PASSWORD), "operator"))
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "bulk-operator", "password": TEST_PASSWORD})
+        self.assertEqual(self.start_discovered([gate]).status_code, 403)
+
+    def test_a_discovered_device_being_added_elsewhere_is_reported_and_its_claim_left_alone(self):
+        later = (datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat()
+        busy = self.discovered("cand-busy", "5f1c0a52-0000-4000-8000-000000000003", "http://192.0.2.23/onvif/device_service", claimed_until=later)
+        job = self.start_discovered([busy]).json()
+        inspect = self.work()
+        self.assertEqual(inspect.await_count, 0)
+        item = self.job(job["id"])["items"][0]
+        self.assertEqual(item["status"], "failed")
+        self.assertIn("already being added", item["detail"])
+        self.assertEqual(self.rows("SELECT add_claim_token FROM discovery_candidates WHERE id=?", busy)[0][0], "someone-else")
+
+    def test_a_discovered_device_that_is_not_added_is_let_go(self):
+        refused = self.discovered("cand-refused", "5f1c0a52-0000-4000-8000-000000000004", "http://192.0.2.24/onvif/device_service")
+        unwell = self.discovered("cand-unwell", "5f1c0a52-0000-4000-8000-000000000005", "http://192.0.2.25/onvif/device_service")
+
+        async def refuse(payload, recorders, **kwargs):
+            raise HTTPException(status_code=422, detail="Camera stream could not be opened")
+
+        job = self.start_discovered([refused]).json()
+        self.work(add=refuse)
+        self.assertEqual(self.job(job["id"])["items"][0]["status"], "failed")
+        job = self.start_discovered([unwell], add_anyway=False).json()
+        self.work(inspect=AsyncMock(return_value=report(False)))
+        self.assertIn("needs attention", self.job(job["id"])["items"][0]["detail"])
+        # Neither stays claimed or linked: either can be added again at once, here or by hand.
+        rows = self.rows("SELECT linked_camera_id,add_claim_token,add_claimed_until FROM discovery_candidates WHERE id IN (?,?)", refused, unwell)
+        self.assertEqual([tuple(row) for row in rows], [(None, None, None), (None, None, None)])
+
+    def test_after_a_restart_a_discovered_device_being_checked_is_let_go_and_queued_again(self):
+        gate = self.discovered("cand-gate", "5f1c0a52-0000-4000-8000-000000000006", "http://192.0.2.26/onvif/device_service")
+        job = self.start_discovered([gate]).json()
+        later = (datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat()
+        with sqlite3.connect(os.environ["NVR_DB_PATH"]) as db:  # The server stopped while it was being checked, holding the claim
+            db.execute("UPDATE camera_add_items SET status='checking'")
+            db.execute("UPDATE discovery_candidates SET add_claim_token='job-claim',add_claimed_until=?", (later,))
+        bulk_add.recover_interrupted()
+        self.assertEqual(self.rows("SELECT add_claim_token FROM discovery_candidates")[0][0], None)
+        add, _ = self.linking_add()
+        self.work(add=add)
+        self.assertEqual(self.job(job["id"])["counts"], {"added": 1})
+
     def test_finished_jobs_are_forgotten_after_a_week(self):
         old = self.start([{"host": "192.0.2.10"}])
         self.work()
