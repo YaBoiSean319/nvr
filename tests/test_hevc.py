@@ -332,6 +332,56 @@ class HevcLiveTests(unittest.TestCase):
             with self.client.websocket_connect("/api/cameras/two/live/stream") as again:
                 self.assertEqual(again.receive_json()["type"], "init")
 
+    def test_clicking_through_six_cameras_with_live_video_kept_ready_never_runs_more_conversions_than_the_limit(self):
+        # "Keep live video ready" keeps a stream open ten minutes after its last viewer. A conversion kept like that was no longer counted,
+        # so six viewers of six H.265 cameras, one after another, left six conversions running (#344).
+        hub = self.app.state.live_hub
+        hub.linger_seconds = 600.0
+        cameras = ["cam"] + [self.add_camera(f"more{index}", f"Camera {index}", feed=True) and f"more{index}" for index in range(5)]
+        most = 0
+        for camera_id in cameras:
+            with self.client.websocket_connect(f"/api/cameras/{camera_id}/live/stream") as websocket:
+                init, _, _ = self.receive(websocket, 1)
+                self.assertTrue(init["transcoded"])
+                most = max(most, len(hub.conversions()))
+                self.assertLessEqual(len(hub.conversions()), live_media.MAX_LIVE_TRANSCODES, camera_id)
+        self.assertLessEqual(most, live_media.MAX_LIVE_TRANSCODES)
+        self.assertEqual(live_media.transcode_counts(), (0, 0))  # Nobody is watching
+        status = self.client.get("/api/system/status").json()["live"]
+        self.assertLessEqual(status["conversions"], live_media.MAX_LIVE_TRANSCODES)
+        # And none is kept for ten minutes: each closes a few seconds after its viewer left.
+        self.assertTrue(self.wait_for(lambda: not hub.conversions(), seconds=live_hub.LINGER_SECONDS + 6), "the conversions stop soon after the last viewer leaves")
+        self.assertEqual(self.client.get("/api/system/status").json()["live"]["conversions"], 0)
+
+    def test_a_conversion_nobody_is_watching_makes_room_for_a_new_one(self):
+        self.add_camera("two", "Gate", feed=True)
+        hub = self.app.state.live_hub
+        with patch.object(live_media, "MAX_LIVE_TRANSCODES", 1):
+            with self.client.websocket_connect("/api/cameras/cam/live/stream") as first:
+                self.receive(first, 1)
+            self.assertEqual([stream.key[0] for stream in hub.conversions()], ["cam"])  # Still running for a few seconds, with no viewer
+            with self.client.websocket_connect("/api/cameras/two/live/stream") as second:
+                self.receive(second, 1)
+                self.assertEqual([stream.key[0] for stream in hub.conversions()], ["two"])  # The idle one was closed first: never two at once
+
+    def test_a_stream_that_is_only_copied_is_still_kept_ready(self):
+        import asyncio
+
+        async def seconds_kept(**how) -> float:
+            stream = LiveStream(("cam", "main"), "rtsp://camera.invalid/main", False, **how)
+            stream.linger_seconds = 600.0  # "Keep live video ready" is on
+            viewer = live_hub.Viewer()
+            stream.viewers.add(viewer)
+            stream.remove(viewer, lambda: None)
+            kept = stream.linger.when() - asyncio.get_running_loop().time()
+            stream.linger.cancel()
+            return kept
+
+        self.assertAlmostEqual(asyncio.run(seconds_kept()), 600.0, delta=1)                      # Copied as it is
+        self.assertAlmostEqual(asyncio.run(seconds_kept(hevc_copy=True)), 600.0, delta=1)        # H.265 passed on
+        self.assertAlmostEqual(asyncio.run(seconds_kept(video_filter="drawbox")), 600.0, delta=1)  # Masked: held ready as before
+        self.assertAlmostEqual(asyncio.run(seconds_kept(transcode=True)), live_hub.LINGER_SECONDS, delta=1)  # Converted from H.265: never kept
+
     def test_a_refused_viewer_slot_leaves_no_conversion_counted(self):
         with patch.object(live_media, "MAX_LIVE_VIEWERS", 1):
             with self.client.websocket_connect("/api/cameras/cam/live/stream") as first:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import shutil
 import threading
@@ -40,18 +39,35 @@ def live_counts() -> tuple[int, int]:
         return _live_view_count, _live_audio_count
 
 
-def transcode_counts() -> tuple[int, int]:
-    """Conversions of H.265 to H.264 running, and the viewers they serve."""
+def transcode_counts(hub: LiveHub | None = None) -> tuple[int, int]:
+    """Conversions of H.265 to H.264 with viewers, and the viewers they serve. Given the hub, the first number is every conversion
+    running, including one that is closing because its last viewer has just left."""
     with _live_view_lock:
-        return len(_transcodes), sum(_transcodes.values())
+        watched, viewers = set(_transcodes), sum(_transcodes.values())
+    return len(watched | {stream.key for stream in hub.conversions()} if hub is not None else watched), viewers
 
 
-def _acquire_transcode(key: tuple[str, ...]) -> bool:
+def _count_transcode(key: tuple[str, ...], limit: int) -> bool:
     with _live_view_lock:
-        if key not in _transcodes and len(_transcodes) >= MAX_LIVE_TRANSCODES:
+        if key not in _transcodes and len(_transcodes) >= limit:
             return False
         _transcodes[key] = _transcodes.get(key, 0) + 1
         return True
+
+
+async def _acquire_transcode(key: tuple[str, ...], hub: LiveHub) -> bool:
+    """A place for a viewer of the conversion with this stream key. Joining one that is running costs nothing more; a new one needs a free
+    place among ``MAX_LIVE_TRANSCODES``, counting conversions that are still running after their last viewer left. Those are closed to
+    make room, so the number running never passes the limit (#344)."""
+    while True:
+        running = hub.conversions()
+        if any(stream.key == key for stream in running) or len(running) < MAX_LIVE_TRANSCODES:
+            # The place is taken in the same step as the look, with nothing awaited between: two viewers cannot both take the last one.
+            return _count_transcode(key, MAX_LIVE_TRANSCODES)
+        unwatched = [stream for stream in running if not stream.viewers]
+        if not unwatched:
+            return False
+        await hub.evict(unwatched[0])
 
 
 def _release_transcode(key: tuple[str, ...]) -> None:
@@ -431,19 +447,18 @@ async def live_stream(
         await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
         return
     include_audio = variant.include_audio
-    conversion_key = (camera_id, profile, "audio" if include_audio else "video", "h264", hashlib.sha256(source.encode()).hexdigest()[:16])
-    if transcode and not _acquire_transcode(conversion_key):
+    hub: LiveHub = websocket.app.state.live_hub
+    stream_key = conversion_key = live_variant.key_of(camera_id, variant, source)  # A conversion is counted by the stream that does it
+    if transcode and not await _acquire_transcode(conversion_key, hub):
         _release_live_view(camera_id)
         await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted view and retry"})
         return
     listening = audio and include_audio and _acquire_live_audio()
-    hub: LiveHub = websocket.app.state.live_hub
     viewer = Viewer()
 
     def mark_fresh() -> None:
         mark_camera_fresh(camera_id)
 
-    stream_key = live_variant.key_of(camera_id, variant, source)
     joined_running = (running := hub.streams.get(stream_key)) is not None and running.ready.is_set() and not running.failed
     stream = hub.join(stream_key, source, include_audio, viewer, mark_fresh, video_filter, transcode, hevc_copy)
     mode = variant.mode

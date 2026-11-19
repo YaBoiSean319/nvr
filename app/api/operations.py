@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import json
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 
 from app.version import APP_VERSION
@@ -21,16 +21,17 @@ class DiagnosticCaptureRequest(BaseModel):
     hours: int = Field(default=4, ge=1, le=24)
 
 
-def _live() -> dict[str, int]:
-    """Live video being served from this process: streams and viewers, and the H.265 conversions among them."""
+def _live(request: Request) -> dict[str, int]:
+    """Live video being served from this process: streams and viewers, and the H.265 conversions running (one that is closing after
+    its last viewer left still uses the processor, so it is counted)."""
     from app.api.live_media import live_counts, transcode_counts
     viewers, listeners = live_counts()
-    conversions, converted = transcode_counts()
+    conversions, converted = transcode_counts(getattr(request.app.state, "live_hub", None))
     return {"viewers": viewers, "audio_listeners": listeners, "conversions": conversions, "converted_viewers": converted}
 
 
 @router.get("/api/system/status")
-def system_status(user: Administrator) -> dict[str, object]:
+def system_status(request: Request, user: Administrator) -> dict[str, object]:
     db_path = database_path()
     with connect() as db:
         admin_count = db.execute("SELECT COUNT(*) FROM users WHERE role='administrator'").fetchone()[0]
@@ -52,7 +53,7 @@ def system_status(user: Administrator) -> dict[str, object]:
         "storage": storage,
         "self_test": self_test.latest(),
         "acceleration": acceleration.current(),
-        "live": _live(),
+        "live": _live(request),
     }
 
 
