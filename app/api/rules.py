@@ -399,7 +399,9 @@ def list_rule_events(
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with connect() as db:
         rows = db.execute(
-            "SELECT e.*,c.name AS camera_name FROM rule_events e JOIN cameras c ON c.id=e.camera_id" + where + " ORDER BY e.occurred_at DESC,e.id LIMIT ?",
+            # The camera's name is looked up per row returned, so the newest events are read from the index in order rather than the whole
+            # table being joined and sorted (#349). An event's camera always exists: deleting a camera deletes its events.
+            "SELECT e.*,(SELECT c.name FROM cameras c WHERE c.id=e.camera_id) AS camera_name FROM rule_events e" + where + " ORDER BY e.occurred_at DESC,e.id LIMIT ?",
             (*values, limit)).fetchall()
     events = []
     for row in rows:

@@ -170,7 +170,7 @@ export function GeneralTab({ camera, admin }: { camera: Camera; admin: boolean }
     return (
       <dl className="details">
         <dt>Name</dt><dd>{camera.name}</dd>
-        <dt>Address</dt><dd className="mono">{camera.camera_ip ?? camera.stream_url}</dd>
+        <dt>Address</dt><dd className="mono">{camera.camera_ip ?? camera.stream_url ?? <span className="muted">Shown to administrators</span>}</dd>
         <dt>Brand</dt><dd>{BRAND_LABEL[camera.camera_brand ?? "auto"]}</dd>
         <dt>Main profile</dt><dd>{camera.onvif_profile_token ?? "Not reported"}</dd>
         <dt>Live substream</dt><dd>{camera.live_substream_available ? camera.live_substream_profile_token ?? "Configured" : "None"}</dd>

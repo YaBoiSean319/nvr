@@ -28,6 +28,8 @@ Operators and administrators can acknowledge, assign, comment and resolve. Only 
 
 The footage around an alarm (its clip) is kept, whatever the camera's retention, until the alarm is resolved and then for a configurable number of days: **Settings → Recording & storage → Alarm footage**, 30 days by default. Deleting all of an archived camera's footage is a separate administrator action and is not blocked by alarms.
 
+**How long alarms are kept.** Resolved alarms and rule events are kept **90 days** by default (the same place: *Days to keep resolved alarms and rule events*, 7 to 3650), and never less than the footage period above. An alarm nobody resolves is closed automatically after **30 days**: its history says `auto_resolved`, and an `alarm.resolved` webhook is sent with no actor. Alarms in a case, or whose clip has footage under a hold, are neither closed nor removed. The pass runs with retention, reads what is due before it takes the database's write lock, and records what it removed in the audit log (`alarm_history_pruned`).
+
 ## Push notifications
 
 Each person can be notified of alarms on their own devices, desktop or phone (install the app on a phone for the best results):
@@ -74,7 +76,7 @@ POST   /api/alarms/{alarm_id}/resolve       {"note": "…"}   (note optional)
 DELETE /api/alarms/{alarm_id}                                (administrators)
 GET    /api/alarms/assignees
 GET    /api/alarm-settings
-PUT    /api/alarm-settings                  {"resolved_footage_days": 30}   (administrators)
+PUT    /api/alarm-settings                  {"resolved_footage_days": 30, "history_days": 90}   (administrators; either or both)
 GET    /api/push/public-key
 GET    /api/push/preferences
 PUT    /api/push/preferences                {"rule_ids": null, "group_ids": null, "quiet_hours": {"start": "22:00", "end": "07:00", "timezone": "Europe/London"}}

@@ -105,8 +105,8 @@ export function CameraEditor({ camera, admin, extraTabs = {} }: { camera: Camera
         <div className="editor-identity">
           <h2>{camera.name}{archived ? <span className="tag">Archived</span> : null}</h2>
           <p className="muted">
-            <span className="mono">{camera.camera_ip ?? camera.stream_url}</span>
-            {" · "}{CONNECTION_LABEL[connection]}
+            {camera.camera_ip ?? camera.stream_url ? <><span className="mono">{camera.camera_ip ?? camera.stream_url}</span>{" · "}</> : null}
+            {CONNECTION_LABEL[connection]}
             {" · "}<span className="status-dot" data-tone={HEALTH_TONE[camera.recording_health.state]} aria-hidden="true" /> {HEALTH_LABEL[camera.recording_health.state]}
             {" · "}{MODE_LABEL[modeOf(camera)]}{camera.recording_enabled ? "" : " (recording off)"}
           </p>

@@ -61,10 +61,12 @@ export interface Camera {
   recording_health: { state: RecordingHealthState; detail: string; video_fresh: boolean };
   camera_brand: CameraBrand;
   device_service_url: string | null;
+  /** Whether the camera has an ONVIF device service, for everyone; its address is for administrators only (#377). */
+  has_onvif_device: boolean;
   onvif_profile_token: string | null;
   live_substream_profile_token: string | null;
-  /** Masked: credentials are never returned. */
-  stream_url: string;
+  /** Masked: credentials are never returned. This and the other address fields are null for anyone but an administrator (#377). */
+  stream_url: string | null;
   video: { codec: string | null; width: number | null; height: number | null };
   audio_supported: boolean | null;
   last_probe_at: string | null;

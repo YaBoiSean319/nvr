@@ -320,9 +320,27 @@ def _first_codes(db: sqlite3.Connection, user_id: int) -> list[str] | None:
     return codes
 
 
+FIRST_FACTOR_ON_SITE = ("Set up your first second factor from the site's own network, or ask an administrator: "
+                        "from outside, only an account that already has one can add another.")
+
+
+def _first_factor_allowed_here(request: Request, user_id: int) -> None:
+    """When remote sessions need a second factor, the first one cannot be set up from outside (#374).
+
+    Otherwise someone remote with only a stolen password, held at "set up a second factor", could set up their own and lock the real owner
+    out. Adding a further factor to an account that has one is unchanged: that already asks for the password and is confirmed by the factor."""
+    with connect() as db:
+        remote_rule = db.execute("SELECT remote_mfa FROM security_settings WHERE singleton_id=1").fetchone()
+        if not (remote_rule and remote_rule[0]) or mfa.has_factor(db, user_id):
+            return
+    if network.request_is_remote(request):
+        raise HTTPException(status_code=403, detail=FIRST_FACTOR_ON_SITE)
+
+
 @router.post("/api/me/security/totp/begin")
 def begin_totp(request: Request, user: CurrentUser, payload: OptionalPassword | None = None) -> dict[str, str]:
     account = _local_account(user)
+    _first_factor_allowed_here(request, user.id)
     _confirm_password_to_add(account, payload.password if payload else None, request)
     with connect() as db:
         if mfa.stored_totp(db, user.id, confirmed=True):
@@ -335,6 +353,7 @@ def begin_totp(request: Request, user: CurrentUser, payload: OptionalPassword | 
 @router.post("/api/me/security/totp/confirm")
 def confirm_totp(payload: TotpConfirmRequest, request: Request, user: CurrentUser) -> dict[str, object]:
     account = _local_account(user)
+    _first_factor_allowed_here(request, user.id)
     key, address = limits.account_key(account["username"]), limits.client_address(request)
     limits.begin(key, address)
     with connect() as db:
@@ -464,6 +483,7 @@ def _after_removal(db: sqlite3.Connection, user_id: int, factor: str) -> None:
 @router.post("/api/me/security/passkeys/options")
 def passkey_creation_options(request: Request, user: CurrentUser, payload: OptionalPassword | None = None) -> dict[str, Any]:
     account = _local_account(user)
+    _first_factor_allowed_here(request, user.id)
     _confirm_password_to_add(account, payload.password if payload else None, request)
     value = webauthn.new_challenge()
     with connect() as db:
@@ -476,6 +496,7 @@ def passkey_creation_options(request: Request, user: CurrentUser, payload: Optio
 @router.post("/api/me/security/passkeys", status_code=status.HTTP_201_CREATED)
 def register_passkey(payload: PasskeyRegistration, request: Request, user: CurrentUser) -> dict[str, object]:
     _local_account(user)
+    _first_factor_allowed_here(request, user.id)
     with connect() as db:
         row = db.execute("SELECT passkey_registration_challenge,passkey_registration_expires_at FROM users WHERE id=?", (user.id,)).fetchone()
         db.execute("UPDATE users SET passkey_registration_challenge=NULL,passkey_registration_expires_at=NULL WHERE id=?", (user.id,))  # Single use.

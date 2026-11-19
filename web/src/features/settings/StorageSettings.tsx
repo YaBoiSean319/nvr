@@ -295,16 +295,20 @@ export function StorageSettings() {
   );
 }
 
-/** How long a resolved alarm keeps its footage beyond the camera's retention. */
+type AlarmSettings = { resolved_footage_days: number; history_days: number };
+
+const wholeDays = (value: number | undefined, low: number, high: number) => value !== undefined && Number.isInteger(value) && value >= low && value <= high;
+
+/** How long a resolved alarm keeps its footage beyond the camera's retention, and how long resolved alarms and rule events are kept at all. */
 function AlarmFootage() {
   const client = useQueryClient();
-  const settings = useQuery({ queryKey: alarmKeys.settings, queryFn: ({ signal }) => api<{ resolved_footage_days: number }>("/api/alarm-settings", { signal }) });
+  const settings = useQuery({ queryKey: alarmKeys.settings, queryFn: ({ signal }) => api<AlarmSettings>("/api/alarm-settings", { signal }) });
   const tab = useTabDraft(settings.data, {
     label: "Alarm footage",
     editable: true,
     save: async (draft, base) => {
       try {
-        const saved = await api<{ resolved_footage_days: number }>("/api/alarm-settings", { method: "PUT", body: draft });
+        const saved = await api<AlarmSettings>("/api/alarm-settings", { method: "PUT", body: draft });
         client.setQueryData(alarmKeys.settings, saved);
         return { ok: true, base: saved, outcome: { tone: "good", text: "Saved." } };
       } catch (error) {
@@ -313,6 +317,10 @@ function AlarmFootage() {
     },
   });
   const days = tab.draft?.resolved_footage_days;
+  const history = tab.draft?.history_days;
+  const number = (text: string) => (text === "" ? Number.NaN : Number(text));
+  const blocked = !wholeDays(days, 0, 3650) ? "Enter a whole number of days from 0 to 3650 for alarm footage."
+    : !wholeDays(history, 7, 3650) ? "Keep alarm history for a whole number of days from 7 to 3650." : null;
   return (
     <form className="field-group" aria-label="Alarm footage" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
       <h2 className="field-heading">Alarm footage</h2>
@@ -321,10 +329,17 @@ function AlarmFootage() {
         <>
           <label className="field"><span>Days to keep after resolution</span>
             <input type="number" min={0} max={3650} value={Number.isNaN(days) ? "" : days}
-                   onChange={event => tab.change({ resolved_footage_days: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
+                   onChange={event => tab.change({ resolved_footage_days: number(event.target.value) })} />
           </label>
-          <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert}
-                     blocked={days !== undefined && days >= 0 && days <= 3650 && Number.isInteger(days) ? null : "Enter a whole number of days from 0 to 3650."} />
+          <label className="field"><span>Days to keep resolved alarms and rule events</span>
+            <input type="number" min={7} max={3650} value={Number.isNaN(history) ? "" : history}
+                   onChange={event => tab.change({ history_days: number(event.target.value) })} />
+          </label>
+          <p className="muted field-hint">
+            Older resolved alarms and rule events are removed (never sooner than their footage above). An alarm nobody resolves is closed after
+            30 days. Alarms in a case, or over held footage, are kept.
+          </p>
+          <TabFooter outcome={tab.outcome} dirty={tab.dirty} saving={tab.saving} onRevert={tab.revert} blocked={blocked} />
         </>
       ) : <p className="muted">{settings.error ? failureText(settings.error) : "Loading…"}</p>}
     </form>

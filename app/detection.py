@@ -17,8 +17,9 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from . import acceleration, ai_capacity
+from . import acceleration, ai_capacity, privacy
 from .credentials import decrypt
+from .track_privacy import box_touches, box_usable
 from .recording import _manifest_bytes, _PROTOCOLS, safe_stream_url
 from .store import connect
 from .clock import parse as clock_parse, stamp as clock_stamp
@@ -288,6 +289,7 @@ def _record_observations(
     stamp = when.isoformat()
     version = model_version or MODEL_VERSION
     count = 0
+    masked: list[dict[str, float]] | None = None  # The areas the NVR must hide at this moment, read once for the frame if a webhook is due
     for item in observations:
         candidates = db.execute(
             "SELECT id,box_json FROM ai_observations WHERE camera_id=? AND label=? AND model_id=? AND model_version=? AND provider=? AND last_seen_at>=? ORDER BY last_seen_at DESC LIMIT 100",
@@ -309,6 +311,13 @@ def _record_observations(
             )
             event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "nvr-ai-observation:" + observation_id))
             from .webhooks import enqueue_event
+            if masked is None:
+                masked = privacy.server_zones(db, camera_id, when)
+            if masked and (not box_usable(item["box"]) or box_touches(item["box"], masked)):
+                # A webhook sends the data to another system: something people are not shown behind a privacy mask is not sent there either (#376).
+                # Rule events and alarms are unchanged (the owner's decision on #296).
+                count += 1
+                continue
             enqueue_event(db, "ai.detection", {
                 "event_id": event_id, "event_type": "ai.detection", "occurred_at": stamp,
                 "observation_id": observation_id, "camera_id": camera_id, "label": item["label"],

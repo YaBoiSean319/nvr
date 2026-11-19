@@ -19,6 +19,7 @@ Exports made before a camera's masks were set or changed can no longer be downlo
 - **The MJPEG fallback** draws the mask too.
 - **Recordings** are delivered as a masked copy, rendered on first viewing (two at a time) and kept for a day after its last use, under `.masked` on the recordings volume. Seeking works as usual. The file on disk is never sent.
 - **Snapshots, alarm pictures, notification thumbnails and tracked objects' keyframes** are masked. If a mask cannot be drawn, no picture is sent at all.
+- **The `ai.detection` webhook** leaves out any detection whose box touches a masked area (or cannot be compared with it): a webhook sends the data to another system. Alarms and rule events raised from inside a mask are kept, as before, for the site's own staff.
 - **Exports** burn the mask into each camera's video and into the grid. `metadata.json` marks masked cameras with `"privacy_masked": true`.
 
 Masks are filled black, rounded outwards to whole pixels so no edge of a masked area shows.
