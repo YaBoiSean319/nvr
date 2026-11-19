@@ -71,10 +71,17 @@ class _Capture:
     segments: dict[str, HlsSegment] = field(default_factory=dict)
     staging_dir: Path | None = None
     last_segment_end: datetime | None = None
+    source: str = ""
+    topic: str = ""
+    skip: set[str] = field(default_factory=set)  # Buffer parts the clip before this one already holds
 
 
 STOP_JOIN_SECONDS = 20.0  # While stopping, a clip gets this long to be joined: inside the recorder's stop grace
 ENDED_EARLY = "The recording stopped before the event ended; the clip holds what was captured until then"
+# An event that goes on (a door left open, a camera whose motion never clears) is saved as a series of clips of at most this length.
+# One clip for the whole event kept every part in the motion buffer until the end, and lost all of it if it could not be joined (#339).
+MAX_CLIP_SECONDS = 600
+CONTINUES = "A long event: it continues in the next clip"
 
 
 class MotionClipAssembler:
@@ -110,6 +117,7 @@ class MotionClipAssembler:
                     first_source_event_at=event.event_time,
                     capture_until=received + timedelta(seconds=self.post_roll_seconds),
                     staging_dir=self.spool_dir / ("capture-" + uuid.uuid4().hex),
+                    source=event.source, topic=event.topic,
                 )
                 capture.staging_dir.mkdir(parents=True, exist_ok=True)
                 self.capture = capture
@@ -145,12 +153,40 @@ class MotionClipAssembler:
         now = datetime.now(timezone.utc)
         if not self._copy_buffered(capture, now):
             return
+        if capture.copied and (capture.active or now < capture.capture_until) and self._length(capture) >= MAX_CLIP_SECONDS:
+            # Still going, and long enough: this much is saved now and the event carries on in a new clip from where this one ends.
+            self.capture = self._continuation(capture, now)
+            await self._finalize(capture, note=CONTINUES)
+            return
         if capture.active or now < capture.capture_until or not capture.copied:
             return
         if capture.last_segment_end and capture.last_segment_end < capture.capture_until:
             return
         await self._finalize(capture)
         self.capture = None
+
+    @staticmethod
+    def _length(capture: _Capture) -> float:
+        starts = [segment.starts_at for segment in capture.segments.values()]
+        return (capture.last_segment_end - min(starts)).total_seconds() if starts and capture.last_segment_end else 0.0
+
+    def _continuation(self, capture: _Capture, now: datetime) -> _Capture:
+        """The next clip of an event that is still going: it starts where the last one ends, with no pre-roll of its own."""
+        following = _Capture(
+            event_id=str(uuid.uuid4()), first_received_at=now, requested_start=capture.last_segment_end or now,
+            first_source_event_at=capture.first_source_event_at, capture_until=capture.capture_until, active=capture.active,
+            source_events=list(capture.source_events[-8:]), staging_dir=self.spool_dir / ("capture-" + uuid.uuid4().hex),
+            source=capture.source, topic=capture.topic, skip=capture.skip | capture.copied,
+        )
+        following.staging_dir.mkdir(parents=True, exist_ok=True)
+        with connect() as db:
+            db.execute(
+                "INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,pre_roll_complete,status,source_events_json) "
+                "VALUES(?,?,?,?,?,?,?,?,0,'recording',?)",
+                (following.event_id, self.camera_id, following.source, following.topic, following.first_source_event_at.isoformat(), now.isoformat(),
+                 following.requested_start.isoformat(), following.capture_until.isoformat(), json.dumps(following.source_events, separators=(",", ":"))),
+            )
+        return following
 
     def _copy_buffered(self, capture: _Capture, now: datetime) -> bool:
         """Copy the buffer's segments that belong to this capture and are not yet copied into its staging folder. False when the buffer's list cannot be read."""
@@ -159,7 +195,7 @@ class MotionClipAssembler:
         except (OSError, UnicodeError):
             return False
         for segment in (s for s in segments if s.ends_at >= capture.requested_start and s.starts_at <= now):
-            if segment.name in capture.copied:
+            if segment.name in capture.copied or segment.name in capture.skip:
                 continue
             source = self.spool_dir / segment.name
             if not source.is_file():
@@ -253,6 +289,13 @@ class MotionClipAssembler:
                 self._copy_buffered(capture, datetime.now(timezone.utc))
                 if capture.copied:
                     await self._finalize(capture, timeout=STOP_JOIN_SECONDS, note=ENDED_EARLY)
+                    return
+                if capture.skip:
+                    # The next clip of a long event, begun a moment ago with nothing in it yet: the clips before it hold the event, and
+                    # an empty one is not a recording that failed.
+                    with connect() as db:
+                        db.execute("DELETE FROM motion_events WHERE id=? AND status='recording'", (capture.event_id,))
+                    shutil.rmtree(capture.staging_dir, ignore_errors=True)
                     return
             except (OSError, sqlite3.Error):
                 pass
