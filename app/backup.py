@@ -97,22 +97,41 @@ def _derive(secret: str, salt: bytes, n: int, r: int, p: int) -> bytes:
     return hashlib.scrypt(secret.encode("utf-8"), salt=salt, n=n, r=r, p=p, maxmem=128 * 1024 * 1024, dklen=32)
 
 
+class _Sealer:
+    """Encrypts what is written to it, a chunk at a time, in the format ``decrypt_stream`` reads: a header, then chunks of CHUNK_BYTES, the
+    last one marked final. A backup's archive is written straight into one, so no unencrypted copy of the archive is ever written (#328)."""
+
+    def __init__(self, target: BinaryIO, secret: str) -> None:
+        salt, self._prefix = secrets.token_bytes(16), secrets.token_bytes(8)
+        self._header = MAGIC + salt + struct.pack(">III", SCRYPT_N, SCRYPT_R, SCRYPT_P) + self._prefix
+        self._cipher = AESGCM(_derive(secret, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P))
+        self._target = target
+        self._buffer = bytearray()
+        self._counter = 0
+        target.write(self._header)
+
+    def write(self, data: bytes) -> int:
+        self._buffer += data
+        # A chunk is sealed only once more follows it, so the last one can be marked final when the writing ends.
+        while len(self._buffer) > CHUNK_BYTES:
+            self._seal(bytes(self._buffer[:CHUNK_BYTES]), final=False)
+            del self._buffer[:CHUNK_BYTES]
+        return len(data)
+
+    def finish(self) -> None:
+        self._seal(bytes(self._buffer), final=True)
+        self._buffer.clear()
+
+    def _seal(self, chunk: bytes, final: bool) -> None:
+        sealed = self._cipher.encrypt(self._prefix + struct.pack(">I", self._counter), chunk, self._header + struct.pack(">I?", self._counter, final))
+        self._target.write(struct.pack(">I", len(sealed)) + sealed)
+        self._counter += 1
+
+
 def encrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
-    salt, prefix = secrets.token_bytes(16), secrets.token_bytes(8)
-    header = MAGIC + salt + struct.pack(">III", SCRYPT_N, SCRYPT_R, SCRYPT_P) + prefix
-    cipher = AESGCM(_derive(secret, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P))
-    target.write(header)
-    counter = 0
-    chunk = source.read(CHUNK_BYTES)
-    while True:
-        following = source.read(CHUNK_BYTES)
-        final = not following
-        sealed = cipher.encrypt(prefix + struct.pack(">I", counter), chunk, header + struct.pack(">I?", counter, final))
-        target.write(struct.pack(">I", len(sealed)) + sealed)
-        if final:
-            return
-        counter += 1
-        chunk = following
+    sealer = _Sealer(target, secret)
+    shutil.copyfileobj(source, sealer, CHUNK_BYTES)
+    sealer.finish()
 
 
 def decrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
@@ -171,7 +190,9 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
     name = f"nvr-config-{created.strftime('%Y%m%dT%H%M%S%fZ')}-{kind.replace('_', '-')}{SUFFIX}"
     final_path = target_dir / name
     partial_path = target_dir / f".{name}.partial"
-    # Plaintext only ever exists in the protected data volume.
+    # Plaintext only ever exists in the protected data volume, and only as the one snapshot of the database: the archive is encrypted as
+    # it is written. A backup needs room for that snapshot where the database is, and for the encrypted archive where backups go (#328).
+    _check_space(database, target_dir)
     with tempfile.TemporaryDirectory(prefix=".backup-", dir=database.parent) as work:
         work_dir = Path(work)
         os.chmod(work_dir, 0o700)
@@ -184,6 +205,8 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
                 schema_version = copy.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             except sqlite3.Error:
                 schema_version = None  # an installation from before versioned migrations
+        except sqlite3.Error as exc:
+            raise BackupError(f"Could not copy the database for the backup: {exc}") from exc
         finally:
             copy.close()
             source.close()
@@ -201,26 +224,55 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
             "files": {member: _sha256(path) for member, path in files.items()},
             "footage_included": False,
         }
-        archive = work_dir / "backup.tar"
-        with tarfile.open(archive, "w") as tar:
-            data = json.dumps(manifest, indent=2).encode()
-            info = tarfile.TarInfo("manifest.json")
-            info.size, info.mode = len(data), 0o600
-            tar.addfile(info, io.BytesIO(data))
-            for member, path in files.items():
-                tar.add(path, arcname=member, recursive=False, filter=_owner_only)
         try:
-            with archive.open("rb") as plain, partial_path.open("wb") as sealed:
+            with partial_path.open("wb") as sealed:
                 os.chmod(partial_path, 0o600)
-                encrypt_stream(plain, sealed, passphrase() or "")
+                sealer = _Sealer(sealed, passphrase() or "")
+                with tarfile.open(fileobj=sealer, mode="w|") as tar:  # A stream: each piece is encrypted as it is written
+                    data = json.dumps(manifest, indent=2).encode()
+                    info = tarfile.TarInfo("manifest.json")
+                    info.size, info.mode = len(data), 0o600
+                    tar.addfile(info, io.BytesIO(data))
+                    for member, path in files.items():
+                        tar.add(path, arcname=member, recursive=False, filter=_owner_only)
+                sealer.finish()
                 sealed.flush()
                 os.fsync(sealed.fileno())
             os.replace(partial_path, final_path)
-        except OSError as exc:
+        except BaseException as exc:
             partial_path.unlink(missing_ok=True)
-            raise BackupError(f"Could not write the backup: {exc.strerror or exc}") from exc
+            if isinstance(exc, OSError):
+                raise BackupError(f"Could not write the backup: {exc.strerror or exc}") from exc
+            raise
     prune()
     return {"file_name": name, "size_bytes": final_path.stat().st_size, "created_at": created.isoformat(), "run_id": run_id}
+
+
+SPACE_MARGIN = 64 << 20  # Left free on each disk after a backup, so that making one never fills a disk the NVR is writing to
+
+
+def _database_bytes(database: Path) -> int:
+    """The most the snapshot can take: the database file and its write-ahead log."""
+    return sum(item.stat().st_size for item in (database, database.with_name(database.name + "-wal")) if item.exists())
+
+
+def _check_space(database: Path, target_dir: Path) -> None:
+    """Refuse up front, saying how much room is needed where, rather than fail half way with "No space left on device" (#328)."""
+    snapshot = _database_bytes(database)
+    archive = snapshot + (key_path().stat().st_size if key_path().exists() else 0)
+    archive += archive // CHUNK_BYTES * 32 + (64 << 10)  # Encryption adds a few bytes a chunk, the archive a header per file
+    staging, destination_folder = database.parent, target_dir
+    same_disk = os.stat(staging).st_dev == os.stat(destination_folder).st_dev
+    needs = [(staging, snapshot + archive + SPACE_MARGIN)] if same_disk else [(staging, snapshot + SPACE_MARGIN), (destination_folder, archive + SPACE_MARGIN)]
+    for folder, needed in needs:
+        free = shutil.disk_usage(folder).free
+        if free < needed:
+            raise BackupError(f"Not enough free space for a backup: it needs about {_megabytes(needed)} free in {folder}, and there is {_megabytes(free)}. "
+                              "Free some space on that disk, or send backups to another disk (NVR_BACKUP_PATH). Nothing was written.")
+
+
+def _megabytes(value: int) -> str:
+    return f"{value / (1 << 30):.1f} GB" if value >= 1 << 30 else f"{max(1, value >> 20)} MB"
 
 
 FAILOVER_KEEP = 2  # A standby's sync makes one of these every few minutes; only the newest are any use

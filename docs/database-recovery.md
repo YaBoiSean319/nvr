@@ -65,7 +65,7 @@ Run these from the folder with the compose file. If Docker says permission denie
    ```
    Sign in and check the cameras, groups, rules and users. Everything written to the database after the copy was made is gone (settings changes, alarm actions, sessions); recorded video is not affected.
 
-7. **Find the cause** (host disk errors, snapshots or checkpoints, host crashes, storage), turn on configuration backups, and copy them to another machine. A backup on the same disk does not protect against a failed disk.
+7. **Find the cause** (host disk errors, snapshots or checkpoints, host crashes, storage), turn on configuration backups, and copy them to another machine. A backup on the same disk does not protect against a failed disk. A backup needs free space for one copy of the database on the data disk while it runs; if there is not enough, it is refused with a message saying how much is needed where.
 
 If every copy is damaged, keep the files and ask for help before deleting anything: part of a damaged file can often be recovered with SQLite's `.recover` command.
 

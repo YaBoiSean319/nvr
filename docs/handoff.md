@@ -32,7 +32,6 @@ Nothing on this page may hold a secret or a real site's address. The owner's pro
 
 **Can start without the owner**
 - **The backend review's tickets (#332)**, all labelled `ready-for-agent` unless they need a decision. The most serious still open: #356 (long grid exports run out of memory or cannot start). #339 is fixed apart from one question waiting for the owner on its thread (where the motion buffer is kept by default). Several add a migration: merge those one at a time, each taking the next free number. The next free migration number is 76.
-- **#328** backups stage two plaintext copies of the database on the data disk and fail on a nearly full disk: stream the tar into the encryption, check free space first (see the ticket).
 - **#286** two functions remain: `live_stream` (`app/api/live_media.py`, complexity F 82; the surrounding tests in `tests/test_live_stream.py`, `test_hevc.py`, `test_stream_credentials.py`, `test_privacy.py`, `test_access_grants.py`, `test_viewing_audit.py` passed as a baseline) and `DetectionManager._run` (`app/detection.py`, F 69). One function per PR; pin first.
 - **#256** settings grouping: the in-page sections for Integrations / AI analysis and Email alerts remain.
 - **#173** the two parts still not built: (1) select several *discovered* devices and add them with one shared login, and (3) live progress while a single check runs. Design for (1): checkboxes on the Discover list, a panel with a shared username and password, and the existing bulk job taught a `candidate_id` so the server takes the address and service URL from the discovery record, claims the device (`_claim_discovery_add` in `app/api/onboarding.py`), saves with its ONVIF identity, links it, and releases the claim on failure; progress shows in the Bulk Add tab, which already shows the latest job. This needs one new column on `camera_add_items` (a new migration). For (3) a single check could run as the same kind of job with step progress that the page polls.
@@ -75,7 +74,7 @@ The reporting site's SQLite database was damaged twice in a week on a Hyper-V vi
 
 - The nightly self-test checks the database file and raises an incident; startup logs one `THE DATABASE FILE IS DAMAGED` line; requests answer 503 with a clear message; `/healthz` fails. Recovery (stop, copy the data folder, check each `*.pre-migration-*` copy read-only, restore the newest healthy one) is in `docs/database-recovery.md`.
 - **Only three pre-migration copies are kept and older ones are removed automatically**: copy a known-good one off the machine before upgrading.
-- **Backups are disabled until `NVR_BACKUP_PASSPHRASE` is set** (not a Settings switch). A backup needs about twice the database size free on the data disk until #328 is fixed.
+- **Backups are disabled until `NVR_BACKUP_PASSPHRASE` is set** (not a Settings switch). A backup needs room for one copy of the database on the data disk, plus the encrypted backup where backups go, and is refused up front when there is not (#328).
 - Leftover test volumes and many database copies filled the system disk. Keep headroom on the disk that holds the database.
 - A configuration file (`.env`) can mix `KEY=value` and `KEY: "value"` lines; masking only one form leaks secrets. Ask for names only.
 
