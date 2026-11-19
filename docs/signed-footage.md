@@ -36,12 +36,14 @@ Ranges are limited to 7 days, and one verification runs at a time (`429` while a
 
 The result is `valid` only when no segment is out of order, missing, altered or overdue for a signature, and the chain itself checks out. If the chain has been rewritten, or its signature does not match this installation's key, `chain_error` says so and nothing in it can be trusted.
 
+**What a check reads.** Verifying a range checks the links of the footage in it: each is hashed with its neighbours from the signature before it to the first signature that covers it, and both signatures must be this installation's and valid. The newest signature is checked too. A range is therefore proved against signed points on either side of it without re-reading the camera's whole history, and the check says nothing about footage outside the range asked for.
+
 ## Evidence packages
 
 Before packaging, the export brings the chain up to date and signs it, so footage recorded moments earlier is covered. Each export includes `chain.json` (listed in `integrity.json` like every other member). For each camera, it holds:
 
 - the SHA-256 of every source segment used, taken at export time;
-- the chain links from the first of those segments to the latest signature (segments recorded before signing began are listed as `unsigned_segments` when checked);
+- the chain links from the first of those segments to the **first signature that covers the last of them** (a camera's head is signed about once a minute, so this is the footage's own stretch of the chain, a few links, not everything recorded since); segments recorded before signing began, or hashed but not yet signed when the export was made, are listed as `unsigned_segments` when checked. Packages made before this ran on to the latest signature; they verify the same way;
 - the signature and the public key.
 
 `metadata.json` marks each camera `signed` or `not_signed` under `signed_footage`.
