@@ -130,9 +130,25 @@ class LiveSessionTests(AuditCase):
         with connect() as db:
             session = viewing_audit.begin(db, self.limited_id, self.d1, "live", "low")
             viewing_audit.heartbeat(db, session)
-            viewing_audit.close_orphans(db)
+            self.assertEqual(viewing_audit.close_orphans(db), 0)  # Marked alive a moment ago: someone is still being served it (#386)
+            self.assertIsNone(self.rows()[0]["ended_at"])
+            later = datetime.now(timezone.utc) + timedelta(seconds=viewing_audit.ORPHAN_AFTER_SECONDS + 5)
+            self.assertEqual(viewing_audit.close_orphans(db, later), 1)  # Quiet since: the crash left it
         (row,) = self.rows()
         self.assertEqual(row["ended_at"], row["last_seen_at"])
+
+    def test_a_recorder_restart_does_not_end_the_record_of_someone_still_watching(self):
+        with connect() as db:
+            session = viewing_audit.begin(db, self.limited_id, self.d1, "live", "low")
+        from app.recording import RecordingManager
+        RecordingManager._prune_viewing_audit()  # The same call the recorder makes
+        with connect() as db:
+            viewing_audit.close_orphans(db)  # And at its start
+            viewing_audit.heartbeat(db, session)
+            viewing_audit.end(db, session)
+        (row,) = self.rows()
+        self.assertGreaterEqual(row["ended_at"], row["started_at"])
+        self.assertEqual(row["ended_at"], row["last_seen_at"])  # Ended when the viewer left, by the web process, not cut short at the restart
 
 
 class PlaybackAndPointEventTests(AuditCase):

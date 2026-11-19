@@ -122,9 +122,17 @@ class LiveSession:
             self.row = None
 
 
-def close_orphans(db: sqlite3.Connection) -> None:
-    """Sessions a crash left open ended when they were last seen alive."""
-    db.execute("UPDATE viewing_audit SET ended_at=last_seen_at WHERE ended_at IS NULL")
+ORPHAN_AFTER_SECONDS = HEARTBEAT_SECONDS * 4  # A session being served is marked alive every HEARTBEAT_SECONDS; playback has its own gap, which is shorter
+
+
+def close_orphans(db: sqlite3.Connection, now: datetime | None = None) -> int:
+    """Sessions a crash left open are ended at the moment they were last seen alive. Only sessions that have gone quiet: the recorder
+    calls this when it starts, and a recorder restart used to end the records of viewers the web process was still serving, whose
+    viewing from then on went unrecorded (#386). Reads first, so a pass with nothing to close takes no write lock."""
+    quiet = stamp((now or datetime.now(timezone.utc)) - timedelta(seconds=ORPHAN_AFTER_SECONDS))
+    if not has_row(db, "SELECT 1 FROM viewing_audit WHERE ended_at IS NULL AND last_seen_at<? LIMIT 1", (quiet,)):
+        return 0
+    return db.execute("UPDATE viewing_audit SET ended_at=last_seen_at WHERE ended_at IS NULL AND last_seen_at<?", (quiet,)).rowcount
 
 
 def retention_days(db: sqlite3.Connection) -> int:
