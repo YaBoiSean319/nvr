@@ -439,7 +439,9 @@ class LiveHub:
     async def close(self) -> None:
         streams = list(self.streams.values())
         self.streams.clear()
-        await asyncio.gather(*(stream.stop() for stream in streams), return_exceptions=True)
+        # Streams whose last viewer has left are already being closed in the background. Wait for those too: the event loop ends after this,
+        # and a close left unfinished leaves its FFmpeg running with nothing to end it or collect its exit.
+        await asyncio.gather(*(stream.stop() for stream in streams), *list(self._closing), return_exceptions=True)
 
     def snapshot(self) -> list[dict[str, object]]:
         return [{"key": list(stream.key), "viewers": sum(1 for viewer in stream.viewers if not isinstance(viewer, SinkViewer)), "held_ready": any(isinstance(viewer, SinkViewer) for viewer in stream.viewers), "camera_connections": stream.connections,
