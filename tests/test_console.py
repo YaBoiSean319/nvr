@@ -354,6 +354,55 @@ class TokenTests(ConsoleCase):
             self.assertEqual(client.delete(f"/api/console/sites/{self.site_ids['alpha']}").status_code, 403)
         self.assertEqual(TestClient(self.app).get("/api/console/status").status_code, 401)
 
+    def test_a_sites_saved_token_is_never_sent_to_a_changed_address(self):
+        # Changing only the address used to make the NVR call the new address with the site's saved token (#373).
+        self.federate()
+        site = self.site_ids["alpha"]
+        moved = self.admin.put(f"/api/console/sites/{site}", json={"url": self.b.url})  # Another host and port, no token
+        self.assertEqual(moved.status_code, 422)
+        self.assertIn("token again", moved.json()["detail"])
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT base_url FROM console_sites WHERE id=?", (site,)).fetchone()[0].rstrip("/"), self.a.url.rstrip("/"))
+        # With its token entered again, a site can be moved; and the same address needs nothing new.
+        self.assertEqual(self.admin.put(f"/api/console/sites/{site}", json={"url": self.a.url}).status_code, 200)
+        self.assertEqual(self.admin.put(f"/api/console/sites/{site}", json={"url": self.a.url, "token": self.a.token(["read", "media"])}).status_code, 200)
+
+    def test_what_a_site_sends_is_relayed_only_as_the_kinds_of_answer_footage_is(self):
+        import asyncio
+
+        import httpx
+
+        from app import console
+        from app.api import console as console_api
+
+        class Request:
+            method, headers = "GET", {}
+
+            class url:
+                query = ""
+
+        link = type("Link", (), {"id": "abcd1234", "name": "Alpha"})()
+
+        def relayed(content_type: str | None, body: bytes = b"data"):
+            async def stream(*args, **kwargs):
+                return httpx.Response(200, headers={"content-type": content_type} if content_type else {}, content=body)
+
+            async def run():
+                with mock.patch.object(console, "stream", stream):
+                    return await console_api._forward(Request(), link, "/api/cameras/c/live")
+
+            return asyncio.run(run())
+
+        page = relayed("text/html; charset=utf-8", b"<script>alert(1)</script>")
+        self.assertEqual((page.headers["content-type"], page.headers["content-disposition"], page.headers["x-content-type-options"]), ("application/octet-stream", "attachment", "nosniff"))
+        picture = relayed("image/jpeg")
+        self.assertEqual((picture.headers["content-type"], picture.headers["x-content-type-options"]), ("image/jpeg", "nosniff"))
+        self.assertNotIn("content-disposition", picture.headers)
+        self.assertEqual(relayed(None).headers["content-type"], "application/octet-stream")
+        with mock.patch.object(console, "MAX_JSON_BYTES", 10), self.assertRaises(console_api.HTTPException) as caught:
+            relayed("application/json", b'{"padding": "' + b"x" * 100 + b'"}')
+        self.assertEqual(caught.exception.status_code, 502)
+
     def test_a_site_can_be_renamed_switched_off_and_its_token_replaced_without_showing_it(self):
         self.federate()
         site = self.site_ids["alpha"]

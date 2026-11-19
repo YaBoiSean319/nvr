@@ -208,7 +208,12 @@ async def call(link: SiteLink, method: str, path: str, *, params: Any = None, bo
         try:
             if int(response.headers.get("content-length", "0") or 0) > MAX_JSON_BYTES:
                 raise SiteDown("The answer was too large")
-            await response.aread()
+            received = bytearray()
+            async for chunk in response.aiter_bytes():  # Counted as it is read: the declared length is the site's word, and may be missing (#373)
+                received.extend(chunk)
+                if len(received) > MAX_JSON_BYTES:
+                    raise SiteDown("The answer was too large")
+            response._content = bytes(received)
         finally:
             await response.aclose()
     except httpx.HTTPError as exc:
