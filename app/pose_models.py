@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -129,6 +130,9 @@ class PoseReader:
         outputs = list(self.model.outputs)
         self._landmarks = next(output for output in outputs if list(output.shape)[-1] == 195)
         self._score = next(output for output in outputs if list(output.shape) == [1, 1])
+        # One inference request at a time: every camera with fall detection on shares this reader from its own worker thread, and the
+        # compiled model's single request refuses a second call while one runs ("Infer Request is busy", #408).
+        self._lock = threading.Lock()
 
     def pose(self, frame: np.ndarray, box: dict[str, float]) -> dict[str, tuple[float, float, float]] | None:
         """The body points fall detection decides on."""
@@ -140,9 +144,13 @@ class PoseReader:
         rows, columns = frame.shape[:2]
         crop, left, top, side = square_crop(frame, box)
         tensor = (resize_bilinear(crop[:, :, ::-1], INPUT_SIZE, INPUT_SIZE) / 255.0).astype(np.float32)[None]
-        outputs = self.model(tensor)
+        with self._lock:
+            outputs = self.model(tensor)
+            # Copied out while the lock is held: the outputs are the request's own buffers, which the next call writes over.
+            landmarks = np.array(outputs[self._landmarks], dtype=np.float32)
+            score = float(np.asarray(outputs[self._score]).reshape(-1)[0])
         # The pose score is already a probability (about 0 for an empty picture); the landmarks' visibility is a logit, which ``decode`` turns into one.
-        return decode(np.asarray(outputs[self._landmarks]), float(np.asarray(outputs[self._score]).reshape(-1)[0]), rows, columns, left, top, side, DRAWN_POINTS)
+        return decode(landmarks, score, rows, columns, left, top, side, DRAWN_POINTS)
 
 
 def load_reader(provider: str = "CPU") -> PoseReader | None:

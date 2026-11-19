@@ -97,59 +97,107 @@ def _derive(secret: str, salt: bytes, n: int, r: int, p: int) -> bytes:
     return hashlib.scrypt(secret.encode("utf-8"), salt=salt, n=n, r=r, p=p, maxmem=128 * 1024 * 1024, dklen=32)
 
 
+class _Sealer:
+    """Encrypts what is written to it, a chunk at a time, in the format ``decrypt_stream`` reads: a header, then chunks of CHUNK_BYTES, the
+    last one marked final. A backup's archive is written straight into one, so no unencrypted copy of the archive is ever written (#328)."""
+
+    def __init__(self, target: BinaryIO, secret: str) -> None:
+        salt, self._prefix = secrets.token_bytes(16), secrets.token_bytes(8)
+        self._header = MAGIC + salt + struct.pack(">III", SCRYPT_N, SCRYPT_R, SCRYPT_P) + self._prefix
+        self._cipher = AESGCM(_derive(secret, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P))
+        self._target = target
+        self._buffer = bytearray()
+        self._counter = 0
+        target.write(self._header)
+
+    def write(self, data: bytes) -> int:
+        self._buffer += data
+        # A chunk is sealed only once more follows it, so the last one can be marked final when the writing ends.
+        while len(self._buffer) > CHUNK_BYTES:
+            self._seal(bytes(self._buffer[:CHUNK_BYTES]), final=False)
+            del self._buffer[:CHUNK_BYTES]
+        return len(data)
+
+    def finish(self) -> None:
+        self._seal(bytes(self._buffer), final=True)
+        self._buffer.clear()
+
+    def _seal(self, chunk: bytes, final: bool) -> None:
+        sealed = self._cipher.encrypt(self._prefix + struct.pack(">I", self._counter), chunk, self._header + struct.pack(">I?", self._counter, final))
+        self._target.write(struct.pack(">I", len(sealed)) + sealed)
+        self._counter += 1
+
+
 def encrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
-    salt, prefix = secrets.token_bytes(16), secrets.token_bytes(8)
-    header = MAGIC + salt + struct.pack(">III", SCRYPT_N, SCRYPT_R, SCRYPT_P) + prefix
-    cipher = AESGCM(_derive(secret, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P))
-    target.write(header)
-    counter = 0
-    chunk = source.read(CHUNK_BYTES)
-    while True:
-        following = source.read(CHUNK_BYTES)
-        final = not following
-        sealed = cipher.encrypt(prefix + struct.pack(">I", counter), chunk, header + struct.pack(">I?", counter, final))
-        target.write(struct.pack(">I", len(sealed)) + sealed)
-        if final:
-            return
-        counter += 1
-        chunk = following
+    sealer = _Sealer(target, secret)
+    shutil.copyfileobj(source, sealer, CHUNK_BYTES)
+    sealer.finish()
 
 
-def decrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
-    header = source.read(len(MAGIC) + 16 + 12 + 8)
-    if len(header) != len(MAGIC) + 36 or not header.startswith(MAGIC):
-        raise BackupError("This is not an NVR configuration backup")
-    salt = header[len(MAGIC):len(MAGIC) + 16]
-    n, r, p = struct.unpack(">III", header[len(MAGIC) + 16:len(MAGIC) + 28])
-    if n > 2**20 or r > 16 or p > 4:
-        raise BackupError("Backup key-derivation parameters are out of range")
-    prefix = header[-8:]
-    cipher = AESGCM(_derive(secret, salt, n, r, p))
-    counter = 0
-    while True:
-        length = source.read(4)
+class _Opener:
+    """Reads a backup back as plain bytes, a chunk at a time, checking each chunk as it goes. ``finish`` checks that the backup ended where
+    its last chunk says it does: until then, nothing read from it may be trusted to be the whole backup."""
+
+    def __init__(self, source: BinaryIO, secret: str) -> None:
+        header = source.read(len(MAGIC) + 16 + 12 + 8)
+        if len(header) != len(MAGIC) + 36 or not header.startswith(MAGIC):
+            raise BackupError("This is not an NVR configuration backup")
+        salt = header[len(MAGIC):len(MAGIC) + 16]
+        n, r, p = struct.unpack(">III", header[len(MAGIC) + 16:len(MAGIC) + 28])
+        if n > 2**20 or r > 16 or p > 4:
+            raise BackupError("Backup key-derivation parameters are out of range")
+        self._header, self._prefix = header, header[-8:]
+        self._cipher = AESGCM(_derive(secret, salt, n, r, p))
+        self._source = source
+        self._buffer = bytearray()
+        self._counter = 0
+        self._ended = False
+
+    def _next_chunk(self) -> None:
+        length = self._source.read(4)
         if len(length) != 4:
             raise BackupError("The backup is truncated")
         (size,) = struct.unpack(">I", length)
         if size > CHUNK_BYTES + 16:
             raise BackupError("The backup is corrupt")
-        sealed = source.read(size)
+        sealed = self._source.read(size)
         if len(sealed) != size:
             raise BackupError("The backup is truncated")
         for final in (False, True):
             try:
-                plain = cipher.decrypt(prefix + struct.pack(">I", counter), sealed, header + struct.pack(">I?", counter, final))
+                plain = self._cipher.decrypt(self._prefix + struct.pack(">I", self._counter), sealed, self._header + struct.pack(">I?", self._counter, final))
                 break
             except InvalidTag:
                 plain = None
         if plain is None:
             raise BackupError("Wrong passphrase, or the backup has been altered")
-        target.write(plain)
+        self._buffer += plain
+        self._counter += 1
         if final:
-            if source.read(1):
+            if self._source.read(1):
                 raise BackupError("The backup has unexpected trailing data")
-            return
-        counter += 1
+            self._ended = True
+
+    def read(self, size: int = -1) -> bytes:
+        while not self._ended and (size < 0 or len(self._buffer) < size):
+            self._next_chunk()
+        size = len(self._buffer) if size < 0 else min(size, len(self._buffer))
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return data
+
+    def finish(self) -> None:
+        """Read to the end of the backup, so that a backup cut short or added to is refused."""
+        while not self._ended:
+            self._next_chunk()
+            self._buffer.clear()
+
+
+def decrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
+    opener = _Opener(source, secret)
+    while chunk := opener.read(CHUNK_BYTES):
+        target.write(chunk)
+    opener.finish()
 
 
 # --- creating backups -------------------------------------------------------------
@@ -171,7 +219,9 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
     name = f"nvr-config-{created.strftime('%Y%m%dT%H%M%S%fZ')}-{kind.replace('_', '-')}{SUFFIX}"
     final_path = target_dir / name
     partial_path = target_dir / f".{name}.partial"
-    # Plaintext only ever exists in the protected data volume.
+    # Plaintext only ever exists in the protected data volume, and only as the one snapshot of the database: the archive is encrypted as
+    # it is written. A backup needs room for that snapshot where the database is, and for the encrypted archive where backups go (#328).
+    _check_space(database, target_dir)
     with tempfile.TemporaryDirectory(prefix=".backup-", dir=database.parent) as work:
         work_dir = Path(work)
         os.chmod(work_dir, 0o700)
@@ -184,6 +234,8 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
                 schema_version = copy.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             except sqlite3.Error:
                 schema_version = None  # an installation from before versioned migrations
+        except sqlite3.Error as exc:
+            raise BackupError(f"Could not copy the database for the backup: {exc}") from exc
         finally:
             copy.close()
             source.close()
@@ -201,26 +253,55 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
             "files": {member: _sha256(path) for member, path in files.items()},
             "footage_included": False,
         }
-        archive = work_dir / "backup.tar"
-        with tarfile.open(archive, "w") as tar:
-            data = json.dumps(manifest, indent=2).encode()
-            info = tarfile.TarInfo("manifest.json")
-            info.size, info.mode = len(data), 0o600
-            tar.addfile(info, io.BytesIO(data))
-            for member, path in files.items():
-                tar.add(path, arcname=member, recursive=False, filter=_owner_only)
         try:
-            with archive.open("rb") as plain, partial_path.open("wb") as sealed:
+            with partial_path.open("wb") as sealed:
                 os.chmod(partial_path, 0o600)
-                encrypt_stream(plain, sealed, passphrase() or "")
+                sealer = _Sealer(sealed, passphrase() or "")
+                with tarfile.open(fileobj=sealer, mode="w|") as tar:  # A stream: each piece is encrypted as it is written
+                    data = json.dumps(manifest, indent=2).encode()
+                    info = tarfile.TarInfo("manifest.json")
+                    info.size, info.mode = len(data), 0o600
+                    tar.addfile(info, io.BytesIO(data))
+                    for member, path in files.items():
+                        tar.add(path, arcname=member, recursive=False, filter=_owner_only)
+                sealer.finish()
                 sealed.flush()
                 os.fsync(sealed.fileno())
             os.replace(partial_path, final_path)
-        except OSError as exc:
+        except BaseException as exc:
             partial_path.unlink(missing_ok=True)
-            raise BackupError(f"Could not write the backup: {exc.strerror or exc}") from exc
+            if isinstance(exc, OSError):
+                raise BackupError(f"Could not write the backup: {exc.strerror or exc}") from exc
+            raise
     prune()
     return {"file_name": name, "size_bytes": final_path.stat().st_size, "created_at": created.isoformat(), "run_id": run_id}
+
+
+SPACE_MARGIN = 64 << 20  # Left free on each disk after a backup, so that making one never fills a disk the NVR is writing to
+
+
+def _database_bytes(database: Path) -> int:
+    """The most the snapshot can take: the database file and its write-ahead log."""
+    return sum(item.stat().st_size for item in (database, database.with_name(database.name + "-wal")) if item.exists())
+
+
+def _check_space(database: Path, target_dir: Path) -> None:
+    """Refuse up front, saying how much room is needed where, rather than fail half way with "No space left on device" (#328)."""
+    snapshot = _database_bytes(database)
+    archive = snapshot + (key_path().stat().st_size if key_path().exists() else 0)
+    archive += archive // CHUNK_BYTES * 32 + (64 << 10)  # Encryption adds a few bytes a chunk, the archive a header per file
+    staging, destination_folder = database.parent, target_dir
+    same_disk = os.stat(staging).st_dev == os.stat(destination_folder).st_dev
+    needs = [(staging, snapshot + archive + SPACE_MARGIN)] if same_disk else [(staging, snapshot + SPACE_MARGIN), (destination_folder, archive + SPACE_MARGIN)]
+    for folder, needed in needs:
+        free = shutil.disk_usage(folder).free
+        if free < needed:
+            raise BackupError(f"Not enough free space for a backup: it needs about {_megabytes(needed)} free in {folder}, and there is {_megabytes(free)}. "
+                              "Free some space on that disk, or send backups to another disk (NVR_BACKUP_PATH). Nothing was written.")
+
+
+def _megabytes(value: int) -> str:
+    return f"{value / (1 << 30):.1f} GB" if value >= 1 << 30 else f"{max(1, value >> 20)} MB"
 
 
 FAILOVER_KEEP = 2  # A standby's sync makes one of these every few minutes; only the newest are any use
@@ -466,20 +547,33 @@ def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dic
     if not force and _installation_running(database):
         raise BackupError("The NVR appears to be running. Stop it before restoring, or pass --force if it is stopped")
     database.parent.mkdir(parents=True, exist_ok=True)
+    needed = archive.stat().st_size + SPACE_MARGIN  # The database unpacked from it is no larger than the backup
+    free = shutil.disk_usage(database.parent).free
+    if free < needed:
+        raise BackupError(f"Not enough free space to restore: it needs about {_megabytes(needed)} free in {database.parent}, and there is {_megabytes(free)}. "
+                          "Free some space on that disk and try again. Nothing was changed.")
     with tempfile.TemporaryDirectory(prefix=".restore-", dir=database.parent) as work:
         work_dir = Path(work)
         os.chmod(work_dir, 0o700)
-        plain = work_dir / "backup.tar"
-        with archive.open("rb") as sealed, plain.open("wb") as target:
-            decrypt_stream(sealed, target, secret)
-        with tarfile.open(plain, "r") as tar:
-            names = tar.getnames()
-            if sorted(names) != sorted(("manifest.json", *MEMBERS)):
-                raise BackupError("The backup does not contain the expected files")
-            manifest = json.loads(tar.extractfile("manifest.json").read())
-            for member in MEMBERS:
-                with tar.extractfile(member) as stream, (work_dir / member).open("wb") as target:
-                    shutil.copyfileobj(stream, target)
+        # The backup is decrypted as it is read: the database is the only unencrypted copy written, as when it was made (#328).
+        with archive.open("rb") as sealed:
+            opener = _Opener(sealed, secret)
+            found: dict[str, bytes] = {}
+            with tarfile.open(fileobj=opener, mode="r|") as tar:  # A stream: each piece is checked as it is read
+                for info in tar:
+                    if info.name not in ("manifest.json", *MEMBERS) or info.name in found or not info.isfile():
+                        raise BackupError("The backup does not contain the expected files")
+                    stream = tar.extractfile(info)
+                    if info.name == "manifest.json":
+                        found[info.name] = stream.read()
+                    else:
+                        with (work_dir / info.name).open("wb") as target:
+                            shutil.copyfileobj(stream, target)
+                        found[info.name] = b""
+            opener.finish()
+        if sorted(found) != sorted(("manifest.json", *MEMBERS)):
+            raise BackupError("The backup does not contain the expected files")
+        manifest = json.loads(found["manifest.json"])
         for member in MEMBERS:
             if _sha256(work_dir / member) != manifest["files"][member]:
                 raise BackupError(f"Checksum mismatch for {member}")
