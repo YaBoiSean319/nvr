@@ -60,7 +60,8 @@ def remove_device(payload: TokenRequest, user: CurrentUser) -> Response:
 @router.post("/api/native/device-sessions", status_code=status.HTTP_201_CREATED)
 def create_device_session(payload: DeviceSessionRequest, user: SignedInPerson) -> dict[str, object]:
     """For a fully signed-in person: the secret the app keeps in the phone's secure storage. Shown once. Never for an API token or a video wall (#292)."""
-    return device_sessions.create(int(user["id"]), payload.device_label.strip())
+    credential = getattr(user, "credential", None)
+    return device_sessions.create(int(user["id"]), payload.device_label.strip(), credential[1] if credential and credential[0] == "session" else None)
 
 
 @router.post("/api/native/device-sessions/resume")

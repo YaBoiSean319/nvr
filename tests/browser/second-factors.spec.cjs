@@ -232,3 +232,37 @@ test("the password is changed from the account menu, and only the new one signs 
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(nav(page)).toBeVisible();
 });
+
+test("an administrator disables a person, whose session ends and who cannot sign in until enabled (#364)", async ({ page, browser }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const operatorContext = await browser.newContext({ baseURL: page.url().split("/").slice(0, 3).join("/") });
+  const operator = await operatorContext.newPage();
+  const operatorSignIn = async () => {
+    await operator.goto("/");
+    await operator.getByLabel("Username").fill("camera-operator");
+    await operator.getByLabel("Password").fill(FIXTURE_PASSWORD);
+    await operator.getByRole("button", { name: "Sign in", exact: true }).click();
+  };
+  await operatorSignIn();
+  await expect(nav(operator)).toBeVisible();
+
+  await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
+  await (await settingsLink(page, "Users & access")).click();
+  const accounts = page.getByRole("region", { name: "Sign-in security" });
+  const row = accounts.getByRole("row", { name: /camera-operator/ });
+  await expect(accounts.getByRole("button", { name: "Disable camera-admin" })).toHaveCount(0); // Nobody disables themselves.
+  await row.getByRole("button", { name: "Disable camera-operator" }).click();
+  await page.getByRole("dialog", { name: "Disable camera-operator?" }).getByRole("button", { name: "Disable" }).click();
+  await expect(accounts.getByRole("status")).toContainText("camera-operator is disabled");
+  await expect(row).toContainText("Disabled");
+  expect((await operator.request.get("/api/auth/me")).status()).toBe(401);
+  await operatorSignIn();
+  await expect(operator.getByRole("alert")).toContainText("Invalid username or password");
+
+  await row.getByRole("button", { name: "Enable camera-operator" }).click();
+  await expect(accounts.getByRole("status")).toContainText("camera-operator can sign in again");
+  await operatorSignIn();
+  await expect(nav(operator)).toBeVisible();
+  await operatorContext.close();
+});

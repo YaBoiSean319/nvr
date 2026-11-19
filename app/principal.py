@@ -140,7 +140,7 @@ def current_user(request: HTTPConnection) -> Principal:
             "(SELECT remote_mfa FROM security_settings WHERE singleton_id=1) AS remote_mfa, "
             "(SELECT COUNT(*) FROM user_totp t WHERE t.user_id=u.id AND t.confirmed_at IS NOT NULL) + "
             "(SELECT COUNT(*) FROM user_passkeys p WHERE p.user_id=u.id) AS factor_count "
-            "FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
+            "FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.disabled_at IS NULL",
             (token_digest(raw), stamp()),
         ).fetchone()
         if row is None:
@@ -225,7 +225,7 @@ def refresh(principal: Principal) -> Principal | None:
     now = stamp()
     with connect() as db:
         if kind == "session":
-            row = db.execute("SELECT u.id,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?", (ref, now)).fetchone()
+            row = db.execute("SELECT u.id,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.disabled_at IS NULL", (ref, now)).fetchone()
             if row is None:
                 return None
             return replace(principal, id=row["id"], role=row["role"], access=resolve_access(db, int(row["id"]), row["role"]))

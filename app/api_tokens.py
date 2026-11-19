@@ -81,7 +81,7 @@ def authenticate(presented: str) -> sqlite3.Row:
     now = _now()
     with connect() as db:
         row = db.execute(
-            "SELECT t.*,u.username AS owner_username,u.role AS owner_role FROM api_tokens t "
+            "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
             "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
             (token_id,),
         ).fetchone()
@@ -100,7 +100,7 @@ def usable_token(token_id: str) -> sqlite3.Row:
     """A token by id, for a session it signed in (a video wall), or raise TokenRejected."""
     with connect() as db:
         row = db.execute(
-            "SELECT t.*,u.username AS owner_username,u.role AS owner_role FROM api_tokens t "
+            "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
             "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
             (token_id,),
         ).fetchone()
@@ -113,6 +113,8 @@ def usable_token(token_id: str) -> sqlite3.Row:
 def _check_usable(row: sqlite3.Row, now: datetime) -> None:
     if row["revoked_at"]:
         raise TokenRejected("API token has been revoked")
+    if row["owner_disabled_at"]:
+        raise TokenRejected("API token belongs to a disabled account")  # Disabling revokes them too; this holds even if one was missed
     if row["expires_at"] and _parse(row["expires_at"]) <= now:
         raise TokenRejected("API token has expired")
     if row["created_by"] is None or row["owner_role"] != "administrator":

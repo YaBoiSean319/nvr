@@ -10,7 +10,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
-from app import auth_limits as limits, mfa, network, webauthn
+from app import accounts, auth_limits as limits, mfa, network, webauthn
 from app.api.identity import signed_in
 from app.audit import record
 from app.principal import COOKIE_NAME, Administrator, CurrentUser, Principal
@@ -61,7 +61,7 @@ def _open_challenge(raw: str, kind: str = "login", *, claim: bool = False) -> tu
         challenge = mfa.claim_attempt(db, raw, kind) if claim else mfa.get_challenge(db, raw, kind)
         if challenge is None:
             raise _expired()
-        user = db.execute("SELECT id,username,role,provider_issuer FROM users WHERE id=?", (challenge["user_id"],)).fetchone() if challenge["user_id"] else None
+        user = db.execute("SELECT id,username,role,provider_issuer FROM users WHERE id=? AND disabled_at IS NULL", (challenge["user_id"],)).fetchone() if challenge["user_id"] else None
     return challenge, user
 
 
@@ -204,7 +204,7 @@ def passkey_sign_in(payload: PasskeyAssertion, request: Request, response: Respo
     try:
         with connect() as db:
             row = db.execute("SELECT user_id FROM user_passkeys WHERE credential_id=?", (str(payload.credential.get("id", "")),)).fetchone()
-            user = db.execute("SELECT id,username,role,provider_issuer,passkey_sign_in FROM users WHERE id=?", (row["user_id"],)).fetchone() if row else None
+            user = db.execute("SELECT id,username,role,provider_issuer,passkey_sign_in FROM users WHERE id=? AND disabled_at IS NULL", (row["user_id"],)).fetchone() if row else None
         if user is None:
             raise webauthn.WebAuthnError("This passkey is not registered")
         account = limits.account_key(user["username"])
@@ -576,14 +576,33 @@ def put_security_policy(payload: PolicyRequest, admin: Administrator) -> dict[st
 @router.get("/api/admin/users")
 def list_users(_: Administrator) -> dict[str, object]:
     with connect() as db:
-        rows = db.execute("SELECT id,username,role,provider_issuer,passkey_sign_in,created_at FROM users ORDER BY username COLLATE NOCASE").fetchall()
+        rows = db.execute("SELECT id,username,role,provider_issuer,provider_roles_json,passkey_sign_in,disabled_at,created_at FROM users ORDER BY username COLLATE NOCASE").fetchall()
         users = []
         for row in rows:
             found = mfa.factors(db, int(row["id"]))
             users.append({"id": row["id"], "username": row["username"], "role": row["role"], "local": row["provider_issuer"] is None,
                           "totp": found["totp"], "passkeys": len(found["passkeys"]), "recovery_codes_remaining": found["recovery_codes_remaining"],
-                          "passkey_sign_in": bool(row["passkey_sign_in"])})
+                          "passkey_sign_in": bool(row["passkey_sign_in"]), "disabled": row["disabled_at"] is not None,
+                          # Entra refused their last sign-in for want of a role, and what they had here was ended.
+                          "entra_role_removed": row["provider_issuer"] is not None and row["provider_roles_json"] == "[]"})
     return {"users": users}
+
+
+class DisabledRequest(BaseModel):
+    disabled: bool
+
+
+@router.put("/api/admin/users/{user_id}/disabled")
+def set_user_disabled(user_id: int, payload: DisabledRequest, admin: Administrator) -> dict[str, object]:
+    """Disable a person: their sessions, device sign-ins and alarm notifications end, their API tokens are revoked, and they cannot sign in
+    until enabled again. Nobody disables themselves, so an administrator always remains. Audited."""
+    if user_id == admin.id:
+        raise HTTPException(status_code=409, detail="You cannot disable your own account; ask another administrator")
+    with connect() as db:
+        if db.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        accounts.set_disabled(db, user_id, payload.disabled, admin.id)
+    return {"id": user_id, "disabled": payload.disabled}
 
 
 @router.delete("/api/admin/users/{user_id}/mfa", status_code=status.HTTP_204_NO_CONTENT)

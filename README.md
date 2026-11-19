@@ -116,6 +116,7 @@ Every editor saves explicitly. Leaving with unsaved changes asks whether to save
 - `GET /api/setup/status` reports whether initial setup is still required.
 - `POST /api/setup/admin` creates the one-time local administrator. Passwords require at least 14 characters, including a letter and a number.
 - A local account changes its own password in the account menu under **Security…** (the current password, and the second factor when it has one; the same rules; other sessions end). When nobody can sign in, `python -m app.mfa password USERNAME` on the NVR host sets one: it asks for the password rather than taking it as an argument, ends that account's sessions, leaves its second factors alone and is audited (see [second factors](docs/second-factors.md)).
+- An administrator can **disable** any account in Settings › Users & access, which ends its sessions, device sign-ins and alarm notifications and revokes its API tokens; a refused Entra sign-in (role removed) ends the same things (see [access grants](docs/access-grants.md)).
 - `GET /api/system/status` requires an authenticated administrator session.
 - `POST /api/cameras/test` checks an RTSP/RTSPS video stream with FFprobe.
 - Administrators can enable opt-in support diagnostics for 1–24 hours and download a bounded JSON bundle. Capture is off by default. The bundle contains only scan/probe outcomes, aggregate counts, and timings; it excludes camera inventory, names, addresses, stream/service URLs, credentials, sessions, and footage. It is capped at 1,000 events and 7 days.

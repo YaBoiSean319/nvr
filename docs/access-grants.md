@@ -17,7 +17,7 @@ The NVR has no "sites" concept, only camera groups, so grants name groups. To gr
 
 These automatic grants are marked as defaults (shown as "All cameras (default)"). A default gives way as soon as a role the person holds has grants of its own, so giving an Entra role access narrows the people who hold it without editing each of them. A grant an administrator chose for the person themselves does not give way. The default is applied when an operator is created, and once more when an Entra sign-in turns an administrator into an operator; it is never reapplied to an operator an administrator left with no cameras.
 
-Manage grants in **Settings › Users & access › Camera access**: choose an operator or an Entra role, then every camera, chosen groups (each with its own optional expiry), or none. Saving replaces everything that subject was granted, in one audited step. The same is available as `GET`/`PUT /api/admin/access-grants` and `DELETE /api/admin/access-grants/{id}`. Entra roles are read from the sign-in token and stored with the user at each sign-in, so a role grant follows what the person held at their last sign-in: a role removed in Entra stops applying when they next sign in, and a session still open keeps the access it had until then.
+Manage grants in **Settings › Users & access › Camera access**: choose an operator or an Entra role, then every camera, chosen groups (each with its own optional expiry), or none. Saving replaces everything that subject was granted, in one audited step. The same is available as `GET`/`PUT /api/admin/access-grants` and `DELETE /api/admin/access-grants/{id}`. Entra roles are read from the sign-in token and stored with the user at each sign-in, so a role grant follows what the person held at their last sign-in: a role removed in Entra stops applying when they next sign in, and a session still open keeps the access it had until then. To end someone's access without waiting for that, disable them (below).
 
 ## What is hidden
 
@@ -38,6 +38,12 @@ The person's access is resolved once per request, from their grants as they stan
 What is stored is untouched, so restoring access brings a saved view back.
 
 An **API token** has its creator's access, resolved at each request. Tokens are made by administrators, who see every camera, so a token sees every camera; a token whose creator stops being an administrator stops working.
+
+## Removing a person
+
+**Settings › Users & access › Sign-in security** lists every account with a **Disable** button (`PUT /api/admin/users/{id}/disabled`). Disabling a person ends, in one audited step, everything they could reach the NVR with: their browser sessions, their device sign-ins, the alarm notifications sent to their devices, and the API tokens they created (revoked). A disabled account cannot sign in, by password, passkey or Entra, until an administrator chooses **Enable**; enabling brings nothing back, so they sign in afresh and make new tokens. Nobody can disable their own account, so there is always an administrator left.
+
+**When a role is removed in Entra**, or the Entra account is disabled there, the NVR hears of it only when the person next tries to sign in. That sign-in is refused, and the same four things are ended at that moment (audited as `user_access_ended`); the list then shows the person as "No Entra role (access ended)". Until they try, a browser session lasts up to the session lifetime, and a device sign-in on an Entra account works for at most 30 days after their last Entra sign-in, however often it is used. If someone must lose access today, do not wait for either: disable them here as well.
 
 ## Expiry and changes take effect at once
 

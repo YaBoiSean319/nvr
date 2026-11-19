@@ -16,7 +16,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from authlib.integrations.starlette_client import OAuth
 
-from app import auth_limits as limits, mfa, network
+from app import accounts, auth_limits as limits, mfa, network
+from app.audit import record
 from app.clock import stamp
 from app.access import ensure_default_grant
 from app.principal import secure_cookie, COOKIE_NAME, Administrator, CurrentUser
@@ -186,7 +187,7 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
     limits.begin(account, address)  # Counted as a failure until it turns out right.
     with connect() as db:
         user = db.execute(
-            "SELECT id, username, password_hash, role, provider_issuer FROM users WHERE username=? COLLATE NOCASE",
+            "SELECT id, username, password_hash, role, provider_issuer FROM users WHERE username=? COLLATE NOCASE AND disabled_at IS NULL",
             (payload.username.strip(),),
         ).fetchone()
     if user is None:
@@ -278,6 +279,24 @@ async def oidc_login(request: Request) -> dict[str, str] | RedirectResponse:
         raise HTTPException(status_code=503, detail="Entra sign-in is temporarily unavailable; local administrator sign-in remains available") from exc
 
 
+def _entra_role_removed(issuer: str, subject: str) -> None:
+    """Entra has just said this person has no role here. If they had one before, what it gave them ends now (#364): the refusal alone left
+    their open session, device sign-ins, API tokens and alarm notifications working. Someone the NVR never knew changes nothing."""
+    known = ("SELECT 1 FROM users u WHERE u.provider_issuer=? AND u.provider_subject=? AND (u.provider_roles_json IS NOT '[]' "
+             "OR EXISTS(SELECT 1 FROM sessions s WHERE s.user_id=u.id) OR EXISTS(SELECT 1 FROM device_sessions d WHERE d.user_id=u.id) "
+             "OR EXISTS(SELECT 1 FROM push_subscriptions p WHERE p.user_id=u.id) OR EXISTS(SELECT 1 FROM api_tokens t WHERE t.created_by=u.id AND t.revoked_at IS NULL))")
+    with connect() as db:
+        if not has_row(db, known, (issuer, subject)):
+            return  # Read first: anyone in the tenant can reach this refusal, and a repeat of it must not take the write lock (#353)
+    with connect() as db:
+        user = db.execute("SELECT id,username FROM users WHERE provider_issuer=? AND provider_subject=?", (issuer, subject)).fetchone()
+        if user is None:
+            return
+        ended = accounts.end_access(db, int(user["id"]), None)
+        db.execute("UPDATE users SET provider_roles_json='[]' WHERE id=?", (int(user["id"]),))
+        record(db, None, "user_access_ended", "user", int(user["id"]), username=user["username"], reason="entra_role_removed", **ended)
+
+
 @router.get("/api/auth/oidc/callback", include_in_schema=False)
 async def oidc_callback(request: Request) -> RedirectResponse:
     config = _oidc_settings()
@@ -296,17 +315,20 @@ async def oidc_callback(request: Request) -> RedirectResponse:
     tenant_id = config["tenant_id"].casefold()
     if str(claims.get("tid", "")).casefold() != tenant_id:
         raise HTTPException(status_code=403, detail="This Entra tenant is not allowed")
-    role = _mapped_role(claims)
-    if role is None:
-        raise HTTPException(status_code=403, detail="Your Entra account has no NVR role assignment")
     issuer = claims.get("iss")
     if not isinstance(issuer, str) or not issuer.startswith("https://login.microsoftonline.com/"):
         raise HTTPException(status_code=401, detail="Entra sign-in issuer is invalid")
     subject = claims["sub"]
+    role = _mapped_role(claims)
+    if role is None:
+        _entra_role_removed(issuer, subject)
+        raise HTTPException(status_code=403, detail="Your Entra account has no NVR role assignment")
     display = claims.get("preferred_username")
     username = display.strip()[:128] if isinstance(display, str) and display.strip() else f"entra-{subject[:112]}"
     with connect() as db:
-        user = db.execute("SELECT id, username, role FROM users WHERE provider_issuer=? AND provider_subject=?", (issuer, subject)).fetchone()
+        user = db.execute("SELECT id, username, role, disabled_at FROM users WHERE provider_issuer=? AND provider_subject=?", (issuer, subject)).fetchone()
+        if user is not None and user["disabled_at"] is not None:
+            raise HTTPException(status_code=403, detail="This account has been disabled on this NVR. Ask an administrator.")
         if user is None:
             if db.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone():
                 username = f"entra-{subject[:112]}"
