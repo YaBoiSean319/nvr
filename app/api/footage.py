@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -178,17 +179,39 @@ def restore_camera(
     return camera_view(updated)
 
 
+FOOTAGE_DELETE_BATCH = 200  # Segments removed in one write transaction, and at most this many files open at once
+
+_ACTIVE_HOLD = ("SELECT 1 FROM recording_holds WHERE camera_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) LIMIT 1")
+_ACTIVE_EXPORT = ("SELECT 1 FROM export_sources s JOIN recording_segments r ON r.id=s.segment_id "
+                  "JOIN exports e ON e.id=s.export_id WHERE r.camera_id=? AND e.status IN ('queued','running') LIMIT 1")
+
+
+def _refuse_protected_footage(db: sqlite3.Connection, camera_id: str) -> None:
+    if db.execute(_ACTIVE_HOLD, (camera_id,)).fetchone():
+        raise HTTPException(status_code=409, detail="Archived camera has preserved footage; release its holds before deleting footage")
+    if db.execute(_ACTIVE_EXPORT, (camera_id,)).fetchone():
+        raise HTTPException(status_code=409, detail="Archived camera footage is in an active export")
+
+
 @router.delete("/api/cameras/{camera_id}/footage", status_code=status.HTTP_204_NO_CONTENT)
 def delete_archived_camera_footage(
     camera_id: str,
     payload: CameraFootageDeleteRequest,
     user: Administrator,
 ) -> Response:
+    """Delete every recording of an archived camera.
+
+    Everything that can refuse is looked at first, before anything is removed: a hold, a queued or running export, storage that is not
+    there, a file being played. Then the footage goes ``FOOTAGE_DELETE_BATCH`` segments at a time, each batch its own short write
+    transaction, so recording and everything else keep writing in between, and no more than a batch of files is ever open (#361).
+    One transaction for a camera with a month of footage held the write lock for most of an hour and opened every file at once.
+    A delete that stops part-way (a file starts being played, the server restarts) has removed whole batches; running it again finishes."""
     from app import tiering
+    from app.retention import playback_is_leased
     from app.storage import recording_file_path, remove_segment_files
 
+    columns = "id,relative_path,tier_id,tier_key,tier_sha256"
     with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
         camera = db.execute("SELECT name,archived_at FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if camera is None:
             raise HTTPException(status_code=404, detail="Camera not found")
@@ -196,35 +219,46 @@ def delete_archived_camera_footage(
             raise HTTPException(status_code=409, detail="Archive the camera before deleting its footage")
         if payload.confirm_camera_name != camera["name"]:
             raise HTTPException(status_code=422, detail="Camera name confirmation does not match")
-        active_hold = db.execute(
-            "SELECT 1 FROM recording_holds WHERE camera_id=? AND released_at IS NULL AND (expires_at IS NULL OR expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) LIMIT 1",
-            (camera_id,),
-        ).fetchone()
-        if active_hold:
-            raise HTTPException(status_code=409, detail="Archived camera has preserved footage; release its holds before deleting footage")
-        active_export = db.execute(
-            "SELECT 1 FROM export_sources s JOIN recording_segments r ON r.id=s.segment_id "
-            "JOIN exports e ON e.id=s.export_id WHERE r.camera_id=? AND e.status IN ('queued','running') LIMIT 1",
-            (camera_id,),
-        ).fetchone()
-        if active_export:
-            raise HTTPException(status_code=409, detail="Archived camera footage is in an active export")
-        segments = db.execute("SELECT id,relative_path,tier_id,tier_key,tier_sha256 FROM recording_segments WHERE camera_id=?", (camera_id,)).fetchall()
-        try:
-            for row in segments:
-                if not row["tier_id"]:
-                    recording_file_path(row["relative_path"])  # Hot storage that is not there is refused here, as before
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=503, detail="Assigned recording storage is unavailable") from exc
-        if not remove_segment_files(segments):
-            raise HTTPException(status_code=409, detail="Archived camera footage is currently being played")
-        db.execute("DELETE FROM recording_segments WHERE camera_id=?", (camera_id,))
-        # Including detections between motion clips: nothing of this camera's recorded activity remains.
-        db.execute("DELETE FROM ai_tracks WHERE camera_id=?", (camera_id,))
+        _refuse_protected_footage(db, camera_id)
+        segments = db.execute(f"SELECT {columns} FROM recording_segments WHERE camera_id=? ORDER BY id", (camera_id,)).fetchall()
+    try:
+        for row in segments:
+            if row["tier_id"]:
+                continue
+            # Hot storage that is not there is refused here, as before; and a file being played, one file open at a time.
+            if playback_is_leased(recording_file_path(row["relative_path"])):
+                raise HTTPException(status_code=409, detail="Archived camera footage is currently being played")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Assigned recording storage is unavailable") from exc
+
+    deleted = 0
+    for offset in range(0, len(segments), FOOTAGE_DELETE_BATCH):
+        batch = segments[offset:offset + FOOTAGE_DELETE_BATCH]
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            _refuse_protected_footage(db, camera_id)  # A hold or an export made since the check above still stops what is left
+            try:
+                removed = remove_segment_files(batch)
+            except OSError as exc:  # Its files are closed again by now; what is left can be deleted once the storage is back
+                raise HTTPException(status_code=503, detail="Assigned recording storage is unavailable") from exc
+            if not removed:
+                raise HTTPException(status_code=409, detail="Archived camera footage is currently being played")
+            marks = ",".join("?" * len(batch))
+            db.execute(f"DELETE FROM recording_segments WHERE id IN ({marks})", [row["id"] for row in batch])
+        tiering.discard_objects(batch)  # Copies in object stores go once the rows are gone, outside the write lock
+        deleted += len(batch)
+    # Including detections between motion clips: nothing of this camera's recorded activity remains. In batches too: a track takes its detections with it.
+    while True:
+        with connect() as db:
+            tracks = [row[0] for row in db.execute("SELECT id FROM ai_tracks WHERE camera_id=? LIMIT ?", (camera_id, FOOTAGE_DELETE_BATCH))]
+            if tracks:
+                db.execute(f"DELETE FROM ai_tracks WHERE id IN ({','.join('?' * len(tracks))})", tracks)
+        if len(tracks) < FOOTAGE_DELETE_BATCH:
+            break
+    with connect() as db:
         db.execute("INSERT INTO audit_log(actor_id,action,resource_type,resource_id,details_json) VALUES(?,?,?,?,?)",
                    (int(user["id"]), "delete_camera_footage", "camera", camera_id,
-                    json.dumps({"segments_deleted": len(segments)}, separators=(",", ":"))))
-    tiering.discard_objects(segments)  # Copies in object stores go once the rows are gone, outside the write lock
+                    json.dumps({"segments_deleted": deleted}, separators=(",", ":"))))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

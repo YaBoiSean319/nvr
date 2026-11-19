@@ -91,17 +91,23 @@ def _shared_lock(path: Path) -> int:
 def _exclusive_locks(paths: list[Path]) -> list[int] | None:
     """Exclusively lock every existing file, or return None if any is leased."""
     held: list[int] = []
-    for path in paths:
-        try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        held.append(descriptor)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            _close(held)
-            return None
+    try:
+        for path in paths:
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            held.append(descriptor)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                _close(held)
+                return None
+    except BaseException:
+        # Any other failure part-way (out of file handles, a disk error): the files already opened were left open and locked for the
+        # life of the process, until it had no handles left at all (#361).
+        _close(held)
+        raise
     return held
 
 
