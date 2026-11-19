@@ -242,3 +242,17 @@ test("a failed CSV preview explains itself and a preview of older text cannot be
   await expect(page.getByRole("table", { name: "Import preview" })).toContainText("Newer Text Fixture");
   await expect(page.getByRole("button", { name: "Import 1 camera" })).toBeEnabled();
 });
+
+test("a discovered device that is not wanted can be forgotten (#381)", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  await openAdd(page);
+  await expect(results(page)).toContainText("Unadded Fixture Camera");
+  await expect(page.getByText("2 not-added devices shown")).toBeVisible();
+  await results(page).getByRole("button", { name: "Unadded Fixture Camera" }).click();
+  const setup = page.getByRole("region", { name: "Device setup" });
+  await setup.getByRole("button", { name: "Forget this device" }).click();
+  await expect(results(page)).not.toContainText("Unadded Fixture Camera");
+  await expect(page.getByText("1 not-added device shown")).toBeVisible();
+  await expect(setup).toContainText("Select a discovered device to set it up.");
+});
