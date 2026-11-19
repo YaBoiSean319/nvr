@@ -14,7 +14,6 @@ one alarm. It carries no session or API token.
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import json
@@ -36,6 +35,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from . import base64url
 from .access import may_view_camera
 from .alarms import label_text
 from .credentials import decrypt, derived_key, encrypt
@@ -60,12 +60,7 @@ class PushError(Exception):
     pass
 
 
-def _b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _unb64(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+_b64, _unb64 = base64url.encode, base64url.decode
 
 
 # --- keys -------------------------------------------------------------------------

@@ -5,6 +5,7 @@ stream and the worker's own heartbeat waited with it. Each test holds the lock f
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import sqlite3
 import threading
@@ -44,7 +45,14 @@ class LoopStaysFreeTests(GrantCase):
         return thread
 
     def longest_stall_during(self, request) -> tuple[httpx.Response, float]:
-        """Make the request while the write lock is held; return its answer and the longest the event loop went without turning."""
+        """Make the request while the write lock is held; return its answer and the longest the event loop went without turning.
+
+        Python's garbage collector is run first and kept off while this is measured. Late in the full suite a collection of what earlier
+        tests left behind froze the whole process for over four seconds in the middle of one of these tests (CI, PR #404): that is a pause
+        of the test process, not of the request, and it would hide or fake exactly what is being measured. The limit itself is unchanged."""
+        gc.collect()
+        gc.disable()
+        self.addCleanup(gc.enable)
 
         async def body():
             longest = 0.0

@@ -8,7 +8,6 @@ verification when asked), signature and signature counter. Supported algorithms 
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -22,7 +21,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import cbor
+from . import base64url, cbor
 
 ES256, RS256, EDDSA = -7, -257, -8
 SUPPORTED = (ES256, RS256, EDDSA)
@@ -34,15 +33,14 @@ class WebAuthnError(ValueError):
     """A ceremony that must be refused; the message is safe to show."""
 
 
-def b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+b64url = base64url.encode
 
 
 def unb64url(value: str) -> bytes:
     if not isinstance(value, str):
         raise WebAuthnError("The passkey response is malformed")
     try:
-        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        return base64url.decode(value)
     except (ValueError, TypeError) as exc:
         raise WebAuthnError("The passkey response is malformed") from exc
 

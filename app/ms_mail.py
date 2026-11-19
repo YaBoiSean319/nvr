@@ -9,7 +9,6 @@ Nothing here puts a token, a code or a secret in an error: failures are short co
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -22,6 +21,7 @@ from urllib.parse import quote
 
 import httpx
 
+from . import base64url
 from .credentials import decrypt, encrypt
 from .store import connect
 from app.clock import now as _now
@@ -233,7 +233,7 @@ def _account_of(id_token: str | None) -> str | None:
     """The signed-in account's name from the sign-in token, for display only (nothing trusts it)."""
     try:
         payload = (id_token or "").split(".")[1]
-        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        claims = json.loads(base64url.decode(payload))
         name = claims.get("preferred_username") or claims.get("email") or claims.get("upn")
         return str(name)[:254] if name else None
     except (IndexError, ValueError, TypeError):
