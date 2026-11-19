@@ -10,7 +10,6 @@ picture is fetched by the app through the signed thumbnail link, as for web push
 """
 from __future__ import annotations
 
-import base64
 import json
 import re
 import sqlite3
@@ -23,6 +22,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
+from . import base64url
 from .credentials import decrypt, encrypt
 from .store import connect
 from app.clock import now as _now
@@ -44,8 +44,7 @@ class NativePushError(ValueError):
     """A device or the credentials cannot be saved as given."""
 
 
-def _b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+_b64 = base64url.encode
 
 
 # --- devices ----------------------------------------------------------------------------------------------------------------------------------
