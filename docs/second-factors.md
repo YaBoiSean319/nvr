@@ -12,6 +12,10 @@ Open the account menu and choose **Security…**.
 
 Removing a factor, making new recovery codes, turning passkey-only sign-in on or off, and **adding another factor to an account that already has one**, all ask for your password again, so a borrowed session cannot weaken sign-in or add a factor of its own. After any change to how you sign in, your other sessions end; the one making the change stays. Setting up sign-in security needs a browser session: an API token, which acts for its creator, cannot.
 
+## Changing your password
+
+The same **Security…** dialog has a **Password** section. Give the current password and the new one twice; an account with a second factor also gives an authenticator code, a recovery code (which is used up), or answers with its passkey. The new password follows the first-run rules: at least 14 characters, with a letter and a number. Afterwards every other session and device sign-in of yours ends, the one making the change stays, and the change is audited (never the password itself). Entra accounts have no password here.
+
 ## Signing in
 
 1. Enter the username and password. An account with a second factor gets a short-lived, single-use challenge instead of a session (5 minutes, and five wrong answers burn it).
@@ -34,6 +38,16 @@ If the only administrator loses their authenticator and recovery codes, run this
 ```
 python -m app.mfa reset USERNAME
 ```
+
+## A lost or leaked password
+
+If someone can still sign in, they change it themselves as above. If the only administrator cannot, run this on the NVR host:
+
+```
+python -m app.mfa password USERNAME
+```
+
+It asks for the new password twice (it is never given on the command line, where it would be kept in the shell's history), applies the same rules, ends every session of that account and is audited. Second factors are left as they are; use `reset` as well if those are lost too. It refuses Entra accounts.
 
 ## Rate limiting
 

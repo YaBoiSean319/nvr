@@ -67,6 +67,58 @@ function PasswordDialog({ pending, onClose }: { pending: Reauth | null; onClose:
   );
 }
 
+/** Change one's own password: the current one, the new one twice, and the second factor when there is one. */
+function PasswordForm({ totp, passkeys }: { totp: boolean; passkeys: boolean }) {
+  const { changePassword } = useSecurityActions();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [again, setAgain] = useState("");
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const usePasskey = !totp && passkeys && passkeysSupported();
+  const needsCode = (totp || passkeys) && !usePasskey;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setDone(false);
+    if (next !== again) { setError("The two new passwords do not match."); return; }
+    setError(null);
+    try {
+      await changePassword.mutateAsync({ current, next, code: code.trim() || undefined, passkey: usePasskey });
+      setCurrent(""); setNext(""); setAgain(""); setCode("");
+      setDone(true);
+    } catch (failure) {
+      setError(message(failure));
+    }
+  }
+
+  return (
+    <form className="tab-form" aria-label="Change your password" onSubmit={event => void submit(event)} noValidate>
+      <label className="field"><span>Current password</span>
+        <input type="password" autoComplete="current-password" value={current} onChange={event => setCurrent(event.target.value)} />
+      </label>
+      <label className="field"><span>New password</span>
+        <input type="password" autoComplete="new-password" value={next} onChange={event => setNext(event.target.value)} />
+      </label>
+      <label className="field"><span>New password again</span>
+        <input type="password" autoComplete="new-password" value={again} onChange={event => setAgain(event.target.value)} />
+      </label>
+      <p className="muted">At least 14 characters, with a letter and a number.</p>
+      {totp || passkeys ? (
+        <label className="field"><span>{totp ? "Authenticator code or recovery code" : usePasskey ? "Recovery code (leave empty to use your passkey)" : "Recovery code"}</span>
+          <input value={code} autoComplete="one-time-code" maxLength={64} onChange={event => setCode(event.target.value)} />
+        </label>
+      ) : null}
+      {error ? <p className="notice" data-tone="bad" role="alert">{error}</p> : null}
+      {done ? <p className="notice" data-tone="good" role="status">Password changed. Your other sessions were signed out.</p> : null}
+      <div className="field-actions">
+        <button type="submit" className="button" disabled={changePassword.isPending || !current || !next || !again || (needsCode && !code.trim())}>Change password</button>
+      </div>
+    </form>
+  );
+}
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="field-group" aria-label={title}>
@@ -211,6 +263,12 @@ export function SecurityPanel({ onChange }: { onChange?: () => void }) {
           </div>
         </Section>
       ) : null}
+
+      {data.required && !hasFactor ? null : (
+        <Section title="Password">
+          <PasswordForm totp={data.totp} passkeys={data.passkeys.length > 0} />
+        </Section>
+      )}
 
       <RecoveryCodesDialog codes={codes} onClose={() => { setCodes(null); onChange?.(); }} />
       <PasswordDialog pending={pending} onClose={() => setPending(null)} />

@@ -172,33 +172,86 @@ def burn_challenge(db: sqlite3.Connection, raw: str) -> bool:
     return db.execute("DELETE FROM mfa_challenges WHERE token_hash=?", (token_digest(raw),)).rowcount == 1
 
 
-def main(argv: list[str] | None = None) -> int:
-    """``python -m app.mfa reset USERNAME``: remove a person's second factors from the host.
+def _reset_from_host(db: sqlite3.Connection, user: sqlite3.Row) -> str:
+    from .audit import record
 
-    For an administrator who lost their authenticator and recovery codes when no other administrator can reset them.
-    Whoever can run it can already read the database, so it needs no password; it is audited."""
+    user_id = int(user["id"])
+    before = factors(db, user_id)
+    reset_factors(db, user_id)
+    _end_every_session(db, user_id)
+    record(db, None, "mfa_reset", "user", user_id, username=user["username"], had_totp=before["totp"], passkeys=len(before["passkeys"]), via="host")
+    return f"Removed the second factors of {user['username']}; they will sign in with their password and set up a new one if the policy asks."
+
+
+def _end_every_session(db: sqlite3.Connection, user_id: int) -> None:
+    db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+    db.execute("DELETE FROM device_sessions WHERE user_id=?", (user_id,))  # A phone's stored secret is a session too
+    db.execute("DELETE FROM mfa_challenges WHERE user_id=?", (user_id,))  # And so is a sign-in half done
+
+
+def _new_password() -> str | None:
+    """The new password, asked for twice at a terminal or read as one line when piped in. Never an argument: those show in the process list
+    and the shell's history."""
+    import getpass
+    import sys
+
+    from .security import password_problem
+
+    if sys.stdin.isatty():
+        password = getpass.getpass("New password: ")
+        if getpass.getpass("Again: ") != password:
+            print("The two did not match; nothing was changed.")
+            return None
+    else:
+        password = sys.stdin.readline().rstrip("\r\n")
+    problem = password_problem(password)
+    if problem:
+        print(f"{problem}; nothing was changed.")
+        return None
+    return password
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m app.mfa reset USERNAME`` removes a person's second factors from the host; ``python -m app.mfa password USERNAME`` sets a
+    local account's password.
+
+    For an administrator who lost their authenticator and recovery codes, or their password, when no other way in is left. Whoever can run
+    these can already read and write the database, so they ask for no proof; both are audited."""
     import argparse
 
     from .audit import record
+    from .security import hash_password
     from .store import connect, initialize
 
-    parser = argparse.ArgumentParser(prog="python -m app.mfa", description="Second factor administration from the NVR host")
+    parser = argparse.ArgumentParser(prog="python -m app.mfa", description="Sign-in administration from the NVR host")
     commands = parser.add_subparsers(dest="command", required=True)
     reset = commands.add_parser("reset", help="Remove every second factor of a user and end their sessions")
     reset.add_argument("username")
+    password = commands.add_parser("password", help="Set a local account's password (asked for, never an argument) and end their sessions")
+    password.add_argument("username")
     arguments = parser.parse_args(argv)
     initialize()
     with connect() as db:
-        user = db.execute("SELECT id,username FROM users WHERE username=? COLLATE NOCASE", (arguments.username,)).fetchone()
-        if user is None:
-            print(f"No user named {arguments.username!r}")
-            return 1
-        before = factors(db, int(user["id"]))
-        reset_factors(db, int(user["id"]))
-        db.execute("DELETE FROM sessions WHERE user_id=?", (int(user["id"]),))
-        db.execute("DELETE FROM device_sessions WHERE user_id=?", (int(user["id"]),))  # A phone's stored secret is a session too
-        record(db, None, "mfa_reset", "user", int(user["id"]), username=user["username"], had_totp=before["totp"], passkeys=len(before["passkeys"]), via="host")
-    print(f"Removed the second factors of {user['username']}; they will sign in with their password and set up a new one if the policy asks.")
+        user = db.execute("SELECT id,username,provider_issuer FROM users WHERE username=? COLLATE NOCASE", (arguments.username,)).fetchone()
+    if user is None:
+        print(f"No user named {arguments.username!r}")
+        return 1
+    if arguments.command == "reset":
+        with connect() as db:
+            print(_reset_from_host(db, user))
+        return 0
+    if user["provider_issuer"] is not None:
+        print(f"{user['username']} signs in with Microsoft Entra; their password is managed there.")
+        return 1
+    chosen = _new_password()
+    if chosen is None:
+        return 1
+    encoded = hash_password(chosen)
+    with connect() as db:
+        db.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, int(user["id"])))
+        _end_every_session(db, int(user["id"]))
+        record(db, None, "password_changed", "user", int(user["id"]), username=user["username"], via="host")
+    print(f"Set a new password for {user['username']} and ended their sessions. Their second factors are unchanged.")
     return 0
 
 

@@ -206,3 +206,29 @@ test("when required, someone without a second factor must set one up first; an a
   expect((await operator.request.get("/api/auth/me")).status()).toBe(401); // Their session ended.
   await operatorContext.close();
 });
+
+test("the password is changed from the account menu, and only the new one signs in afterwards (#366)", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const dialog = await openSecurity(page, "camera-admin");
+  const form = dialog.getByRole("form", { name: "Change your password" });
+  const changed = "a-changed-password-2468";
+  await form.getByLabel("Current password").fill("not the password 123");
+  await form.getByLabel("New password", { exact: true }).fill(changed);
+  await form.getByLabel("New password again").fill(changed);
+  await form.getByRole("button", { name: "Change password" }).click();
+  await expect(form.getByRole("alert")).toContainText("That password is not right");
+  await form.getByLabel("Current password").fill(FIXTURE_PASSWORD);
+  await form.getByRole("button", { name: "Change password" }).click();
+  await expect(form.getByRole("status")).toContainText("Password changed");
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await signOut(page, "camera-admin");
+
+  await page.getByLabel("Username").fill("camera-admin");
+  await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Invalid username or password");
+  await page.getByLabel("Password").fill(changed);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(nav(page)).toBeVisible();
+});
