@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import time
 import uuid
@@ -149,7 +150,12 @@ class HeartbeatManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                await asyncio.to_thread(record_heartbeat_result, success=False, error="worker_error")
+                try:
+                    await asyncio.to_thread(record_heartbeat_result, success=False, error="worker_error")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - the database busy at this moment used to end the heartbeat for good (#386)
+                    logging.getLogger(__name__).warning("The heartbeat's failure could not be recorded this time; it carries on", exc_info=True)
                 await asyncio.sleep(1)
 
     async def _send(self, config: dict[str, Any]) -> None:
