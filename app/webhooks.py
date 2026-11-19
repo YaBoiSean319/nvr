@@ -134,7 +134,12 @@ def signed_headers(secret: str, event_id: str, event_type: str, body: bytes) -> 
 
 
 def url_origin(ciphertext: bytes) -> str:
-    parsed = urlsplit(decrypt(ciphertext))
+    """Where a stored address points, for a list. One that cannot be read (the credential key is missing or is not the one it was saved
+    with) is shown as unreadable: it used to fail the whole page (#383)."""
+    try:
+        parsed = urlsplit(decrypt(ciphertext))
+    except RuntimeError:
+        return "(cannot be read: the credential key is missing or has changed)"
     host = parsed.hostname or ""
     host = f"[{host}]" if ":" in host else host
     port = f":{parsed.port}" if parsed.port else ""
