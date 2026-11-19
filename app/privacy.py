@@ -18,9 +18,9 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-from . import acceleration
+from . import acceleration, copies_budget
 from .access import may_view_camera
 from .credentials import decrypt
 from .store import connect
@@ -296,6 +296,39 @@ def _copies_root() -> Path:
     return recordings_path() / MASKED_COPY_DIRECTORY
 
 
+def _source_key(source: Path) -> str:
+    """The same for a recording however its path was reached (playback and deletion build it differently)."""
+    try:
+        source = Path(source).resolve()
+    except OSError:
+        pass
+    return hashlib.sha256(str(source).encode()).hexdigest()[:16]
+
+
+def forget_copies(sources: Iterable[Path]) -> int:
+    """Remove the playback copies made from these recordings, which are being deleted: a copy must not outlive its footage (#362)."""
+    root = _copies_root()
+    removed = 0
+    for source in sources:
+        for copy in root.glob(f"{_source_key(Path(source))}-*.mp4"):
+            try:
+                copy.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def sweep_copies(now: Any = None) -> int:
+    """Remove playback copies not used for ``MASKED_COPY_DAYS``. Run on a timer with retention, not only when another copy is made (#362)."""
+    root = _copies_root()
+    if not root.is_dir():
+        return 0
+    before = sum(1 for _ in root.glob("*.mp4"))
+    _sweep(root)
+    return before - sum(1 for _ in root.glob("*.mp4"))
+
+
 def _sweep(root: Path) -> None:
     cutoff = time.time() - MASKED_COPY_DAYS * 86400
     for item in root.glob("*.mp4"):
@@ -311,7 +344,8 @@ async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
     for a browser that cannot play its H.265). Renders are few at a time, so scrubbing through footage cannot exhaust the processor, and use the
     graphics chip when there is one, falling back to software if it fails."""
     global _render_slots
-    digest = hashlib.sha256(f"{source}|{source.stat().st_mtime_ns}|{json.dumps(zones, sort_keys=True)}".encode()).hexdigest()[:32]
+    # The name starts with a digest of the recording's path, so the copies of a recording can be found and removed with it (#362).
+    digest = _source_key(source) + "-" + hashlib.sha256(f"{source}|{source.stat().st_mtime_ns}|{json.dumps(zones, sort_keys=True)}".encode()).hexdigest()[:32]
     root = _copies_root()
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"{digest}.mp4"
@@ -325,6 +359,8 @@ async def masked_recording(source: Path, zones: list[dict[str, float]]) -> Path:
                 _render_slots = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
             async with _render_slots:
                 await asyncio.to_thread(_sweep, root)
+                # Copies share one disk budget with exports and case packages: older copies make way for this one (#362).
+                await asyncio.to_thread(copies_budget.make_room, source.stat().st_size, refuse=False)
                 partial = root / f"{digest}.{uuid.uuid4().hex}.partial.mp4"
                 try:
                     hardware_failure = None

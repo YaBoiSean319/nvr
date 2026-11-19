@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Callable
 
-from . import acceleration, footage_chain, privacy, redaction, viewing_audit
+from . import acceleration, copies_budget, footage_chain, privacy, redaction, viewing_audit
 from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
 from .recording import recordings_path
@@ -45,7 +45,26 @@ EXPORT_DIRECTORY = "exports"
 MAX_VERIFY_PACKAGE_BYTES = 2 * 1024**3
 MAX_EXPORT_PACKAGE_BYTES = 2 * 1024**3
 MIN_EXPORT_FREE_BYTES = 256 * 1024**2
-EXPORT_RETENTION = timedelta(days=7)
+EXPORT_RETENTION = timedelta(days=7)  # The default; an administrator may choose 1 to 30 days (export_settings, #362)
+MAX_EXPORT_RETENTION_DAYS = 30
+
+
+def retention_days(db: sqlite3.Connection) -> int:
+    row = db.execute("SELECT retention_days FROM export_settings WHERE singleton_id=1").fetchone()
+    return int(row[0]) if row else EXPORT_RETENTION.days
+
+
+def free_floor(directory: Path) -> int:
+    """How much free space an export or case package must leave on the recordings volume: its recording headroom, below which the recorder
+    deletes the oldest footage, and never less than ``MIN_EXPORT_FREE_BYTES`` (#362)."""
+    from . import headroom
+
+    try:
+        capacity = shutil.disk_usage(directory).total
+    except OSError:
+        return MIN_EXPORT_FREE_BYTES
+    with connect() as db:
+        return max(MIN_EXPORT_FREE_BYTES, headroom.effective_headroom(db, "default", capacity))
 
 
 def verify_chain_member(archive: zipfile.ZipFile, installation_key: str | None = None) -> dict[str, Any]:
@@ -186,8 +205,8 @@ def _ensure_export_space(directory: Path, requested_bytes: int = 0) -> None:
     if requested_bytes > MAX_EXPORT_PACKAGE_BYTES:
         raise RuntimeError("Evidence package exceeds the 2 GiB export limit")
     free = shutil.disk_usage(directory).free
-    if free - requested_bytes < MIN_EXPORT_FREE_BYTES:
-        raise RuntimeError("Insufficient free storage for evidence export; at least 256 MiB must remain")
+    if free - requested_bytes < free_floor(directory):
+        raise RuntimeError("Insufficient free storage for evidence export: the recordings volume's headroom must stay free")
 
 
 def _has_audio(path: Path) -> bool:
@@ -1049,7 +1068,9 @@ class ExportManager:
             if "grid" in job.output_modes:
                 await self._render_grid_output(job, per_camera, union, metadata)
             chain_path = await _signed_chain(job, per_camera, metadata)
-            expires_at = (datetime.now(timezone.utc) + EXPORT_RETENTION).isoformat()
+            with connect() as db:
+                kept = timedelta(days=retention_days(db))
+            expires_at = (datetime.now(timezone.utc) + kept).isoformat()
             metadata["expires_at"] = expires_at
             # Hashing and copying up to 2 GiB into the zip, and hashing the result: in a thread. On the loop, the exporter's sign of life
             # stopped for as long as it took, and past 30 seconds the supervisor ended the exporter with the export at 85 to 99 percent (#359).
@@ -1284,9 +1305,10 @@ class ExportManager:
         output_path = Path(args[-1])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         free = shutil.disk_usage(output_path.parent).free
-        output_limit = min(MAX_EXPORT_PACKAGE_BYTES, free - MIN_EXPORT_FREE_BYTES)
+        copies_budget.make_room(0)  # Over the budget already: playback copies go first, and then this export is refused (#362)
+        output_limit = min(MAX_EXPORT_PACKAGE_BYTES, free - free_floor(output_path.parent), copies_budget.room_left())
         if output_limit <= 0:
-            raise RuntimeError("Insufficient free storage for evidence export; at least 256 MiB must remain")
+            raise RuntimeError("Insufficient free storage for evidence export: the recordings volume's headroom and the export budget must not be exceeded")
         args = list(args)
         args[-1:-1] = ["-fs", str(output_limit)]
         args[3:3] = ["-progress", "pipe:1", "-nostats"]
@@ -1449,6 +1471,8 @@ def create_export_record(
     redaction_review_id: str | None = None, dewarp: dict[str, dict[str, Any]] | None = None, dewarp_lenses: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     output_modes, tile_camera_ids = _checked_request(camera_ids, output_modes, tile_camera_ids, grid_resolution, include_audio, audio_camera_id)
+    # Refused up front, with the reason, when exports and case packages already fill their share of the disk (#362).
+    copies_budget.make_room(MIN_EXPORT_FREE_BYTES)
     job_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:

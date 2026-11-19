@@ -607,9 +607,17 @@ def assemble(db: sqlite3.Connection, package: sqlite3.Row) -> None:
     # The case document names each clip's file, so it is written last of the documents that name files (above) and hashed as written.
     directory = root / PACKAGE_DIRECTORY / case["id"]
     directory.mkdir(parents=True, exist_ok=True)
-    needed = sum(source.stat().st_size for source in sources.values()) + MIN_PACKAGE_FREE_BYTES
-    if shutil.disk_usage(directory).free < needed:
-        _fail(db, package, "There is not enough free space to write the package")
+    from . import copies_budget
+    from .exports import free_floor
+
+    size = sum(source.stat().st_size for source in sources.values())
+    if shutil.disk_usage(directory).free < size + max(MIN_PACKAGE_FREE_BYTES, free_floor(directory)):
+        _fail(db, package, "There is not enough free space to write the package without eating into the recordings' headroom")
+        return
+    try:
+        copies_budget.make_room(size)  # Playback copies go first; then the package is refused, with the reason (#362)
+    except copies_budget.BudgetFull as exc:
+        _fail(db, package, str(exc))
         return
     target = directory / f"{package['id']}.zip"
     temporary = target.with_suffix(".partial")

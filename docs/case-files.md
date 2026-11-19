@@ -44,7 +44,7 @@ A package is the access of the person who asked for it, so only they and adminis
 ## Limits
 
 - A case holds up to 500 items. Items of a camera that is later deleted stay in the case but their footage goes with the camera.
-- The exports a package is built from expire after seven days as usual; the assembled case package does not.
+- The exports a package is built from expire after seven days as usual; the assembled case package does not. A package counts against the disk budget shared with exports and playback copies; when that is full, building one fails with the reason (see [evidence packages](evidence-packages.md)).
 - Only clips are put in a package as footage. Alarms, saved searches and exports appear in `case.json` as records; an export added to a case is not bundled (build the package for the clips). A package is all or nothing: if one clip cannot be exported the package fails, with the reason.
 - Viewing a clip is recorded when it is opened from the case; watching the same footage in Playback directly is in the viewing audit as ever, with no case attached.
 - Footage whose file is already gone cannot be held and is not counted as held; a segment still being recorded when a clip is added is not held, and footage recorded later in the clip's range is not added to the hold.

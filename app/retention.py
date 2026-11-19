@@ -356,7 +356,9 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             failed += 1
     from .alarms import prune_history as prune_alarm_history  # Resolved alarms and rule events past their history period (#349)
 
-    for prune in (prune_motion_events, prune_ai_observations, prune_ai_coverage, prune_alarm_history):
+    from .privacy import sweep_copies  # Playback copies unused for a day, on a timer (#362)
+
+    for prune in (prune_motion_events, prune_ai_observations, prune_ai_coverage, prune_alarm_history, sweep_copies):
         try:
             prune(now)
         except sqlite3.Error:
