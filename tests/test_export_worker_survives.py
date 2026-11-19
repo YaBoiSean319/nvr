@@ -5,6 +5,7 @@ kept reporting healthy: every later export stayed queued until the container was
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sqlite3
@@ -109,6 +110,20 @@ class ExportWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.status("job-1")[1], "Export was interrupted by an internal error; start it again")
         with connect() as db:
             self.assertEqual(db.execute("SELECT details_json FROM audit_log WHERE action='export_failed' AND resource_id='job-1'").fetchone()[0], '{"reason":"worker_error"}')
+
+    async def test_a_running_job_that_showed_life_a_moment_ago_is_not_called_abandoned(self):
+        async def execute(job_id: str) -> None:
+            return None
+
+        await self.manager(execute)
+        self.job("job-1", status="running")
+        with connect() as db:
+            db.execute("UPDATE exports SET updated_at=? WHERE id='job-1'", (datetime.now(timezone.utc).isoformat(),))
+        await asyncio.sleep(0.5)  # Ten passes of the poll at the test's pace
+        self.assertEqual(self.status("job-1")[0], "running")
+        with connect() as db:  # A minute of silence later, it is
+            db.execute("UPDATE exports SET updated_at=? WHERE id='job-1'", ((datetime.now(timezone.utc) - timedelta(seconds=exports.ORPHAN_AFTER_SECONDS + 5)).isoformat(),))
+        await self.until(lambda: self.status("job-1")[0] == "failed")
 
     async def test_progress_that_cannot_be_written_does_not_stop_ffmpegs_output_being_read(self):
         manager = exports.ExportManager()
