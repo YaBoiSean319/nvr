@@ -16,6 +16,8 @@ MULTICAST_ADDRESS = "239.255.255.250"
 MULTICAST_PORT = 3702
 MAX_DATAGRAM_BYTES = 64 * 1024
 DISCOVERY_TIMEOUT_SECONDS = 5
+MAX_DEVICES_PER_ANSWER = 16  # A camera answers for itself; a few more allows for a multi-channel encoder
+MAX_DEVICES_PER_SCAN = 512  # A scan keeps this many devices and counts the rest: one answer can name hundreds, and nothing limited a scan (#381)
 IP_RANGE_MAX_HOSTS = 256
 IP_RANGE_PORTS = (80, 8000, 8080, 8899)
 IP_RANGE_CONCURRENCY = 64
@@ -169,8 +171,14 @@ def _discover_sync(timeout_seconds: float, interface_address: str | None) -> Dis
             matches = parse_probe_response(data)
             if not matches:
                 ignored_responses += 1
+            if len(matches) > MAX_DEVICES_PER_ANSWER:
+                ignored_responses += 1  # Reported with the malformed ones: it named more devices than any camera does
+                matches = matches[:MAX_DEVICES_PER_ANSWER]
             for device in matches:
                 previous = devices.get(device.device_uuid)
+                if previous is None and len(devices) >= MAX_DEVICES_PER_SCAN:
+                    ignored_responses += 1
+                    continue
                 if previous:
                     urls = tuple(dict.fromkeys(previous.service_urls + device.service_urls))[:8]
                     scopes = tuple(dict.fromkeys(previous.scopes + device.scopes))[:64]

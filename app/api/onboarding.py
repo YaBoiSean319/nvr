@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.principal import Administrator
@@ -25,6 +25,8 @@ from app.request_validation import normalize_group_name
 from app.api.cameras import CameraCreateRequest, CameraProbeRequest, MotionZoneRequest, camera_view, insert_camera, record_discovery_failure, record_discovery_probe, create_camera
 
 router = APIRouter()
+CANDIDATE_KEEP_DAYS = 30  # A discovered device that was never added and has not answered a scan for this long is forgotten
+MAX_CANDIDATES_LISTED = 1000
 
 
 class CameraImportRequest(BaseModel):
@@ -346,6 +348,10 @@ async def scan_cameras(
 
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")  # One transaction for the scan's devices, not a commit for each (#381)
+        # Devices that were found once, never added, and have not answered a scan for a month are forgotten: nothing removed a candidate before.
+        db.execute("DELETE FROM discovery_candidates WHERE linked_camera_id IS NULL AND last_seen_at<?",
+                   ((datetime.now(timezone.utc) - timedelta(days=CANDIDATE_KEEP_DAYS)).isoformat(),))
         for device in result.devices:
             linked = db.execute("SELECT id FROM cameras WHERE onvif_uuid=?", (device.device_uuid,)).fetchone()
             existing = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device.device_uuid,)).fetchone()
@@ -367,7 +373,8 @@ async def scan_cameras(
                 (candidate_id, device.device_uuid, json.dumps(device.service_urls), json.dumps(device.scopes),
                  json.dumps(capabilities), linked["id"] if linked else None, now, now),
             )
-        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid").fetchall()
+        db.execute("COMMIT")
+        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid LIMIT ?", (MAX_CANDIDATES_LISTED,)).fetchall()
     partial_failures = [f"Ignored {result.ignored_responses} malformed or unrecognized response(s)"] if result.ignored_responses else []
     diagnostics.record_event(
         "discovery_scan", outcome="completed", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),
@@ -387,8 +394,21 @@ async def scan_cameras(
 @router.get("/api/discovery/candidates")
 def list_discovery_candidates(_: Administrator) -> dict[str, object]:
     with connect() as db:
-        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid").fetchall()
+        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid LIMIT ?", (MAX_CANDIDATES_LISTED,)).fetchall()
     return {"candidates": [_candidate_view(row) for row in rows]}
+
+
+@router.delete("/api/discovery/candidates/{candidate_id}", status_code=204)
+def forget_discovery_candidate(candidate_id: str, _: Administrator) -> Response:
+    """Forget a discovered device that was never added (it comes back if it answers a later scan). One that is a camera stays: its camera uses it."""
+    with connect() as db:
+        row = db.execute("SELECT linked_camera_id FROM discovery_candidates WHERE id=?", (candidate_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Discovered device not found")
+        if row["linked_camera_id"]:
+            raise HTTPException(status_code=409, detail="This device is a camera on this NVR; remove the camera instead")
+        db.execute("DELETE FROM discovery_candidates WHERE id=? AND linked_camera_id IS NULL", (candidate_id,))
+    return Response(status_code=204)
 
 
 @router.post("/api/discovery/candidates/{candidate_id}/link")
