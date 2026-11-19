@@ -170,7 +170,8 @@ jobs:
           NVR_RTSP_AUDIO_TEST_URL: rtsp://127.0.0.1:8554/nvr-audio
           NVR_REQUIRE_PLATE_MODELS: "1"  # The real plate models are downloaded and tested here, never silently skipped
           NVR_REQUIRE_POSE_MODELS: "1"  # The real pose model for fall detection is downloaded and tested here, never silently skipped
-        run: python -m unittest discover -s tests -v
+        # "-t ." imports the tests package first, which makes password hashing and empty databases cheap for the suite (see tests/__init__.py).
+        run: python -m unittest discover -s tests -t . -v
       - name: Compile Python
         run: python -m compileall -q app tests
       - name: Typecheck and build the browser interface

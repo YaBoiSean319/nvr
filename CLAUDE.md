@@ -13,7 +13,7 @@ Performance, reliability, stability and security. Put the main server first. The
 ```sh
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-python -m unittest discover -s tests            # about 2,000 tests; about 30-40 minutes. Run one module while working: python -m unittest tests.test_bulk_add
+python -m unittest discover -s tests -t .       # about 2,000 tests; about 20-25 minutes ("-t ." loads tests/__init__.py, which makes the suite cheaper). Run one module while working: python -m unittest tests.test_bulk_add
 ruff check app tools scripts tests               # small rule set on purpose: real errors, not style
 npm ci --prefix web && npm run build --prefix web   # type-checks, then writes app/web_dist
 npm run unused --prefix web                      # knip: unused files, exports and dependencies fail CI

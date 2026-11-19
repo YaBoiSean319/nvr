@@ -34,6 +34,16 @@ def hvcc(profile_space=0, tier=0, profile=1, compatibility=0x60000000, constrain
     return b"\0" * 8 + b"hvc1" + b"\0" * 8 + b"hvcC" + record + b"\0" * 8
 
 
+def wait_for_the_startup_probe(app, seconds: float = 30) -> None:
+    """Starting the application looks for graphics acceleration in the background and stores what it finds. A test that then sets the state itself
+    must not be overwritten by that look finishing late, which is what happened whenever the rest of setUp was quicker than one FFmpeg run."""
+    deadline = time.monotonic() + seconds
+    while not app.state.acceleration_probe.done():
+        if time.monotonic() > deadline:
+            raise AssertionError("the startup acceleration probe did not finish")
+        time.sleep(0.01)
+
+
 class FakeFfmpeg:
     """A stand-in for running FFmpeg: lists these encoders and says whether a test encode with a given codec works."""
 
@@ -227,6 +237,7 @@ class HevcLiveTests(unittest.TestCase):
         self.app = create_app(start_workers=False)
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
+        wait_for_the_startup_probe(self.app)
         self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
         self.add_camera("cam", "Yard", feed=True)
 
@@ -401,6 +412,7 @@ class HevcPlaybackTests(unittest.TestCase):
         self.app = create_app(start_workers=False)
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
+        wait_for_the_startup_probe(self.app)
         self.assertEqual(self.client.post("/api/setup/admin", json={"username": "keeper", "password": TEST_PASSWORD}).status_code, 201)
         self.file = root / "recordings" / "cam" / "hevc.mp4"
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=320x240:r=10", "-t", "2", "-an", "-c:v", "libx265", "-tag:v", "hvc1",

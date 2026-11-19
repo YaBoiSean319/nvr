@@ -181,7 +181,7 @@ Use `docker compose restart` to restart the service. The account remains in the 
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -t . -v
 uvicorn app.main:app --reload --port 8280
 ```
 
