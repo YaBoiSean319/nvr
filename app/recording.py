@@ -21,7 +21,7 @@ from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
 from .server_motion import FRAME_HEIGHT, FRAME_WIDTH, FrameMotionDetector
 from .scheduling import effective_policy
-from . import camera_health, coverage, metrics, tamper, viewing_audit
+from . import camera_health, coverage, metrics, security_log, tamper, viewing_audit
 from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
@@ -430,6 +430,7 @@ class RecordingManager:
     def _prune_viewing_audit() -> None:
         with connect() as db:
             viewing_audit.prune(db)
+            security_log.prune(db)
 
     async def _storage_loop(self) -> None:
         while not self.stopping:

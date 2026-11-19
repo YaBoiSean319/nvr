@@ -9,6 +9,15 @@ _ITERATIONS = 600_000
 _SALT_BYTES = 16
 
 
+def password_problem(password: str) -> str | None:
+    """What is wrong with a new local password, or None. One rule for first-run setup, a change and a host reset."""
+    if len(password) < 14 or not any(c.isalpha() for c in password) or not any(c.isdigit() for c in password):
+        return "Password must be at least 14 characters and include a letter and a number"
+    if len(password) > 1024:
+        return "Password must be at most 1024 characters"
+    return None
+
+
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(_SALT_BYTES)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _ITERATIONS)

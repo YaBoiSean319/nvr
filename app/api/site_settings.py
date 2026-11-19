@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.principal import Administrator, CurrentUser
 from app.store import connect
+from app.audit import record
 from app.display_settings import format_display_datetime, validate_display_settings
 
 router = APIRouter()
@@ -94,9 +95,13 @@ def preview_display_settings(payload: DisplaySettingsRequest, _: Administrator) 
 
 
 @router.put("/api/settings/display")
-def save_display_settings(payload: DisplaySettingsRequest, _: Administrator) -> dict[str, object]:
+def save_display_settings(payload: DisplaySettingsRequest, admin: Administrator) -> dict[str, object]:
     updated_at = datetime.now(timezone.utc).isoformat()
     with connect() as db:
+        before = dict(db.execute("SELECT time_zone,date_format,clock_format FROM site_display_settings WHERE singleton_id=1").fetchone())
+        after = {"time_zone": payload.time_zone, "date_format": payload.date_format, "clock_format": payload.clock_format}
+        if after != before:
+            record(db, int(admin["id"]), "display_settings_changed", "site_display_settings", 1, before=before, after=after)
         db.execute(
             "UPDATE site_display_settings SET time_zone=?,date_format=?,clock_format=?,updated_at=? WHERE singleton_id=1",
             (payload.time_zone, payload.date_format, payload.clock_format, updated_at),

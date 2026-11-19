@@ -10,11 +10,11 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
-from app import auth_limits as limits, mfa, network, webauthn
+from app import accounts, auth_limits as limits, mfa, network, webauthn
 from app.api.identity import signed_in
 from app.audit import record
 from app.principal import COOKIE_NAME, Administrator, CurrentUser, Principal
-from app.security import token_digest, verify_password
+from app.security import hash_password, password_problem, token_digest, verify_password
 from app.store import connect
 
 router = APIRouter()
@@ -61,7 +61,7 @@ def _open_challenge(raw: str, kind: str = "login", *, claim: bool = False) -> tu
         challenge = mfa.claim_attempt(db, raw, kind) if claim else mfa.get_challenge(db, raw, kind)
         if challenge is None:
             raise _expired()
-        user = db.execute("SELECT id,username,role,provider_issuer FROM users WHERE id=?", (challenge["user_id"],)).fetchone() if challenge["user_id"] else None
+        user = db.execute("SELECT id,username,role,provider_issuer FROM users WHERE id=? AND disabled_at IS NULL", (challenge["user_id"],)).fetchone() if challenge["user_id"] else None
     return challenge, user
 
 
@@ -204,7 +204,7 @@ def passkey_sign_in(payload: PasskeyAssertion, request: Request, response: Respo
     try:
         with connect() as db:
             row = db.execute("SELECT user_id FROM user_passkeys WHERE credential_id=?", (str(payload.credential.get("id", "")),)).fetchone()
-            user = db.execute("SELECT id,username,role,provider_issuer,passkey_sign_in FROM users WHERE id=?", (row["user_id"],)).fetchone() if row else None
+            user = db.execute("SELECT id,username,role,provider_issuer,passkey_sign_in FROM users WHERE id=? AND disabled_at IS NULL", (row["user_id"],)).fetchone() if row else None
         if user is None:
             raise webauthn.WebAuthnError("This passkey is not registered")
         account = limits.account_key(user["username"])
@@ -363,6 +363,94 @@ def remove_totp(payload: PasswordRequest, request: Request, user: CurrentUser) -
     return _summary(user)
 
 
+# --- The password itself ---------------------------------------------------------------
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=1, max_length=1024)
+    method: Literal["totp", "recovery", "passkey"] | None = None
+    code: str | None = Field(default=None, max_length=64)
+    challenge: str | None = Field(default=None, max_length=128)
+    credential: dict[str, Any] | None = None
+
+
+def _confirm_factor(account: sqlite3.Row, payload: PasswordChange, request: Request) -> str | None:
+    """A new password needs the second factor too when the account has one: the password alone is exactly what may have leaked.
+    Returns the method that proved it, or None for an account without a factor."""
+    user_id = int(account["id"])
+    with connect() as db:
+        protected = mfa.has_factor(db, user_id)
+    if not protected:
+        return None
+    if payload.method is None:
+        raise HTTPException(status_code=403, detail="Confirm your second factor to change the password")
+    key, address = limits.account_key(account["username"]), limits.client_address(request)
+    limits.begin(key, address)
+    reason = "wrong_code"
+    try:
+        if payload.method == "passkey":
+            # The challenge is single-use and belongs to this account; it was issued only after the current password was checked.
+            challenge, owner = _open_challenge(payload.challenge or "", claim=True)
+            if owner is None or int(owner["id"]) != user_id or payload.credential is None:
+                raise webauthn.WebAuthnError("This passkey answer is not for this account")
+            with connect() as db:
+                _check_assertion(db, payload.credential, challenge["webauthn_challenge"], request, user_id, require_verified=False)
+                _consume(db, payload.challenge or "")
+            accepted = True
+        else:
+            code = payload.code or ""
+            with connect() as db:
+                if payload.method == "totp":
+                    stored = mfa.stored_totp(db, user_id, confirmed=True)
+                    step = mfa.matching_totp_step(stored[0], code, stored[1]) if stored else None
+                    accepted = step is not None and db.execute("UPDATE user_totp SET last_step=? WHERE user_id=? AND last_step<?", (step, user_id, step)).rowcount == 1
+                else:
+                    accepted = mfa.use_recovery_code(db, user_id, code)
+    except webauthn.WebAuthnError as exc:
+        accepted, reason = False, str(exc)
+    if not accepted:
+        with connect() as db:
+            record(db, user_id, "mfa_failed", "user", user_id, method=f"password_change_{payload.method}", reason=reason, address=address)
+        raise HTTPException(status_code=403, detail="That code is not right" if payload.method != "passkey" else reason)
+    limits.release(key, address)
+    return payload.method
+
+
+@router.post("/api/me/security/password/passkey-options")
+def password_change_passkey_options(payload: PasswordRequest, request: Request, user: CurrentUser) -> dict[str, Any]:
+    """For an account whose second factor is a passkey: the browser's prompt to answer before the password changes."""
+    account = _local_account(user)
+    _confirm_password(account, payload.password, request)
+    value = webauthn.new_challenge()
+    with connect() as db:
+        allowed = _passkeys_of(db, user.id)
+        if not allowed:
+            raise HTTPException(status_code=409, detail="This account has no passkey")
+        raw = mfa.new_challenge(db, "login", user.id)
+        _store_challenge(db, raw, value)
+    return {"challenge": raw, "options": webauthn.request_options(_relying_party(request), value, allowed, "preferred")}
+
+
+@router.post("/api/me/security/password")
+def change_password(payload: PasswordChange, request: Request, user: CurrentUser) -> dict[str, object]:
+    """Change one's own local password: the current password, the second factor when there is one, then every other session ends."""
+    account = _local_account(user)
+    problem = password_problem(payload.new_password)
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+    _confirm_password(account, payload.current_password, request)
+    if payload.new_password == payload.current_password:
+        raise HTTPException(status_code=422, detail="The new password is the same as the current one")
+    method = _confirm_factor(account, payload, request)
+    encoded = hash_password(payload.new_password)
+    with connect() as db:
+        db.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, user.id))
+        db.execute("DELETE FROM mfa_challenges WHERE user_id=?", (user.id,))  # A sign-in half done with the old password does not finish
+        _end_other_sessions(db, user.id, request)
+        record(db, user.id, "password_changed", "user", user.id, via="account", second_factor=method, address=limits.client_address(request))
+    return _summary(user)
+
+
 def _after_removal(db: sqlite3.Connection, user_id: int, factor: str) -> None:
     record(db, user_id, "mfa_factor_removed", "user", user_id, factor=factor)
     if not mfa.has_factor(db, user_id):
@@ -488,14 +576,33 @@ def put_security_policy(payload: PolicyRequest, admin: Administrator) -> dict[st
 @router.get("/api/admin/users")
 def list_users(_: Administrator) -> dict[str, object]:
     with connect() as db:
-        rows = db.execute("SELECT id,username,role,provider_issuer,passkey_sign_in,created_at FROM users ORDER BY username COLLATE NOCASE").fetchall()
+        rows = db.execute("SELECT id,username,role,provider_issuer,provider_roles_json,passkey_sign_in,disabled_at,created_at FROM users ORDER BY username COLLATE NOCASE").fetchall()
         users = []
         for row in rows:
             found = mfa.factors(db, int(row["id"]))
             users.append({"id": row["id"], "username": row["username"], "role": row["role"], "local": row["provider_issuer"] is None,
                           "totp": found["totp"], "passkeys": len(found["passkeys"]), "recovery_codes_remaining": found["recovery_codes_remaining"],
-                          "passkey_sign_in": bool(row["passkey_sign_in"])})
+                          "passkey_sign_in": bool(row["passkey_sign_in"]), "disabled": row["disabled_at"] is not None,
+                          # Entra refused their last sign-in for want of a role, and what they had here was ended.
+                          "entra_role_removed": row["provider_issuer"] is not None and row["provider_roles_json"] == "[]"})
     return {"users": users}
+
+
+class DisabledRequest(BaseModel):
+    disabled: bool
+
+
+@router.put("/api/admin/users/{user_id}/disabled")
+def set_user_disabled(user_id: int, payload: DisabledRequest, admin: Administrator) -> dict[str, object]:
+    """Disable a person: their sessions, device sign-ins and alarm notifications end, their API tokens are revoked, and they cannot sign in
+    until enabled again. Nobody disables themselves, so an administrator always remains. Audited."""
+    if user_id == admin.id:
+        raise HTTPException(status_code=409, detail="You cannot disable your own account; ask another administrator")
+    with connect() as db:
+        if db.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        accounts.set_disabled(db, user_id, payload.disabled, admin.id)
+    return {"id": user_id, "disabled": payload.disabled}
 
 
 @router.delete("/api/admin/users/{user_id}/mfa", status_code=status.HTTP_204_NO_CONTENT)

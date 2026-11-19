@@ -48,7 +48,11 @@ const size = (bytes: number | null | undefined) => {
 
 const GIB = 1024 ** 3;
 
-/** One volume's headroom: the free space the NVR keeps by deleting the oldest footage, and what that is doing now. */
+/**
+ * One volume's headroom: the free space the NVR keeps by deleting the oldest footage, and what that is doing now.
+ * The card is keyed by the volume alone. Keyed by the saved value too, it was rebuilt as soon as the new value was read back,
+ * and "Headroom saved." vanished a moment after it appeared.
+ */
 function HeadroomCard({ volume, onSaved }: { volume: Volume; onSaved: () => void }) {
   const info = volume.headroom;
   const [gigabytes, setGigabytes] = useState((info.headroom_bytes / GIB).toFixed(1));
@@ -176,7 +180,7 @@ export function StorageSettings() {
           A recorder fills its disks, so storage space comes before the retention policy. Each volume keeps this much free space: when it falls below, the oldest footage on the volume is deleted until it is free again,
           even if it is still inside its retention policy. Footage that is held, being exported, kept for an alarm or being played is never deleted. The headroom keeps room for recording and for exports.
         </p>
-        {(storage.data?.volumes ?? []).filter(volume => volume.headroom).map(volume => <HeadroomCard key={`${volume.id}:${volume.headroom.headroom_bytes}`} volume={volume} onSaved={() => void client.invalidateQueries({ queryKey: ["storage"] })} />)}
+        {(storage.data?.volumes ?? []).filter(volume => volume.headroom).map(volume => <HeadroomCard key={volume.id} volume={volume} onSaved={() => void client.invalidateQueries({ queryKey: ["storage"] })} />)}
       </section>
 
       </SectionPanel>

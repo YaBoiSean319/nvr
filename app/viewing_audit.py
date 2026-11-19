@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Literal
 
-from .store import connect
+from .store import connect, has_row
 
 logger = logging.getLogger("nvr.viewing_audit")
 
@@ -134,6 +134,8 @@ def retention_days(db: sqlite3.Connection) -> int:
 def prune(db: sqlite3.Connection, now: datetime | None = None) -> int:
     """Remove entries older than the configured retention (by when they ended), and return how many."""
     cutoff = stamp((now or datetime.now(timezone.utc)) - timedelta(days=retention_days(db)))
+    if not has_row(db, "SELECT 1 FROM viewing_audit WHERE COALESCE(ended_at,last_seen_at)<? LIMIT 1", (cutoff,)):
+        return 0  # Read first: this runs every few minutes and nearly always finds nothing, which must not take the write lock (#280)
     return db.execute("DELETE FROM viewing_audit WHERE COALESCE(ended_at,last_seen_at)<?", (cutoff,)).rowcount
 
 

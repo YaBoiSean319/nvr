@@ -89,7 +89,7 @@ Privacy masks black out areas of a camera's picture everywhere: written to camer
 
 Access grants limit which cameras an operator sees, by camera group or for everyone holding an Entra role, optionally until an expiry; hidden cameras, their footage, alarms and exports behave as if they did not exist (see [camera access grants](docs/access-grants.md)).
 
-The viewing audit records who watched which camera live or in playback, from when to when, and every export, download and snapshot; administrators report it per person or per camera for a date range, download it as CSV, and set how long it is kept apart from footage (see [viewing audit](docs/viewing-audit.md)).
+The viewing audit records who watched which camera live or in playback, from when to when, and every export, download and snapshot; administrators report it per person or per camera for a date range, download it as CSV, and set how long it is kept apart from footage (see [viewing audit](docs/viewing-audit.md)). The **security log** (Settings › Security log) shows every recorded change to accounts, sign-in, tokens, access and settings, filtered by date, person and action, with a CSV export and its own retention period (see [security log](docs/security-log.md)).
 
 `/metrics` serves Prometheus metrics to an API token with the `metrics` scope, and the logs can be forwarded as syslog (TCP or TLS) or OTLP, scrubbed of camera addresses and credentials and never blocking the NVR (see [metrics and log forwarding](docs/metrics-and-log-forwarding.md)).
 
@@ -115,6 +115,8 @@ Every editor saves explicitly. Leaving with unsaved changes asks whether to save
 - The container runs a supervisor that keeps recording in a separate process from the web interface. A web crash or restart does not interrupt footage writes. Either process is restarted automatically with backoff, and an incident stays active until it is running again. `GET /api/system/status` reports each worker's liveness and restart count. See [architecture](docs/architecture.md).
 - `GET /api/setup/status` reports whether initial setup is still required.
 - `POST /api/setup/admin` creates the one-time local administrator. Passwords require at least 14 characters, including a letter and a number.
+- A local account changes its own password in the account menu under **Security…** (the current password, and the second factor when it has one; the same rules; other sessions end). When nobody can sign in, `python -m app.mfa password USERNAME` on the NVR host sets one: it asks for the password rather than taking it as an argument, ends that account's sessions, leaves its second factors alone and is audited (see [second factors](docs/second-factors.md)).
+- An administrator can **disable** any account in Settings › Users & access, which ends its sessions, device sign-ins and alarm notifications and revokes its API tokens; a refused Entra sign-in (role removed) ends the same things (see [access grants](docs/access-grants.md)).
 - `GET /api/system/status` requires an authenticated administrator session.
 - `POST /api/cameras/test` checks an RTSP/RTSPS video stream with FFprobe.
 - Administrators can enable opt-in support diagnostics for 1–24 hours and download a bounded JSON bundle. Capture is off by default. The bundle contains only scan/probe outcomes, aggregate counts, and timings; it excludes camera inventory, names, addresses, stream/service URLs, credentials, sessions, and footage. It is capped at 1,000 events and 7 days.

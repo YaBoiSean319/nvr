@@ -206,3 +206,63 @@ test("when required, someone without a second factor must set one up first; an a
   expect((await operator.request.get("/api/auth/me")).status()).toBe(401); // Their session ended.
   await operatorContext.close();
 });
+
+test("the password is changed from the account menu, and only the new one signs in afterwards (#366)", async ({ page }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const dialog = await openSecurity(page, "camera-admin");
+  const form = dialog.getByRole("form", { name: "Change your password" });
+  const changed = "a-changed-password-2468";
+  await form.getByLabel("Current password").fill("not the password 123");
+  await form.getByLabel("New password", { exact: true }).fill(changed);
+  await form.getByLabel("New password again").fill(changed);
+  await form.getByRole("button", { name: "Change password" }).click();
+  await expect(form.getByRole("alert")).toContainText("That password is not right");
+  await form.getByLabel("Current password").fill(FIXTURE_PASSWORD);
+  await form.getByRole("button", { name: "Change password" }).click();
+  await expect(form.getByRole("status")).toContainText("Password changed");
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await signOut(page, "camera-admin");
+
+  await page.getByLabel("Username").fill("camera-admin");
+  await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Invalid username or password");
+  await page.getByLabel("Password").fill(changed);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(nav(page)).toBeVisible();
+});
+
+test("an administrator disables a person, whose session ends and who cannot sign in until enabled (#364)", async ({ page, browser }) => {
+  seedFixtures(1);
+  await signInNext(page);
+  const operatorContext = await browser.newContext({ baseURL: page.url().split("/").slice(0, 3).join("/") });
+  const operator = await operatorContext.newPage();
+  const operatorSignIn = async () => {
+    await operator.goto("/");
+    await operator.getByLabel("Username").fill("camera-operator");
+    await operator.getByLabel("Password").fill(FIXTURE_PASSWORD);
+    await operator.getByRole("button", { name: "Sign in", exact: true }).click();
+  };
+  await operatorSignIn();
+  await expect(nav(operator)).toBeVisible();
+
+  await page.getByRole("navigation", { name: "Workspaces" }).getByRole("link", { name: "Settings" }).click();
+  await (await settingsLink(page, "Users & access")).click();
+  const accounts = page.getByRole("region", { name: "Sign-in security" });
+  const row = accounts.getByRole("row", { name: /camera-operator/ });
+  await expect(accounts.getByRole("button", { name: "Disable camera-admin" })).toHaveCount(0); // Nobody disables themselves.
+  await row.getByRole("button", { name: "Disable camera-operator" }).click();
+  await page.getByRole("dialog", { name: "Disable camera-operator?" }).getByRole("button", { name: "Disable" }).click();
+  await expect(accounts.getByRole("status")).toContainText("camera-operator is disabled");
+  await expect(row).toContainText("Disabled");
+  expect((await operator.request.get("/api/auth/me")).status()).toBe(401);
+  await operatorSignIn();
+  await expect(operator.getByRole("alert")).toContainText("Invalid username or password");
+
+  await row.getByRole("button", { name: "Enable camera-operator" }).click();
+  await expect(accounts.getByRole("status")).toContainText("camera-operator can sign in again");
+  await operatorSignIn();
+  await expect(nav(operator)).toBeVisible();
+  await operatorContext.close();
+});

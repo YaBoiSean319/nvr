@@ -321,7 +321,8 @@ class RouteTests(GrantCase):
         ("GET", "/api/footage/signing-key"), ("GET", "/api/me/preferences"), ("PUT", "/api/me/preferences"), ("GET", "/api/me/security"),
         ("PUT", "/api/me/security/passkey-sign-in"), ("POST", "/api/me/security/passkeys"), ("POST", "/api/me/security/passkeys/options"),
         ("DELETE", "/api/me/security/passkeys/{passkey_id}"), ("POST", "/api/me/security/recovery-codes"), ("DELETE", "/api/me/security/totp"),
-        ("POST", "/api/me/security/totp/begin"), ("POST", "/api/me/security/totp/confirm"), ("GET", "/api/push/preferences"),
+        ("POST", "/api/me/security/totp/begin"), ("POST", "/api/me/security/totp/confirm"),
+        ("POST", "/api/me/security/password"), ("POST", "/api/me/security/password/passkey-options"), ("GET", "/api/push/preferences"),
         ("PUT", "/api/push/preferences"), ("GET", "/api/push/public-key"), ("POST", "/api/push/subscriptions"), ("POST", "/api/push/subscriptions/remove"),
         ("GET", "/api/settings/display"), ("GET", "/api/redaction/models"), ("GET", "/api/failover/status"),
         # The native app's own phone: its push token and device sessions

@@ -168,11 +168,14 @@ class APITokenTests(unittest.TestCase):
         token, secret = self._create("read")
         for _ in range(3):
             self.assertEqual(self._bearer("GET", "/api/cameras", secret).status_code, 200)
-        used = self._audit("api_token_used")
-        self.assertEqual(len(used), 1)
-        self.assertEqual(used[0]["resource_id"], token["id"])
         listed = self.client.get("/api/admin/api-tokens").json()["tokens"][0]
-        self.assertIsNotNone(listed["last_used_at"])
+        self.assertEqual(listed["id"], token["id"])
+        first = listed["last_used_at"]
+        self.assertIsNotNone(first)
+        self.assertEqual(self._bearer("GET", "/api/cameras", secret).status_code, 200)
+        self.assertEqual(self.client.get("/api/admin/api-tokens").json()["tokens"][0]["last_used_at"], first)  # Written once per interval
+        # The last-used time is the record of use. A security-log row per use filled the log (#367).
+        self.assertEqual(self._audit("api_token_used"), [])
 
     def test_openapi_documents_scope_per_operation(self):
         schema = self.client.get("/openapi.json").json()

@@ -154,6 +154,25 @@ def seed_fresh_install() -> dict[str, object]:
     return _write_manifest({"camera_count": 0, "camera_ids": [], "fresh_install": True})
 
 
+def _restore_passwords(db: sqlite3.Connection) -> None:
+    """Put the fixture password back on an account whose password a journey changed. The stored form is remembered beside the password
+    file, so telling "changed" from "as seeded" is a string comparison, not a slow password check on every seed."""
+    for name in (ADMIN_USERNAME, OPERATOR_USERNAME):
+        kept = Path(os.environ["NVR_BROWSER_FIXTURE_PASSWORD_PATH"]).with_name(f"{name}.password-hash")
+        current = db.execute("SELECT password_hash FROM users WHERE username=?", (name,)).fetchone()
+        if current is None:
+            continue
+        if not kept.exists() or TEST_PASSWORD not in kept.read_text(encoding="utf-8").split("\n")[:1]:
+            # First seed for this password: remember the form this account holds if it is the fixture's, else make one.
+            from app.security import verify_password
+            stored = current[0] if verify_password(TEST_PASSWORD, current[0]) else hash_password(TEST_PASSWORD)
+            kept.write_text(f"{TEST_PASSWORD}\n{stored}", encoding="utf-8")
+            os.chmod(kept, 0o600)
+        stored = kept.read_text(encoding="utf-8").split("\n")[1]
+        if current[0] != stored:
+            db.execute("UPDATE users SET password_hash=? WHERE username=?", (stored, name))
+
+
 def _write_manifest(manifest: dict[str, object]) -> dict[str, object]:
     manifest_path = Path(os.environ.get(
         "NVR_BROWSER_FIXTURE_MANIFEST",
@@ -191,7 +210,8 @@ def seed_fixtures(count: int, *, bulk_trigger: bool = False, fail_name_save: boo
         for table in ("api_tokens", "webhook_deliveries", "webhook_endpoints", "heartbeat_configuration", "backup_runs", "diagnostic_settings", "coverage_reports",
                       "user_totp", "user_passkeys", "user_recovery_codes", "mfa_challenges", "auth_failures"):
             db.execute(f"DELETE FROM {table}")
-        db.execute("UPDATE users SET passkey_sign_in=0")
+        db.execute("UPDATE users SET passkey_sign_in=0,disabled_at=NULL")
+        _restore_passwords(db)
         # Every operator sees every camera until a journey narrows them.
         db.execute("DELETE FROM access_grants")
         db.execute("INSERT INTO access_grants(subject_type,subject,scope_type) SELECT 'user', CAST(id AS TEXT), 'all' FROM users WHERE role='operator'")

@@ -18,9 +18,12 @@ from typing import Any
 
 from .security import new_session_token, token_digest
 from .store import connect
-from app.clock import now as _now, stamp
+from app.clock import now as _now, parse, stamp
 
 LIFETIME = timedelta(days=30)
+# An Entra account's device sign-in works this long after the person last signed in with Entra, however often it is used (#364). Entra is where
+# a person's role is removed or their account disabled, and the NVR only hears of it at a sign-in. Local accounts are disabled here instead.
+ENTRA_PROOF_LIFETIME = timedelta(days=30)
 GRACE = timedelta(minutes=2)
 MAX_PER_USER = 10
 PREFIX = "nvrd_"
@@ -46,19 +49,35 @@ def _remove(db, user_id: int, session_id: str, action: str) -> bool:
     return True
 
 
-def create(user_id: int, label: str) -> dict[str, Any]:
-    """A new device session for a signed-in person; the least recently used go once there are too many."""
+def _deadline(row, now) -> Any:
+    """When an Entra account's device sign-in stops, or None for a local account's (which has no such end)."""
+    if row["provider_issuer"] is None:
+        return None
+    return parse(row["proved_at"] or row["created_at"]) + ENTRA_PROOF_LIFETIME
+
+
+def create(user_id: int, label: str, session_digest: str | None = None) -> dict[str, Any]:
+    """A new device session for a signed-in person; the least recently used go once there are too many.
+
+    ``session_digest`` is the browser session asking. When a device sign-in produced that session, the new one counts from the same real
+    sign-in, so making one from another cannot put off an Entra account's next sign-in."""
     raw = PREFIX + new_session_token()
-    session_id, expires = str(uuid.uuid4()), stamp(_now() + LIFETIME)
+    session_id, now = str(uuid.uuid4()), _now()
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            parent = db.execute("SELECT d.proved_at,d.created_at FROM sessions s JOIN device_sessions d ON d.id=s.device_session_id WHERE s.token_hash=?",
+                                (session_digest,)).fetchone() if session_digest else None
+            proved = (parent["proved_at"] or parent["created_at"]) if parent else stamp(now)
+            owner = db.execute("SELECT provider_issuer,? AS proved_at,? AS created_at FROM users WHERE id=?", (proved, proved, user_id)).fetchone()
+            deadline = _deadline(owner, now)
+            expires = stamp(min(now + LIFETIME, deadline) if deadline else now + LIFETIME)
             db.execute("DELETE FROM device_sessions WHERE expires_at<=?", (stamp(_now()),))
             old = [row[0] for row in db.execute("SELECT id FROM device_sessions WHERE user_id=? ORDER BY COALESCE(last_used_at,created_at) DESC", (user_id,))][MAX_PER_USER - 1:]
             for stale in old:
                 _remove(db, user_id, stale, "device_session_evicted")
-            db.execute("INSERT INTO device_sessions(id,user_id,token_hash,device_label,created_at,expires_at) VALUES(?,?,?,?,?,?)",
-                       (session_id, user_id, token_digest(raw), label, stamp(_now()), expires))
+            db.execute("INSERT INTO device_sessions(id,user_id,token_hash,device_label,created_at,expires_at,proved_at) VALUES(?,?,?,?,?,?,?)",
+                       (session_id, user_id, token_digest(raw), label, stamp(now), expires, proved))
             _audit(db, user_id, "device_session_created", session_id, device=label)
         except BaseException:
             db.execute("ROLLBACK")
@@ -73,15 +92,16 @@ def resume(token: str) -> dict[str, Any] | None:
         return None
     digest, now = token_digest(token), _now()
     raw = PREFIX + new_session_token()
-    expires = stamp(now + LIFETIME)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            row = db.execute("SELECT s.*,u.username,u.role FROM device_sessions s JOIN users u ON u.id=s.user_id "
-                             "WHERE s.token_hash=? OR (s.previous_hash=? AND s.previous_until>?)", (digest, digest, stamp(now))).fetchone()
-            if row is None or row["expires_at"] <= stamp(now):
+            row = db.execute("SELECT s.*,u.username,u.role,u.provider_issuer FROM device_sessions s JOIN users u ON u.id=s.user_id "
+                             "WHERE (s.token_hash=? OR (s.previous_hash=? AND s.previous_until>?)) AND u.disabled_at IS NULL", (digest, digest, stamp(now))).fetchone()
+            deadline = _deadline(row, now) if row is not None else None
+            if row is None or row["expires_at"] <= stamp(now) or (deadline is not None and deadline <= now):
                 db.execute("ROLLBACK")
                 return None
+            expires = stamp(min(now + LIFETIME, deadline) if deadline else now + LIFETIME)
             retry = digest != row["token_hash"]
             if retry:
                 # The previous secret, presented again: a phone that never heard the answer asking once more. It works this once, nothing is extended

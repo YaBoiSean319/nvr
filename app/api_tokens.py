@@ -81,7 +81,7 @@ def authenticate(presented: str) -> sqlite3.Row:
     now = _now()
     with connect() as db:
         row = db.execute(
-            "SELECT t.*,u.username AS owner_username,u.role AS owner_role FROM api_tokens t "
+            "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
             "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
             (token_id,),
         ).fetchone()
@@ -90,9 +90,9 @@ def authenticate(presented: str) -> sqlite3.Row:
         _check_usable(row, now)
         last_used = _parse(row["last_used_at"]) if row["last_used_at"] else None
         if last_used is None or now - last_used >= LAST_USED_WRITE_INTERVAL:
-            # Bounded writes: record use (and audit it) at most once per interval per token.
+            # Bounded writes: record use at most once per interval per token. The token's last-used time is the record; a security-log row
+            # each time added up to 1,440 rows a day for one token that is polled constantly (#367).
             db.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?", (_iso(now), token_id))
-            _audit(db, row["created_by"], "api_token_used", token_id, {})
     return row
 
 
@@ -100,7 +100,7 @@ def usable_token(token_id: str) -> sqlite3.Row:
     """A token by id, for a session it signed in (a video wall), or raise TokenRejected."""
     with connect() as db:
         row = db.execute(
-            "SELECT t.*,u.username AS owner_username,u.role AS owner_role FROM api_tokens t "
+            "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
             "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
             (token_id,),
         ).fetchone()
@@ -113,6 +113,8 @@ def usable_token(token_id: str) -> sqlite3.Row:
 def _check_usable(row: sqlite3.Row, now: datetime) -> None:
     if row["revoked_at"]:
         raise TokenRejected("API token has been revoked")
+    if row["owner_disabled_at"]:
+        raise TokenRejected("API token belongs to a disabled account")  # Disabling revokes them too; this holds even if one was missed
     if row["expires_at"] and _parse(row["expires_at"]) <= now:
         raise TokenRejected("API token has expired")
     if row["created_by"] is None or row["owner_role"] != "administrator":

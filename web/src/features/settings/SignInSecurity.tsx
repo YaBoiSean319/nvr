@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "@/api/client";
+import { useMe } from "@/api/queries";
 import { Modal } from "@/components/Modal";
 import { failureText } from "@/features/admin/tabDraft";
 
 type Policy = "off" | "administrators" | "all";
-interface LocalUser { id: number; username: string; role: string; local: boolean; totp: boolean; passkeys: number; recovery_codes_remaining: number; passkey_sign_in: boolean }
+interface LocalUser { id: number; username: string; role: string; local: boolean; totp: boolean; passkeys: number; recovery_codes_remaining: number; passkey_sign_in: boolean; disabled: boolean; entra_role_removed: boolean }
 
 const POLICY_LABEL: Record<Policy, string> = {
   off: "Not required",
@@ -13,12 +14,14 @@ const POLICY_LABEL: Record<Policy, string> = {
   all: "Required for all local accounts",
 };
 
-/** The second-factor policy, and who has factors set up, with a reset for someone who lost theirs. */
+/** The second-factor policy, and who has factors set up, with a reset for someone who lost theirs and a way to disable a person. */
 export function SignInSecurity() {
   const client = useQueryClient();
+  const me = useMe().data;
   const policy = useQuery({ queryKey: ["admin", "security"], queryFn: ({ signal }) => api<{ mfa_policy: Policy }>("/api/admin/security", { signal }) });
   const users = useQuery({ queryKey: ["admin", "users"], queryFn: ({ signal }) => api<{ users: LocalUser[] }>("/api/admin/users", { signal }).then(result => result.users) });
   const [resetting, setResetting] = useState<LocalUser | null>(null);
+  const [disabling, setDisabling] = useState<LocalUser | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,6 +34,14 @@ export function SignInSecurity() {
     mutationFn: (user: LocalUser) => api<void>(`/api/admin/users/${user.id}/mfa`, { method: "DELETE" }),
     onSuccess: (_result, user) => { setNotice(`Second factors removed for ${user.username}; their sessions ended.`); setResetting(null); setError(null); void client.invalidateQueries({ queryKey: ["admin", "users"] }); },
     onError: failure => { setError(failureText(failure)); setResetting(null); },
+  });
+  const setDisabled = useMutation({
+    mutationFn: (input: { user: LocalUser; disabled: boolean }) => api<void>(`/api/admin/users/${input.user.id}/disabled`, { method: "PUT", body: { disabled: input.disabled } }),
+    onSuccess: (_result, input) => {
+      setNotice(input.disabled ? `${input.user.username} is disabled; their sessions, device sign-ins and notifications ended and their API tokens were revoked.` : `${input.user.username} can sign in again.`);
+      setDisabling(null); setError(null); void client.invalidateQueries({ queryKey: ["admin", "users"] });
+    },
+    onError: failure => { setError(failureText(failure)); setDisabling(null); },
   });
 
   return (
@@ -56,9 +67,12 @@ export function SignInSecurity() {
               return (
                 <tr key={user.id}>
                   <td>{user.username}</td>
-                  <td>{user.role}</td>
+                  <td>{user.disabled ? "Disabled" : user.entra_role_removed ? "No Entra role (access ended)" : user.role}</td>
                   <td>{!user.local ? "Managed by Entra" : factors || "None"}</td>
-                  <td>{user.local && factors ? <button type="button" className="button" data-variant="ghost" aria-label={`Reset second factors for ${user.username}`} onClick={() => setResetting(user)}>Reset</button> : null}</td>
+                  <td>{user.local && factors ? <button type="button" className="button" data-variant="ghost" aria-label={`Reset second factors for ${user.username}`} onClick={() => setResetting(user)}>Reset</button> : null}
+                    {user.disabled
+                      ? <button type="button" className="button" data-variant="ghost" aria-label={`Enable ${user.username}`} disabled={setDisabled.isPending} onClick={() => setDisabled.mutate({ user, disabled: false })}>Enable</button>
+                      : user.username !== me?.username ? <button type="button" className="button" data-variant="ghost" aria-label={`Disable ${user.username}`} onClick={() => setDisabling(user)}>Disable</button> : null}</td>
                 </tr>
               );
             })}
@@ -70,6 +84,12 @@ export function SignInSecurity() {
              footer={<><button type="button" className="button" onClick={() => setResetting(null)}>Cancel</button>
                <button type="button" className="button" data-variant="danger" disabled={reset.isPending} onClick={() => resetting && reset.mutate(resetting)}>Reset second factors</button></>}>
         <p className="muted">They sign in with their password and set up a new factor if the policy asks for one. The reset is recorded in the audit log.</p>
+      </Modal>
+      <Modal open={disabling !== null} onOpenChange={open => { if (!open) setDisabling(null); }} title={`Disable ${disabling?.username ?? ""}?`}
+             description="Ends their sessions, device sign-ins and alarm notifications now, and revokes the API tokens they made."
+             footer={<><button type="button" className="button" onClick={() => setDisabling(null)}>Cancel</button>
+               <button type="button" className="button" data-variant="danger" disabled={setDisabled.isPending} onClick={() => disabling && setDisabled.mutate({ user: disabling, disabled: true })}>Disable</button></>}>
+        <p className="muted">They cannot sign in until you enable them again. Enabling does not bring back what was ended. This is recorded in the audit log.</p>
       </Modal>
     </section>
   );

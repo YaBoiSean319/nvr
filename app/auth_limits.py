@@ -98,7 +98,19 @@ def _count(db: sqlite3.Connection, buckets: list[tuple[str, str]], address: str,
                    "ON CONFLICT(scope,key) DO UPDATE SET failures=excluded.failures,last_failure_at=excluded.last_failure_at,blocked_until=excluded.blocked_until",
                    (scope, key, failures, now.isoformat(), (now + timedelta(seconds=wait)).isoformat() if wait else None))
         if wait and failures - 1 == LIMITS[scope][0]:
-            record(db, None, "auth_throttled", scope, key, failures=failures, wait_seconds=wait, address=address)
+            record(db, None, "auth_throttled", scope, _logged_key(db, scope, key), failures=failures, wait_seconds=wait, address=address)
+
+
+def _logged_key(db: sqlite3.Connection, scope: str, key: str) -> str:
+    """A throttle bucket's key as the security log may hold it: an account that exists by name, anything else typed in the username box
+    as a digest (#367). People type their password there by mistake."""
+    if scope == "address":
+        return key
+    account, bar, address = key.rpartition("|") if scope == "pair" else (key, "", "")
+    if db.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE", (account,)).fetchone():
+        return key
+    from .security_log import unknown_name
+    return unknown_name(account) + bar + address
 
 
 def _attempt(account: str, address: str, include_address: bool) -> None:

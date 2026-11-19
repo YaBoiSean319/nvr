@@ -71,6 +71,22 @@ export function useSecurityActions() {
     }),
     removePasskey: useMutation({ mutationFn: (input: { id: number; password: string }) => api<SecurityResult>(`/api/me/security/passkeys/${input.id}`, { method: "DELETE", body: { password: input.password } }).then(done) }),
     setPasskeySignIn: useMutation({ mutationFn: (input: { enabled: boolean; password: string }) => api<SecurityResult>("/api/me/security/passkey-sign-in", { method: "PUT", body: input }).then(done) }),
+    // The second factor is asked for when the account has one: a code, or a passkey when no code was typed.
+    changePassword: useMutation({
+      mutationFn: async (input: { current: string; next: string; code?: string; passkey?: boolean }) => {
+        const body: Record<string, unknown> = { current_password: input.current, new_password: input.next };
+        if (input.code) {
+          body.method = /^\d{6}$/.test(input.code) ? "totp" : "recovery";
+          body.code = input.code;
+        } else if (input.passkey) {
+          const begun = await api<{ challenge: string; options: RequestOptionsJson }>("/api/me/security/password/passkey-options", { method: "POST", body: { password: input.current } });
+          body.method = "passkey";
+          body.challenge = begun.challenge;
+          body.credential = await getPasskey(begun.options);
+        }
+        return api<SecurityResult>("/api/me/security/password", { method: "POST", body }).then(done);
+      },
+    }),
     regenerateCodes: useMutation({ mutationFn: (password: string) => api<SecurityResult>("/api/me/security/recovery-codes", { method: "POST", body: { password } }).then(done) }),
   };
 }

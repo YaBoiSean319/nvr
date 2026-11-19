@@ -3,6 +3,7 @@ import { NavLink, Navigate, useNavigate, useParams } from "react-router";
 import { DraftGuard } from "@/features/admin/drafts";
 import { AccessSettings } from "./AccessSettings";
 import { AuditSettings } from "./AuditSettings";
+import { SecurityLogSettings } from "./SecurityLogSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { CoverageSettings } from "./CoverageSettings";
 import { DigestsSettings } from "./DigestsSettings";
@@ -36,6 +37,7 @@ const CATEGORIES = {
   capacity: { label: "Capacity planner", page: CapacitySettings },
   coverage: { label: "Coverage & self-test", page: CoverageSettings },
   audit: { label: "Viewing audit", page: AuditSettings },
+  securitylog: { label: "Security log", page: SecurityLogSettings },
   hardening: { label: "Camera hardening", page: HardeningSettings },
   notifications: { label: "Notifications", page: NotificationsSettings },
   email: { label: "Email alerts", page: EmailSettings },
@@ -56,7 +58,7 @@ type Category = keyof typeof CATEGORIES;
 /** The categories in the order they are listed, under a few headings (every category is in exactly one group). The addresses do not change. */
 const GROUPS: { label: string; items: Category[] }[] = [
   { label: "Site", items: ["general", "appearance", "privacy"] },
-  { label: "People & access", items: ["access", "remote", "audit", "hardening"] },
+  { label: "People & access", items: ["access", "remote", "audit", "securitylog", "hardening"] },
   { label: "Recording & storage", items: ["recording", "tiering", "capacity", "coverage", "failover"] },
   { label: "Alerts", items: ["notifications", "email", "digests", "events"] },
   { label: "AI", items: ["integrations", "plates", "falls", "faces"] },
@@ -71,6 +73,7 @@ const KEYWORDS: Record<Category, string> = {
   access: "users passwords roles tokens passkeys two factor grants api",
   remote: "internet tunnel vpn outside",
   audit: "viewing log who watched",
+  securitylog: "audit changes sign-in accounts tokens who did",
   hardening: "camera passwords security checks firmware",
   recording: "storage disks retention volumes cameras space",
   tiering: "cold archive s3 move old footage",

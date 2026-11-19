@@ -175,7 +175,7 @@ function RetentionSection() {
     <section className="field-group settings-block" aria-label="Audit retention">
       <h2 className="field-heading">Audit retention</h2>
       <p className="muted field-hint">
-        Viewing entries older than this are removed, separately from how long footage is kept. The security log of changes to settings and accounts is not affected.
+        Viewing entries older than this are removed, separately from how long footage is kept. The security log of changes to settings and accounts has its own page and its own retention.
       </p>
       <form className="tab-form" onSubmit={event => { event.preventDefault(); save.mutate(); }} noValidate>
         <label className="field"><span>Keep viewing entries for (days)</span>
