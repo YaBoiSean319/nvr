@@ -82,6 +82,7 @@ test("an administrator sets a volume's storage headroom and sees what it is doin
   await expect(card.getByRole("status")).toContainText("Headroom saved.");
   await expect(card.getByRole("list", { name: "Headroom status for default" })).toContainText("Keeping 512.0 MB free.");
   await expect(card.getByRole("list", { name: "Headroom status for default" })).toContainText("nothing is being deleted for it");
+  await expect(card.getByRole("status")).toContainText("Headroom saved."); // Still there once the new value has been read back
   expect((await (await page.request.get("/api/storage")).json()).volumes.find(volume => volume.id === "default").headroom.headroom_bytes).toBe(536870912);
 
   await card.getByRole("button", { name: "Use the default for default" }).click();
