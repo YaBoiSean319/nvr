@@ -304,6 +304,18 @@ def prune_ai_observations(now: datetime) -> int:
     return removed
 
 
+def prune_ai_coverage(now: datetime) -> int:
+    """Remove each camera's record of when it was analysed once it is older than the camera's retention and no footage is left for it (#351)."""
+    from . import ai_coverage
+
+    removed = 0
+    with connect() as db:
+        for camera in db.execute("SELECT id FROM cameras").fetchall():
+            days, _ = effective_retention(db, camera["id"])
+            removed += ai_coverage.prune(db, camera["id"], days, now)
+    return removed
+
+
 def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(timezone.utc)
     removed_segments = removed_bytes = skipped_leased = skipped_alarm = skipped_unavailable = failed = 0
@@ -336,7 +348,7 @@ def cleanup_expired_recordings(now: datetime | None = None) -> dict[str, int]:
             removed_bytes += int(current["size_bytes"])
         except (OSError,sqlite3.Error,ValueError):  # ValueError: a stored time that cannot be read
             failed += 1
-    for prune in (prune_motion_events, prune_ai_observations):
+    for prune in (prune_motion_events, prune_ai_observations, prune_ai_coverage):
         try:
             prune(now)
         except sqlite3.Error:

@@ -243,6 +243,11 @@ def _inactivity(condition: dict[str, Any], path: list[PathPoint]) -> list[PathPo
     return _moments(_inactivity_steps(condition), path)
 
 
+def condition_steps(rule: Rule) -> Step:
+    """The rule's condition as a machine to feed a path's points to, one at a time and in order, without holding the path."""
+    return _CONDITIONS[rule.condition_type](rule.condition)
+
+
 def condition_moments(rule: Rule, path: list[PathPoint]) -> list[PathPoint]:
     """Every moment along a track's path that meets the rule's condition, in order."""
     return _moments(_CONDITIONS[rule.condition_type](rule.condition), path)

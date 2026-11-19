@@ -18,7 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import rules, search, track_privacy
+from . import ai_coverage, rules, search, track_privacy
 from app.clock import parse as _parse, stamp
 
 MAX_RANGE = {"hour": timedelta(days=31), "day": search.MAX_RANGE}
@@ -62,13 +62,13 @@ def buckets(start: datetime, end: datetime, zone: ZoneInfo, unit: str) -> list[t
 
 def _analysed_intervals(db: sqlite3.Connection, camera_ids: list[str], start: datetime, end: datetime) -> dict[str, list[tuple[datetime, datetime]]]:
     found: dict[str, list[tuple[datetime, datetime]]] = {camera_id: [] for camera_id in camera_ids}
-    for offset in range(0, len(camera_ids), CHUNK):
-        part = camera_ids[offset:offset + CHUNK]
-        for row in db.execute(f"SELECT camera_id,starts_at,ends_at FROM ai_coverage WHERE state='analyzed' AND camera_id IN ({','.join('?' * len(part))}) "
-                              "AND starts_at<? AND (ends_at IS NULL OR ends_at>?) ORDER BY starts_at", (*part, stamp(end), stamp(start))):
+    for camera_id in camera_ids:
+        for row in ai_coverage.overlapping(db, camera_id, stamp(start), stamp(end)):
+            if row["state"] != "analyzed":
+                continue
             begin, finish = max(start, _parse(row["starts_at"])), min(end, _parse(row["ends_at"]) if row["ends_at"] else end)
             if finish > begin:
-                found[row["camera_id"]].append((begin, finish))
+                found[camera_id].append((begin, finish))
     return {camera_id: search._merge(intervals) for camera_id, intervals in found.items()}
 
 
@@ -133,43 +133,56 @@ def counts(db: sqlite3.Connection, cameras: dict[str, str], start: datetime, end
     for camera_id in ids:
         # A track that began before the range can still enter a zone or cross a line inside it, so those are found from every track that overlaps the range.
         visible, visible_values = track_privacy.track_visible_sql(zones, alias="t", window=(_iso(start), _iso(end)))
-        track_rows = db.execute(f"SELECT t.id,t.label,t.first_seen_at FROM ai_tracks t WHERE t.camera_id=? AND t.last_seen_at>=? AND t.first_seen_at<? AND {visible} ORDER BY t.first_seen_at",
-                                (camera_id, _iso(start), _iso(end), *visible_values)).fetchall()
-        tracks = [row for row in track_rows if row["label"] in labels]
         own = series[f"camera:{camera_id}"]
-        for row in tracks:
-            position = index(_parse(row["first_seen_at"]))  # a camera's count is the tracks that began in the hour
-            if position is not None:
-                own[position][LABELS.index(row["label"])] += 1
-        if not defined[camera_id] or not tracks:
-            continue
-        watched = set().union(*(rule.classes for rule, _ in defined[camera_id]))
-        tracks = [row for row in tracks if row["label"] in watched]  # only the paths a rule could use are read
-        paths: dict[str, list[sqlite3.Row]] = defaultdict(list)
-        track_ids = [row["id"] for row in tracks]
-        for offset in range(0, len(track_ids), CHUNK):
-            part = track_ids[offset:offset + CHUNK]
-            for detection in db.execute(f"SELECT d.track_id,d.id,d.detected_at,d.box_x,d.box_y,d.box_width,d.box_height FROM ai_detections d WHERE d.track_id IN ({','.join('?' * len(part))}) "
-                                        f"AND {permitted} ORDER BY d.track_id,d.detected_at,d.id", (*part, *permitted_values)):
-                paths[detection["track_id"]].append(detection)
-        for row in tracks:
-            path = rules.path_from_rows(paths[row["id"]])
-            for rule, cells in defined[camera_id]:
-                if row["label"] not in rule.classes:
-                    continue
-                moments = rules.condition_moments(rule, path)
-                if rule.condition_type == "zone_entry":
-                    moments = moments[:1]  # once per track
-                for moment in moments:
-                    position = index(moment.at)
-                    if position is not None:
-                        cells[position][LABELS.index(row["label"])] += 1
+        watched = set().union(*(rule.classes for rule, _ in defined[camera_id])) if defined[camera_id] else set()
+        # The range can be a quarter of a year on a busy camera. Tracks are taken a batch at a time and each path is fed to the zones and
+        # lines point by point as it is read, so what is held is one batch of track ids, never the paths (#351).
+        cursor = db.execute(f"SELECT t.id,t.label,t.first_seen_at FROM ai_tracks t WHERE t.camera_id=? AND t.last_seen_at>=? AND t.first_seen_at<? AND {visible} ORDER BY t.first_seen_at",
+                            (camera_id, _iso(start), _iso(end), *visible_values))
+        while batch := cursor.fetchmany(CHUNK):
+            tracks = [row for row in batch if row["label"] in labels]
+            for row in tracks:
+                position = index(_parse(row["first_seen_at"]))  # a camera's count is the tracks that began in the hour
+                if position is not None:
+                    own[position][LABELS.index(row["label"])] += 1
+            label_of = {row["id"]: row["label"] for row in tracks if row["label"] in watched}  # only the paths a rule could use are read
+            if not label_of:
+                continue
+            _count_moments(db, list(label_of), label_of, defined[camera_id], index, permitted, permitted_values)
 
     analysed = _analysed_intervals(db, ids, start, end)
     coverage = {camera_id: [_analysed_percent(analysed[camera_id], begin, finish, now) for begin, finish in spans] for camera_id in ids}
     return {"unit": unit, "time_zone": zone.key, "labels": list(LABELS), "shown_labels": labels,
             "buckets": [{"start": _iso(begin), "end": _iso(finish)} for begin, finish in spans],
             "subjects": subjects, "counts": series, "analysed": coverage, "coverage": search.coverage(db, cameras, start, min(end, now))}
+
+
+def _count_moments(db: sqlite3.Connection, track_ids: list[str], label_of: dict[str, str], defined: list[tuple[rules.Rule, list[list[int]]]],
+                   index, permitted: str, permitted_values: tuple | list) -> None:
+    """Add to each zone's and line's cells the moments these tracks meet it, reading their points as a stream in path order."""
+    reading = db.execute(f"SELECT d.track_id,d.id,d.detected_at,d.box_x,d.box_y,d.box_width,d.box_height FROM ai_detections d WHERE d.track_id IN ({','.join('?' * len(track_ids))}) "
+                                         f"AND {permitted} ORDER BY d.track_id,d.detected_at,d.id", (*track_ids, *permitted_values))
+    current: str | None = None
+    following: list[tuple[rules.Rule, list[list[int]], rules.Step]] = []
+    entered: set[str] = set()
+    for detection in reading:
+        if detection["track_id"] != current:
+            current = detection["track_id"]
+            following = [(rule, cells, rules.condition_steps(rule)) for rule, cells in defined if label_of[current] in rule.classes]
+            entered = set()
+        if not following:
+            continue
+        point = rules.path_from_rows((detection,))[0]
+        for rule, cells, steps in following:
+            if not steps(point):
+                continue
+            if rule.condition_type == "zone_entry":
+                if rule.id in entered:
+                    continue  # once per track
+                entered.add(rule.id)
+            position = index(point.at)
+            if position is not None:
+                cells[position][LABELS.index(label_of[current])] += 1
 
 
 def _safe(value: str) -> str:
