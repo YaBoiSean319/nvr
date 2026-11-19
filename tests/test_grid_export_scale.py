@@ -5,6 +5,7 @@ files the command was too long to start. Each tile now reads its camera's files 
 from __future__ import annotations
 
 import asyncio
+import os
 import resource
 import shutil
 import subprocess
@@ -48,21 +49,29 @@ class GridScaleTests(unittest.TestCase):
                        for offset, camera in enumerate(("a", "b"))]
             intervals = exports._union_intervals(cameras, START, end)
             commands: list[list[str]] = []
+            peaks: list[float] = []
 
             class Manager:
                 async def _run_ffmpeg(self, job_id, args):
+                    # Each FFmpeg run's own peak memory, from its own exit: the process-wide figure for children is the largest of every
+                    # child the test run ever started, which an earlier test can set (it did, in the full suite).
                     commands.append(args)
-                    subprocess.run([FFMPEG, *args], check=True, capture_output=True, timeout=600)
+                    process = subprocess.Popen([FFMPEG, *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    _, status, usage = os.wait4(process.pid, 0)
+                    process.returncode = os.waitstatus_to_exitcode(status)
+                    peaks.append(usage.ru_maxrss / 1024)
+                    if process.returncode:
+                        raise subprocess.CalledProcessError(process.returncode, args, stderr=process.stderr.read())
+                    process.stderr.close()
 
-            before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
             with patch.object(exports, "recording_file_path", lambda relative: root / relative):
                 output = asyncio.run(exports._render_grid(Manager(), "job", root, cameras, ["a", "b", None, "a"], intervals, "1080p",
                                                           {"time_zone": "UTC", "date_format": "iso", "clock_format": "24"}))
-            peak_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+            peak_mb = max(peaks)
             seconds = float(subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(output)],
                                            capture_output=True, text=True, check=True).stdout)
         self.assertAlmostEqual(seconds, (end - START).total_seconds(), delta=0.5)
-        self.assertLess(peak_mb, MEMORY_BOUND_MB, f"an FFmpeg process used {peak_mb:.0f} MB (before: {before / 1024:.0f} MB)")
+        self.assertLess(peak_mb, MEMORY_BOUND_MB, f"an FFmpeg process used {peak_mb:.0f} MB")
         self.assertTrue(all(sum(1 for arg in command if arg == "-i") <= 4 for command in commands), "a command opened more than four inputs")
         self.assertTrue(all(len(" ".join(command)) < 8000 for command in commands), "a command line grew with the number of files")
 
