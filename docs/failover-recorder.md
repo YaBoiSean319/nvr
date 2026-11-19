@@ -23,6 +23,16 @@ A **standby** NVR records in the primary's place while the primary is down, and 
 - **Handback.** The primary downloads each segment the standby recorded (checked against the digest the standby gives), adds it to its own index marked **Recorded by the standby NVR**, and tells the standby, which recovers its incident; the primary recovers its own. The footage plays and exports like any other, is subject to the primary's retention, and the primary's footage chain hashes and signs it like footage it recorded itself, so it verifies. The standby keeps its own copy until its retention removes it.
 - **Gaps.** Time after the primary stopped and before the standby took over is a gap as it always was (for example *Recorder restarting*); Playback says that the standby waits for the primary to be silent before it takes over. Footage the standby recorded fills the rest.
 
+## What is signed, and what you see
+
+Everything the two NVRs say to each other is signed with the failover secret, in both directions.
+
+- **Requests** (the primary's renewals, and fetching the standby's footage and the primary's backup) carry a signature over the method, the address, the body and the time. A request that is unsigned, wrongly signed, older than a minute or altered is refused.
+- **The standby's answer to a renewal** is signed too, over the answer, the time and the request it answers. The primary obeys only an answer it can verify. Anything else (unsigned, altered, signed with another secret, or a genuine answer to an earlier renewal sent again) is treated as no answer: the primary keeps recording, and its status reads **the standby's answer was not signed and was ignored**. So someone who can interfere with the traffic between the two cannot make the primary stop recording by answering in the standby's place.
+- **Both NVRs must run a version that signs answers.** A primary that has been upgraded ignores the answers of a standby that has not, and keeps recording; upgrade the two together.
+- **A standby that never hands back.** While the standby stops its recorders it answers "not yet" and the primary waits, normally for well under a minute. If the answers are still "not yet" after five minutes, the primary records again and raises an incident, *The standby NVR did not hand recording back*, which recovers when the standby grants the lease. Both may be recording in the meantime; recording twice is the lesser fault.
+- **Badly signed requests are counted by address** and refused with `429` after twenty in a minute. A correctly signed request is never refused for that, so others behind the same proxy or NAT address as the primary cannot shut out its renewals and make the standby take over from a healthy primary.
+
 ## What is copied to the standby
 
 Cameras (with their stream addresses and logins, encrypted under the key both share), camera groups, recording schedules, retention and privacy masks, and the site's time zone and date format. **Not** copied: footage, the footage index and its signing key, users, rules, alarms, notifications, AI settings, integrations, access grants and storage settings. The standby keeps its own users, so people sign in to it with accounts made on it; a camera removed at the primary is switched off and archived on the standby if it holds footage of it, otherwise removed.

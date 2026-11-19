@@ -45,7 +45,7 @@ import httpx
 from . import backup
 from .credentials import decrypt, key_path
 from .incidents import sync_incident
-from .store import connect
+from .store import connect, has_row
 from .webhooks import validate_target_url
 from app.clock import now as _now
 
@@ -164,6 +164,28 @@ def verify(secret: str | None, method: str, path: str, body: bytes, timestamp: s
     return hmac.compare_digest(signature[7:], expected)
 
 
+def sign_answer(secret: str, path: str, body: bytes, request_signature: str, timestamp: int | None = None) -> dict[str, str]:
+    """Headers that prove an answer came from the holder of the secret, for this request and no other (#343). Requests were signed and
+    answers were not, so anything able to alter the traffic between the two NVRs could answer a renewal "not granted" and stop the
+    primary recording. The request's own signature is part of what is signed, so an old answer cannot be replayed to a new request."""
+    stamp = str(int(time.time()) if timestamp is None else timestamp)
+    digest = hmac.new(secret.encode("utf-8"), _message(stamp, "ANSWER", path, body) + b"\n" + request_signature.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+    return {"X-Failover-Timestamp": stamp, "X-Failover-Signature": f"sha256={digest}"}
+
+
+def verify_answer(secret: str | None, path: str, body: bytes, request_signature: str, timestamp: str | None, signature: str | None, now: float | None = None) -> bool:
+    if not secret or not timestamp or not signature or not signature.startswith("sha256="):
+        return False
+    try:
+        stamped = int(timestamp)
+    except ValueError:
+        return False
+    if abs((time.time() if now is None else now) - stamped) > SIGNATURE_WINDOW_SECONDS:
+        return False
+    expected = sign_answer(secret, path, body, request_signature, stamped)["X-Failover-Signature"]
+    return hmac.compare_digest(signature, expected)
+
+
 def authenticate(method: str, path: str, body: bytes, timestamp: str | None, signature: str | None) -> None:
     """Refuse a request that is not signed with this NVR's failover secret (the same answer however it is wrong)."""
     with connect() as db:
@@ -182,6 +204,10 @@ def check_peer_url(url: str, allow_private: bool) -> str:
 # --- incidents and episodes -----------------------------------------------------------------------------------------------------------------------
 
 TAKEOVER_KEY = "failover:takeover"
+YIELD_KEY = "failover:yield"
+# How long a primary goes on yielding to a standby that keeps saying "not yet". A standby stops its recorders and grants within
+# STOP_WAIT_SECONDS; one still refusing after this is not handing back, and a primary that records nothing is the worse failure.
+YIELD_LIMIT_SECONDS = 300.0
 
 
 def _takeover_incident(db: sqlite3.Connection, role: str, active: bool, details: dict[str, Any]) -> None:
@@ -189,6 +215,14 @@ def _takeover_incident(db: sqlite3.Connection, role: str, active: bool, details:
                else "The standby NVR recorded while this primary was away: its footage is being brought back") if active else \
               ("The primary NVR is back and recording again: the standby has handed back" if role == "standby" else "The standby's footage is back in this NVR and it is recording again")
     sync_incident(db, incident_key=TAKEOVER_KEY, camera_id=None, fault_type="failover", summary=summary, active=active, details={"role": role, **details})
+
+
+def _yield_incident(db: sqlite3.Connection, active: bool, since: str | None = None) -> None:
+    minutes = int(YIELD_LIMIT_SECONDS // 60)
+    summary = (f"The standby NVR did not hand recording back within {minutes} minutes: this primary is recording again, and both may be recording" if active
+               else "The standby NVR has handed recording back to this primary")
+    if active or has_row(db, "SELECT 1 FROM incidents WHERE incident_key=? AND fault_active=1", (YIELD_KEY,)):
+        sync_incident(db, incident_key=YIELD_KEY, camera_id=None, fault_type="failover", summary=summary, active=active, details={"role": "primary", "yielding_since": since})
 
 
 def episodes(db: sqlite3.Connection, limit: int = 10) -> list[dict[str, Any]]:
@@ -572,7 +606,9 @@ def status_view(db: sqlite3.Connection) -> dict[str, Any]:
             headline = "Standby: watching the primary"
     else:
         headline = {"ok": "Primary: the standby is watching", "unreachable": "Primary: the standby cannot be reached (recording continues)", "refused": "Primary: the standby refused the signature (the secrets differ)",
-                    "starting": "Primary: starting, waiting to hear from the standby", "standby_stopping": "Primary: waiting for the standby to stop recording", "handback": "Primary: bringing back the standby's footage"
+                    "starting": "Primary: starting, waiting to hear from the standby", "standby_stopping": "Primary: waiting for the standby to stop recording", "handback": "Primary: bringing back the standby's footage",
+                    "unverified": "Primary: the standby's answer was not signed and was ignored (recording continues)",
+                    "not_handing_back": "Primary: the standby did not hand back in time; this primary is recording again",
                     }.get(str(state["peer_state"]), "Primary")
     return {"role": role, "headline": headline, "lease_until": state["lease_until"], "recording_held": held, "peer_state": state["peer_state"], "last_contact_at": state["last_contact_at"],
             "takeover_active": bool(state["takeover_active"]), "takeover_started_at": state["takeover_started_at"], "epoch": state["epoch"], "last_error": state["last_error"],
@@ -643,7 +679,9 @@ class FailoverManager:
         headers = {**sign(secret, method, path, body), "Content-Type": "application/json"}
         url = check_peer_url(settings["peer_url"], settings["allow_private"]) + path
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False) as client:
-            return await client.request(method, url, content=body or None, headers=headers, **options)
+            response = await client.request(method, url, content=body or None, headers=headers, **options)
+        response.extensions["failover_request_signature"] = headers["X-Failover-Signature"]  # What a signed answer must be an answer to
+        return response
 
     async def _renew(self, settings: dict[str, Any], secret: str) -> None:
         sent = _now()
@@ -657,6 +695,13 @@ class FailoverManager:
             return
         if response.status_code != 200:
             await asyncio.to_thread(self._record_peer, "error", f"The standby answered {response.status_code}")
+            return
+        # Only an answer the standby signed, for this request, counts. Anything else is no answer: the primary neither yields nor
+        # takes its lease as renewed on the word of whoever could reach it (#343).
+        if not verify_answer(secret, "/api/inbound/failover/lease", response.content, str(response.extensions.get("failover_request_signature", "")),
+                             response.headers.get("x-failover-timestamp"), response.headers.get("x-failover-signature")):
+            await asyncio.to_thread(self._record_peer, "unverified", "The standby's answer was not signed with the failover secret and was ignored; "
+                                                                    "both NVRs must run a version that signs answers, with the same secret")
             return
         try:
             answer = response.json()
@@ -674,10 +719,20 @@ class FailoverManager:
     def _apply_answer(settings: dict[str, Any], sent: datetime, answer: dict[str, Any]) -> None:
         with connect() as db:
             if answer.get("granted") is True:
-                _set_state(db, lease_until=_stamp(sent + timedelta(seconds=settings["lease_seconds"])), yield_until=None, last_contact_at=_stamp(), last_error=None,
+                _set_state(db, lease_until=_stamp(sent + timedelta(seconds=settings["lease_seconds"])), yield_until=None, yield_since=None, last_contact_at=_stamp(), last_error=None,
                            peer_state="handback" if answer.get("handback") else "ok", epoch=int(answer.get("epoch") or 0))
+                _yield_incident(db, active=False)
             else:
-                _set_state(db, yield_until=_stamp(_now() + timedelta(seconds=settings["lease_seconds"])), last_contact_at=_stamp(), last_error=None, peer_state="standby_stopping")
+                now = _now()
+                since = _parse(read_state(db).get("yield_since")) or now
+                if (now - since).total_seconds() >= YIELD_LIMIT_SECONDS:
+                    # Still "not yet" after the limit: this primary records again and says so, rather than record nothing for as long as it is told to wait.
+                    _set_state(db, yield_until=None, yield_since=_stamp(since), last_contact_at=_stamp(), peer_state="not_handing_back",
+                               last_error="The standby has kept this primary waiting too long; this primary is recording again")
+                    _yield_incident(db, active=True, since=_stamp(since))
+                else:
+                    _set_state(db, yield_until=_stamp(now + timedelta(seconds=settings["lease_seconds"])), yield_since=_stamp(since), last_contact_at=_stamp(), last_error=None,
+                               peer_state="standby_stopping")
         if answer.get("granted") is True and isinstance(answer.get("handback"), dict):
             learn_of_takeover(answer["handback"])
 
