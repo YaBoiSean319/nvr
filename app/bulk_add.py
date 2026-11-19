@@ -172,6 +172,10 @@ def recover_interrupted() -> None:
     """After a restart: a camera that was only being checked goes back in the queue; one that was being saved may or may not have been, so it is reported, not repeated."""
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
+        # A camera that was being checked goes back in the queue, but only in a job that is still running. In a cancelled job it was put
+        # back and never worked, keeping its encrypted password until the job was pruned (#386): it is skipped, as the others were.
+        db.execute("UPDATE camera_add_items SET status='skipped',detail='Stopped before this camera',password_ciphertext=NULL,updated_at=? "
+                   "WHERE status='checking' AND job_id IN (SELECT id FROM camera_add_jobs WHERE state!='running')", (stamp(),))
         db.execute("UPDATE camera_add_items SET status='queued',updated_at=? WHERE status='checking'", (stamp(),))
         stopped = db.execute("SELECT DISTINCT job_id FROM camera_add_items WHERE status='adding'").fetchall()
         db.execute("UPDATE camera_add_items SET status='failed',detail='Interrupted while saving: check the camera list before adding it again',password_ciphertext=NULL,updated_at=? WHERE status='adding'", (stamp(),))
