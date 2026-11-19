@@ -524,9 +524,9 @@ class ObjectStoreTierTests(TierCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM tier_orphans").fetchone()[0], 0)
 
 
-@unittest.skipUnless(os.environ.get("NVR_TEST_S3_ENDPOINT"), "needs a real S3-compatible store (the CI workflow starts MinIO and sets NVR_TEST_S3_ENDPOINT)")
+@unittest.skipUnless(os.environ.get("NVR_TEST_S3_ENDPOINT"), "needs a real S3-compatible store (the CI workflow starts one and sets NVR_TEST_S3_ENDPOINT: .github/scripts/start-s3-store.sh)")
 class RealObjectStoreTests(TierCase):
-    """The same journeys against a real store (MinIO in CI), proving the client's signing and addressing against software that is not ours."""
+    """The same journeys against a real store (moto's S3 server in CI, with signing checked), proving the client's signing and addressing against software that is not ours."""
 
     def setUp(self):
         super().setUp()

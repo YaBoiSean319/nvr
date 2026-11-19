@@ -39,7 +39,7 @@ Retention, deleting a segment and deleting a camera's footage remove the cold co
 - A configuration backup does not know about footage moved after it was taken: restoring an older backup loses track of what moved (the objects stay in the bucket).
 - A bad copy found when verifying is not deleted (its name is shared with any other mover); it is overwritten on the next pass.
 - Cold storage is not a backup: it holds the footage that left the disks, one copy, with whatever durability the store gives.
-- Tested here with a local folder and with a stand-in S3 server that checks AWS Signature Version 4 and upload hashes, and with the signing code checked against examples AWS publishes; the CI workflow also runs the object-store tests against MinIO when it can start one. Try your own store (see the acceptance checklist) before relying on it.
+- Tested here with a local folder and with a stand-in S3 server that checks AWS Signature Version 4 and upload hashes, and with the signing code checked against examples AWS publishes; the CI workflow also runs the object-store tests against a separate S3 server (moto's, with signing checked). Try your own store (see the acceptance checklist) before relying on it.
 
 ## API
 

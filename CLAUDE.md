@@ -21,7 +21,7 @@ npx playwright test tests/browser/<spec>.cjs --trace off   # one browser journey
 python -m radon cc app -s -n C                   # not in CI: how complex the biggest functions are (pip install radon)
 ```
 
-Some browser journeys and tests need the simulated RTSP camera (a MediaMTX container) and MinIO, which only CI starts; they are skipped or fail locally for that reason alone. A few tests need packages that are in `requirements-dev.txt` but may be missing from a sandbox (for example `joserfc`).
+Some browser journeys and tests need the simulated RTSP camera (a MediaMTX container) and an S3 store (`.github/scripts/start-s3-store.sh`), which only CI starts; they are skipped or fail locally for that reason alone. A few tests need packages that are in `requirements-dev.txt` but may be missing from a sandbox (for example `joserfc`).
 
 ## Layout
 
