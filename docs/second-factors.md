@@ -8,6 +8,7 @@ Open the account menu and choose **Security…**.
 
 - **Authenticator app.** Add an account in your app with the key shown (or open the setup link on the device that has the app), then enter the code it shows. The key is stored encrypted with the credential key. Each code works once; the NVR also accepts the code before and after the current one, for clock drift.
 - **Passkeys.** Choose **Add a passkey** and follow the browser's prompt. Give it a name so you can tell several apart. Any attestation format is accepted and ignored: the NVR only needs the passkey to prove it holds its private key. ES256, RS256 and EdDSA keys are supported.
+- **Where a first factor can be set up.** Anywhere, unless a second factor is required for sessions from outside (see [remote access](remote-access.md)): then the first one must be set up from the local network.
 - **Recovery codes.** Ten codes are made when you set up your first factor, and shown once. Each works once. Use **Make new recovery codes** to replace them all. They are stored only as digests.
 
 Removing a factor, making new recovery codes, turning passkey-only sign-in on or off, and **adding another factor to an account that already has one**, all ask for your password again, so a borrowed session cannot weaken sign-in or add a factor of its own. After any change to how you sign in, your other sessions end; the one making the change stays. Setting up sign-in security needs a browser session: an API token, which acts for its creator, cannot.
