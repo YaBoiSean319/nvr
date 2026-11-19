@@ -40,17 +40,31 @@ MODEL_XML_SHA256 = "408e2a556cc935a59b765cb72045fb7c5f8071c4b0f2c5433711c2b38ff0
 MODEL_DIRECTORY = Path(os.environ.get("NVR_AI_MODEL_DIRECTORY", "/data/models"))
 
 
+_model_versions: dict[tuple[str, int, int, int, int], str] = {}
+
+
 def _model_version(path: Path) -> str:
+    """The version of a model's two files. They are megabytes and this is asked for every camera every few seconds, so the answer is kept
+    for as long as neither file's size or modified time changes (#348), as the plate models' is."""
     binary = path.with_suffix(".bin")
     try:
+        xml_stat, binary_stat = path.stat(), binary.stat()
+        key = (str(path), xml_stat.st_size, xml_stat.st_mtime_ns, binary_stat.st_size, binary_stat.st_mtime_ns)
+        known = _model_versions.get(key)
+        if known is not None:
+            return known
         xml_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     except OSError:
         return "unavailable"
     if xml_hash == MODEL_XML_SHA256 and binary_hash == MODEL_BINARY_SHA256:
-        return MODEL_VERSION
-    digest = hashlib.sha256((xml_hash + binary_hash).encode("ascii")).hexdigest()
-    return "sha256:" + digest[:16]
+        version = MODEL_VERSION
+    else:
+        version = "sha256:" + hashlib.sha256((xml_hash + binary_hash).encode("ascii")).hexdigest()[:16]
+    for stale in [old for old in _model_versions if old[0] == key[0]]:
+        del _model_versions[stale]
+    _model_versions[key] = version
+    return version
 
 
 def model_options() -> list[dict[str, Any]]:
@@ -318,11 +332,13 @@ def set_camera_state(camera_id: str, state: str, error: str | None = None, at: d
 
 
 STATE_WRITE_SECONDS = 5.0  # While a camera stays "analyzed", its row is refreshed this often; any other change is written at once
+ATTEMPT_WRITE_SECONDS = 60.0  # While a camera stays failed or delayed for the same reason, the time of its last attempt is refreshed this often
+RESTING_STATES = {"disabled", "skipped"}  # Nothing is being attempted: the row is written when the state or its reason changes, and not again
 
 
-def _written_recently(written: str | None, moment: datetime) -> bool:
+def _written_recently(written: str | None, moment: datetime, within: float = STATE_WRITE_SECONDS) -> bool:
     try:
-        return written is not None and 0 <= (moment - clock_parse(written)).total_seconds() < STATE_WRITE_SECONDS
+        return written is not None and 0 <= (moment - clock_parse(written)).total_seconds() < within
     except (TypeError, ValueError):
         return False
 
@@ -331,12 +347,20 @@ def _set_camera_state(db: sqlite3.Connection, camera_id: str, state: str, error:
     """``set_camera_state`` on a connection the caller owns (#279)."""
     moment = at or datetime.now(timezone.utc)
     stamp = clock_stamp(moment)  # Canonical, like every other time written for the state and the coverage (#284)
-    db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
-    row = db.execute("SELECT status,last_success_at,last_error FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+    row = db.execute("SELECT status,last_attempt_at,last_success_at,last_error FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
     if row is None:
-        return
-    if state == "analyzed" and row["status"] == "analyzed" and (row["last_error"] or None) == (error or None) and _written_recently(row["last_success_at"], moment):
-        return  # Still analysing, as a moment ago: nothing to say yet. A frame at 5 fps on 20 cameras would otherwise rewrite this row 100 times a second (#279).
+        # Read first, and add the row only when it is missing: even an insert that adds nothing takes the write lock (#348).
+        db.execute("INSERT OR IGNORE INTO ai_camera_settings(camera_id) VALUES(?)", (camera_id,))
+        row = db.execute("SELECT status,last_attempt_at,last_success_at,last_error FROM ai_camera_settings WHERE camera_id=?", (camera_id,)).fetchone()
+        if row is None:
+            return
+    elif row["status"] == state and (row["last_error"] or None) == (error or None):
+        if state == "analyzed" and _written_recently(row["last_success_at"], moment):
+            return  # Still analysing, as a moment ago: nothing to say yet. A frame at 5 fps on 20 cameras would otherwise rewrite this row 100 times a second (#279).
+        if state in RESTING_STATES:
+            return  # Still switched off, or still waiting for the same reason. The 5-second check used to rewrite this row for every such camera, for ever (#348).
+        if state != "analyzed" and _written_recently(row["last_attempt_at"], moment, ATTEMPT_WRITE_SECONDS):
+            return
     db.execute("UPDATE ai_camera_settings SET status=?,last_attempt_at=?,last_success_at=CASE WHEN ?='analyzed' THEN ? ELSE last_success_at END,last_error=?,updated_at=? WHERE camera_id=?",
                (state, stamp, state, stamp, error, stamp, camera_id))
     active = db.execute("SELECT id,state FROM ai_coverage WHERE camera_id=? AND ends_at IS NULL ORDER BY id DESC LIMIT 1", (camera_id,)).fetchone()
@@ -460,6 +484,9 @@ def _store_frame(camera_id: str, observations: list[dict[str, Any]], at: datetim
     return track_ids
 
 
+_UNREAD: Any = object()  # "The caller has not read this camera's settings": None already means the camera is gone or switched off
+
+
 class DetectionManager:
     def __init__(self, detector_factory: Callable[..., Any] = OpenVINODetector,
                  clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
@@ -471,6 +498,7 @@ class DetectionManager:
         self._plate_readers: dict[tuple[str, str], Any] = {}
         self._pose_readers: dict[str, Any] = {}
         self._model_lock = asyncio.Lock()
+        self._sync_lock = asyncio.Lock()  # One camera is settled at a time (see sync_camera)
         # Database writes can wait seconds for a busy database; their own threads keep them from starving inference, embedding and JPEG work in the shared pool.
         self._db_threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-db")
         self._inference_slots = asyncio.Semaphore(1)
@@ -510,12 +538,17 @@ class DetectionManager:
         score = {camera_id: (1 if watched.get(camera_id) else 0) + (1 if camera_id in falls_on else 0) + (1 if camera_id in plates_on else 0) for camera_id in camera_ids}
         return sorted(camera_ids, key=lambda camera_id: -score[camera_id])  # Stable: ties stay in name order
 
-    async def reconcile(self) -> None:
+    def _survey(self) -> tuple[list[str], dict[str, dict[str, Any] | None], tuple[str, int, int | None], list[str]]:
+        """Everything a pass reads before it decides: the cameras, each one's settings, the limit, and who wants analysis, most important
+        first. Blocking; the pass runs it in a thread so a busy database cannot stop the AI worker's loop and its heartbeat (#348)."""
         with connect() as db:
-            cameras = db.execute("SELECT id FROM cameras WHERE enabled=1 ORDER BY name COLLATE NOCASE").fetchall()
-        mode, fixed, last_limit = self._runtime()
-        wanting = [row["id"] for row in cameras if (config := effective_camera_config(row["id"])) and config["enabled"]]
-        wanting = self._by_importance(wanting)
+            cameras = [row["id"] for row in db.execute("SELECT id FROM cameras WHERE enabled=1 ORDER BY name COLLATE NOCASE")]
+        configs = {camera_id: effective_camera_config(camera_id) for camera_id in cameras}
+        wanting = self._by_importance([camera_id for camera_id in cameras if configs[camera_id] and configs[camera_id]["enabled"]])
+        return cameras, configs, self._runtime(), wanting
+
+    async def reconcile(self) -> None:
+        cameras, configs, (mode, fixed, last_limit), wanting = await asyncio.to_thread(self._survey)
         analysed = sum(1 for camera_id in wanting if camera_id in self.tasks and not self.tasks[camera_id].done())
         if mode == "fixed":
             limit = fixed
@@ -531,8 +564,8 @@ class DetectionManager:
             self.waiting_text = "Waiting: this machine is at its limit" + (f" ({_FACTOR_TEXT.get(factor, factor)})" if factor else "")
         self.limit_now = limit
         eligible = wanting[:limit]
-        for row in cameras:
-            await self.sync_camera(row["id"], capacity_allowed=row["id"] in eligible)
+        for camera_id in cameras:
+            await self.sync_camera(camera_id, capacity_allowed=camera_id in eligible, config=configs[camera_id])
         await asyncio.to_thread(self._write_status, mode, limit, len(wanting))
 
     def _write_status(self, mode: str, limit: int, wanting: int) -> None:
@@ -577,10 +610,19 @@ class DetectionManager:
         mode, fixed, last_limit = self._runtime()
         return fixed if mode == "fixed" else (ai_capacity.Controller.starting(ai_capacity.hardware_ceiling(self.capacity.sampler.cores(), self.capacity.sampler.memory_total()), last_limit).limit)
 
-    async def sync_camera(self, camera_id: str, force_restart: bool = False, capacity_allowed: bool | None = None) -> None:
+    async def sync_camera(self, camera_id: str, force_restart: bool = False, capacity_allowed: bool | None = None, config: Any = _UNREAD) -> None:
+        """Start, restart or stop one camera's analysis to match its settings. ``config`` is the camera's settings when the caller has
+        just read them. Every database call is made in a thread, and one camera is settled at a time, so a message arriving in the middle
+        of a pass cannot start a second analysis of a camera."""
+        async with self._sync_lock:
+            await self._sync_camera(camera_id, force_restart, capacity_allowed, config)
+
+    async def _sync_camera(self, camera_id: str, force_restart: bool, capacity_allowed: bool | None, config: Any) -> None:
         if self.stopping:
             return
-        config = effective_camera_config(camera_id)
+        if config is _UNREAD:
+            config = await asyncio.to_thread(effective_camera_config, camera_id)
+        set_camera_state = self._state
         task = self.tasks.get(camera_id)
         signature = None if config is None else (
             bool(config["enabled"]), float(config["analysis_fps"]), float(config["confidence_threshold"]), float(config["effective_vehicle_confidence_threshold"]),
@@ -600,10 +642,10 @@ class DetectionManager:
                 task.cancel()
             self.tasks.pop(camera_id, None)
             self.task_configs.pop(camera_id, None)
-            set_camera_state(camera_id, "disabled")
+            await set_camera_state(camera_id, "disabled")
             return
         if not config.get("model_available", False) and self.detector is None:
-            set_camera_state(camera_id, "failed", "Selected model changed or is unvalidated; validate and save the AI runtime settings")
+            await set_camera_state(camera_id, "failed", "Selected model changed or is unvalidated; validate and save the AI runtime settings")
             return
         if capacity_allowed is False:
             if task and not task.done():
@@ -611,12 +653,12 @@ class DetectionManager:
                 await asyncio.gather(task, return_exceptions=True)
             self.tasks.pop(camera_id, None)
             self.task_configs.pop(camera_id, None)
-            set_camera_state(camera_id, "skipped", self.waiting_text)
+            await set_camera_state(camera_id, "skipped", self.waiting_text)
             return
         active_count = sum(1 for active in self.tasks.values() if not active.done())
-        max_active = self.limit_now if self.limit_now is not None else self._current_limit()
+        max_active = self.limit_now if self.limit_now is not None else await asyncio.to_thread(self._current_limit)
         if task is None and active_count >= max_active:
-            set_camera_state(camera_id, "skipped", self.waiting_text)
+            await set_camera_state(camera_id, "skipped", self.waiting_text)
             self.task_configs.pop(camera_id, None)
             return
         if task is None or task.done() or force_restart:
@@ -632,13 +674,16 @@ class DetectionManager:
                             )
                             self._detectors[detector_key] = detector
                         except Exception:
-                            set_camera_state(camera_id, "failed", "Selected OpenVINO provider/model could not be loaded")
+                            await set_camera_state(camera_id, "failed", "Selected OpenVINO provider/model could not be loaded")
                             return
             if detector is None:
                 return
-            set_camera_state(camera_id, "connecting")
+            await set_camera_state(camera_id, "connecting")
             self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, config, detector), name=f"ai-detection-{camera_id}")
             self.task_configs[camera_id] = signature
+
+    async def _state(self, camera_id: str, state: str, error: str | None = None) -> None:
+        await self._db(set_camera_state, camera_id, state, error)
 
     async def _attribute_model(self, provider: str) -> Any:
         """The vehicle attribute model, loaded once for every camera that uses this provider (None when it is not installed)."""
