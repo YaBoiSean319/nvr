@@ -318,6 +318,41 @@ def _release_discovery_add(candidate_id: str, token: str) -> None:
         )
 
 
+def _store_scan(devices: list) -> list:
+    """Record what a scan found, in one transaction, and return the candidates to list. Blocking: the scan route runs it in a thread, so a
+    busy database does not stop the web server's loop while up to 512 devices are written (#381)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")  # One transaction for the scan's devices, not a commit for each (#381)
+        # Devices that were found once, never added, and have not answered a scan for a month are forgotten: nothing removed a candidate before.
+        db.execute("DELETE FROM discovery_candidates WHERE linked_camera_id IS NULL AND last_seen_at<?",
+                   ((datetime.now(timezone.utc) - timedelta(days=CANDIDATE_KEEP_DAYS)).isoformat(),))
+        for device in devices:
+            linked = db.execute("SELECT id FROM cameras WHERE onvif_uuid=?", (device.device_uuid,)).fetchone()
+            existing = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device.device_uuid,)).fetchone()
+            candidate_id = existing["id"] if existing else str(uuid.uuid4())
+            capabilities = {
+                "onvif_discovery": "supported",
+                "video_stream": "untested",
+                "motion_events": "untested",
+                "audio": "untested",
+                "ptz": "untested",
+            }
+            if existing:
+                capabilities.update(json.loads(existing["capabilities"]))
+            db.execute(
+                "INSERT INTO discovery_candidates(id,device_uuid,service_urls,scopes,capabilities,linked_camera_id,first_seen_at,last_seen_at) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(device_uuid) DO UPDATE SET "
+                "service_urls=excluded.service_urls,scopes=excluded.scopes,capabilities=excluded.capabilities,"
+                "linked_camera_id=COALESCE(excluded.linked_camera_id,discovery_candidates.linked_camera_id),last_seen_at=excluded.last_seen_at",
+                (candidate_id, device.device_uuid, json.dumps(device.service_urls), json.dumps(device.scopes),
+                 json.dumps(capabilities), linked["id"] if linked else None, now, now),
+            )
+        db.execute("COMMIT")
+        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid LIMIT ?", (MAX_CANDIDATES_LISTED,)).fetchall()
+    return rows
+
+
 @router.post("/api/discovery/scan")
 async def scan_cameras(
     payload: DiscoveryScanRequest,
@@ -349,35 +384,7 @@ async def scan_cameras(
         )
         raise HTTPException(status_code=503, detail="Camera discovery failed; check the NVR discovery network configuration") from exc
 
-    now = datetime.now(timezone.utc).isoformat()
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")  # One transaction for the scan's devices, not a commit for each (#381)
-        # Devices that were found once, never added, and have not answered a scan for a month are forgotten: nothing removed a candidate before.
-        db.execute("DELETE FROM discovery_candidates WHERE linked_camera_id IS NULL AND last_seen_at<?",
-                   ((datetime.now(timezone.utc) - timedelta(days=CANDIDATE_KEEP_DAYS)).isoformat(),))
-        for device in result.devices:
-            linked = db.execute("SELECT id FROM cameras WHERE onvif_uuid=?", (device.device_uuid,)).fetchone()
-            existing = db.execute("SELECT id,capabilities FROM discovery_candidates WHERE device_uuid=?", (device.device_uuid,)).fetchone()
-            candidate_id = existing["id"] if existing else str(uuid.uuid4())
-            capabilities = {
-                "onvif_discovery": "supported",
-                "video_stream": "untested",
-                "motion_events": "untested",
-                "audio": "untested",
-                "ptz": "untested",
-            }
-            if existing:
-                capabilities.update(json.loads(existing["capabilities"]))
-            db.execute(
-                "INSERT INTO discovery_candidates(id,device_uuid,service_urls,scopes,capabilities,linked_camera_id,first_seen_at,last_seen_at) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(device_uuid) DO UPDATE SET "
-                "service_urls=excluded.service_urls,scopes=excluded.scopes,capabilities=excluded.capabilities,"
-                "linked_camera_id=COALESCE(excluded.linked_camera_id,discovery_candidates.linked_camera_id),last_seen_at=excluded.last_seen_at",
-                (candidate_id, device.device_uuid, json.dumps(device.service_urls), json.dumps(device.scopes),
-                 json.dumps(capabilities), linked["id"] if linked else None, now, now),
-            )
-        db.execute("COMMIT")
-        rows = db.execute("SELECT * FROM discovery_candidates ORDER BY last_seen_at DESC,device_uuid LIMIT ?", (MAX_CANDIDATES_LISTED,)).fetchall()
+    rows = await asyncio.to_thread(_store_scan, list(result.devices))
     partial_failures = [f"Ignored {result.ignored_responses} malformed or unrecognized response(s)"] if result.ignored_responses else []
     diagnostics.record_event(
         "discovery_scan", outcome="completed", elapsed_ms=min(60000, int((time.monotonic() - started) * 1000)),

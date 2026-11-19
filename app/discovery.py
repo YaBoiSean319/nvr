@@ -217,7 +217,9 @@ async def _probe_onvif_endpoint(address: ipaddress.IPv4Address, port: int, semap
             try:
                 writer.write(request)
                 await writer.drain()
-                response = await asyncio.wait_for(reader.read(MAX_DATAGRAM_BYTES + 1), timeout=IP_RANGE_PROBE_TIMEOUT_SECONDS)
+                # The whole answer, to the end of the connection (it was asked to close) or the size limit. One read returns whatever
+                # has arrived so far, which for many devices is the headers alone, and the device was then not recognised (#381).
+                response = await asyncio.wait_for(_read_answer(reader), timeout=IP_RANGE_PROBE_TIMEOUT_SECONDS)
             finally:
                 writer.close()
                 await writer.wait_closed()
@@ -236,11 +238,11 @@ async def _probe_onvif_endpoint(address: ipaddress.IPv4Address, port: int, semap
     if status == 200 and body and not declares_dtd(body):
         try:
             root = ET.fromstring(body)
-            is_onvif = any(
-                "onvif.org/ver10/device/wsdl" in node.tag
-                or _local_name(node.tag) in {"GetDeviceInformationResponse", "Fault"}
-                for node in root.iter()
-            )
+            # A fault counts only when it is an ONVIF one. Any SOAP service answers an unknown request with a fault, and each used to be
+            # listed as a camera (#381).
+            names = [_local_name(node.tag) for node in root.iter()]
+            is_onvif = (any("onvif.org/ver10/device/wsdl" in node.tag for node in root.iter()) or "GetDeviceInformationResponse" in names
+                        or ("Fault" in names and b"onvif.org" in body))
         except ET.ParseError:
             is_onvif = False
     if not is_onvif:
@@ -248,6 +250,22 @@ async def _probe_onvif_endpoint(address: ipaddress.IPv4Address, port: int, semap
     # IP-scan identities are deterministic candidate keys, not camera UUIDs.
     candidate_key = "ipscan:" + hashlib.sha256(endpoint.encode("ascii")).hexdigest()[:32]
     return DiscoveredDevice(candidate_key, (endpoint,), ())
+
+
+async def _read_answer(reader: asyncio.StreamReader) -> bytes:
+    received = bytearray()
+    while len(received) <= MAX_DATAGRAM_BYTES:
+        chunk = await reader.read(MAX_DATAGRAM_BYTES + 1 - len(received))
+        if not chunk:
+            break
+        received += chunk
+        header, separator, body = bytes(received).partition(b"\r\n\r\n")
+        if separator:  # A device that keeps the connection open: its declared length says when the answer is complete
+            for line in header.split(b"\r\n")[1:]:
+                name, _, value = line.partition(b":")
+                if name.strip().lower() == b"content-length" and value.strip().isdigit() and len(body) >= int(value.strip()):
+                    return bytes(received)
+    return bytes(received)
 
 
 async def discover_onvif_ip_range(ip_range: str) -> DiscoveryResult:

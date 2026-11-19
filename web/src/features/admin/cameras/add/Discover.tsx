@@ -256,6 +256,18 @@ function CandidateSetup({ candidate, existing, cameras, onChanged, onOpenExistin
     }
   }
 
+  async function forget() {
+    setBusy(true);
+    setResult(null);
+    try {
+      await api(`/api/discovery/candidates/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
+      await onChanged();  // The device leaves the list; a later scan lists it again if it still answers
+    } catch (error) {
+      setResult({ tone: "bad", text: `Not forgotten: ${failureText(error)}.` });
+      setBusy(false);
+    }
+  }
+
   const linkable = cameras.filter(camera => !camera.archived_at);
   return (
     <form className="tab-form" aria-label={`Set up ${candidateLabel(candidate)}`} noValidate onSubmit={event => { event.preventDefault(); void add(); }}>
@@ -281,6 +293,13 @@ function CandidateSetup({ candidate, existing, cameras, onChanged, onOpenExistin
           </div>
         </fieldset>
       ) : null}
+      <fieldset className="field-group">
+        <legend>Not a camera you want?</legend>
+        <p className="muted field-hint">Forgetting removes this device from the list. If it still answers, the next scan lists it again.</p>
+        <div className="field-actions">
+          <button type="button" className="button" data-variant="ghost" disabled={busy} onClick={() => void forget()}>Forget this device</button>
+        </div>
+      </fieldset>
     </form>
   );
 }
