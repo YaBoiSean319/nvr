@@ -68,7 +68,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": true,
@@ -76,7 +76,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": true,
@@ -231,7 +231,7 @@
      "decode_ms_per_megapixel",
      "inference_ms_cpu"
     ],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -430,7 +430,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -438,7 +438,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -540,7 +540,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -729,7 +729,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -737,7 +737,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -833,7 +833,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -1022,7 +1022,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -1030,7 +1030,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -1128,7 +1128,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -1317,7 +1317,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -1325,7 +1325,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -1403,7 +1403,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -1592,7 +1592,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": true,
@@ -1600,7 +1600,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": true,
@@ -1772,7 +1772,7 @@
      "decode_ms_per_megapixel",
      "inference_ms_cpu"
     ],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -1986,7 +1986,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -1994,7 +1994,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -2111,7 +2111,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -2307,7 +2307,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -2315,7 +2315,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -2416,7 +2416,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -2605,7 +2605,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -2613,7 +2613,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -2715,7 +2715,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -2912,7 +2912,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -2920,7 +2920,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -3018,7 +3018,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -3207,7 +3207,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": false,
@@ -3215,7 +3215,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": false,
@@ -3316,7 +3316,7 @@
    },
    "cores_ai_processor": {
     "assumes": [],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
@@ -3505,7 +3505,7 @@
    },
    {
     "key": "analysis_fps",
-    "label": "Frames analysed per second by AI, per AI camera",
+    "label": "Frames analyzed per second by AI, per AI camera",
     "source": "default",
     "unit": "frames per second",
     "used": true,
@@ -3513,7 +3513,7 @@
    },
    {
     "key": "ai_frame_megapixels",
-    "label": "Size of the frame AI analyses (the low-quality stream)",
+    "label": "Size of the frame AI analyzes (the low-quality stream)",
     "source": "default",
     "unit": "megapixels",
     "used": true,
@@ -3624,7 +3624,7 @@
      "decode_ms_per_megapixel",
      "inference_ms_cpu"
     ],
-    "basis": "analysed frames per second x (decode + inference on the processor)",
+    "basis": "analyzed frames per second x (decode + inference on the processor)",
     "inputs_assumed": false,
     "label": "Processor, AI analysis (no accelerator)",
     "unit": "cores",
