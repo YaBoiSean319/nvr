@@ -134,41 +134,70 @@ def encrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
     sealer.finish()
 
 
-def decrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
-    header = source.read(len(MAGIC) + 16 + 12 + 8)
-    if len(header) != len(MAGIC) + 36 or not header.startswith(MAGIC):
-        raise BackupError("This is not an NVR configuration backup")
-    salt = header[len(MAGIC):len(MAGIC) + 16]
-    n, r, p = struct.unpack(">III", header[len(MAGIC) + 16:len(MAGIC) + 28])
-    if n > 2**20 or r > 16 or p > 4:
-        raise BackupError("Backup key-derivation parameters are out of range")
-    prefix = header[-8:]
-    cipher = AESGCM(_derive(secret, salt, n, r, p))
-    counter = 0
-    while True:
-        length = source.read(4)
+class _Opener:
+    """Reads a backup back as plain bytes, a chunk at a time, checking each chunk as it goes. ``finish`` checks that the backup ended where
+    its last chunk says it does: until then, nothing read from it may be trusted to be the whole backup."""
+
+    def __init__(self, source: BinaryIO, secret: str) -> None:
+        header = source.read(len(MAGIC) + 16 + 12 + 8)
+        if len(header) != len(MAGIC) + 36 or not header.startswith(MAGIC):
+            raise BackupError("This is not an NVR configuration backup")
+        salt = header[len(MAGIC):len(MAGIC) + 16]
+        n, r, p = struct.unpack(">III", header[len(MAGIC) + 16:len(MAGIC) + 28])
+        if n > 2**20 or r > 16 or p > 4:
+            raise BackupError("Backup key-derivation parameters are out of range")
+        self._header, self._prefix = header, header[-8:]
+        self._cipher = AESGCM(_derive(secret, salt, n, r, p))
+        self._source = source
+        self._buffer = bytearray()
+        self._counter = 0
+        self._ended = False
+
+    def _next_chunk(self) -> None:
+        length = self._source.read(4)
         if len(length) != 4:
             raise BackupError("The backup is truncated")
         (size,) = struct.unpack(">I", length)
         if size > CHUNK_BYTES + 16:
             raise BackupError("The backup is corrupt")
-        sealed = source.read(size)
+        sealed = self._source.read(size)
         if len(sealed) != size:
             raise BackupError("The backup is truncated")
         for final in (False, True):
             try:
-                plain = cipher.decrypt(prefix + struct.pack(">I", counter), sealed, header + struct.pack(">I?", counter, final))
+                plain = self._cipher.decrypt(self._prefix + struct.pack(">I", self._counter), sealed, self._header + struct.pack(">I?", self._counter, final))
                 break
             except InvalidTag:
                 plain = None
         if plain is None:
             raise BackupError("Wrong passphrase, or the backup has been altered")
-        target.write(plain)
+        self._buffer += plain
+        self._counter += 1
         if final:
-            if source.read(1):
+            if self._source.read(1):
                 raise BackupError("The backup has unexpected trailing data")
-            return
-        counter += 1
+            self._ended = True
+
+    def read(self, size: int = -1) -> bytes:
+        while not self._ended and (size < 0 or len(self._buffer) < size):
+            self._next_chunk()
+        size = len(self._buffer) if size < 0 else min(size, len(self._buffer))
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return data
+
+    def finish(self) -> None:
+        """Read to the end of the backup, so that a backup cut short or added to is refused."""
+        while not self._ended:
+            self._next_chunk()
+            self._buffer.clear()
+
+
+def decrypt_stream(source: BinaryIO, target: BinaryIO, secret: str) -> None:
+    opener = _Opener(source, secret)
+    while chunk := opener.read(CHUNK_BYTES):
+        target.write(chunk)
+    opener.finish()
 
 
 # --- creating backups -------------------------------------------------------------
@@ -518,20 +547,33 @@ def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dic
     if not force and _installation_running(database):
         raise BackupError("The NVR appears to be running. Stop it before restoring, or pass --force if it is stopped")
     database.parent.mkdir(parents=True, exist_ok=True)
+    needed = archive.stat().st_size + SPACE_MARGIN  # The database unpacked from it is no larger than the backup
+    free = shutil.disk_usage(database.parent).free
+    if free < needed:
+        raise BackupError(f"Not enough free space to restore: it needs about {_megabytes(needed)} free in {database.parent}, and there is {_megabytes(free)}. "
+                          "Free some space on that disk and try again. Nothing was changed.")
     with tempfile.TemporaryDirectory(prefix=".restore-", dir=database.parent) as work:
         work_dir = Path(work)
         os.chmod(work_dir, 0o700)
-        plain = work_dir / "backup.tar"
-        with archive.open("rb") as sealed, plain.open("wb") as target:
-            decrypt_stream(sealed, target, secret)
-        with tarfile.open(plain, "r") as tar:
-            names = tar.getnames()
-            if sorted(names) != sorted(("manifest.json", *MEMBERS)):
-                raise BackupError("The backup does not contain the expected files")
-            manifest = json.loads(tar.extractfile("manifest.json").read())
-            for member in MEMBERS:
-                with tar.extractfile(member) as stream, (work_dir / member).open("wb") as target:
-                    shutil.copyfileobj(stream, target)
+        # The backup is decrypted as it is read: the database is the only unencrypted copy written, as when it was made (#328).
+        with archive.open("rb") as sealed:
+            opener = _Opener(sealed, secret)
+            found: dict[str, bytes] = {}
+            with tarfile.open(fileobj=opener, mode="r|") as tar:  # A stream: each piece is checked as it is read
+                for info in tar:
+                    if info.name not in ("manifest.json", *MEMBERS) or info.name in found or not info.isfile():
+                        raise BackupError("The backup does not contain the expected files")
+                    stream = tar.extractfile(info)
+                    if info.name == "manifest.json":
+                        found[info.name] = stream.read()
+                    else:
+                        with (work_dir / info.name).open("wb") as target:
+                            shutil.copyfileobj(stream, target)
+                        found[info.name] = b""
+            opener.finish()
+        if sorted(found) != sorted(("manifest.json", *MEMBERS)):
+            raise BackupError("The backup does not contain the expected files")
+        manifest = json.loads(found["manifest.json"])
         for member in MEMBERS:
             if _sha256(work_dir / member) != manifest["files"][member]:
                 raise BackupError(f"Checksum mismatch for {member}")

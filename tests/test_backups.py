@@ -221,6 +221,53 @@ class BackupTests(unittest.TestCase):
         self.assertEqual([(gap["state"], gap["reason"]) for gap in timeline["gaps"]],
                          [("failure", "Footage file was not found after a configuration restore")])
 
+    def test_a_restore_writes_only_the_database_and_key_unencrypted(self):
+        # Restoring used to decrypt the whole backup to a tar next to the database, then unpack it: two unencrypted copies again.
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        database = Path(os.environ["NVR_DB_PATH"])
+        listings: list[set[str]] = []
+        real_read = backup._Opener.read
+
+        def watching(opener, size=-1):
+            staging = next(database.parent.glob(".restore-*"), None)
+            if staging is not None:
+                listings.append({item.name for item in staging.iterdir()})
+            return real_read(opener, size)
+
+        with patch.object(backup._Opener, "read", watching):
+            backup.restore(archive, force=True)
+        self.assertTrue(listings)
+        self.assertTrue(all(listing <= {"nvr.sqlite3", "credentials.key"} for listing in listings), listings[:3])
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT name FROM cameras WHERE id='c1'").fetchone()[0], "Dock East")
+
+    def test_a_restore_without_room_is_refused_and_changes_nothing(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        database = Path(os.environ["NVR_DB_PATH"])
+        before = database.read_bytes()
+        real = shutil.disk_usage
+        with patch.object(backup.shutil, "disk_usage", lambda folder: real(folder)._replace(free=1 << 20)), \
+                self.assertRaisesRegex(backup.BackupError, "Not enough free space to restore: it needs about .* and there is 1 MB"):
+            backup.restore(archive, force=True)
+        self.assertEqual(database.read_bytes(), before)
+        self.assertEqual(sorted(item.name for item in database.parent.glob("*before-restore*")), [])
+        self.assertEqual(list(database.parent.glob(".restore-*")), [])
+
+    def test_a_backup_cut_short_is_refused_before_anything_is_replaced(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        cut = self.backups / "cut.nvrbackup"
+        cut.write_bytes(archive.read_bytes()[:-40])  # Its final chunk is lost
+        database = Path(os.environ["NVR_DB_PATH"])
+        before = database.read_bytes()
+        with self.assertRaises(backup.BackupError):
+            backup.restore(cut, force=True)
+        self.assertEqual(database.read_bytes(), before)
+        self.assertEqual(sorted(item.name for item in database.parent.glob("*before-restore*")), [])
+        self.assertEqual(list(database.parent.glob(".restore-*")), [])
+
     def test_restore_refuses_a_running_installation_and_unmounted_recordings_defer_reconciliation(self):
         self._seed()
         archive = self.backups / backup.create_backup("manual")["file_name"]
