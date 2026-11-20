@@ -6,5 +6,5 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 command -v uv >/dev/null || { echo "Install uv first: python -m pip install uv" >&2; exit 1; }
 for name in requirements requirements-dev requirements-ci-s3 requirements-ci-audit; do
-  uv pip compile "$name.in" --generate-hashes --universal --python-version 3.12 -o "$name.txt"
+  uv pip compile "$name.in" --generate-hashes --universal --python-version 3.14 -o "$name.txt"
 done

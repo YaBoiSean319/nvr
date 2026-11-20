@@ -1,6 +1,6 @@
 # Only the linter is configured here; the application is run from requirements.txt.
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 extend-exclude = ["web", "mobile", "node_modules"]
 
 [tool.ruff.lint]
