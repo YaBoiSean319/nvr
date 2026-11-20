@@ -159,7 +159,9 @@ class MotionClipAssembler:
         if capture is None:
             return
         now = datetime.now(timezone.utc)
-        if not self._copy_buffered(capture, now):
+        # Copying is disk work on the recorder's disk, which is busy writing every camera's stream: when it falls behind, the kernel makes
+        # the copy wait. In a thread, that wait never stops every camera's recording supervision. The capture is only touched under the lock.
+        if not await asyncio.to_thread(self._copy_buffered, capture, now):
             return
         if capture.copied and (capture.active or now < capture.capture_until) and self._length(capture) >= MAX_CLIP_SECONDS:
             # Still going, and long enough: this much is saved now and the event carries on in a new clip from where this one ends.
@@ -281,12 +283,12 @@ class MotionClipAssembler:
                 db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (self.camera_id,))
 
         await asyncio.to_thread(keep)  # Its writes wait for the database's lock: off the recorder's event loop, as _write says
-        shutil.rmtree(staging, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)  # Its parts, deleted off the loop like they were copied
 
     async def _mark_failed(self, capture: _Capture, reason: str) -> None:
         metrics.segment_dropped(self.camera_id)
         await _write("UPDATE motion_events SET status='failed',failure_reason=? WHERE id=?", (reason, capture.event_id))
-        shutil.rmtree(capture.staging_dir, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, capture.staging_dir, ignore_errors=True)
 
     async def stop(self) -> None:
         """End the capture in progress, keeping what it holds. The camera was unplugged, the stream dropped or the recorder is stopping: the
@@ -297,7 +299,7 @@ class MotionClipAssembler:
             if capture is None:
                 return
             try:
-                self._copy_buffered(capture, datetime.now(timezone.utc))
+                await asyncio.to_thread(self._copy_buffered, capture, datetime.now(timezone.utc))
                 if capture.copied:
                     await self._finalize(capture, timeout=STOP_JOIN_SECONDS, note=ENDED_EARLY)
                     return
@@ -305,7 +307,7 @@ class MotionClipAssembler:
                     # The next clip of a long event, begun a moment ago with nothing in it yet: the clips before it hold the event, and
                     # an empty one is not a recording that failed.
                     await _write("DELETE FROM motion_events WHERE id=? AND status='recording'", (capture.event_id,))
-                    shutil.rmtree(capture.staging_dir, ignore_errors=True)
+                    await asyncio.to_thread(shutil.rmtree, capture.staging_dir, ignore_errors=True)
                     return
             except (OSError, sqlite3.Error):
                 pass
