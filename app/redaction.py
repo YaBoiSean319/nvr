@@ -426,14 +426,39 @@ async def _frames(manifest: Path, zones: list[dict[str, float]]):
         await process.wait()
 
 
-async def analyse(review_id: str, detector: RedactionDetector | None = None) -> None:
-    """Find and link the faces and plates of one queued review. Footage is read through leases and nothing of it is kept."""
+def _claim_review(review_id: str) -> Any:
+    """Take a queued review (the first to claim it wins); None when it is not queued any more."""
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT * FROM redaction_reviews WHERE id=? AND state='queued'", (review_id,)).fetchone()
         if row is None:
-            return
+            return None
         db.execute("UPDATE redaction_reviews SET state='analysing',progress=1,updated_at=? WHERE id=?", (_now().isoformat(), review_id))
+        return row
+
+
+def _plan_and_lease(camera_ids: list[str], start: datetime, end: datetime, held: list[Path]) -> list[tuple[str, dict[str, Any]]]:
+    """Each camera's sources in the range, leased under the write lock so retention cannot remove one between choosing and leasing it. What
+    is leased is added to ``held`` as it is, so the caller releases it whatever happens."""
+    plans = []
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        for camera_id in camera_ids:
+            plan = _sources(db, camera_id, start, end)
+            if plan["spans"]:
+                held.extend(_lease(plan["spans"]))
+                plans.append((camera_id, plan))
+    return plans
+
+
+async def analyse(review_id: str, detector: RedactionDetector | None = None) -> None:
+    """Find and link the faces and plates of one queued review. Footage is read through leases and nothing of it is kept.
+
+    It runs on the export worker's event loop: its database writes (which wait for the lock) and the fetching of cold-tier footage (downloads
+    from a bucket) are done in threads, so that neither stops the worker's heartbeat."""
+    row = await asyncio.to_thread(_claim_review, review_id)
+    if row is None:
+        return
     camera_ids, kinds = json.loads(row["camera_ids_json"]), [KINDS[word] for word in json.loads(row["kinds_json"])]
     start, end = _parse(row["requested_start"]), _parse(row["requested_end"])
     held: list[Path] = []
@@ -445,15 +470,8 @@ async def analyse(review_id: str, detector: RedactionDetector | None = None) -> 
         work.mkdir(parents=True, exist_ok=True)
         tracks: list[dict[str, Any]] = []
         durations: dict[str, float] = {}
-        plans = []
-        fetch_cold_sources(camera_ids, start, end)  # Downloads happen before the lock (#358)
-        with connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            for camera_id in camera_ids:
-                plan = _sources(db, camera_id, start, end)
-                if plan["spans"]:
-                    held.extend(_lease(plan["spans"]))
-                    plans.append((camera_id, plan))
+        await asyncio.to_thread(fetch_cold_sources, camera_ids, start, end)  # Downloads happen before the lock (#358)
+        plans = await asyncio.to_thread(_plan_and_lease, camera_ids, start, end, held)
         for index, (camera_id, plan) in enumerate(plans):
             manifest = work / f"{index}.ffconcat"
             manifest.write_text(_concat_text(plan["spans"]), encoding="utf-8")
@@ -465,16 +483,16 @@ async def analyse(review_id: str, detector: RedactionDetector | None = None) -> 
                 samples.append((number / SAMPLE_FPS, await asyncio.to_thread(detector.detect, image, kinds)))
                 number += 1
                 if number % 25 == 0:
-                    _set(review_id, progress=min(95, 1 + int(94 * (index + min(1.0, number / SAMPLE_FPS / max(durations[camera_id], 1))) / len(plans))))
+                    await asyncio.to_thread(_set, review_id, progress=min(95, 1 + int(94 * (index + min(1.0, number / SAMPLE_FPS / max(durations[camera_id], 1))) / len(plans))))
             tracks.extend(link(samples, camera_id))
-        _set(review_id, state="ready", progress=100, error=None, regions_json=json.dumps({"tracks": tracks, "manual": [], "durations": durations, "fingerprint": fingerprint(plans)}, separators=(",", ":")),
+        await asyncio.to_thread(_set, review_id, state="ready", progress=100, error=None, regions_json=json.dumps({"tracks": tracks, "manual": [], "durations": durations, "fingerprint": fingerprint(plans)}, separators=(",", ":")),
              models_json=json.dumps({"model": detector.model_id, "kinds": sorted(detector.kinds()), "threshold": THRESHOLD, "sample_fps": SAMPLE_FPS}))
     except asyncio.CancelledError:
-        _set(review_id, state="failed", error="Interrupted by application shutdown")
+        _set(review_id, state="failed", error="Interrupted by application shutdown")  # Stopping: written at once, not in a thread a second cancellation could cut short
         raise
     except Exception as exc:  # noqa: BLE001 - the review fails with a reason the person can read
         log.exception("Redaction review %s failed", review_id)
-        _set(review_id, state="failed", error=str(exc)[:300] or "The review failed")
+        await asyncio.to_thread(_set, review_id, state="failed", error=str(exc)[:300] or "The review failed")
     finally:
         for path in held:
             release_playback(path)

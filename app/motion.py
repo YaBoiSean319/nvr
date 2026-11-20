@@ -163,7 +163,7 @@ class MotionClipAssembler:
             return
         if capture.copied and (capture.active or now < capture.capture_until) and self._length(capture) >= MAX_CLIP_SECONDS:
             # Still going, and long enough: this much is saved now and the event carries on in a new clip from where this one ends.
-            self.capture = self._continuation(capture, now)
+            self.capture = await asyncio.to_thread(self._continuation, capture, now)  # It saves the next clip's event: off the recorder's loop, as _write
             await self._finalize(capture, note=CONTINUES)
             return
         if capture.active or now < capture.capture_until or not capture.copied:
