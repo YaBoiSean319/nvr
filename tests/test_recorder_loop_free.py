@@ -9,6 +9,7 @@ holds the lock from another connection and watches the loop keep turning, as tes
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -130,6 +131,30 @@ class RecorderLoopFreeTests(unittest.TestCase):
             longest = self.longest_stall_while_locked(lambda manager: manager._run_continuous(self.camera_id))
         self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while a camera's state change waited for the write lock")
         self.assertEqual(self.status(), "unavailable")
+
+    def test_a_motion_event_is_saved_without_stopping_the_loop(self):
+        # Each notification a camera sends (motion starts, motion stops) is saved as it arrives: often, on a busy site.
+        from datetime import datetime, timezone
+
+        from app.motion import MotionClipAssembler
+        from app.onvif_events import CameraMotionEvent
+        from app.store import connect
+
+        spool = self.root / "spool"
+        spool.mkdir()
+        assembler = MotionClipAssembler(self.camera_id, spool, 5, 10)
+
+        async def notified():
+            now = datetime.now(timezone.utc)
+            await assembler.ingest(CameraMotionEvent(True, now, "RuleEngine/CellMotionDetector/Motion"))
+            await assembler.ingest(CameraMotionEvent(False, now, "RuleEngine/CellMotionDetector/Motion"))
+
+        longest = loop_stall.longest_stall_while_locked(notified)
+        self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while a motion event waited for the write lock")
+        with connect() as db:
+            event = db.execute("SELECT status,source_events_json FROM motion_events WHERE camera_id=?", (self.camera_id,)).fetchone()
+        self.assertEqual(event["status"], "recording")  # Saved once the lock was free, with both notifications
+        self.assertEqual(len(json.loads(event["source_events_json"])), 2)
 
     def test_the_schedule_pass_checks_coverage_without_stopping_the_loop(self):
         async def one_pass(manager):

@@ -58,6 +58,16 @@ def parse_live_playlist(text: str) -> list[HlsSegment]:
     return segments
 
 
+async def _write(sql: str, parameters: tuple[object, ...]) -> None:
+    """One write from the recorder's event loop, in a thread. It waits for the database's lock, and while it waits every camera's recording
+    supervision and the worker's heartbeat must not; motion events are saved as each notification arrives."""
+    def write() -> None:
+        with connect() as db:
+            db.execute(sql, parameters)
+
+    await asyncio.to_thread(write)
+
+
 @dataclass
 class _Capture:
     event_id: str
@@ -121,13 +131,12 @@ class MotionClipAssembler:
                 )
                 capture.staging_dir.mkdir(parents=True, exist_ok=True)
                 self.capture = capture
-                with connect() as db:
-                    db.execute(
-                        "INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,pre_roll_complete,status,source_events_json) "
-                        "VALUES(?,?,?,?,?,?,?,?,0,'recording','[]')",
-                        (capture.event_id, self.camera_id, event.source, event.topic, event.event_time.isoformat(), received.isoformat(),
-                         capture.requested_start.isoformat(), capture.capture_until.isoformat()),
-                    )
+                await _write(
+                    "INSERT INTO motion_events(id,camera_id,source,source_topic,source_event_at,received_at,requested_start,requested_end,pre_roll_complete,status,source_events_json) "
+                    "VALUES(?,?,?,?,?,?,?,?,0,'recording','[]')",
+                    (capture.event_id, self.camera_id, event.source, event.topic, event.event_time.isoformat(), received.isoformat(),
+                     capture.requested_start.isoformat(), capture.capture_until.isoformat()),
+                )
             else:
                 capture.active = True
                 capture.capture_until = max(capture.capture_until, received + timedelta(seconds=self.post_roll_seconds))
@@ -138,9 +147,8 @@ class MotionClipAssembler:
             return
         if len(capture.source_events) < 128:
             capture.source_events.append({"source": event.source, "source_event_at": event.event_time.isoformat(), "received_at": received.isoformat(), "topic": event.topic, "active": event.active})
-        with connect() as db:
-            db.execute("UPDATE motion_events SET requested_end=?,source_events_json=? WHERE id=?",
-                       (capture.capture_until.isoformat(), json.dumps(capture.source_events, separators=(",", ":")), capture.event_id))
+        await _write("UPDATE motion_events SET requested_end=?,source_events_json=? WHERE id=?",
+                     (capture.capture_until.isoformat(), json.dumps(capture.source_events, separators=(",", ":")), capture.event_id))
 
     async def poll(self) -> None:
         async with self._lock:
@@ -254,27 +262,30 @@ class MotionClipAssembler:
         actual_end = max(s.ends_at for s in selected)
         pre_roll_complete = actual_start <= capture.requested_start + timedelta(seconds=self.segment_seconds)
         relative = output.relative_to(recordings_path()).as_posix()
-        with connect() as db:
-            cursor = db.execute(
-                "INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
-                (self.camera_id, relative, actual_start.isoformat(), actual_end.isoformat(), output.stat().st_size),
-            )
-            segment_id = cursor.lastrowid
-            try:
-                metrics.segment_written(db, self.camera_id, actual_end)
-            except sqlite3.Error:
-                pass  # A counter must not strand the clip it counts.
-            db.execute(
-                "UPDATE motion_events SET actual_start=?,actual_end=?,pre_roll_complete=?,status='complete',segment_id=?,failure_reason=? WHERE id=?",
-                (actual_start.isoformat(), actual_end.isoformat(), int(pre_roll_complete), segment_id, note, capture.event_id),
-            )
-            db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (self.camera_id,))
+
+        def keep() -> None:
+            with connect() as db:
+                cursor = db.execute(
+                    "INSERT INTO recording_segments(camera_id,relative_path,starts_at,ends_at,size_bytes) VALUES(?,?,?,?,?)",
+                    (self.camera_id, relative, actual_start.isoformat(), actual_end.isoformat(), output.stat().st_size),
+                )
+                segment_id = cursor.lastrowid
+                try:
+                    metrics.segment_written(db, self.camera_id, actual_end)
+                except sqlite3.Error:
+                    pass  # A counter must not strand the clip it counts.
+                db.execute(
+                    "UPDATE motion_events SET actual_start=?,actual_end=?,pre_roll_complete=?,status='complete',segment_id=?,failure_reason=? WHERE id=?",
+                    (actual_start.isoformat(), actual_end.isoformat(), int(pre_roll_complete), segment_id, note, capture.event_id),
+                )
+                db.execute("UPDATE cameras SET last_footage_write_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),recording_fault_since=NULL WHERE id=?", (self.camera_id,))
+
+        await asyncio.to_thread(keep)  # Its writes wait for the database's lock: off the recorder's event loop, as _write says
         shutil.rmtree(staging, ignore_errors=True)
 
     async def _mark_failed(self, capture: _Capture, reason: str) -> None:
         metrics.segment_dropped(self.camera_id)
-        with connect() as db:
-            db.execute("UPDATE motion_events SET status='failed',failure_reason=? WHERE id=?", (reason, capture.event_id))
+        await _write("UPDATE motion_events SET status='failed',failure_reason=? WHERE id=?", (reason, capture.event_id))
         shutil.rmtree(capture.staging_dir, ignore_errors=True)
 
     async def stop(self) -> None:
@@ -293,8 +304,7 @@ class MotionClipAssembler:
                 if capture.skip:
                     # The next clip of a long event, begun a moment ago with nothing in it yet: the clips before it hold the event, and
                     # an empty one is not a recording that failed.
-                    with connect() as db:
-                        db.execute("DELETE FROM motion_events WHERE id=? AND status='recording'", (capture.event_id,))
+                    await _write("DELETE FROM motion_events WHERE id=? AND status='recording'", (capture.event_id,))
                     shutil.rmtree(capture.staging_dir, ignore_errors=True)
                     return
             except (OSError, sqlite3.Error):
