@@ -34,8 +34,9 @@ class AnalysisKeepsTheEventLoopFreeTests(SceneTestCase):
 
     def test_the_settings_refreshes_run_off_the_event_loop_too(self):
         # Plate and fall settings were read with a connection opened on the loop itself (#279): a busy database would stall the heartbeat.
+        # The face watch's settings were still read on the loop until later.
         main = threading.get_ident()
-        where: dict[str, set[bool]] = {"plates": set(), "falls": set()}
+        where: dict[str, set[bool]] = {"plates": set(), "falls": set(), "faces": set()}
         real_plates, real_falls = detection._plate_refresh, detection._fall_refresh
 
         def plates(*args, **kwargs):
@@ -46,9 +47,15 @@ class AnalysisKeepsTheEventLoopFreeTests(SceneTestCase):
             where["falls"].add(threading.get_ident() == main)
             return real_falls(*args, **kwargs)
 
-        with patch.object(detection, "_plate_refresh", plates), patch.object(detection, "_fall_refresh", falls):
+        def faces(db, camera_id):
+            where["faces"].add(threading.get_ident() == main)
+            return real_scanning(db, camera_id)
+
+        from app import face_scan
+        real_scanning = face_scan.scanning
+        with patch.object(detection, "_plate_refresh", plates), patch.object(detection, "_fall_refresh", falls), patch.object(face_scan, "scanning", faces):
             self.analyse_footage()
-        self.assertEqual(where, {"plates": {False}, "falls": {False}})
+        self.assertEqual(where, {"plates": {False}, "falls": {False}, "faces": {False}})
 
 
 if __name__ == "__main__":

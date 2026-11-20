@@ -32,6 +32,8 @@ Nothing on this page may hold a secret or a real site's address. The owner's pro
 - **From the monitor, fixed**: #410 (the supervisor stops every worker within `NVR_STOP_GRACE_SECONDS`, 25 by default, in all, under Compose's 30 s `stop_grace_period`: the other workers together within half, then the recorder with the rest; each worker's stop time is logged; open until the monitor sees 7 days of redeploys without exit 137).
 - **From the monitor, fixed**: #418 (after an upgrade with a schema change the new container was marked unhealthy for half a minute: the pre-migration copy and backup of a large database take longer than the old 10 s start period plus three checks. The health check's `start_period` is 300 s in both the Dockerfile and `compose.yaml` (a test keeps them the same), and the log gives each step's time, when the database was ready and when the web interface first answered).
 
+- **Worker event loops**: the recorder's regular passes (the two-second watch over each recording and the five-second coverage check) and the AI worker's face-watch settings read now do their database work in a thread (`tests/test_recorder_loop_free.py`, `tests/test_ai_loop_free.py`). Still on their workers' loops, and rarer: the recorder's state-change writes in `sync_camera`, `_run_motion` and the server-motion fallback, and writes in `motion`, `capabilities`, `camera_health`, `backfill`, `exports`, `failover`, `ptz`, `privacy` and `redaction` (find them with an AST walk for `connect()` inside `async def` outside `app/api`).
+
 ## Open work
 
 **Can start without the owner**
