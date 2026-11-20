@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import weakref
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -107,22 +107,24 @@ async def _check_live(client: OnvifClient, services: Services, live: MediaProfil
 
 
 async def inspect_camera(host: str, username: str = "", password: str = "", *, device_service_url: str | None = None, brand: str = "auto",
-                         transport: httpx.AsyncBaseTransport | None = None, verify: bool = True, protocols: str | None = None) -> dict[str, Any]:
-    """The report on one camera. It does not raise for camera faults: each failure is the step's outcome and the capability's state."""
+                         transport: httpx.AsyncBaseTransport | None = None, verify: bool = True, protocols: str | None = None,
+                         on_step: Callable[[dict[str, str]], None] | None = None) -> dict[str, Any]:
+    """The report on one camera. It does not raise for camera faults: each failure is the step's outcome and the capability's state.
+    ``on_step`` is told each step's outcome as soon as it is known (a copy of the step), for a page that shows the check as it runs (#173)."""
     async with _gate():
-        return await _inspect(host, username, password, device_service_url, brand, transport, verify, protocols)
+        return await _inspect(host, username, password, device_service_url, brand, transport, verify, protocols, on_step)
 
 
 async def _inspect(host: str, username: str, password: str, device_service_url: str | None, brand: str, transport: httpx.AsyncBaseTransport | None,
-                   verify: bool, protocols: str | None) -> dict[str, Any]:
-    return await _Inspection(verify, protocols).run(host, username, password, device_service_url, brand, transport)
+                   verify: bool, protocols: str | None, on_step: Callable[[dict[str, str]], None] | None = None) -> dict[str, Any]:
+    return await _Inspection(verify, protocols, on_step).run(host, username, password, device_service_url, brand, transport)
 
 
 class _Inspection:
     """One inspection of a camera: the report being filled in, one method for each stage. A stage that cannot go on says so and the later ones are skipped."""
 
-    def __init__(self, verify: bool, protocols: str | None) -> None:
-        self.verify, self.protocols = verify, protocols
+    def __init__(self, verify: bool, protocols: str | None, on_step: Callable[[dict[str, str]], None] | None = None) -> None:
+        self.verify, self.protocols, self.on_step = verify, protocols, on_step
         self.steps: dict[str, dict[str, str]] = {key: {"id": key, "label": label, "state": "pending", "detail": ""} for key, label in STEPS}
         self.capabilities: dict[str, dict[str, str]] = {name: _state("unknown", "Not checked") for name in ("discovery", "authentication", "video", "audio", "motion", "ptz")}
         self.report: dict[str, Any] = {"ok": False, "device": {}, "brand": "auto", "device_service_url": None, "services": {}, "auth": {}, "profiles": [], "selection": None,
@@ -139,6 +141,8 @@ class _Inspection:
 
     def done(self, key: str, state: str, detail: str = "") -> None:
         self.steps[key].update(state=state, detail=detail)
+        if self.on_step is not None:
+            self.on_step(dict(self.steps[key]))
 
     async def run(self, host: str, username: str, password: str, device_service_url: str | None, brand: str, transport: httpx.AsyncBaseTransport | None) -> dict[str, Any]:
         try:

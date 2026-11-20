@@ -1,5 +1,5 @@
-import type { Camera, CameraBrand, InspectReport } from "@/api/types";
-import { api } from "@/api/client";
+import type { Camera, CameraBrand, InspectReport, InspectStep } from "@/api/types";
+import { api, apiLines, ApiError } from "@/api/client";
 import { failureText } from "../../tabDraft";
 
 /** The login and address entered for a camera. It lives only in the form that holds it, never in storage. */
@@ -25,16 +25,31 @@ export function splitAddress(text: string): { host: string; endpoint: string | n
   return { host, endpoint: `http://${host.includes(":") ? `[${host}]` : host}:${port}/onvif/device_service` };
 }
 
-export function inspectCamera(connection: QuickConnection, verifyVideo = true): Promise<InspectReport> {
+/**
+ * Check a camera, told as it happens (#173): `onSteps` is given the steps each time one is decided, so the page shows the check as it goes
+ * rather than all at once at the end, up to a minute later. Resolves with the whole report.
+ */
+export async function inspectCamera(connection: QuickConnection, onSteps: (steps: InspectStep[]) => void, verifyVideo = true): Promise<InspectReport> {
   const value = (text: string) => text.trim() || null;
   const address = splitAddress(connection.host);
-  return api<InspectReport>("/api/cameras/inspect", {
-    method: "POST",
-    body: {
-      host: address.host, username: value(connection.username), password: connection.password || null,
-      device_service_url: value(connection.endpoint) ?? address.endpoint, camera_brand: connection.brand, verify_video: verifyVideo,
-    },
+  let steps: InspectStep[] = [];
+  let report: InspectReport | null = null;
+  let failure: string | null = null;
+  await apiLines("/api/cameras/inspect/stream", {
+    host: address.host, username: value(connection.username), password: connection.password || null,
+    device_service_url: value(connection.endpoint) ?? address.endpoint, camera_brand: connection.brand, verify_video: verifyVideo,
+  }, line => {
+    const update = line as { type: string; steps?: InspectStep[]; step?: InspectStep; report?: InspectReport; detail?: string };
+    if (update.type === "steps" && update.steps) steps = update.steps;
+    else if (update.type === "step" && update.step) steps = steps.map(step => (step.id === update.step!.id ? update.step! : step));
+    else if (update.type === "report" && update.report) report = update.report;
+    else if (update.type === "error") failure = update.detail ?? "The camera could not be checked";
+    else return;
+    onSteps(steps);
   });
+  if (failure) throw new ApiError(422, failure, null);
+  if (!report) throw new ApiError(0, "The check stopped before it finished.", null);
+  return report;
 }
 
 export function suggestedName(report: InspectReport | null, host: string): string {

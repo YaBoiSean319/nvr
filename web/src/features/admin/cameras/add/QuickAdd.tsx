@@ -2,10 +2,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { keys } from "@/api/queries";
-import type { Camera, CameraBrand, InspectReport } from "@/api/types";
+import type { Camera, CameraBrand, InspectReport, InspectStep } from "@/api/types";
 import { BRAND_LABEL } from "../inventory";
 import { useCamerasStore } from "../store";
-import { InspectionReport } from "./InspectionReport";
+import { InspectionReport, InspectionSteps } from "./InspectionReport";
 import { attentionText, EMPTY_QUICK, failureText, inspectCamera, saveChecked, suggestedName, type QuickConnection } from "./inspect";
 
 /** Add one camera from only its address, username and password: the NVR works out the rest and shows what it found. */
@@ -15,6 +15,7 @@ export function QuickAdd() {
   const [connection, setConnection] = useState<QuickConnection>(EMPTY_QUICK);
   const [name, setName] = useState("");
   const [report, setReport] = useState<InspectReport | null>(null);
+  const [progress, setProgress] = useState<InspectStep[] | null>(null);  // The steps of a check still going
   const [checked, setChecked] = useState<QuickConnection | null>(null);
   const [busy, setBusy] = useState<"check" | "add" | null>(null);
   const [recording, setRecording] = useState(false);
@@ -30,11 +31,13 @@ export function QuickAdd() {
     setReport(null);
     let result: InspectReport;
     try {
-      result = await inspectCamera(connection);
+      result = await inspectCamera(connection, setProgress);
     } catch (error) {
       setMessage({ tone: "bad", text: `The camera could not be checked: ${failureText(error)}.` });
       setBusy(null);
       return;
+    } finally {
+      setProgress(null);
     }
     const pickedName = nameEdited && name ? name : suggestedName(result, connection.host);
     setReport(result);
@@ -96,7 +99,8 @@ export function QuickAdd() {
         <button type="submit" className="button" data-variant="primary" disabled={busy !== null || !ready}>{busy === "check" ? "Checking the camera…" : busy === "add" ? "Adding…" : "Add camera"}</button>
         <button type="button" className="button" disabled={busy !== null || !ready} onClick={() => void check(false)}>Check only</button>
       </div>
-      {busy === "check" ? <p className="muted" role="status">Connecting, signing in, finding the streams and checking the video. This can take up to a minute.</p> : null}
+      {busy === "check" ? <p className="muted" role="status">Checking the camera: connecting, signing in, finding the streams and checking the video. This can take up to a minute.</p> : null}
+      {busy === "check" && progress ? <InspectionSteps steps={progress} label="Checking the camera" live /> : null}
       {report ? <InspectionReport report={report} /> : null}
       {report ? (
         <>
