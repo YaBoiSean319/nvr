@@ -7,7 +7,7 @@ Alert emails are sent through **Microsoft Graph** (`sendMail`) with a Microsoft 
 1. In **Microsoft Entra** (entra.microsoft.com) > App registrations, register an app (single tenant is fine). Under **API permissions** add Microsoft Graph > Delegated > **Mail.Send**. Under **Authentication** turn on **Allow public client flows**. No client secret is needed. Note the **Application (client) ID** and your **Tenant ID**.
 2. In the NVR: **Settings > Email alerts**. Enter the tenant ID (or domain, such as `contoso.onmicrosoft.com`) and the application ID, and press **Connect with Microsoft**.
 3. The page shows a **link and a code**. Open the link on any device, enter the code and sign in with the account that should send the alerts. The page notices by itself and shows "Connected as ...".
-4. Send a test email from the same page.
+4. Once it is connected, the page shows three tabs: **Connection**, **Test email** and **NVR problems**. Send a test email from the **Test email** tab.
 5. Add the rule action **Email (Microsoft 365)** to a rule: recipients, and an optional subject (`{rule}`, `{camera}`, `{label}`, `{time}`).
 
 To send as a shared mailbox, put its address in **Send as**; the signed-in account needs permission to send as it.
@@ -44,7 +44,7 @@ The settings page and the test email now show what Microsoft actually said (its 
 
 ## Emails about the NVR itself
 
-**Settings > Email alerts > NVR problems**: choose who is emailed when the NVR finds a problem in itself (a camera that stopped recording, a full or failing disk, the AI worker stopping, a covered camera, a failed backup): one email when it starts and one when it is mended. Nothing is sent about a camera during a [maintenance window](maintenance-windows.md); a problem still there when the window ends is emailed then. Failed sends are retried with backoff, and the page lists the recent ones.
+**Settings > Email alerts**, the **NVR problems** tab: choose who is emailed when the NVR finds a problem in itself (a camera that stopped recording, a full or failing disk, the AI worker stopping, a covered camera, a failed backup): one email when it starts and one when it is mended. Nothing is sent about a camera during a [maintenance window](maintenance-windows.md); a problem still there when the window ends is emailed then. Failed sends are retried with backoff, and the page lists the recent ones.
 
 **Held back.** At most 30 problem emails an hour are sent (and the rule limits above). Every alert email a limit stops is counted, shown on the page, and told about in **one summary email** once things have been quiet for 10 minutes ("N alert emails held back"), sent to the people chosen for problems. The alerts themselves are in the alarm inbox and the incident list.
 
