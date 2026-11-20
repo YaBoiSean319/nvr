@@ -137,6 +137,34 @@ class LoopPathTests(SceneTestCase):
         self.assertIn("person", {label for _, label in scanner.seen_items})  # Fed each tracked object with its label; it picks the people itself
         self.assertEqual(scanner.forgotten, scene.FRAME_COUNT)  # Told which tracks are still active after every frame
 
+    def test_a_face_scanner_with_a_read_due_has_it_done_in_the_background(self):
+        scans: list[str] = []
+
+        class Scanner:
+            def __init__(self, *args, threshold):
+                self.asked = 0
+
+            def seen(self, track_id, label, box):
+                pass
+
+            def forget(self, active):
+                pass
+
+            def due(self):
+                self.asked += 1
+                return self.asked == 2  # One read, due on the second frame
+
+            async def scan(self):
+                await asyncio.sleep(0.05)  # Longer than a frame: analysis goes on meanwhile
+                scans.append(asyncio.current_task().get_name())
+
+        async def face_reader(provider):
+            return object()
+
+        with patch.object(face_scan, "FaceScanner", Scanner), patch.object(face_scan, "scanning", lambda db, camera_id: (True, 0.5)):
+            self.run_loop(lambda manager: setattr(manager, "_face_reader", face_reader))
+        self.assertEqual(scans, [f"faces-{self.camera_id}"])
+
     def test_without_the_face_watch_no_scanner_is_made(self):
         made: list[Any] = []
         with patch.object(face_scan, "FaceScanner", lambda *args, **kwargs: made.append(args)), patch.object(face_scan, "SETTINGS_REFRESH", 0.0), \
