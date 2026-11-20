@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
 from . import acceleration
+from .processes import end_process
 from .recording import _PROTOCOLS, _manifest_bytes
 
 logger = logging.getLogger("nvr.live")
@@ -371,13 +372,7 @@ class LiveStream:
                     if self.on_fragment:
                         self.on_fragment()
         finally:
-            if self.process and self.process.returncode is None:
-                self.process.terminate()
-                try:
-                    await asyncio.wait_for(self.process.wait(), 3)
-                except asyncio.TimeoutError:
-                    self.process.kill()
-                    await self.process.wait()
+            await end_process(self.process, 3)
 
 
 class LiveHub:

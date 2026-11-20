@@ -61,5 +61,41 @@ class EndProcessTests(unittest.TestCase):
         self.assertEqual(asyncio.run(run()), 0)
 
 
+class SharedHelperTests(unittest.TestCase):
+    """app.processes.end_process, which every copy now calls with its own grace period."""
+
+    def test_the_grace_period_is_the_callers(self):
+        from app.processes import end_process
+
+        async def run():
+            process = await child(STUBBORN)
+            started = time.monotonic()
+            await end_process(process, 0.5)
+            return process.returncode, time.monotonic() - started
+        code, took = asyncio.run(run())
+        self.assertEqual(code, -signal.SIGKILL)
+        self.assertLess(took, 3)
+
+    def test_a_process_that_ends_just_before_it_is_signalled_is_not_an_error(self):
+        from app.processes import end_process
+
+        class Vanished:
+            returncode = None
+            waited = False
+
+            def terminate(self):
+                raise ProcessLookupError
+
+            def kill(self):
+                raise ProcessLookupError
+
+            async def wait(self):
+                Vanished.waited = True
+                return 0
+
+        asyncio.run(end_process(Vanished(), 1))  # type: ignore[arg-type]
+        self.assertTrue(Vanished.waited)
+
+
 if __name__ == "__main__":
     unittest.main()
