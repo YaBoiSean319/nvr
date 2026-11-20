@@ -72,6 +72,15 @@ def revoke_token(token_id: str, actor_id: int) -> dict[str, object] | None:
     return token_view(row) if row else None
 
 
+def _with_owner(db: sqlite3.Connection, token_id: str) -> sqlite3.Row | None:
+    """A token with its owner's name, role and disabled state, or None."""
+    return db.execute(
+        "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
+        "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
+        (token_id,),
+    ).fetchone()
+
+
 def authenticate(presented: str) -> sqlite3.Row:
     """Return the token joined with its creator, or raise TokenRejected."""
     parts = presented.split("_", 2)
@@ -80,11 +89,7 @@ def authenticate(presented: str) -> sqlite3.Row:
     token_id, secret = parts[1], parts[2]
     now = _now()
     with connect() as db:
-        row = db.execute(
-            "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
-            "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
-            (token_id,),
-        ).fetchone()
+        row = _with_owner(db, token_id)
         if row is None or not hmac.compare_digest(row["secret_digest"], _digest(secret)):
             raise TokenRejected("Invalid API token")
         _check_usable(row, now)
@@ -101,11 +106,7 @@ def usable_token(token_id: str, db: sqlite3.Connection | None = None) -> sqlite3
     if db is None:
         with connect() as own:
             return usable_token(token_id, own)
-    row = db.execute(
-        "SELECT t.*,u.username AS owner_username,u.role AS owner_role,u.disabled_at AS owner_disabled_at FROM api_tokens t "
-        "LEFT JOIN users u ON u.id=t.created_by WHERE t.id=?",
-        (token_id,),
-    ).fetchone()
+    row = _with_owner(db, token_id)
     if row is None:
         raise TokenRejected("Invalid API token")
     _check_usable(row, _now())
