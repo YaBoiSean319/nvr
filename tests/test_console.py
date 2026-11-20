@@ -62,8 +62,10 @@ class ConsoleCase(GrantCase):
         return response
 
     def federate(self):
-        self.assertEqual(self.add(self.a, self.a_token).status_code, 201)
-        self.assertEqual(self.add(self.b, self.b_token).status_code, 201)
+        for site, token in ((self.a, self.a_token), (self.b, self.b_token)):
+            added = self.add(site, token)
+            # Once in a full run a site was refused with 422 and nothing else was kept: say which check failed and what the site logged.
+            self.assertEqual(added.status_code, 201, f"{added.text}; the site's log ends: {site.log_tail()}")
         self.assertEqual(self.admin.put("/api/console", json={"enabled": True}).status_code, 200)
 
     def cid(self, site: NvrSite, camera: str) -> str:

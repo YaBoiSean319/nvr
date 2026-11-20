@@ -121,18 +121,27 @@ class ReportTests(HealthCase):
 class ManagerTests(HealthCase):
     def test_starting_the_app_does_not_call_every_camera_at_once(self):
         camera = self.device(self.d1)
+        real_sample, passes = camera_health.sample_once, []
 
-        async def run() -> int:
+        async def sample(*args, **kwargs):
+            passes.append(asyncio.get_running_loop().time())
+            return await real_sample(*args, **kwargs)
+
+        async def run() -> None:
+            # When the first pass starts is measured, not guessed from fixed sleeps: on a busy machine a pass (a database read and a call to
+            # each camera) can take longer than a sleep allowed for it, and the test failed although the manager had done nothing wrong.
             manager = camera_health.HealthManager(poll_seconds=0.05, initial_delay=0.3)
-            await manager.start()
-            await asyncio.sleep(0.1)
-            early = len(camera.requests)
-            await asyncio.sleep(1.0)
-            await manager.stop()
-            self.assertGreater(len(camera.requests), early)  # It does sample, after its delay
-            return early
+            started = asyncio.get_running_loop().time()
+            with patch.object(camera_health, "sample_once", sample):
+                await manager.start()
+                deadline = started + 30
+                while not camera.requests and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.05)
+                await manager.stop()
+            self.assertTrue(camera.requests, "the camera was never sampled")  # It does sample, after its delay
+            self.assertGreaterEqual(passes[0] - started, 0.3)  # ...and not before: nothing is called while the app is starting
 
-        self.assertEqual(asyncio.run(run()), 0)
+        asyncio.run(run())
 
 
 class FirmwareTests(HealthCase):
