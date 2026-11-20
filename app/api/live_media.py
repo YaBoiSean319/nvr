@@ -393,6 +393,160 @@ def _admit(websocket: WebSocket, camera_id: str, unmasked: bool) -> "_Refusal | 
     return principal, camera, zones, privacy.StreamGuard(principal, camera_id, unmasked)
 
 
+def _source_for(camera: Any, variant: Any, fallback: str) -> "str | _Refusal":
+    """The camera stream this viewer is served from, or why it cannot be: a codec the browser cannot play directly, or an address that
+    cannot be read or is not allowed."""
+    if (not variant.video_filter and variant.profile == "main" and variant.codec and variant.codec not in {"h264", "avc", "avc1"}
+            and not variant.camera_is_hevc):
+        return _Refusal(CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": variant.codec, "fallback": fallback,
+                                            "detail": f"{variant.codec.upper()} video cannot be played directly; use the fallback stream"})
+    try:
+        source = decrypt(camera["live_substream_url_ciphertext"] if variant.profile == "sub" else camera["stream_url_ciphertext"])
+        safe_stream_url(source)
+    except (RuntimeError, ValueError):
+        return _Refusal(CLOSE_STREAM_FAILED, {"type": "error", "detail": "Camera stream configuration is invalid"})
+    return source
+
+
+async def _take_places(camera_id: str, variant: Any, conversion_key: tuple[str, ...], hub: LiveHub) -> _Refusal | None:
+    """A live-view place for this viewer and, for a converted stream, a conversion place; None when both are taken. Nothing is kept when
+    either is refused."""
+    if not _acquire_live_view(camera_id):
+        return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
+    if variant.transcode and not await _acquire_transcode(conversion_key, hub):
+        _release_live_view(camera_id)
+        return _Refusal(CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted view and retry"})
+    return None
+
+
+@dataclass
+class _LiveViewer:
+    """One live viewer's share of the server while they watch: their place on the camera's stream, their live-view, conversion and audio
+    places, and the reads waiting on their socket and their stream. ``close`` gives all of it back."""
+    websocket: WebSocket
+    camera_id: str
+    hub: LiveHub
+    stream: Any
+    viewer: Viewer
+    transcode_key: tuple[str, ...] | None  # Set when this viewer holds a conversion place
+    listening: bool
+    include_audio: bool
+    receiver: asyncio.Task
+    getter: asyncio.Task | None = None
+
+    def offer_audio(self, has_audio: bool) -> None:
+        """Audio is offered only when the stream really carries a track."""
+        if self.listening and not has_audio:
+            _release_live_audio()
+            self.listening = False
+        self.include_audio = has_audio
+
+    def listen(self, wanted: bool) -> str | None:
+        """Unmuting claims one of the audio slots; muting returns it. Says why the viewer is not listening, when they asked to."""
+        if wanted and not self.listening:
+            self.listening = self.include_audio and _acquire_live_audio()
+        elif not wanted and self.listening:
+            _release_live_audio()
+            self.listening = False
+        return None if self.listening or not wanted else ("This camera's audio is not enabled" if not self.include_audio else "All live audio slots are in use")
+
+    def close(self) -> None:
+        self.receiver.cancel()
+        if self.getter is not None:
+            self.getter.cancel()
+        self.hub.leave(self.stream, self.viewer)
+        if self.listening:
+            _release_live_audio()
+        if self.transcode_key is not None:
+            _release_transcode(self.transcode_key)
+        _release_live_view(self.camera_id)
+
+
+async def _start_viewing(session: _LiveViewer, variant: Any, fallback: str) -> bool:
+    """Wait up to 20 s for the camera's stream, then send the viewer the ``init`` message and the initialization segment. False when the
+    viewer left first or was refused."""
+    websocket, stream = session.websocket, session.stream
+    await asyncio.wait({session.receiver, asyncio.create_task(stream.ready.wait())}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
+    if session.receiver.done():
+        return False
+    if not stream.ready.is_set() or stream.failed:
+        if variant.transcode or variant.hevc_copy:
+            # H.265 could not be passed on or converted: only now is the compatibility stream offered.
+            await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": variant.codec, "fallback": fallback, "converted": variant.transcode,
+                                                         "detail": "This camera's H.265 video could not be prepared for the browser; use the fallback stream"})
+            return False
+        await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera did not start streaming in time"})
+        return False
+    wanted = ("hvc1", "hev1") if variant.hevc_copy else ("avc1",)
+    if not any(name in (stream.mime or "") for name in wanted):
+        await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": "unknown", "fallback": fallback,
+                                                     "detail": "This camera's video cannot be played directly; use the fallback stream"})
+        return False
+    has_audio = "mp4a" in (stream.mime or "")
+    session.offer_audio(has_audio)
+    await websocket.send_json({"type": "init", "mime": stream.mime, "profile": variant.profile, "audio": has_audio, "listening": session.listening,
+                               "codec": "hevc" if variant.hevc_copy else "h264", "transcoded": variant.transcode, "accelerated": bool(stream.accelerated)})
+    await websocket.send_bytes(stream.init)
+    return True
+
+
+async def _deliver(session: _LiveViewer, guard: privacy.StreamGuard, watching: viewing_audit.LiveSession, wait: dict[str, object],
+                   asked_at: float, joined_running: bool) -> None:
+    """Send the viewer each media fragment as it comes, answer their messages, and end the stream when their access ends, the masks
+    change, they fall too far behind or the camera's stream ends."""
+    websocket = session.websocket
+    while True:
+        await watching.delivered()
+        if session.getter is None:
+            session.getter = asyncio.create_task(session.viewer.queue.get())
+        # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once.
+        done, _ = await asyncio.wait({session.getter, session.receiver}, timeout=privacy.ACCESS_RECHECK_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+        if not done:
+            if not await guard.check() and guard.reason in {"access", "credential"}:
+                await _ended(websocket, guard.reason)
+                return
+            continue
+        if session.receiver in done:
+            message = session.receiver.result()
+            if message["type"] == "websocket.disconnect":
+                return
+            request = _client_message(message)
+            if request.get("type") == "listen":
+                reason = session.listen(bool(request.get("on")))
+                await websocket.send_json({"type": "listening", "on": session.listening, "detail": reason})
+            session.receiver = asyncio.create_task(websocket.receive())
+            continue
+        item = session.getter.result()
+        session.getter = None
+        if not await _send_media(session, guard, item):
+            return
+        if "first_media_ms" not in wait:
+            # The first picture left the server: how long this viewer waited, and, for the viewer who started the camera's stream, where the time went.
+            wait["first_media_ms"] = round((time.monotonic() - asked_at) * 1000)
+            if not joined_running:
+                wait.update(getattr(session.stream, "timing", None) or {})
+            session.hub.record_start(wait)  # Measuring never gets in the way of the picture
+
+
+async def _send_media(session: _LiveViewer, guard: privacy.StreamGuard, item: bytes | None) -> bool:
+    """Send one media fragment, once the viewer may still see it as it is. False when the stream ended instead, and the viewer was told why."""
+    websocket = session.websocket
+    if not await guard.check():
+        if guard.reason in {"access", "credential"}:
+            await _ended(websocket, guard.reason)
+        else:
+            await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
+        return False
+    if item is None:
+        if session.viewer.closed_reason == "too_slow":
+            await _refuse(websocket, CLOSE_TOO_SLOW, {"type": "too_slow", "detail": "Video could not be delivered fast enough; reconnect to resume at live"})
+        else:
+            await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": session.stream.failed or "The camera stream ended"})
+        return False
+    await websocket.send_bytes(item)
+    return True
+
+
 @router.websocket("/api/cameras/{camera_id}/live/stream")
 @requires_scope("media")
 async def live_stream(
@@ -431,127 +585,36 @@ async def live_stream(
     fallback = f"/api/cameras/{camera_id}/live?quality={quality}" + ("&unmasked=true" if unmasked else "")
     # A masked camera is transcoded with the mask drawn in (H.264, so any camera codec plays).
     variant = live_variant.choose(camera, zones, quality, hevc)
-    video_filter, profile, codec, camera_is_hevc = variant.video_filter, variant.profile, variant.codec, variant.camera_is_hevc
-    hevc_copy, transcode = variant.hevc_copy, variant.transcode
-    if not video_filter and profile == "main" and codec and codec not in {"h264", "avc", "avc1"} and not camera_is_hevc:
-        await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback,
-                                                     "detail": f"{codec.upper()} video cannot be played directly; use the fallback stream"})
+    source = _source_for(camera, variant, fallback)
+    if isinstance(source, _Refusal):
+        await _refuse(websocket, source.code, source.message)
         return
-    try:
-        source = decrypt(camera["live_substream_url_ciphertext"] if profile == "sub" else camera["stream_url_ciphertext"])
-        safe_stream_url(source)
-    except (RuntimeError, ValueError):
-        await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "Camera stream configuration is invalid"})
-        return
-    if not _acquire_live_view(camera_id):
-        await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All live-view slots are in use; close another view and retry"})
-        return
-    include_audio = variant.include_audio
     hub: LiveHub = websocket.app.state.live_hub
-    stream_key = conversion_key = live_variant.key_of(camera_id, variant, source)  # A conversion is counted by the stream that does it
-    if transcode and not await _acquire_transcode(conversion_key, hub):
-        _release_live_view(camera_id)
-        await _refuse(websocket, CLOSE_BUSY, {"type": "busy", "detail": "All video conversion slots are in use; close another converted view and retry"})
+    conversion_key = live_variant.key_of(camera_id, variant, source)  # A conversion is counted by the stream that does it
+    refused = await _take_places(camera_id, variant, conversion_key, hub)
+    if refused is not None:
+        await _refuse(websocket, refused.code, refused.message)
         return
-    listening = audio and include_audio and _acquire_live_audio()
+    listening = audio and variant.include_audio and _acquire_live_audio()
     viewer = Viewer()
 
     def mark_fresh() -> None:
         mark_camera_fresh(camera_id)
 
-    joined_running = (running := hub.streams.get(stream_key)) is not None and running.ready.is_set() and not running.failed
-    stream = hub.join(stream_key, source, include_audio, viewer, mark_fresh, video_filter, transcode, hevc_copy)
-    mode = variant.mode
-    wait: dict[str, object] = {"camera_id": camera_id, "at": datetime.now(timezone.utc).isoformat(), "profile": profile, "mode": mode, "joined_running": joined_running}
-    receiver = asyncio.create_task(websocket.receive())
-    getter: asyncio.Task | None = None
+    joined_running = (running := hub.streams.get(conversion_key)) is not None and running.ready.is_set() and not running.failed
+    stream = hub.join(conversion_key, source, variant.include_audio, viewer, mark_fresh, variant.video_filter, variant.transcode, variant.hevc_copy)
+    wait: dict[str, object] = {"camera_id": camera_id, "at": datetime.now(timezone.utc).isoformat(), "profile": variant.profile, "mode": variant.mode,
+                               "joined_running": joined_running}
+    session = _LiveViewer(websocket, camera_id, hub, stream, viewer, conversion_key if variant.transcode else None, listening, variant.include_audio,
+                          asyncio.create_task(websocket.receive()))
     watching = viewing_audit.LiveSession(principal.id, camera_id, quality)
     try:
-        await asyncio.wait({receiver, asyncio.create_task(stream.ready.wait())}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
-        if receiver.done():
+        if not await _start_viewing(session, variant, fallback):
             return
-        if not stream.ready.is_set() or stream.failed:
-            if transcode or hevc_copy:
-                # H.265 could not be passed on or converted: only now is the compatibility stream offered.
-                await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": codec, "fallback": fallback, "converted": transcode,
-                                                             "detail": "This camera's H.265 video could not be prepared for the browser; use the fallback stream"})
-                return
-            await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera did not start streaming in time"})
-            return
-        wanted = ("hvc1", "hev1") if hevc_copy else ("avc1",)
-        if not any(name in (stream.mime or "") for name in wanted):
-            await _refuse(websocket, CLOSE_UNSUPPORTED, {"type": "unsupported", "codec": "unknown", "fallback": fallback,
-                                                         "detail": "This camera's video cannot be played directly; use the fallback stream"})
-            return
-        # Audio is offered only when the stream really carries a track.
-        has_audio = "mp4a" in (stream.mime or "")
-        if listening and not has_audio:
-            _release_live_audio()
-            listening = False
-        include_audio = has_audio
-        await websocket.send_json({"type": "init", "mime": stream.mime, "profile": profile, "audio": has_audio, "listening": listening,
-                                   "codec": "hevc" if hevc_copy else "h264", "transcoded": transcode, "accelerated": bool(stream.accelerated)})
-        await websocket.send_bytes(stream.init)
         wait["init_ms"] = round((time.monotonic() - asked_at) * 1000)
-        while True:
-            await watching.delivered()
-            if getter is None:
-                getter = asyncio.create_task(viewer.queue.get())
-            # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once.
-            done, _ = await asyncio.wait({getter, receiver}, timeout=privacy.ACCESS_RECHECK_SECONDS, return_when=asyncio.FIRST_COMPLETED)
-            if not done:
-                if not await guard.check() and guard.reason in {"access", "credential"}:
-                    await _ended(websocket, guard.reason)
-                    return
-                continue
-            if receiver in done:
-                message = receiver.result()
-                if message["type"] == "websocket.disconnect":
-                    return
-                request = _client_message(message)
-                if request.get("type") == "listen":
-                    # Unmuting claims one of the audio slots; muting returns it.
-                    wanted = bool(request.get("on"))
-                    if wanted and not listening:
-                        listening = include_audio and _acquire_live_audio()
-                    elif not wanted and listening:
-                        _release_live_audio()
-                        listening = False
-                    reason = None if listening or not wanted else ("This camera's audio is not enabled" if not include_audio else "All live audio slots are in use")
-                    await websocket.send_json({"type": "listening", "on": listening, "detail": reason})
-                receiver = asyncio.create_task(websocket.receive())
-                continue
-            item = getter.result()
-            getter = None
-            if not await guard.check():
-                if guard.reason in {"access", "credential"}:
-                    await _ended(websocket, guard.reason)
-                else:
-                    await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": "This camera's privacy masks changed; reconnecting applies them"})
-                return
-            if item is None:
-                if viewer.closed_reason == "too_slow":
-                    await _refuse(websocket, CLOSE_TOO_SLOW, {"type": "too_slow", "detail": "Video could not be delivered fast enough; reconnect to resume at live"})
-                else:
-                    await _refuse(websocket, CLOSE_STREAM_FAILED, {"type": "error", "detail": stream.failed or "The camera stream ended"})
-                return
-            await websocket.send_bytes(item)
-            if "first_media_ms" not in wait:
-                # The first picture left the server: how long this viewer waited, and, for the viewer who started the camera's stream, where the time went.
-                wait["first_media_ms"] = round((time.monotonic() - asked_at) * 1000)
-                if not joined_running:
-                    wait.update(getattr(stream, "timing", None) or {})
-                hub.record_start(wait)  # Measuring never gets in the way of the picture
+        await _deliver(session, guard, watching, wait, asked_at, joined_running)
     except (WebSocketDisconnect, RuntimeError, OSError):
         return
     finally:
-        receiver.cancel()
-        if getter is not None:
-            getter.cancel()
-        hub.leave(stream, viewer)
-        if listening:
-            _release_live_audio()
-        if transcode:
-            _release_transcode(conversion_key)
-        _release_live_view(camera_id)
+        session.close()
         watching.close()
