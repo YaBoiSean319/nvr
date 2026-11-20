@@ -1,6 +1,7 @@
 """The recorder's regular passes wait for the database's write lock without stopping its event loop.
 
-Every two seconds for every recording camera, the recorder's watch marked the video fresh and wrote the camera's status, and every five
+Every second for every camera recording on motion, and every two seconds for every camera recording all the time, the recorder's watch
+marked the video fresh (and the second wrote the camera's status), and every five
 seconds its schedule pass checked each camera's recording coverage, which writes too. All of it ran on the recorder's event loop: while one
 write waited for the lock (retention, an export or a backup holding it), every camera's recording supervision and the worker's heartbeat
 waited with it, and three long waits in a row reach the supervisor's 30-second kill, which interrupts every camera's recording. Each test
@@ -130,6 +131,29 @@ class RecorderLoopFreeTests(unittest.TestCase):
         with connect() as db:
             marked = db.execute("SELECT last_video_at FROM cameras WHERE id=?", (self.camera_id,)).fetchone()["last_video_at"]
         self.assertIsNotNone(marked)  # Written once the lock was free
+
+    def test_the_watch_over_a_motion_buffer_waits_for_the_lock_without_stopping_the_loop(self):
+        spool = self.root / "spool"
+        spool.mkdir()
+        (spool / "segment-0001.ts").write_bytes(b"being written")  # A fresh segment: the video is marked fresh, a database write
+
+        class Running:
+            returncode = None
+
+        class Assembler:
+            async def poll(self):
+                pass  # No motion event under way: nothing to save
+
+        async def one_pass(manager):
+            with patch("app.recording.asyncio.sleep", self.one_pass_then_stop(manager, 1)):
+                await manager._watch_motion_buffer(self.camera_id, Running(), spool, Assembler(), "rtsp://camera.invalid/main")
+
+        longest = self.longest_stall_while_locked(one_pass)
+        self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while its motion-buffer watch waited for the write lock")
+        from app.store import connect
+        with connect() as db:
+            marked = db.execute("SELECT last_video_at FROM cameras WHERE id=?", (self.camera_id,)).fetchone()["last_video_at"]
+        self.assertIsNotNone(marked)
 
     def test_the_schedule_pass_checks_coverage_without_stopping_the_loop(self):
         async def one_pass(manager):

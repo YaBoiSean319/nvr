@@ -759,10 +759,12 @@ class RecordingManager:
         """Poll the clip assembler once a second until the manager stops or FFmpeg exits; a fresh segment marks the video live."""
         while not self.stopping:
             await assembler.poll()
-            if newest_is_fresh(spool, "segment-*.ts"):
-                self._mark_video_fresh(camera_id)
+            # A write waits for the database's lock: in a thread, so that a wait never stops every camera's recording and the heartbeat.
+            if await asyncio.to_thread(newest_is_fresh, spool, "segment-*.ts"):
+                await asyncio.to_thread(self._mark_video_fresh, camera_id)
             if proc.returncode is not None:
-                self._set_status(camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=await _stream_fault(source))
+                fault = await _stream_fault(source)
+                await asyncio.to_thread(self._set_status, camera_id, "reconnecting", "Camera stream buffer interrupted; retrying", fault=fault)
                 break
             await asyncio.sleep(1)
 
