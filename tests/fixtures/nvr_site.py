@@ -55,6 +55,11 @@ class NvrSite:
                 time.sleep(0.2)
         raise RuntimeError(f"The site {self.name} did not start: {Path(self.directory.name, 'server.log').read_text()[-800:]}")
 
+    def log_tail(self, characters: int = 1500) -> str:
+        """The end of the site server's own log, for a failure's message."""
+        self.log.flush()
+        return (self.base / "server.log").read_text(errors="replace")[-characters:] or "(empty)"
+
     def stop_process(self) -> None:
         """The server goes away (its files stay), as a crashed or powered-off machine's does."""
         if self.process is not None and self.process.poll() is None:
