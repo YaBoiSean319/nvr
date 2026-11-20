@@ -169,6 +169,42 @@ class BackupTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, "not an NVR configuration backup"):
             backup.decrypt_stream(io.BytesIO(b"PK\x03\x04" + original), io.BytesIO(), PASSPHRASE)
 
+    def _members(self, archive: Path) -> dict[str, bytes]:
+        import tarfile
+        plain = io.BytesIO()
+        backup.decrypt_stream(io.BytesIO(archive.read_bytes()), plain, PASSPHRASE)
+        plain.seek(0)
+        with tarfile.open(fileobj=plain, mode="r") as tar:
+            return {member.name: tar.extractfile(member).read() for member in tar.getmembers()}
+
+    def test_the_manifest_holds_each_files_sha256_and_a_restore_checks_it(self):
+        import hashlib
+        import json
+        import tarfile
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        members = self._members(archive)
+        manifest = json.loads(members["manifest.json"])
+        self.assertEqual(manifest["files"], {name: hashlib.sha256(members[name]).hexdigest() for name in backup.MEMBERS})
+
+        # Encrypted correctly, but the manifest names another hash for the database: refused before anything is replaced.
+        manifest["files"]["nvr.sqlite3"] = hashlib.sha256(b"something else").hexdigest()
+        members["manifest.json"] = json.dumps(manifest).encode()
+        plain = io.BytesIO()
+        with tarfile.open(fileobj=plain, mode="w") as tar:
+            for name, data in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        forged = self.backups / "forged.nvrbackup"
+        with forged.open("wb") as target:
+            backup.encrypt_stream(io.BytesIO(plain.getvalue()), target, PASSPHRASE)
+        database = Path(os.environ["NVR_DB_PATH"])
+        before = database.read_bytes()
+        with self.assertRaisesRegex(backup.BackupError, "Checksum mismatch for nvr.sqlite3"):
+            backup.restore(forged, force=True)
+        self.assertEqual(database.read_bytes(), before)
+
     def test_restore_round_trip_and_missing_footage_is_marked_unavailable(self):
         self._seed()
         present = self.recordings / "c1" / "present.mp4"

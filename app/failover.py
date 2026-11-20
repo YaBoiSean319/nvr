@@ -44,6 +44,7 @@ import httpx
 
 from . import backup
 from .credentials import decrypt, key_path
+from .footage_chain import file_sha256
 from .incidents import sync_incident
 from .store import connect, has_row
 from .webhooks import validate_target_url
@@ -425,7 +426,7 @@ def apply_configuration(archive: Path) -> dict[str, Any]:
                 with tar.extractfile(member) as stream, (work_dir / member).open("wb") as target:
                     shutil.copyfileobj(stream, target)
         for member in backup.MEMBERS:
-            if backup._sha256(work_dir / member) != manifest["files"][member]:
+            if file_sha256(work_dir / member) != manifest["files"][member]:
                 raise SyncError(f"Checksum mismatch for {member}")
         if not key_path().is_file() or (work_dir / "credentials.key").read_bytes() != key_path().read_bytes():
             raise SyncError("The backup is not from the primary this standby was set up from: its credential key differs. Restore a backup of the primary on this standby once "

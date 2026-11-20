@@ -39,6 +39,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .credentials import ensure_key, key_path
+from .footage_chain import file_sha256
 from .incidents import sync_incident
 from .store import connect, database_path
 from .version import APP_VERSION
@@ -250,7 +251,7 @@ def create_backup(kind: str, *, run_id: str | None = None, database: Path | None
             "kind": kind,
             "app_version": APP_VERSION,
             "schema_version": schema_version,
-            "files": {member: _sha256(path) for member, path in files.items()},
+            "files": {member: file_sha256(path) for member, path in files.items()},
             "footage_included": False,
         }
         try:
@@ -326,14 +327,6 @@ def pre_migration_backup(database: Path) -> None:
         return
     result = create_backup("pre_migration", database=database)
     logger.info("Pre-migration configuration backup written: %s", result["file_name"])
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _owner_only(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -575,7 +568,7 @@ def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dic
             raise BackupError("The backup does not contain the expected files")
         manifest = json.loads(found["manifest.json"])
         for member in MEMBERS:
-            if _sha256(work_dir / member) != manifest["files"][member]:
+            if file_sha256(work_dir / member) != manifest["files"][member]:
                 raise BackupError(f"Checksum mismatch for {member}")
         check = sqlite3.connect(work_dir / "nvr.sqlite3")
         try:
