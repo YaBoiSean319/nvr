@@ -508,6 +508,9 @@ class DetectionManager:
         self._pose_readers: dict[str, Any] = {}
         self._model_lock = asyncio.Lock()
         self._sync_lock = asyncio.Lock()  # One camera is settled at a time (see sync_camera)
+        # How many times each camera has been settled from its settings as they are now (a save, a message): a reconcile pass leaves a
+        # camera settled that way after its survey alone, since what the pass read about it is older.
+        self._settled: dict[str, int] = {}
         # Database writes can wait seconds for a busy database; their own threads keep them from starving inference, embedding and JPEG work in the shared pool.
         self._db_threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-db")
         self._inference_slots = asyncio.Semaphore(1)
@@ -557,6 +560,7 @@ class DetectionManager:
         return cameras, configs, self._runtime(), wanting
 
     async def reconcile(self) -> None:
+        settled_before = dict(self._settled)
         cameras, configs, (mode, fixed, last_limit), wanting = await asyncio.to_thread(self._survey)
         analysed = sum(1 for camera_id in wanting if camera_id in self.tasks and not self.tasks[camera_id].done())
         if mode == "fixed":
@@ -574,6 +578,9 @@ class DetectionManager:
         self.limit_now = limit
         eligible = wanting[:limit]
         for camera_id in cameras:
+            if self._settled.get(camera_id, 0) != settled_before.get(camera_id, 0):
+                # Its settings were saved and applied after this pass read them: what the pass read would undo them until the next pass.
+                continue
             await self.sync_camera(camera_id, capacity_allowed=camera_id in eligible, config=configs[camera_id])
         await asyncio.to_thread(self._write_status, mode, limit, len(wanting))
 
@@ -623,6 +630,8 @@ class DetectionManager:
         """Start, restart or stop one camera's analysis to match its settings. ``config`` is the camera's settings when the caller has
         just read them. Every database call is made in a thread, and one camera is settled at a time, so a message arriving in the middle
         of a pass cannot start a second analysis of a camera."""
+        if config is _UNREAD:  # Settled from its settings as they are now, read below
+            self._settled[camera_id] = self._settled.get(camera_id, 0) + 1
         async with self._sync_lock:
             await self._sync_camera(camera_id, force_restart, capacity_allowed, config)
 
