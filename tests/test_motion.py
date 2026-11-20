@@ -224,6 +224,10 @@ class MotionTests(unittest.TestCase):
                     "    moving_c = bytes([255]) * size\n"
                     "    sys.stdout.buffer.write(still + moving_a + moving_b + moving_c + still + still + still)\n"
                     "    sys.stdout.buffer.flush()\n"
+                    # Still running while its frames are read, as a real stream is: the detector stops reading once it sees FFmpeg has
+                    # exited, so a stand-in that exits at once raced the reader (it lost whenever the reader paused, for a database write).
+                    "    import time\n"
+                    "    time.sleep(1)\n"
                     "else:\n"
                     "    os.execv(real, [real, *args])\n",
                     encoding="utf-8",
