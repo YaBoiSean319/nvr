@@ -664,20 +664,10 @@ def verify_package_file(package: Any, case_id: str, package_id: str, installatio
     temporary file to be opened (#359). Blocking: callers on an event loop run it in a thread.
 
     ``complete`` says the case's clips are all there (a package of someone with less access can be valid and not complete)."""
-    from .exports import MAX_VERIFY_PACKAGE_BYTES, member_digest, verify_evidence_file
+    from .exports import member_digest, read_integrity_manifest, verify_evidence_file
     try:
         with zipfile.ZipFile(package) as archive:
-            infos = archive.infolist()
-            names = [item.filename for item in infos]
-            if len(names) != len(set(names)) or any(name.startswith("/") or ".." in Path(name).parts for name in names):
-                raise ValueError("invalid archive paths")
-            if sum(item.file_size for item in infos) > MAX_VERIFY_PACKAGE_BYTES:
-                raise ValueError("uncompressed package exceeds the verification size limit")
-            if names.count("integrity.json") != 1:
-                raise ValueError("integrity manifest is missing or duplicated")
-            manifest = json.loads(archive.read("integrity.json"))
-            if manifest.get("algorithm") != "sha256" or not isinstance(manifest.get("files"), list):
-                raise ValueError("unsupported integrity manifest")
+            names, manifest = read_integrity_manifest(archive)
             expected = {entry["path"]: entry for entry in manifest["files"]}
             delivered = set(names) - {"integrity.json"}
             if len(expected) != len(manifest["files"]) or delivered != set(expected):

@@ -142,6 +142,24 @@ def verify_evidence_bytes(package: bytes, expected_export_id: str | None = None,
     return verify_evidence_file(io.BytesIO(package), expected_export_id, installation_key)
 
 
+def read_integrity_manifest(archive: zipfile.ZipFile) -> tuple[list[str], dict[str, Any]]:
+    """The member names and the integrity manifest of an uploaded package, once it has passed the checks made before any file is read: no
+    path that is absolute or climbs out, no name given twice, no more uncompressed content than the limit, and one manifest of the known
+    kind. Raises ValueError saying which failed. Shared by the evidence and case package verifiers (#387)."""
+    infos = archive.infolist()
+    names = [item.filename for item in infos]
+    if len(names) != len(set(names)) or any(name.startswith("/") or ".." in Path(name).parts for name in names):
+        raise ValueError("invalid archive paths")
+    if sum(item.file_size for item in infos) > MAX_VERIFY_PACKAGE_BYTES:
+        raise ValueError("uncompressed package exceeds the verification size limit")
+    if names.count("integrity.json") != 1:
+        raise ValueError("integrity manifest is missing or duplicated")
+    manifest = json.loads(archive.read("integrity.json"))
+    if manifest.get("algorithm") != "sha256" or not isinstance(manifest.get("files"), list):
+        raise ValueError("unsupported integrity manifest")
+    return names, manifest
+
+
 def verify_evidence_file(package: "str | os.PathLike[str] | IO[bytes]", expected_export_id: str | None = None, installation_key: str | None = None) -> dict[str, Any]:
     """Verify the evidence manifest against the exact uploaded ZIP member bytes, reading the package from a file.
 
@@ -149,17 +167,7 @@ def verify_evidence_file(package: "str | os.PathLike[str] | IO[bytes]", expected
     """
     try:
         with zipfile.ZipFile(package) as archive:
-            infos = archive.infolist()
-            names = [item.filename for item in infos]
-            if len(names) != len(set(names)) or any(name.startswith("/") or ".." in Path(name).parts for name in names):
-                raise ValueError("invalid archive paths")
-            if sum(item.file_size for item in infos) > MAX_VERIFY_PACKAGE_BYTES:
-                raise ValueError("uncompressed package exceeds the verification size limit")
-            if names.count("integrity.json") != 1:
-                raise ValueError("integrity manifest is missing or duplicated")
-            manifest = json.loads(archive.read("integrity.json"))
-            if manifest.get("algorithm") != "sha256" or not isinstance(manifest.get("files"), list):
-                raise ValueError("unsupported integrity manifest")
+            names, manifest = read_integrity_manifest(archive)
             expected = {entry["path"]: entry for entry in manifest["files"]}
             if len(expected) != len(manifest["files"]):
                 raise ValueError("integrity manifest contains duplicate paths")
