@@ -1150,7 +1150,8 @@ class ExportManager:
                 self._queue.task_done()
 
     async def _execute(self, job_id: str) -> None:
-        job = _claim_export(job_id)
+        # The export worker's database writes wait for the lock: made in a thread, a wait never stops the worker's heartbeat.
+        job = await asyncio.to_thread(_claim_export, job_id)
         if job is None:
             return
         acquired: list[Path] = []
@@ -1163,7 +1164,7 @@ class ExportManager:
             per_camera, total_segments = await asyncio.to_thread(_reserve_sources, job, acquired)
             metadata = _base_metadata(job)
             redaction_regions = _redaction_regions(job, per_camera, metadata)
-            self._progress(job_id, 10)
+            await asyncio.to_thread(self._progress, job_id, 10)
             union = _union_intervals(per_camera, job.start, job.end) if "grid" in job.output_modes else []
             if union:
                 metadata["grid"] = _grid_timeline(job, union)
@@ -1183,13 +1184,13 @@ class ExportManager:
             await asyncio.to_thread(self._write_package, job, metadata, chain_path)
             await asyncio.to_thread(_record_completed, job, metadata, expires_at, total_segments)
         except ExportCancelled:
-            _record_cancelled(job)
+            await asyncio.to_thread(_record_cancelled, job)
         except asyncio.CancelledError:
             job.partial_path.unlink(missing_ok=True)
             job.final_path.unlink(missing_ok=True)
             raise
         except Exception as exc:
-            _record_failed(job, exc)
+            await asyncio.to_thread(_record_failed, job, exc)
         finally:
             self._processes.pop(job_id, None)
             self._cancelled.discard(job_id)
@@ -1290,7 +1291,7 @@ class ExportManager:
                                  "gap_indicator": "Recording gap skipped"}
             entry["video_file"] = video_file
         metadata["cameras"].append(entry)
-        self._progress(job_id, 15 + round(55 * (camera["index"] + 1) / max(1, camera_count)))
+        await asyncio.to_thread(self._progress, job_id, 15 + round(55 * (camera["index"] + 1) / max(1, camera_count)))
 
     async def _render_grid_output(self, job: "_ExportJob", per_camera: list[dict[str, Any]], union: list[dict[str, Any]], metadata: dict[str, Any]) -> None:
         """The synchronized grid video (on the graphics chip first when there is one, in software if that fails), its audio and its overlay manifest."""
