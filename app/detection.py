@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, NamedTuple
 
 import numpy as np
 
@@ -765,161 +765,13 @@ class DetectionManager:
         return self._clip_loaded
 
     async def _run(self, camera_id: str, config: dict[str, Any], detector: Any) -> None:
-        from . import attributes
-        from . import clip
-        from . import face_scan, falls, plates, pose_models
-        from . import similar
-        from .tracks import Tracker, encode_jpeg, store_keyframe, store_poses
-
-        attribute_model = await self._attribute_model(str(config["provider"]))
-        reid_model = await self._reid_model(str(config["provider"]))
-        clip_model = await self._clip_model()
-        plate_tasks: set[asyncio.Task[Any]] = set()
+        """Analyse one camera until the worker stops. A stream that fails or ends marks the camera failed, and is opened again 5 s later."""
+        provider = str(config["provider"])
+        models = _FrameModels(await self._attribute_model(provider), await self._reid_model(provider), await self._clip_model())
+        background: set[asyncio.Task[Any]] = set()  # The plate and face reads under way, kept until they finish
         while not self.stopping:
             try:
-                source = _camera_source(camera_id, bool(config["use_substream"]))
-                zones = json.loads(config["zones_json"])
-                tracker = Tracker()
-                keyframed: set[str] = set()
-                scanner, scanner_reader, scanner_checked = None, None, float("-inf")
-                face_scanner, face_scanner_reader, face_checked = None, None, float("-inf")
-                fall_detector, fall_reader, fall_checked = None, None, float("-inf")
-                seen_frame = False
-                frames_seen = 0
-                async for frame in _raw_frames(source, float(config["analysis_fps"])):
-                    if self.stopping:
-                        return
-                    seen_frame = True
-                    frames_seen += 1
-                    wait_started = asyncio.get_running_loop().time()
-                    async with self._inference_slots:
-                        queue_wait = asyncio.get_running_loop().time() - wait_started
-                        if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
-                            if frames_seen > WARM_UP_FRAMES:  # The first frames wait behind other cameras' model start-up: not a sign of too little capacity
-                                self.capacity.note_late(camera_id)
-                            await self._db(set_camera_state, camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
-                        infer_started = time.monotonic()
-                        person_threshold, vehicle_threshold = float(config["confidence_threshold"]), float(config["effective_vehicle_confidence_threshold"])
-                        observations = await asyncio.to_thread(detector.infer, frame, min(person_threshold, vehicle_threshold))
-                        observations = [item for item in observations if item["label"] == "vehicle" or item["confidence"] >= person_threshold]
-                        self.capacity.note_inference(time.monotonic() - infer_started)
-                    observations = keep_confident_vehicles(observations, vehicle_threshold)
-                    observations = [item for item in observations if point_in_zones(item["box"], zones)]
-                    await asyncio.to_thread(attributes.describe, frame, observations, attribute_model)
-                    at = self.clock()
-                    model = {"model_id": str(config["model_id"]), "model_version": str(config["model_version"]), "provider": str(config["provider"])}
-                    # The database writes wait up to 10 s each for a busy database, so they run off the event loop: a loop blocked for 30 s
-                    # stops the heartbeat and the supervisor kills the whole worker (exit code -9), taking every camera's analysis with it.
-                    track_ids = await self._db(_store_frame, camera_id, observations, at, tracker, frame, model)
-                    # A camera designated for plates gives each vehicle a few attempts at its plate; reading never holds up analysis.
-                    if time.monotonic() - scanner_checked >= plates.SETTINGS_REFRESH:  # Not self.clock(): the analysis clock stamps the frames and must be read once per frame
-                        scanner_checked = time.monotonic()
-                        wanted, minimum, region = await self._db(_plate_refresh, camera_id)
-                        # The region chosen in Settings is looked at on every refresh, so a change takes effect without a restart.
-                        plate_reader = await self._plate_reader(str(config["provider"]), region) if wanted and region else None
-                        if not wanted or plate_reader is None:
-                            scanner = None
-                        elif scanner is None or scanner_reader is not plate_reader:
-                            scanner_reader = plate_reader
-                            scanner = plates.PlateScanner(plate_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)),
-                                                          lambda track, plate, reader=plate_reader: plates.keep_plate(camera_id, track, plate, self.clock(), reader.reader_id), min_confidence=minimum)
-                        else:
-                            scanner.min_confidence = minimum
-                    if scanner is not None:
-                        for track_id, item in zip(track_ids, observations):
-                            scanner.seen(track_id, str(item["label"]), item["box"])
-                        scanner.forget({track.id for track in tracker.active})
-                        if scanner.due():
-                            task = asyncio.create_task(scanner.scan(), name=f"plates-{camera_id}")
-                            plate_tasks.add(task)
-                            task.add_done_callback(plate_tasks.discard)
-                    # A camera switched on for the face watch gives each person a few attempts at a face that matches someone on the list; reading never holds up analysis.
-                    if time.monotonic() - face_checked >= face_scan.SETTINGS_REFRESH:
-                        face_checked = time.monotonic()
-                        with connect() as db:
-                            face_on, face_threshold = face_scan.scanning(db, camera_id)
-                        face_reader = await self._face_reader(str(config["provider"])) if face_on else None
-                        if face_reader is None:
-                            face_scanner = None
-                        elif face_scanner is None or face_scanner_reader is not face_reader:
-                            face_scanner_reader = face_reader
-                            face_scanner = face_scan.FaceScanner(
-                                face_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)), face_scan.watch_list,
-                                lambda track, entry, similarity, face, picture, taken: face_scan.keep_sighting(camera_id, track, entry, similarity, face, picture, taken),
-                                threshold=face_threshold)
-                        else:
-                            face_scanner.threshold = face_threshold
-                    if face_scanner is not None:
-                        for track_id, item in zip(track_ids, observations):
-                            face_scanner.seen(track_id, str(item["label"]), item["box"])
-                        face_scanner.forget({track.id for track in tracker.active})
-                        if face_scanner.due():
-                            task = asyncio.create_task(face_scanner.scan(), name=f"faces-{camera_id}")
-                            plate_tasks.add(task)
-                            task.add_done_callback(plate_tasks.discard)
-                    # A camera with fall detection on has each person's body points read and watched; a fall raises the alarm. This never holds up analysis for long and never stops it.
-                    if time.monotonic() - fall_checked >= falls.SETTINGS_REFRESH:
-                        fall_checked = time.monotonic()
-                        fall_on, sensitivity, stay_down, fall_aspect, fall_zones = await self._db(_fall_refresh, camera_id, at)
-                        fall_reader = await self._pose_reader(str(config["provider"])) if fall_on else None
-                        if fall_reader is None:
-                            fall_detector = None
-                        elif fall_detector is None:
-                            fall_detector = falls.FallDetector(sensitivity=sensitivity, stay_down_seconds=stay_down, aspect=fall_aspect)
-                        else:
-                            fall_detector.sensitivity, fall_detector.stay_down_seconds, fall_detector.aspect = sensitivity, stay_down, fall_aspect
-                    if fall_detector is not None and fall_reader is not None:
-                        try:
-                            moment = at.timestamp()
-                            picture = np.frombuffer(frame, dtype=np.uint8).reshape(MODEL_HEIGHT, MODEL_WIDTH, 3)  # The analysed frame: small, so far-off people are rough
-                            # Never anyone inside a privacy mask: a masked area yields no picture to read, as for plates.
-                            people = [(track_id, item) for track_id, item in zip(track_ids, observations)
-                                      if item["label"] == "person" and not plates.overlaps_privacy_zone(item["box"], fall_zones)][:falls.MAX_PEOPLE_PER_FRAME]
-                            boxes = {track_id: item["box"] for track_id, item in people}
-                            raised = []
-                            drawn: dict[str, dict[str, tuple[float, float, float]]] = {}
-                            for track_id, item in people:
-                                full = await asyncio.to_thread(fall_reader.pose_full, picture, item["box"])
-                                pose = None if full is None else {name: point for name, point in full.items() if name in pose_models.POINTS}  # The decision uses these; the arms are only for drawing
-                                if full is not None:
-                                    drawn[track_id] = full
-                                found = fall_detector.update(track_id, moment, pose, centre=(item["box"]["x"] + item["box"]["width"] / 2, item["box"]["y"] + item["box"]["height"] / 2))
-                                if found:
-                                    raised.append(found)
-                            if drawn:
-                                await self._db(_with_db, store_poses, camera_id, at, drawn)  # So Playback can draw the skeleton; a failure here never stops detection
-                            raised += fall_detector.tick(moment, set(boxes))
-                            fall_detector.forget({track.id for track in tracker.active}, moment)
-                            for found in raised:
-                                await self._db(falls.store_fall, camera_id, found.track_id, datetime.fromtimestamp(found.at, timezone.utc), found.down_seconds, boxes.get(found.track_id) or falls.FULL_FRAME_BOX)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception:  # noqa: BLE001 - fall detection must never stop analysis
-                            logger.exception("Fall detection failed on a frame")
-                    # Each object's first analysed frame, kept as its keyframe.
-                    first_seen = {track_id: item for track_id, item in reversed(list(zip(track_ids, observations)))}
-                    for track_id in dict.fromkeys(track_ids):
-                        if track_id in keyframed:
-                            continue
-                        keyframed.add(track_id)
-                        jpeg = await asyncio.to_thread(encode_jpeg, frame)
-                        if jpeg:
-                            await self._db(_with_db, store_keyframe, track_id, at, jpeg)
-                        item = first_seen.get(track_id)
-                        # What the object looks like, for finding it again on other cameras. A failure here never stops detection.
-                        try:
-                            described = await asyncio.to_thread(similar.embed, frame, str(item["label"]), item["box"], reid_model) if item else None
-                            if described:
-                                await self._db(_with_db, similar.store_embedding, track_id, described[0], described[1])
-                        except Exception:  # noqa: BLE001
-                            pass
-                        # What it looks like to the image-text model, for natural-language search. Also never fatal.
-                        try:
-                            vector = await asyncio.to_thread(clip_model.embed_image, frame, item["box"]) if clip_model and item else None
-                            if vector is not None:
-                                await self._db(_with_db, clip.store_embedding, track_id, clip_model.model_id, vector)
-                        except Exception:  # noqa: BLE001
-                            pass
+                seen_frame = await self._analyse_stream(camera_id, config, detector, models, background)
                 if not self.stopping:
                     raise RuntimeError("Camera stream ended" + (" after analysis frames" if seen_frame else " before an analysis frame was received"))
             except asyncio.CancelledError:
@@ -929,3 +781,227 @@ class DetectionManager:
                 await self._db(set_camera_state, camera_id, "failed", reason)
                 await asyncio.sleep(5)
 
+    async def _analyse_stream(self, camera_id: str, config: dict[str, Any], detector: Any, models: _FrameModels,
+                              background: set[asyncio.Task[Any]]) -> bool:
+        """Analyse frames from one opening of the camera's stream until it ends or the worker stops. Says whether any frame arrived."""
+        from . import attributes
+        from .tracks import Tracker
+
+        source = _camera_source(camera_id, bool(config["use_substream"]))
+        zones = json.loads(config["zones_json"])
+        tracker = Tracker()
+        provider = str(config["provider"])
+        watches = (_PlateWatch(self, camera_id, provider, background), _FaceWatch(self, camera_id, provider, background),
+                   _FallWatch(self, camera_id, provider))
+        keyframed: set[str] = set()
+        frames_seen = 0
+        async for frame in _raw_frames(source, float(config["analysis_fps"])):
+            if self.stopping:
+                return frames_seen > 0
+            frames_seen += 1
+            observations = await self._detect(camera_id, config, detector, frame, frames_seen)
+            observations = [item for item in observations if point_in_zones(item["box"], zones)]
+            await asyncio.to_thread(attributes.describe, frame, observations, models.attributes)
+            at = self.clock()
+            model = {"model_id": str(config["model_id"]), "model_version": str(config["model_version"]), "provider": provider}
+            # The database writes wait up to 10 s each for a busy database, so they run off the event loop: a loop blocked for 30 s
+            # stops the heartbeat and the supervisor kills the whole worker (exit code -9), taking every camera's analysis with it.
+            track_ids = await self._db(_store_frame, camera_id, observations, at, tracker, frame, model)
+            for watch in watches:
+                await watch.after_frame(frame, at, track_ids, observations, tracker)
+            await self._keep_first_sightings(frame, at, track_ids, observations, keyframed, models)
+        return frames_seen > 0
+
+    async def _detect(self, camera_id: str, config: dict[str, Any], detector: Any, frame: Any, frames_seen: int) -> list[dict[str, Any]]:
+        """The confident people and vehicles in one frame, read when the camera's turn at the shared inference slots comes."""
+        wait_started = asyncio.get_running_loop().time()
+        async with self._inference_slots:
+            queue_wait = asyncio.get_running_loop().time() - wait_started
+            if queue_wait > max(1.0, 2 / float(config["analysis_fps"])):
+                if frames_seen > WARM_UP_FRAMES:  # The first frames wait behind other cameras' model start-up: not a sign of too little capacity
+                    self.capacity.note_late(camera_id)
+                await self._db(set_camera_state, camera_id, "delayed", "Inference was delayed while CPU capacity was occupied")
+            infer_started = time.monotonic()
+            person_threshold, vehicle_threshold = float(config["confidence_threshold"]), float(config["effective_vehicle_confidence_threshold"])
+            observations = await asyncio.to_thread(detector.infer, frame, min(person_threshold, vehicle_threshold))
+            observations = [item for item in observations if item["label"] == "vehicle" or item["confidence"] >= person_threshold]
+            self.capacity.note_inference(time.monotonic() - infer_started)
+        return keep_confident_vehicles(observations, vehicle_threshold)
+
+    async def _keep_first_sightings(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]],
+                                    keyframed: set[str], models: _FrameModels) -> None:
+        """Each object's first analysed frame, kept as its keyframe, with what it looks like for finding it again and for searching in words."""
+        from . import clip, similar
+        from .tracks import encode_jpeg, store_keyframe
+
+        first_seen = {track_id: item for track_id, item in reversed(list(zip(track_ids, observations)))}
+        for track_id in dict.fromkeys(track_ids):
+            if track_id in keyframed:
+                continue
+            keyframed.add(track_id)
+            jpeg = await asyncio.to_thread(encode_jpeg, frame)
+            if jpeg:
+                await self._db(_with_db, store_keyframe, track_id, at, jpeg)
+            item = first_seen.get(track_id)
+            # What the object looks like, for finding it again on other cameras. A failure here never stops detection.
+            try:
+                described = await asyncio.to_thread(similar.embed, frame, str(item["label"]), item["box"], models.appearance) if item else None
+                if described:
+                    await self._db(_with_db, similar.store_embedding, track_id, described[0], described[1])
+            except Exception:  # noqa: BLE001
+                pass
+            # What it looks like to the image-text model, for natural-language search. Also never fatal.
+            clip_model = models.image_text
+            try:
+                vector = await asyncio.to_thread(clip_model.embed_image, frame, item["box"]) if clip_model and item else None
+                if vector is not None:
+                    await self._db(_with_db, clip.store_embedding, track_id, clip_model.model_id, vector)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+class _FrameModels(NamedTuple):
+    """The models every analysed frame of a camera is described with, loaded once for the camera's analysis."""
+    attributes: Any
+    appearance: Any
+    image_text: Any
+
+
+def _keep_until_done(tasks: set[asyncio.Task[Any]], work: Any, name: str) -> None:
+    task = asyncio.create_task(work, name=name)
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+class _PlateWatch:
+    """A camera designated for plates gives each vehicle a few attempts at its plate; reading never holds up analysis.
+
+    The settings are read again every ``plates.SETTINGS_REFRESH`` seconds, so a change (including the region chosen in Settings) takes
+    effect without a restart."""
+
+    def __init__(self, manager: DetectionManager, camera_id: str, provider: str, background: set[asyncio.Task[Any]]) -> None:
+        self.manager, self.camera_id, self.provider, self.background = manager, camera_id, provider, background
+        self.scanner: Any = None
+        self.reader: Any = None
+        self.checked = float("-inf")
+
+    async def after_frame(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]], tracker: Any) -> None:
+        from . import plates
+        manager, camera_id = self.manager, self.camera_id
+        if time.monotonic() - self.checked >= plates.SETTINGS_REFRESH:  # Not the manager's clock: the analysis clock stamps the frames and must be read once per frame
+            self.checked = time.monotonic()
+            wanted, minimum, region = await manager._db(_plate_refresh, camera_id)
+            plate_reader = await manager._plate_reader(self.provider, region) if wanted and region else None
+            if not wanted or plate_reader is None:
+                self.scanner = None
+            elif self.scanner is None or self.reader is not plate_reader:
+                self.reader = plate_reader
+                self.scanner = plates.PlateScanner(
+                    plate_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)),
+                    lambda track, plate, reader=plate_reader: plates.keep_plate(camera_id, track, plate, manager.clock(), reader.reader_id), min_confidence=minimum)
+            else:
+                self.scanner.min_confidence = minimum
+        scanner = self.scanner
+        if scanner is not None:
+            for track_id, item in zip(track_ids, observations):
+                scanner.seen(track_id, str(item["label"]), item["box"])
+            scanner.forget({track.id for track in tracker.active})
+            if scanner.due():
+                _keep_until_done(self.background, scanner.scan(), f"plates-{camera_id}")
+
+
+class _FaceWatch:
+    """A camera switched on for the face watch gives each person a few attempts at a face that matches someone on the list; reading never
+    holds up analysis. The settings are read again every ``face_scan.SETTINGS_REFRESH`` seconds."""
+
+    def __init__(self, manager: DetectionManager, camera_id: str, provider: str, background: set[asyncio.Task[Any]]) -> None:
+        self.manager, self.camera_id, self.provider, self.background = manager, camera_id, provider, background
+        self.scanner: Any = None
+        self.reader: Any = None
+        self.checked = float("-inf")
+
+    async def after_frame(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]], tracker: Any) -> None:
+        from . import face_scan, plates
+        camera_id = self.camera_id
+        if time.monotonic() - self.checked >= face_scan.SETTINGS_REFRESH:
+            self.checked = time.monotonic()
+            with connect() as db:
+                face_on, face_threshold = face_scan.scanning(db, camera_id)
+            face_reader = await self.manager._face_reader(self.provider) if face_on else None
+            if face_reader is None:
+                self.scanner = None
+            elif self.scanner is None or self.reader is not face_reader:
+                self.reader = face_reader
+                self.scanner = face_scan.FaceScanner(
+                    face_reader, lambda: plates.ffmpeg_snapshot(_camera_source(camera_id, False)), face_scan.watch_list,
+                    lambda track, entry, similarity, face, picture, taken: face_scan.keep_sighting(camera_id, track, entry, similarity, face, picture, taken),
+                    threshold=face_threshold)
+            else:
+                self.scanner.threshold = face_threshold
+        scanner = self.scanner
+        if scanner is not None:
+            for track_id, item in zip(track_ids, observations):
+                scanner.seen(track_id, str(item["label"]), item["box"])
+            scanner.forget({track.id for track in tracker.active})
+            if scanner.due():
+                _keep_until_done(self.background, scanner.scan(), f"faces-{camera_id}")
+
+
+class _FallWatch:
+    """A camera with fall detection on has each person's body points read and watched; a fall raises the alarm. This never holds up
+    analysis for long and never stops it. The settings are read again every ``falls.SETTINGS_REFRESH`` seconds."""
+
+    def __init__(self, manager: DetectionManager, camera_id: str, provider: str) -> None:
+        self.manager, self.camera_id, self.provider = manager, camera_id, provider
+        self.detector: Any = None
+        self.reader: Any = None
+        self.zones: Any = None
+        self.checked = float("-inf")
+
+    async def after_frame(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]], tracker: Any) -> None:
+        from . import falls
+        if time.monotonic() - self.checked >= falls.SETTINGS_REFRESH:
+            self.checked = time.monotonic()
+            fall_on, sensitivity, stay_down, fall_aspect, self.zones = await self.manager._db(_fall_refresh, self.camera_id, at)
+            self.reader = await self.manager._pose_reader(self.provider) if fall_on else None
+            if self.reader is None:
+                self.detector = None
+            elif self.detector is None:
+                self.detector = falls.FallDetector(sensitivity=sensitivity, stay_down_seconds=stay_down, aspect=fall_aspect)
+            else:
+                self.detector.sensitivity, self.detector.stay_down_seconds, self.detector.aspect = sensitivity, stay_down, fall_aspect
+        if self.detector is not None and self.reader is not None:
+            try:
+                await self._watch(frame, at, track_ids, observations, tracker)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - fall detection must never stop analysis
+                logger.exception("Fall detection failed on a frame")
+
+    async def _watch(self, frame: Any, at: datetime, track_ids: list[str], observations: list[dict[str, Any]], tracker: Any) -> None:
+        from . import falls, plates, pose_models
+        from .tracks import store_poses
+        detector, reader, camera_id = self.detector, self.reader, self.camera_id
+        moment = at.timestamp()
+        picture = np.frombuffer(frame, dtype=np.uint8).reshape(MODEL_HEIGHT, MODEL_WIDTH, 3)  # The analysed frame: small, so far-off people are rough
+        # Never anyone inside a privacy mask: a masked area yields no picture to read, as for plates.
+        people = [(track_id, item) for track_id, item in zip(track_ids, observations)
+                  if item["label"] == "person" and not plates.overlaps_privacy_zone(item["box"], self.zones)][:falls.MAX_PEOPLE_PER_FRAME]
+        boxes = {track_id: item["box"] for track_id, item in people}
+        raised = []
+        drawn: dict[str, dict[str, tuple[float, float, float]]] = {}
+        for track_id, item in people:
+            full = await asyncio.to_thread(reader.pose_full, picture, item["box"])
+            pose = None if full is None else {name: point for name, point in full.items() if name in pose_models.POINTS}  # The decision uses these; the arms are only for drawing
+            if full is not None:
+                drawn[track_id] = full
+            found = detector.update(track_id, moment, pose, centre=(item["box"]["x"] + item["box"]["width"] / 2, item["box"]["y"] + item["box"]["height"] / 2))
+            if found:
+                raised.append(found)
+        if drawn:
+            await self.manager._db(_with_db, store_poses, camera_id, at, drawn)  # So Playback can draw the skeleton; a failure here never stops detection
+        raised += detector.tick(moment, set(boxes))
+        detector.forget({track.id for track in tracker.active}, moment)
+        for found in raised:
+            await self.manager._db(falls.store_fall, camera_id, found.track_id, datetime.fromtimestamp(found.at, timezone.utc), found.down_seconds,
+                                   boxes.get(found.track_id) or falls.FULL_FRAME_BOX)
