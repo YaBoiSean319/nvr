@@ -376,8 +376,8 @@ class RecordingManager:
                 with connect() as db:
                     rows = db.execute("SELECT id FROM cameras").fetchall()
                 await asyncio.gather(*(self.sync_camera(row["id"]) for row in rows))
-                for row in rows:
-                    self._sync_coverage(row["id"])
+                # Each camera's coverage check writes, and a write waits for the database's lock: in a thread, as the watch does.
+                await asyncio.to_thread(self._sync_all_coverage, [row["id"] for row in rows])
             except asyncio.CancelledError:
                 raise
             except sqlite3.Error:
@@ -465,6 +465,10 @@ class RecordingManager:
                 db.execute("UPDATE coverage_intervals SET ends_at=? WHERE id=?", (checked, interval["id"]))
                 db.execute("INSERT INTO coverage_intervals(camera_id,coverage_kind,reason,reason_code,starts_at,ends_at,checked_at) VALUES(?,?,?,?,?,?,?)",
                            (interval["camera_id"], "failure", "The recorder was not running", "worker_restart", checked, now.isoformat(), now.isoformat()))
+
+    def _sync_all_coverage(self, camera_ids: list[str]) -> None:
+        for camera_id in camera_ids:
+            self._sync_coverage(camera_id)
 
     def _sync_coverage(self, camera_id: str) -> None:
         with connect() as db:
@@ -875,20 +879,25 @@ class RecordingManager:
         """Every two seconds while FFmpeg runs: index the finished segments, mark the video fresh when a file is being written, and say whether the
         recording is current ("recording") or has stalled (the start of the fault is kept)."""
         while process.returncode is None and not self.stopping:
-            await asyncio.to_thread(self._index_csv, camera_id, list_path, output_dir)
-            if await asyncio.to_thread(newest_is_fresh, output_dir, "segment-*.mp4"):
-                self._mark_video_fresh(camera_id)
-            recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
-            with connect() as db:
-                latest = db.execute(
-                    "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
-                    (camera_id,),
-                ).fetchone()["latest"]
-                if latest and latest < recent_cutoff:  # Written here, while the connection is open: leaving the block closes it (#278)
-                    db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
-            if latest and latest >= recent_cutoff:
-                self._set_status(camera_id, "recording")
+            # Its writes wait for the database's lock: in a thread, so that a wait never stops every camera's recording and the heartbeat.
+            await asyncio.to_thread(self._watch_pass, camera_id, list_path, output_dir, segment_duration)
             await asyncio.sleep(2)
+
+    def _watch_pass(self, camera_id: str, list_path: Path, output_dir: Path, segment_duration: int) -> None:
+        """One pass of the watch over a running recording. Blocking, so the watch runs it in a thread."""
+        self._index_csv(camera_id, list_path, output_dir)
+        if newest_is_fresh(output_dir, "segment-*.mp4"):
+            self._mark_video_fresh(camera_id)
+        recent_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=segment_duration * 2)).isoformat()
+        with connect() as db:
+            latest = db.execute(
+                "SELECT MAX(ends_at) AS latest FROM recording_segments WHERE camera_id=?",
+                (camera_id,),
+            ).fetchone()["latest"]
+            if latest and latest < recent_cutoff:  # Written here, while the connection is open: leaving the block closes it (#278)
+                db.execute("UPDATE cameras SET recording_fault_since=COALESCE(recording_fault_since,strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=?", (camera_id,))
+        if latest and latest >= recent_cutoff:
+            self._set_status(camera_id, "recording")
 
     async def _run_continuous(self, camera_id: str, expected_mode: str = "continuous") -> None:
         executable = shutil.which("ffmpeg")
