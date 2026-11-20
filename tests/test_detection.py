@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.test_support import principal
 
+import asyncio
 import os
 import tempfile
 import time
@@ -64,6 +65,16 @@ class DetectionApiTests(unittest.TestCase):
         self.active_user = principal(2, "administrator", "administrator")
         manager = app.state.detectors
         manager.detector = object()
+
+        async def connecting(source, fps):
+            # A camera still connecting, as a real one is just after analysis is switched on. The camera's address goes nowhere, and the
+            # failure to reach it used to land before the coverage below was read on a busy machine: "failed", not "unanalyzed".
+            await asyncio.Event().wait()
+            yield b""
+
+        streams = patch("app.detection._raw_frames", connecting)
+        streams.start()
+        self.addCleanup(streams.stop)
         saved = self.client.put(f"/api/cameras/{self.camera_id}/ai", json={
             "enabled": True, "analysis_fps": 0.5, "confidence_threshold": 0.6,
             "use_substream": True, "zones": [{"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8}],
