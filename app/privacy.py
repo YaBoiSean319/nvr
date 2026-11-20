@@ -420,6 +420,12 @@ async def _save(camera_id: str, zones: list[dict[str, float]], actor_id: int) ->
             camera_side = "failed"
     elif zones:
         camera_side = "unsupported"
+    # Saved from the web server: in a thread, since the transaction waits for the database's lock and every other request must not.
+    return await asyncio.to_thread(_store_masks, camera_id, zones, actor_id, camera_side, tokens, since, written_to)
+
+
+def _store_masks(camera_id: str, zones: list[dict[str, float]], actor_id: int, camera_side: str, tokens: list[Any], since: str | None,
+                 written_to: str | None) -> dict[str, Any]:
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:

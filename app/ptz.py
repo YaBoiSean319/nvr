@@ -224,13 +224,18 @@ async def _run_move(move: _TourMove, now: datetime) -> bool:
         recalled = True
     except Exception:  # noqa: BLE001 - the camera did not answer: try this step again shortly
         next_step, dwell = move.step, 5.0
+    # In a thread: the write waits for the database's lock, and the background worker's loop (webhooks, its heartbeat) must not.
+    await asyncio.to_thread(_store_step, move, next_step, (now + timedelta(seconds=dwell)).isoformat())
+    return recalled
+
+
+def _store_step(move: _TourMove, next_step: int, next_at: str) -> None:
     with connect() as db:
         # Only if the tour is unchanged: an edited tour starts from its first step, a deleted one has no state.
         if db.execute("SELECT 1 FROM ptz_tours WHERE id=? AND updated_at=? AND enabled=1", (move.tour_id, move.updated_at)).fetchone():
             db.execute("INSERT INTO ptz_tour_state(tour_id,step,next_at,state) VALUES(?,?,?,'running') "
                        "ON CONFLICT(tour_id) DO UPDATE SET step=excluded.step,next_at=excluded.next_at,state='running'",
-                       (move.tour_id, next_step, (now + timedelta(seconds=dwell)).isoformat()))
-    return recalled
+                       (move.tour_id, next_step, next_at))
 
 
 async def tick_tours() -> int:
