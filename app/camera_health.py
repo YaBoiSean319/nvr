@@ -146,6 +146,13 @@ def _store(db: sqlite3.Connection, camera_id: str, values: dict[str, Any]) -> No
         db.execute(f"UPDATE camera_health SET {','.join(f'{key}=?' for key in values)} WHERE camera_id=?", (*values.values(), camera_id))
 
 
+def _store_one(camera_id: str, values: dict[str, Any]) -> None:
+    """Store one camera's result on a connection of its own. The write waits for the database's lock, so the pass runs it in a thread: on
+    the background worker's event loop it stopped webhook delivery and the worker's heartbeat while it waited."""
+    with connect() as db:
+        _store(db, camera_id, values)
+
+
 def due(db: sqlite3.Connection, now: datetime, limit: int = 200) -> list[sqlite3.Row]:
     cutoff = _iso(now - timedelta(seconds=SAMPLE_SECONDS))
     return db.execute(
@@ -168,8 +175,7 @@ async def sample_once(now: datetime | None = None) -> int:
             await refresh_one(row)
         except Exception:  # noqa: BLE001 - one camera that cannot be sampled must not stop the others, or be retried at once
             logger.exception("The health of camera %s could not be sampled", row["id"])
-            with connect() as db:
-                _store(db, row["id"], {"onvif_checked_at": _iso(now)} if row["device_service_url"] else {})
+            await asyncio.to_thread(_store_one, row["id"], {"onvif_checked_at": _iso(now)} if row["device_service_url"] else {})
 
     async def refresh_one(row: sqlite3.Row) -> None:
         values: dict[str, Any] = {}
@@ -189,8 +195,7 @@ async def sample_once(now: datetime | None = None) -> int:
                 with connect() as db:
                     return measure_recordings(db, row["id"], now)
             values.update(await asyncio.to_thread(measure), measured_at=_iso(now))
-        with connect() as db:
-            _store(db, row["id"], values)
+        await asyncio.to_thread(_store_one, row["id"], values)
 
     await asyncio.gather(*(refresh(row) for row in cameras))
     return len(cameras)

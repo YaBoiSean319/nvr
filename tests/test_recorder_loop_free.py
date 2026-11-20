@@ -9,18 +9,16 @@ holds the lock from another connection and watches the loop keep turning, as tes
 from __future__ import annotations
 
 import asyncio
-import gc
 import os
-import sqlite3
 import tempfile
-import threading
-import time
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-HOLD_SECONDS = 1.0
+from tests import loop_stall
+from tests.loop_stall import HOLD_SECONDS
+
 _ENV = ("NVR_DB_PATH", "NVR_RECORDINGS_PATH", "NVR_CREDENTIAL_KEY_PATH")
 
 
@@ -50,55 +48,10 @@ class RecorderLoopFreeTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def longest_stall_while_locked(self, work) -> float:
-        """Run ``work(manager)`` while another connection holds the write lock; return the longest the event loop went without turning.
-
-        The garbage collector is run first and kept off while this is measured, as in tests/test_loop_stays_free.py: a collection of what
-        other tests left behind pauses the whole process, not the loop alone."""
+        """Run ``work(manager)`` with a new recorder while another connection holds the write lock (tests/loop_stall.py)."""
         from app.recording import RecordingManager
-        from app.store import database_path
 
-        gc.collect()
-        gc.disable()
-        self.addCleanup(gc.enable)
-        taken, release = threading.Event(), threading.Event()
-
-        def hold() -> None:
-            other = sqlite3.connect(database_path(), timeout=5, isolation_level=None)
-            try:
-                other.execute("BEGIN IMMEDIATE")
-                taken.set()
-                release.wait(HOLD_SECONDS)
-                other.execute("ROLLBACK")
-            finally:
-                other.close()
-
-        async def body() -> float:
-            manager = RecordingManager()
-            longest, running, last = 0.0, True, time.monotonic()
-
-            async def tick() -> None:
-                nonlocal longest, last
-                while running:
-                    await asyncio.sleep(0.01)
-                    now = time.monotonic()
-                    longest, last = max(longest, now - last), now
-
-            ticker = asyncio.create_task(tick())
-            holder = threading.Thread(target=hold)
-            holder.start()
-            self.assertTrue(await asyncio.to_thread(taken.wait, 5))
-            try:
-                await asyncio.wait_for(work(manager), timeout=20)
-                # Counted here too, before the loop turns again: when the work ends with a stall, the ticker may not get to measure it.
-                longest = max(longest, time.monotonic() - last)
-            finally:
-                release.set()
-                await asyncio.to_thread(holder.join)
-                running = False
-                await ticker
-            return longest
-
-        return asyncio.run(body())
+        return loop_stall.longest_stall_while_locked(lambda: work(RecordingManager()))
 
     @staticmethod
     def one_pass_then_stop(manager, pause: float):
