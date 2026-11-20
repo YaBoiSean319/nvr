@@ -136,6 +136,15 @@ class FillTests(BackfillCase):
         self.assertEqual((probe["codec_name"], probe["width"], probe["height"]), ("h264", 640, 360))
         self.assertTrue(path.name.startswith("backfill-"))
 
+    def test_a_pass_waits_for_the_database_without_stopping_the_recorders_loop(self):
+        # Backfill runs in the recorder worker: a write that waits for the database's lock on its event loop stops every camera's
+        # recording supervision and the worker's heartbeat with it. Planning the job, starting it, each chunk and the end all write.
+        from tests.loop_stall import HOLD_SECONDS, longest_stall_while_locked
+        longest = longest_stall_while_locked(lambda: backfill.BackfillManager().tick(NOW))
+        self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while backfill waited for the write lock")
+        self.assertEqual(self.jobs()[0]["state"], "done")  # Planned and filled once the lock was free
+        self.assertGreaterEqual(len(self.backfilled()), 3)
+
     def test_backfilled_footage_is_marked_on_the_timeline_and_in_the_coverage_api(self):
         self.run_backfill()
         timeline = self.client.post("/api/playback/timeline", json={"camera_ids": [self.camera_id], "start": (START - timedelta(minutes=2)).isoformat(),
