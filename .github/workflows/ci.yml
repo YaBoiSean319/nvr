@@ -49,7 +49,7 @@ jobs:
           python-version: '3.14'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22'
+          node-version: '26'
       - name: Install FFmpeg
         # Packages are fetched in parallel and from a second mirror on retries (see the script): the Ubuntu mirror has been slow enough to time out a serial install.
         timeout-minutes: 15
@@ -118,7 +118,7 @@ jobs:
           python-version: '3.14'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22'
+          node-version: '26'
       - name: Install FFmpeg
         # Packages are fetched in parallel and from a second mirror on retries (see the script): the Ubuntu mirror has been slow enough to time out a serial install.
         timeout-minutes: 15
