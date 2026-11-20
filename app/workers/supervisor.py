@@ -299,6 +299,9 @@ class Supervisor:
                 return
 
 def main() -> int:
+    started = time.monotonic()
+    # The workers say how long after this the web interface first answered: the health check allows that long before it counts failures (#418).
+    os.environ["NVR_STARTED_AT"] = repr(time.time())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logforward.install("supervisor")
     os.umask(0o077)
@@ -308,6 +311,7 @@ def main() -> int:
     initialize()
     backup.reconcile_after_restore()
     failover.prepare_startup()  # A primary does not record until it has heard from the standby
+    logger.info("The database was ready %.1f s after the NVR started; starting the workers", time.monotonic() - started)
     supervisor = Supervisor([
         Worker("recorder", "app.workers.recorder"),
         Worker("exporter", "app.workers.exporter"),

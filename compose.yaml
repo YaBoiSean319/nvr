@@ -70,7 +70,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # Covers an upgrade, which copies (and backs up) the database before it answers; the same as the Dockerfile's (#418).
+      start_period: 300s
 
 volumes:
   nvr-data:

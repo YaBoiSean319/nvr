@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import tempfile
 import types
@@ -278,6 +279,18 @@ class MigrationTests(unittest.TestCase):
             db.execute("INSERT INTO users(id,username,password_hash,role) VALUES(1,'admin','unused','administrator')")
         version = migrations.latest_version() + 1
         return mock.patch.object(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, (version, types.SimpleNamespace(NAME="next", upgrade=lambda db: None))])
+
+    def test_an_upgrade_says_how_long_its_copies_took(self):
+        # The NVR answers nothing until these are done, so the log says how long they took (#418).
+        pending = self._database_with_a_pending_migration()
+
+        def backup_hook(path):
+            return None
+
+        with pending, mock.patch.object(migrations, "pre_migration_hooks", [backup_hook]), self.assertLogs(migrations.logger, level="INFO") as logged:
+            initialize()
+        self.assertTrue(any(re.search(r"The pre-migration copy took \d+\.\d s", line) for line in logged.output), logged.output)
+        self.assertTrue(any(re.search(r"The pre-migration hook backup_hook took \d+\.\d s", line) for line in logged.output), logged.output)
 
     def test_a_full_disk_removes_older_copies_to_make_room_and_the_upgrade_goes_ahead(self):
         pending = self._database_with_a_pending_migration()

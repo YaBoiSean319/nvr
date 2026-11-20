@@ -58,6 +58,8 @@ COPY --from=web --chown=nvr:nvr /app/web_dist ./app/web_dist
 COPY --chown=nvr:nvr scripts ./scripts
 USER nvr
 EXPOSE 8280
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# The start period covers an upgrade: before a schema change the NVR copies the database, and backs it up when backups are on, and answers
+# nothing until that is done (about a minute and a half for a 1.2 GB database on a slow disk). Kept the same in compose.yaml (#418).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
   CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('NVR_LISTEN_PORT', '8280') + '/healthz', timeout=3)"
 CMD ["python", "-m", "app.entrypoint"]
