@@ -59,5 +59,26 @@ class HealthLoopFreeTests(unittest.TestCase):
         self.assertEqual(measured, 3)  # Each camera's result was still stored once the lock was free
 
 
+class CapabilityLoopFreeTests(HealthLoopFreeTests):
+    """A camera capability's recheck stores its answer the same way; it runs in the background worker and when an administrator asks."""
+
+    def test_a_recheck_stores_its_answer_without_stopping_the_loop(self):
+        from app import capabilities
+        from app.store import connect
+
+        answers: list = []
+
+        async def recheck():
+            answers.append(await capabilities.recheck(self.camera_ids[0], "motion"))  # No event service set: answered at once, then stored
+
+        longest = longest_stall_while_locked(recheck)
+        self.assertLess(longest, HOLD_SECONDS / 2, "the event loop stopped while a capability's answer waited for the write lock")
+        self.assertEqual(answers[0]["state"], "unsupported")
+        with connect() as db:
+            stored = db.execute("SELECT state FROM camera_capabilities WHERE camera_id=? AND capability='motion'", (self.camera_ids[0],)).fetchone()
+        self.assertEqual(stored["state"], "unsupported")
+
+    test_a_pass_over_the_fleet_waits_for_the_lock_without_stopping_the_loop = None  # type: ignore[assignment]  # The health pass is tested above
+
 if __name__ == "__main__":
     unittest.main()
