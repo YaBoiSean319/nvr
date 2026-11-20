@@ -50,6 +50,12 @@ test("an administrator connects Microsoft 365 with a code and a link, and sends 
   await expect(connection.getByRole("status").filter({ hasText: "Connected as" })).toContainText("alerts@contoso.com", { timeout: 15_000 });
   await expect(page.locator("body")).not.toContainText("ABCD-EFGH");
 
+  // Connected, the page's three parts show one at a time (#256): the connection first, the test and the problem emails on their own tabs.
+  const sections = page.getByRole("tablist", { name: "Email sections" });
+  await expect(sections.getByRole("tab")).toHaveText(["Connection", "Test email", "NVR problems"]);
+  await expect(page.getByRole("region", { name: "Send a test email" })).toBeHidden();
+  await sections.getByRole("tab", { name: "Test email" }).click();
+  await expect(connection).toBeHidden();
   const test_ = page.getByRole("region", { name: "Send a test email" });
   await test_.getByLabel("Send a test email to").fill("desk@contoso.com");
   await test_.getByRole("button", { name: "Send test email" }).click();
@@ -61,6 +67,7 @@ test("an administrator connects Microsoft 365 with a code and a link, and sends 
   await expect(accepted).toContainText("Microsoft's request id: req-123.");
   expect(sent.at(-1)).toEqual({ to: "desk@contoso.com" });
 
+  await sections.getByRole("tab", { name: "NVR problems" }).click();
   const problems = page.getByRole("region", { name: "Emails about NVR problems" });
   await problems.getByLabel("Email these problems").check();
   await problems.getByLabel("Send to").fill("it@contoso.com, desk@contoso.com");
