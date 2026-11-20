@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -83,6 +84,31 @@ STARTUP_ORDER = (
 SHUTDOWN_ORDER = ("backups", "rules", "detectors", "exports", "capabilities", "hardening", "self_test", "footage_chain", "ptz_tracking", "ptz_tours", "console", "home_assistant", "external_events", "camera_health", "digests", "rule_actions", "push", "webhooks", "failover", "tiering", "heartbeat", "recorders")
 
 
+
+_IMPORTED_AT = time.monotonic()
+
+
+def _process_seconds() -> float:
+    """How long this process has been running, from the system's record of when it started (its imports included); failing that, since this module loaded."""
+    try:
+        start_ticks = int(Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19])
+        return float(Path("/proc/uptime").read_text().split()[0]) - start_ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return time.monotonic() - _IMPORTED_AT
+
+
+def _log_ready() -> None:
+    """One line when the web interface starts answering, with how long that took: Docker's health check allows a set time for it (#418).
+    Written to uvicorn's server log, beside its "Application startup complete": the web worker's log shows that one, not this module's."""
+    logger = logging.getLogger("uvicorn.error")
+    since_process = _process_seconds()
+    try:
+        since_nvr = time.time() - float(os.environ["NVR_STARTED_AT"])
+    except (KeyError, ValueError):
+        logger.info("The web interface is answering, %.1f s after its process started", since_process)
+        return
+    logger.info("The web interface is answering, %.1f s after the NVR started (%.1f s after its process started)", since_nvr, since_process)
+
 def create_app(*, start_workers: bool = True) -> FastAPI:
     """Build the web application.
 
@@ -130,6 +156,7 @@ def create_app(*, start_workers: bool = True) -> FastAPI:
                 # The live streams are shared in this process, so this is where they are held ready, supervised or not.
                 await keeper.start()
                 await app.state.bulk_add.start()
+            _log_ready()
             yield
         finally:
             await app.state.bulk_add.stop()

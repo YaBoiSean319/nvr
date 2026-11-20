@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -145,12 +146,18 @@ def migrate(path: Path, connect: Callable[[], sqlite3.Connection]) -> list[int]:
             )
         copy_path = None
         if holds_data:
+            # Both copies take time in proportion to the database's size, and the NVR answers nothing until they are done: say how long (#418).
+            started = time.monotonic()
             copy_path = _pre_migration_copy(db, path, max(applied, default=0), pending[-1][0])
+            logger.info("The pre-migration copy took %.1f s", time.monotonic() - started)
             for hook in pre_migration_hooks:
+                started = time.monotonic()
                 try:
                     hook(path)
                 except Exception:  # noqa: BLE001 - the local copy still protects the upgrade
                     logger.exception("Pre-migration hook failed; continuing with the local copy at %s", copy_path)
+                else:
+                    logger.info("The pre-migration hook %s took %.1f s", getattr(hook, "__name__", hook), time.monotonic() - started)
 
         db.execute("PRAGMA journal_mode = WAL")
         db.execute(
