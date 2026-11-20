@@ -212,3 +212,53 @@ test("Bulk Add sends passwords exactly as written (quotes, commas, a header with
   expect(sent[1].cameras.map(camera => [camera.host, camera.password])).toEqual([["10.7.0.2", 'pa"ss'], ["[::1]:8080", "pw"]]);
   await expectNoSecretKept(page);
 });
+
+test("Quick Add shows each step of the check as it is decided, not all at once at the end (#173)", async ({ page }) => {
+  // The check is told by the NVR one line at a time; here the browser's fetch hands those lines over when the test says, so what the page
+  // shows between them can be checked. The other Quick Add journeys use the real check.
+  await page.addInitScript(() => {
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (String(input).endsWith("/api/cameras/inspect/stream")) {
+        const stream = new ReadableStream({ start(controller) { window.__checkLines = controller; } });
+        return Promise.resolve(new Response(stream, { status: 200, headers: { "Content-Type": "application/x-ndjson" } }));
+      }
+      return realFetch(input, init);
+    };
+  });
+  const send = (update) => page.evaluate(line => window.__checkLines.enqueue(new TextEncoder().encode(line + "\n")), JSON.stringify(update));
+  const step = (id, label, state, detail = "") => ({ id, label, state, detail });
+  const STEPS = [["connect", "Connecting to camera"], ["authenticate", "Authenticating"], ["identify", "Identifying device"], ["streams", "Discovering streams"],
+    ["motion", "Configuring motion events"], ["video", "Verifying video"], ["ready", "Camera ready"]];
+  seedFixtures(0);
+  await signInNext(page);
+  await openAdd(page, "Quick Add");
+  const form = page.getByRole("form", { name: "Add a camera by address" });
+  await form.getByLabel("Camera address").fill("192.0.2.20");
+  await form.getByRole("button", { name: "Check only" }).click();
+  await page.waitForFunction(() => Boolean(window.__checkLines));
+
+  await send({ type: "steps", steps: STEPS.map(([id, label]) => step(id, label, "pending")) });
+  const live = form.getByRole("list", { name: "Checking the camera" });
+  const item = name => live.getByRole("listitem").filter({ hasText: name });
+  await expect(item("Connecting to camera")).toContainText("Checking…");
+  await expect(item("Authenticating")).toContainText("Waiting");
+
+  await send({ type: "step", step: step("connect", "Connecting to camera", "ok") });
+  await expect(item("Connecting to camera")).toContainText("Working");
+  await expect(item("Authenticating")).toContainText("Checking…");
+  await send({ type: "step", step: step("authenticate", "Authenticating", "ok", "Signed in with digest") });
+  await send({ type: "step", step: step("identify", "Identifying device", "ok", "Fixture Make Model-9") });
+  await expect(item("Identifying device")).toContainText("Fixture Make Model-9");
+  await expect(item("Discovering streams")).toContainText("Checking…");
+  await expect(form.getByRole("list", { name: "Steps" })).toHaveCount(0);  // No report yet
+
+  const done = STEPS.map(([id, label]) => step(id, label, ["motion", "video", "ready"].includes(id) ? "failed" : "ok"));
+  await send({ type: "report", report: { ok: false, device: { manufacturer: "Fixture Make", model: "Model-9" }, brand: "other", device_service_url: null, profiles: [], selection: null,
+    steps: done, capabilities: { discovery: { state: "ok", message: "An ONVIF device service answered" } }, diagnostics: [] } });
+  await page.evaluate(() => window.__checkLines.close());
+  await expect(form.getByRole("list", { name: "Steps" }).getByRole("listitem")).toHaveCount(7);
+  await expect(live).toHaveCount(0);
+  await expect(form.getByLabel("Camera name")).toHaveValue("Fixture Make Model-9 192.0.2.20");
+  await expect(form.getByRole("button", { name: "Add camera anyway" })).toBeVisible();
+});

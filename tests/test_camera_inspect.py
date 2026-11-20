@@ -275,6 +275,77 @@ class OnboardingApiTests(GrantCase):
         self.assertNotIn("Could not retrieve ONVIF stream profiles", response.text)
 
 
+    # --- the check told as it happens (#173) -------------------------------------------------------------------------------------
+
+    def stream(self, body: dict, client=None) -> list[dict]:
+        with (client or self.admin).stream("POST", "/api/cameras/inspect/stream", json=body) as response:
+            self.assertEqual(response.status_code, 200, response.read())
+            self.assertEqual(response.headers["content-type"].split(";")[0], "application/x-ndjson")
+            return [json.loads(line) for line in response.iter_lines() if line]
+
+    def test_the_check_is_told_step_by_step_and_ends_with_the_same_report(self):
+        updates = self.stream(self.body())
+        self.assertEqual(updates[0]["type"], "steps")
+        self.assertEqual([step["id"] for step in updates[0]["steps"]], [key for key, _ in camera_inspect.STEPS])
+        self.assertEqual({step["state"] for step in updates[0]["steps"]}, {"pending"})
+        told = [update["step"] for update in updates[1:-1]]
+        self.assertTrue(all(update["type"] == "step" for update in updates[1:-1]))
+        self.assertEqual([step["id"] for step in told[:4]], ["connect", "authenticate", "identify", "streams"])  # In the order they happen
+        self.assertEqual(updates[-1]["type"], "report")
+        report = updates[-1]["report"]
+        self.assertTrue(report["ok"])
+        self.assertEqual({step["id"]: step["state"] for step in told}, {step["id"]: step["state"] for step in report["steps"] if step["state"] != "skipped"})
+        whole = self.admin.post("/api/cameras/inspect", json=self.body()).json()
+        self.assertEqual([(step["id"], step["state"]) for step in report["steps"]], [(step["id"], step["state"]) for step in whole["steps"]])
+        for secret in (USER, PASSWORD, "rtsp://"):
+            self.assertNotIn(secret, json.dumps(updates))
+        self.assertEqual(len(self.audit("camera_inspected")), 2)  # One for each check, the told one included
+
+    def test_each_step_is_sent_as_soon_as_it_is_known(self):
+        import threading
+
+        read_first = threading.Event()
+
+        async def slow(*args, on_step=None, **kwargs):
+            on_step({"id": "connect", "label": "Connecting to camera", "state": "ok", "detail": ""})
+            # The rest of the check waits until the page has the first step: if anything held the answer back, it never would.
+            arrived = await asyncio.to_thread(read_first.wait, 10)
+            return {"ok": arrived, "steps": [], "device": {}}
+
+        with mock.patch.object(camera_inspect, "inspect_camera", slow), self.admin.stream("POST", "/api/cameras/inspect/stream", json=self.body()) as response:
+            lines = response.iter_lines()
+            self.assertEqual(json.loads(next(lines))["type"], "steps")
+            self.assertEqual(json.loads(next(lines))["step"]["id"], "connect")
+            read_first.set()
+            last = json.loads(next(line for line in lines if line))
+        self.assertEqual((last["type"], last["report"]["ok"]), ("report", True))
+
+    def test_a_page_that_goes_away_ends_the_check(self):
+        import threading
+
+        ended = threading.Event()
+
+        async def endless(*args, on_step=None, **kwargs):
+            on_step({"id": "connect", "label": "Connecting to camera", "state": "ok", "detail": ""})
+            try:
+                await asyncio.sleep(30)
+            finally:
+                ended.set()
+
+        with mock.patch.object(camera_inspect, "inspect_camera", endless), self.admin.stream("POST", "/api/cameras/inspect/stream", json=self.body()) as response:
+            lines = response.iter_lines()
+            next(lines)
+            next(lines)
+        self.assertTrue(ended.wait(10), "the check went on after the page closed the connection")
+
+    def test_the_told_check_is_validated_and_only_administrators_may_make_it(self):
+        for body in ({"host": ""}, {"host": "bad host"}, {"host": "127.0.0.1", "username": USER}):
+            self.assertEqual(self.admin.post("/api/cameras/inspect/stream", json=body).status_code, 422, body)
+        self.assertEqual(self.limited.post("/api/cameras/inspect/stream", json=self.body()).status_code, 403)
+        from fastapi.testclient import TestClient
+        self.assertEqual(TestClient(self.app).post("/api/cameras/inspect/stream", json=self.body()).status_code, 401)
+
+
 class ResolveTests(InspectCase):
     async def test_the_default_stream_is_the_h264_main_not_the_first_profile_which_is_mjpeg(self):
         camera = self.camera()

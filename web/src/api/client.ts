@@ -57,6 +57,50 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   return parsed as T;
 }
 
+/**
+ * POST and read an answer of one JSON object a line as it arrives, handing each to `onLine` (a long task that tells its progress).
+ * Errors are the same as `api`'s: a refused request throws `ApiError` before any line is read.
+ */
+export async function apiLines(path: string, body: unknown, onLine: (line: unknown) => void, signal?: AbortSignal): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      signal,
+      credentials: "same-origin",
+      headers: { Accept: "application/x-ndjson", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError(0, "The NVR could not be reached. Check the network connection and try again.", null);
+  }
+  if (!response.ok || !response.body) {
+    const text = await response.text();
+    const parsed: unknown = text ? safeJson(text) : null;
+    if (response.status === 401) sessionExpiredListeners.forEach(listener => listener());
+    throw new ApiError(response.status, describeError(response.status, parsed), parsed);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  for (;;) {
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      throw new ApiError(0, "The connection to the NVR was lost before it finished.", null);
+    }
+    pending += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) if (line.trim()) onLine(safeJson(line));
+    if (chunk.done) break;
+  }
+  if (pending.trim()) onLine(safeJson(pending));
+}
+
 function safeJson(text: string): unknown {
   try {
     return JSON.parse(text);

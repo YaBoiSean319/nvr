@@ -1,4 +1,4 @@
-import type { InspectReport } from "@/api/types";
+import type { InspectReport, InspectStep } from "@/api/types";
 import { CAPABILITY_LABEL, STATE_TEXT } from "./inspect";
 
 const MARK: Record<string, string> = { ok: "✓", failed: "✕", skipped: "–", pending: "·" };
@@ -21,16 +21,7 @@ export function InspectionReport({ report }: { report: InspectReport }) {
   };
   return (
     <section className="inspection" aria-label="Camera check">
-      <ol className="inspection-steps" aria-label="Steps">
-        {report.steps.map(step => (
-          <li key={step.id} data-state={step.state}>
-            <span className="step-mark" aria-hidden="true">{MARK[step.state] ?? "·"}</span>
-            <span className="step-label">{step.label}</span>
-            <span className="step-state">{STATE_TEXT[step.state] ?? step.state}</span>
-            {step.detail ? <span className="step-detail muted">{step.detail}</span> : null}
-          </li>
-        ))}
-      </ol>
+      <InspectionSteps steps={report.steps} label="Steps" />
       {device ? <p><strong>{device}</strong>{report.device.firmware ? <span className="muted"> · firmware {report.device.firmware}</span> : null}</p> : null}
       {record ? (
         <p className="muted">Recording: {size(record)}.{live ? ` Live view: ${size(live)}.` : " Live view uses the main stream."}</p>
@@ -67,5 +58,22 @@ export function InspectionReport({ report }: { report: InspectReport }) {
         <button type="button" className="button" onClick={download}>Download diagnostics</button>
       </details>
     </section>
+  );
+}
+
+/** The steps of a check and where each stands: the finished report's, or (`live`) a check still going, whose next step is the one being checked. */
+export function InspectionSteps({ steps, label, live = false }: { steps: InspectStep[]; label: string; live?: boolean }) {
+  const current = live ? steps.find(step => step.state === "pending")?.id : undefined;
+  return (
+    <ol className="inspection-steps" aria-label={label}>
+      {steps.map(step => (
+        <li key={step.id} data-state={step.id === current ? "running" : step.state}>
+          <span className="step-mark" aria-hidden="true">{step.id === current ? "…" : MARK[step.state] ?? "·"}</span>
+          <span className="step-label">{step.label}</span>
+          <span className="step-state">{step.id === current ? "Checking…" : STATE_TEXT[step.state] ?? step.state}</span>
+          {step.detail ? <span className="step-detail muted">{step.detail}</span> : null}
+        </li>
+      ))}
+    </ol>
   );
 }
