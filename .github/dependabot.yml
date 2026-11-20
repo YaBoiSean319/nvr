@@ -1,4 +1,6 @@
 # Actions are pinned to commit SHAs (#274); Dependabot proposes the updates, keeping the version comments current.
+# Each group bundles minor and patch updates into one weekly pull request. A major version comes as a pull request of its own, so a
+# breaking upgrade (a new React Router, TypeScript or Vite) is judged and fixed by itself and does not hold the safe updates back.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -8,6 +10,7 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
   # Python packages: the direct, pinned ones are in requirements.in and requirements-dev.in; the hashed lock (requirements.txt, requirements-dev.txt) is made by
   # scripts/lock-requirements.sh, and tests/test_requirements_lock.py fails a pull request that changes one without the other.
   - package-ecosystem: pip
@@ -17,15 +20,24 @@ updates:
     groups:
       python:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
   # The base images in the Dockerfile and the tunnel images in the remote-access overlays are pinned by digest (#384, #385): Dependabot proposes
   # the new digest and version together.
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    # A new Python or Node line for the image is a migration, not an update: the locked packages may have no build for it (Python 3.15 had
+    # none for one of them, so the image did not build). Those are chosen on purpose; patch releases and new digests of the same line come here.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
     groups:
       images:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: docker-compose
     directory: /
     schedule:
@@ -33,6 +45,7 @@ updates:
     groups:
       compose-images:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
   # The web interface's packages and the root test packages (Playwright), one pull request a week each.
   - package-ecosystem: npm
     directory: /web
@@ -41,6 +54,7 @@ updates:
     groups:
       web:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -48,3 +62,4 @@ updates:
     groups:
       test-tools:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
