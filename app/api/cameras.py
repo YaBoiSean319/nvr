@@ -490,29 +490,36 @@ async def _probe_new_camera_stream(payload: CameraCreateRequest, stream_url: str
     return capability, video_problem
 
 
+async def _check_live_substream(payload: Any, resolved_service_url: str | None, capability: dict[str, Any]) -> str:
+    """The lower-resolution stream chosen for grid viewing (``payload.live_substream_profile_token``), checked: it resolves, opens, and is
+    smaller than the main stream (``capability``). Returns its address, or raises a 422 saying which check failed. One check for adding a
+    camera and for changing its source (#387); a network error while it is looked up is "could not be resolved" for both."""
+    try:
+        substream = await resolve_camera_stream(
+            payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
+            resolved_service_url or payload.device_service_url, payload.live_substream_profile_token, payload.camera_brand,
+        )
+        safe_stream_url(substream.stream_url)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="The selected live substream could not be resolved") from exc
+    substream_capability = await probe_stream(substream.stream_url)
+    if not substream_capability.get("reachable"):
+        raise HTTPException(status_code=422, detail="The selected live substream failed its video test")
+    main_video = capability.get("video") or {}
+    sub_video = substream_capability.get("video") or {}
+    main_pixels = int(main_video.get("width") or 0) * int(main_video.get("height") or 0)
+    sub_pixels = int(sub_video.get("width") or 0) * int(sub_video.get("height") or 0)
+    if not main_pixels or not sub_pixels or sub_pixels >= main_pixels:
+        raise HTTPException(status_code=422, detail="Choose an ONVIF profile with a lower video resolution for grid viewing")
+    return substream.stream_url
+
+
 async def _resolve_live_substream(payload: CameraCreateRequest, resolved_service_url: str | None, capability: dict[str, Any], video_problem: str | None) -> str | None:
     """The lower-resolution stream chosen for grid viewing, checked: it resolves, opens, and is smaller than the main stream. A camera saved anyway uses the main stream instead."""
     try:
         if not payload.live_substream_profile_token or video_problem is not None:
             return None
-        try:
-            substream = await resolve_camera_stream(
-                payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
-                resolved_service_url or payload.device_service_url, payload.live_substream_profile_token, payload.camera_brand,
-            )
-            safe_stream_url(substream.stream_url)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="The selected live substream could not be resolved") from exc
-        substream_capability = await probe_stream(substream.stream_url)
-        if not substream_capability.get("reachable"):
-            raise HTTPException(status_code=422, detail="The selected live substream failed its video test")
-        main_video = capability.get("video") or {}
-        sub_video = substream_capability.get("video") or {}
-        main_pixels = int(main_video.get("width") or 0) * int(main_video.get("height") or 0)
-        sub_pixels = int(sub_video.get("width") or 0) * int(sub_video.get("height") or 0)
-        if not main_pixels or not sub_pixels or sub_pixels >= main_pixels:
-            raise HTTPException(status_code=422, detail="Choose an ONVIF profile with a lower video resolution for grid viewing")
-        return substream.stream_url
+        return await _check_live_substream(payload, resolved_service_url, capability)
     except HTTPException:
         if not payload.save_anyway:
             raise
@@ -702,26 +709,7 @@ async def update_camera_source(
     if not capability.get("reachable"):
         raise HTTPException(status_code=422, detail=str(capability.get("reason", "Camera stream could not be opened")))
 
-    live_substream_url = None
-    if payload.live_substream_profile_token:
-        try:
-            substream = await resolve_camera_stream(
-                payload.camera_ip or "", payload.camera_username or "", payload.camera_password or "",
-                resolved_service_url or payload.device_service_url, payload.live_substream_profile_token, payload.camera_brand,
-            )
-            safe_stream_url(substream.stream_url)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="The selected live substream could not be resolved") from exc
-        substream_capability = await probe_stream(substream.stream_url)
-        if not substream_capability.get("reachable"):
-            raise HTTPException(status_code=422, detail="The selected live substream failed its video test")
-        main_video = capability.get("video") or {}
-        sub_video = substream_capability.get("video") or {}
-        main_pixels = int(main_video.get("width") or 0) * int(main_video.get("height") or 0)
-        sub_pixels = int(sub_video.get("width") or 0) * int(sub_video.get("height") or 0)
-        if not main_pixels or not sub_pixels or sub_pixels >= main_pixels:
-            raise HTTPException(status_code=422, detail="Choose an ONVIF profile with a lower video resolution for grid viewing")
-        live_substream_url = substream.stream_url
+    live_substream_url = await _check_live_substream(payload, resolved_service_url, capability) if payload.live_substream_profile_token else None
 
     selected_service_url = resolved_service_url or payload.device_service_url
     def save():

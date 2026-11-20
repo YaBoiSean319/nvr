@@ -78,10 +78,11 @@ class LiveSubstreamCheckTests(unittest.TestCase):
             with self.subTest(path):
                 self.assertEqual((response.status_code, response.json()["detail"]), (422, "The selected live substream could not be resolved"))
 
-    def test_a_network_error_while_it_is_looked_up(self):
-        answers = self.both([MAIN, OSError("connection reset")], [HIGH])
-        self.assertEqual((answers["change"].status_code, answers["change"].json()["detail"]), (422, "The selected live substream could not be resolved"))
-        self.assertEqual(answers["add"].status_code, 500)  # A bug: adding a camera does not catch it, where changing a source does
+    def test_a_network_error_while_it_is_looked_up_is_refused_with_its_reason(self):
+        # Adding a camera used to end with a server error (500) here, where changing a source gave this answer.
+        for path, response in self.both([MAIN, OSError("connection reset")], [HIGH]).items():
+            with self.subTest(path):
+                self.assertEqual((response.status_code, response.json()["detail"]), (422, "The selected live substream could not be resolved"))
 
     def test_a_stream_that_does_not_open_is_refused(self):
         for path, response in self.both([MAIN, SUB], [HIGH, UNREACHABLE]).items():
