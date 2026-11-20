@@ -117,12 +117,14 @@ class RecorderLoopFreeTests(unittest.TestCase):
     def test_the_watch_over_a_running_recording_waits_for_the_lock_without_stopping_the_loop(self):
         output_dir = self.root / "recordings" / "run"
         output_dir.mkdir(parents=True)
-        (output_dir / "segment-0001.mp4").write_bytes(b"being written")  # A fresh file: the video is marked fresh, a database write
 
         class Running:
             returncode = None
 
         async def one_pass(manager):
+            # A file written just now: the video is marked fresh, a database write. Written here, not before the measurement starts: a file
+            # counts as fresh for 10 s, and late in the full suite the garbage collection before the measurement can take several seconds.
+            (output_dir / "segment-0001.mp4").write_bytes(b"being written")
             with patch("app.recording.asyncio.sleep", self.one_pass_then_stop(manager, 2)):
                 await manager._watch_continuous_output(self.camera_id, Running(), output_dir / "segments.csv", output_dir, 6)
 
@@ -136,7 +138,6 @@ class RecorderLoopFreeTests(unittest.TestCase):
     def test_the_watch_over_a_motion_buffer_waits_for_the_lock_without_stopping_the_loop(self):
         spool = self.root / "spool"
         spool.mkdir()
-        (spool / "segment-0001.ts").write_bytes(b"being written")  # A fresh segment: the video is marked fresh, a database write
 
         class Running:
             returncode = None
@@ -146,6 +147,7 @@ class RecorderLoopFreeTests(unittest.TestCase):
                 pass  # No motion event under way: nothing to save
 
         async def one_pass(manager):
+            (spool / "segment-0001.ts").write_bytes(b"being written")  # A fresh segment, written just now as above
             with patch("app.recording.asyncio.sleep", self.one_pass_then_stop(manager, 1)):
                 await manager._watch_motion_buffer(self.camera_id, Running(), spool, Assembler(), "rtsp://camera.invalid/main")
 
