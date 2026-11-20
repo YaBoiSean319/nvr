@@ -19,20 +19,20 @@ export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolea
   const cameras = useCameras();
   const current = useMemo(() => neighbours.data ? { camera_ids: neighbours.data.camera_ids } : undefined, [neighbours.data]);
   const tab = useTabDraft(current, {
-    label: `Neighbours for ${camera.name}`,
+    label: `Neighbors for ${camera.name}`,
     editable: admin,
     save: async (draft, base) => {
       try {
         const saved = await api<Neighbours>(at(camera.id), { method: "PUT", body: draft });
         client.setQueryData(queryKey, saved);
-        return { ok: true, base: saved, outcome: { tone: "good", text: `Saved ${saved.camera_ids.length} neighbouring camera${saved.camera_ids.length === 1 ? "" : "s"}.` } };
+        return { ok: true, base: saved, outcome: { tone: "good", text: `Saved ${saved.camera_ids.length} neighboring camera${saved.camera_ids.length === 1 ? "" : "s"}.` } };
       } catch (error) {
-        return { ok: false, base, outcome: { tone: "bad", text: `Neighbours not saved: ${failureText(error)}.` } };
+        return { ok: false, base, outcome: { tone: "bad", text: `Neighbors not saved: ${failureText(error)}.` } };
       }
     },
   });
-  if (neighbours.isPending || cameras.isPending) return <p className="muted">Loading neighbours…</p>;
-  if (neighbours.error || !tab.draft) return <p className="notice" data-tone="bad" role="alert">{failureText(neighbours.error, "Neighbours could not be loaded.")}</p>;
+  if (neighbours.isPending || cameras.isPending) return <p className="muted">Loading neighbors…</p>;
+  if (neighbours.error || !tab.draft) return <p className="notice" data-tone="bad" role="alert">{failureText(neighbours.error, "Neighbors could not be loaded.")}</p>;
   const chosen = tab.draft.camera_ids;
   const max = neighbours.data!.max;
   const byId = new Map((cameras.data ?? []).map(item => [item.id, item]));
@@ -44,12 +44,12 @@ export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolea
   };
 
   return (
-    <form className="tab-form" aria-label="Neighbouring cameras" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
+    <form className="tab-form" aria-label="Neighboring cameras" noValidate onSubmit={event => { event.preventDefault(); void tab.save(); }}>
       <p className="muted field-hint">
         When a rule set to pop into Live raises an alarm on {camera.name}, Live shows {camera.name} first and then these cameras, in this order.
       </p>
       <fieldset className="field-group" disabled={!admin}>
-        <legend>Neighbours ({chosen.length} of {max})</legend>
+        <legend>Neighbors ({chosen.length} of {max})</legend>
         {chosen.length ? (
           <ol className="choice-list neighbour-list">
             {chosen.map((id, index) => (
@@ -63,8 +63,8 @@ export function NeighboursTab({ camera, admin }: { camera: Camera; admin: boolea
               </li>
             ))}
           </ol>
-        ) : <p className="muted field-hint">No neighbours: an alarm shows only {camera.name}.</p>}
-        <label className="field"><span>Add a neighbour</span>
+        ) : <p className="muted field-hint">No neighbors: an alarm shows only {camera.name}.</p>}
+        <label className="field"><span>Add a neighbor</span>
           <select value="" disabled={chosen.length >= max || !others.length} onChange={event => event.target.value && tab.change({ camera_ids: [...chosen, event.target.value] })}>
             <option value="">{others.length ? "Choose a camera…" : "No other cameras"}</option>
             {others.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}

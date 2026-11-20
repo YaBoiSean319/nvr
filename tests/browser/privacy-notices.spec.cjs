@@ -5,7 +5,7 @@ test("an administrator requires purposes, fills one in, and the notice follows",
   seedFixtures(2);
   await signInNext(page);
   await page.goto("/settings/privacy");
-  await page.getByLabel("Organisation").fill("Harbour Depot Ltd");
+  await page.getByLabel("Organization").fill("Harbour Depot Ltd");
   await page.getByLabel("Contact email").fill("privacy@harbour.example");
   await page.getByLabel("Require a purpose for every retention policy").check();
   await page.getByRole("button", { name: "Save privacy settings" }).click();

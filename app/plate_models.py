@@ -69,7 +69,7 @@ WORLDWIDE = Region(
     ModelFile("global_mobile_vit_v2_ocr.onnx", f"{_FPO}/global_mobile_vit_v2_ocr.onnx", "e2fe5946c02e73901f73d21b3b7223a0c3e3b02059d4964fbf279b01af38d63c", 4_991_602),
     ModelFile("global_mobile_vit_v2_ocr_config.yaml", f"{_FPO}/global_mobile_vit_v2_ocr_config.yaml", "202b90f2a1f3a0d486b8f1fbd5cdc2f19f4f4881a094f086b983976ed3108aaf", 507))
 CUSTOM_REGION = Region(CUSTOM, "Models I installed myself (for example Intel's Chinese-plate pair)",
-                       "Whatever the plate models installed by hand cover: the detector and recogniser at the paths in docs/licence-plates.md.")
+                       "Whatever the plate models installed by hand cover: the detector and recognizer at the paths in docs/licence-plates.md.")
 REGIONS: tuple[Region, ...] = (WORLDWIDE, EUROPE, CUSTOM_REGION)
 SHIPPED: tuple[ModelFile, ...] = (DETECTOR, *[item for region in REGIONS for item in (region.recogniser, region.config) if item is not None])
 
@@ -141,11 +141,11 @@ class SlotConfig:
         import yaml
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            raise ValueError("The recogniser's config file is not a mapping")
+            raise ValueError("The recognizer's config file is not a mapping")
         config = cls(int(data["max_plate_slots"]), str(data["alphabet"]), str(data["pad_char"]), int(data["img_height"]), int(data["img_width"]),
                      str(data.get("image_color_mode", "grayscale")) != "rgb")
         if config.pad_char not in config.alphabet or config.slots < 1 or len(config.pad_char) != 1:
-            raise ValueError("The recogniser's config file is not usable")
+            raise ValueError("The recognizer's config file is not usable")
         return config
 
 

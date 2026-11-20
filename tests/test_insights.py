@@ -122,7 +122,7 @@ class UnanalysedTests(InsightsCase):
         camera = [row for row in rows if row["kind"] == "camera"]
         self.assertEqual([(row["person"], row["vehicle"], row["analysed_percent"]) for row in camera], [("2", "1", "100.0"), ("1", "0", "50.0"), ("1", "0", "100.0"), ("0", "0", "100.0")])
         self.assertEqual([bool(row["note"]) for row in camera], [False, True, False, False])
-        self.assertIn("Not fully analysed", camera[1]["note"])
+        self.assertIn("Not fully analyzed", camera[1]["note"])
         self.assertEqual({row["kind"] for row in rows}, {"camera", "zone", "line"})
         self.assertEqual(len(rows), 12)  # 4 hours for each of the camera, the zone and the line
 

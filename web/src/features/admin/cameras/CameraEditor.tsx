@@ -34,7 +34,7 @@ export const TAB_LABEL: Record<EditorTab, string> = {
   talk: "Talk",
   lens: "Lens (360°)",
   privacy: "Privacy",
-  neighbours: "Neighbours",
+  neighbours: "Neighbors",
   schedule: "Schedule & Retention",
   tamper: "Tamper",
   health: "Health & History",

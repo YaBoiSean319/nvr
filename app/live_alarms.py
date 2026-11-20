@@ -33,11 +33,11 @@ def neighbours(db: sqlite3.Connection, camera_id: str, *, include_archived: bool
 
 def set_neighbours(camera_id: str, camera_ids: list[str], actor_id: int) -> list[str]:
     if len(camera_ids) > MAX_NEIGHBOURS:
-        raise NeighbourError(f"Choose up to {MAX_NEIGHBOURS} neighbouring cameras")
+        raise NeighbourError(f"Choose up to {MAX_NEIGHBOURS} neighboring cameras")
     if len(set(camera_ids)) != len(camera_ids):
-        raise NeighbourError("Choose each neighbouring camera once")
+        raise NeighbourError("Choose each neighboring camera once")
     if camera_id in camera_ids:
-        raise NeighbourError("A camera cannot be its own neighbour")
+        raise NeighbourError("A camera cannot be its own neighbor")
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -45,7 +45,7 @@ def set_neighbours(camera_id: str, camera_ids: list[str], actor_id: int) -> list
                 raise LookupError("Camera not found")
             for neighbour in camera_ids:
                 if not camera_exists(db, neighbour):
-                    raise NeighbourError("Unknown camera in the neighbour list")
+                    raise NeighbourError("Unknown camera in the neighbor list")
             db.execute("DELETE FROM camera_neighbours WHERE camera_id=?", (camera_id,))
             db.executemany("INSERT INTO camera_neighbours(camera_id,neighbour_id,position) VALUES(?,?,?)",
                            [(camera_id, neighbour, position) for position, neighbour in enumerate(camera_ids)])

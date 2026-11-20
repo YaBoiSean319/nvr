@@ -17,7 +17,7 @@ test("a scheduled digest lists the alarms, the gap and the incident, and each li
   await expect(digest.getByRole("list", { name: "Vehicles at gates" }).getByRole("link")).toHaveCount(1);
   await expect(digest.getByRole("list", { name: "Recording gaps" })).toContainText("Camera 001");
   await expect(digest.getByRole("list", { name: "System incidents" })).toContainText("Camera 001 stream down");
-  await expect(page.getByTestId("digest-unanalysed")).toContainText("Not all of this time was analysed");
+  await expect(page.getByTestId("digest-unanalysed")).toContainText("Not all of this time was analyzed");
 
   // An alarm link opens that alarm; a gap link opens Playback on the camera; an incident link opens the incidents.
   const alarmLinks = digest.getByRole("list", { name: "Alarms" }).getByRole("link");

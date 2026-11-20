@@ -188,7 +188,7 @@ def check_inputs(folder: Path, labels: Path) -> dict[str, list[Truth]]:
     labelled = load_labels(labels)
     missing = [name for name in labelled if not (folder / name).is_file()]
     if missing:
-        raise ValueError(f"{len(missing)} labelled pictures are not in {folder}: {', '.join(missing[:5])}")
+        raise ValueError(f"{len(missing)} labeled pictures are not in {folder}: {', '.join(missing[:5])}")
     return labelled
 
 
@@ -203,7 +203,7 @@ def run_score(folder: Path, labels: Path, infer: Callable[[bytes, float], Detect
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.detector_eval", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    pull = commands.add_parser("extract", help="Pull still pictures out of a recording, for labelling")
+    pull = commands.add_parser("extract", help="Pull still pictures out of a recording, for labeling")
     pull.add_argument("video", type=Path)
     pull.add_argument("folder", type=Path)
     pull.add_argument("--every", type=float, default=3.0, help="seconds between pictures (default 3)")

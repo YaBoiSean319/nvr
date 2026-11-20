@@ -561,7 +561,7 @@ class DetectionManager:
         analysed = sum(1 for camera_id in wanting if camera_id in self.tasks and not self.tasks[camera_id].done())
         if mode == "fixed":
             limit = fixed
-            self.waiting_text = f"Waiting because the fixed limit of {fixed} analysed camera{'s' if fixed != 1 else ''} is in use"
+            self.waiting_text = f"Waiting because the fixed limit of {fixed} analyzed camera{'s' if fixed != 1 else ''} is in use"
         else:
             if self.capacity.controller is None or self.capacity.due():
                 decision = await asyncio.to_thread(self.capacity.evaluate, analysed, len(wanting), last_limit)

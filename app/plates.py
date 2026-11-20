@@ -153,7 +153,7 @@ def decode_plate(output: np.ndarray, symbols: tuple[str, ...], blank: int | None
                 text.append(symbols[index])
         return "".join(text), None
     if flat.size == 0 or flat.size % classes:
-        raise ValueError("The recogniser's output does not fit its symbols")
+        raise ValueError("The recognizer's output does not fit its symbols")
     scores = flat.reshape(-1, classes)
     if not np.allclose(scores.sum(axis=1), 1.0, atol=1e-2):
         shifted = np.exp(scores - scores.max(axis=1, keepdims=True))

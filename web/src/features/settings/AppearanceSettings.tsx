@@ -112,7 +112,7 @@ export function AppearanceSettings() {
 
   if (!tab.draft || !branding.data) return <p className="muted">{branding.error ? failureText(branding.error) : "Loading…"}</p>;
   const draft = tab.draft;
-  const colorProblem = [draft.primary_color, draft.accent_color].some(color => !/^#[0-9a-fA-F]{6}$/.test(color)) ? "Use six-digit hex colours such as #1a2b3c." : null;
+  const colorProblem = [draft.primary_color, draft.accent_color].some(color => !/^#[0-9a-fA-F]{6}$/.test(color)) ? "Use six-digit hex colors such as #1a2b3c." : null;
   const assetUrl = (key: AssetKey) => {
     const change = draft.assets[key];
     if (change.action === "upload") return change.preview;
@@ -130,16 +130,16 @@ export function AppearanceSettings() {
         <span className="muted">Preview only</span>
       </div>
       <fieldset className="field-group">
-        <legend>Name and colours</legend>
+        <legend>Name and colors</legend>
         <label className="field"><span>Application name</span><input value={draft.app_name} maxLength={80} onChange={event => tab.change({ app_name: event.target.value })} /></label>
         <div className="field-row">
-          <label className="field"><span>Primary colour</span>
-            <span className="color-field"><input type="color" value={draft.primary_color} aria-label="Primary colour picker" onChange={event => tab.change({ primary_color: event.target.value })} />
-              <input className="mono" value={draft.primary_color} aria-label="Primary colour hex" onChange={event => tab.change({ primary_color: event.target.value })} /></span>
+          <label className="field"><span>Primary color</span>
+            <span className="color-field"><input type="color" value={draft.primary_color} aria-label="Primary color picker" onChange={event => tab.change({ primary_color: event.target.value })} />
+              <input className="mono" value={draft.primary_color} aria-label="Primary color hex" onChange={event => tab.change({ primary_color: event.target.value })} /></span>
           </label>
-          <label className="field"><span>Accent colour</span>
-            <span className="color-field"><input type="color" value={draft.accent_color} aria-label="Accent colour picker" onChange={event => tab.change({ accent_color: event.target.value })} />
-              <input className="mono" value={draft.accent_color} aria-label="Accent colour hex" onChange={event => tab.change({ accent_color: event.target.value })} /></span>
+          <label className="field"><span>Accent color</span>
+            <span className="color-field"><input type="color" value={draft.accent_color} aria-label="Accent color picker" onChange={event => tab.change({ accent_color: event.target.value })} />
+              <input className="mono" value={draft.accent_color} aria-label="Accent color hex" onChange={event => tab.change({ accent_color: event.target.value })} /></span>
           </label>
         </div>
         <p className="muted field-hint">The accent is adjusted automatically where needed so text on it stays readable in light and dark themes.</p>
@@ -175,7 +175,7 @@ export function AppearanceSettings() {
         <button type="button" className="button" data-variant="danger" onClick={() => setResetting(true)}>Reset to defaults…</button>
       </div>
       <Modal open={resetting} onOpenChange={setResetting} title="Reset branding to defaults?"
-             description="The name, colours and every uploaded logo return to the defaults for everyone."
+             description="The name, colors and every uploaded logo return to the defaults for everyone."
              footer={<><button type="button" className="button" onClick={() => setResetting(false)}>Cancel</button><button type="button" className="button" data-variant="danger" onClick={() => void resetDefaults()}>Reset to defaults</button></>}>
         {resetError ? <p className="notice" data-tone="bad" role="alert">{resetError}</p> : null}
       </Modal>

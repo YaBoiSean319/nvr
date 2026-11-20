@@ -482,7 +482,7 @@ class CoverageTests(SearchCase):
         self.assertEqual(body["results"], [])
         self.assertEqual(body["coverage"]["searched_cameras"], 4)
         self.assertEqual(len(body["coverage"]["cameras"]), 4)
-        self.assertIn("unanalysed time is listed", body["coverage_note"])
+        self.assertIn("unanalyzed time is listed", body["coverage_note"])
 
     def test_many_intervals_are_capped_per_camera_and_counted(self):
         for index in range(30):

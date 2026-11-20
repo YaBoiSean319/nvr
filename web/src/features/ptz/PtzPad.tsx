@@ -155,7 +155,7 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
         </div>
       ) : null}
       {centring && !blocked ? (
-        <div className="ptz-centre-layer" role="button" tabIndex={-1} aria-label="Centre the camera on a point"
+        <div className="ptz-centre-layer" role="button" tabIndex={-1} aria-label="Center the camera on a point"
              onClick={event => {
                const box = event.currentTarget.getBoundingClientRect();
                void centre(cameraId, (event.clientX - box.left) / box.width, (event.clientY - box.top) / box.height)
@@ -186,8 +186,8 @@ export function PtzPad({ cameraId, keyTarget, compact = false }: {
         <div className="ptz-row">
           {data.capabilities?.zoom ? ZOOM.map(item => <button key={item.label} {...holdProps(item.direction, item.label)}>{item.symbol}</button>) : null}
           {compact && data.capabilities?.centre ? (
-            <button type="button" className="button ptz-button" aria-label="Centre on click" aria-pressed={centring} disabled={blocked} onClick={() => setCentring(!centring)}
-                    title="Click the picture to centre the camera there">Centre</button>
+            <button type="button" className="button ptz-button" aria-label="Center on click" aria-pressed={centring} disabled={blocked} onClick={() => setCentring(!centring)}
+                    title="Click the picture to center the camera there">Center</button>
           ) : null}
           {data.capabilities?.pan_tilt && !tracking ? (
             <button type="button" className="button ptz-button" aria-pressed={choosing} disabled={blocked} onClick={() => { setChoosing(!choosing); setCentring(false); }}

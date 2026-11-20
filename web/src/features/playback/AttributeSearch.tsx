@@ -27,8 +27,8 @@ interface Filters { label: string; upper: string; lower: string; vehicleColour: 
 const EMPTY: Filters = { label: "", upper: "", lower: "", vehicleColour: "", vehicleType: "", direction: "", zone: "", cameras: "all", when: "24h" };
 
 const DIRECTION_LABEL: Record<string, string> = { left: "Moving left", right: "Moving right", toward: "Toward the camera", away: "Away from the camera", stationary: "Not moving" };
-const ZONE_LABEL: Record<string, string> = { left: "Left half", right: "Right half", top: "Top half", bottom: "Bottom half", centre: "Centre" };
-const STATE_LABEL: Record<string, string> = { not_running: "AI not running", failed: "Analysis failed", delayed: "Analysis delayed", unanalyzed: "Not analysed", interrupted: "Analysis interrupted", skipped: "Skipped" };
+const ZONE_LABEL: Record<string, string> = { left: "Left half", right: "Right half", top: "Top half", bottom: "Bottom half", centre: "Center" };
+const STATE_LABEL: Record<string, string> = { not_running: "AI not running", failed: "Analysis failed", delayed: "Analysis delayed", unanalyzed: "Not analyzed", interrupted: "Analysis interrupted", skipped: "Skipped" };
 const WHEN: Record<string, { label: string; hours: number }> = {
   "1h": { label: "Last hour", hours: 1 }, "24h": { label: "Last 24 hours", hours: 24 }, "7d": { label: "Last 7 days", hours: 168 }, "30d": { label: "Last 30 days", hours: 720 },
 };
@@ -159,19 +159,19 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
         {answer.data ? (
           <section className="attr-answer" aria-label="Description results">
             <p className="muted" role="status">
-              {answer.data.not_yet ? "The time asked for has not happened yet." : answer.data.results.length ? `${answer.data.results.length} result${answer.data.results.length === 1 ? "" : "s"}, best first.` : "Nothing matched in the time that was analysed."}{" "}
+              {answer.data.not_yet ? "The time asked for has not happened yet." : answer.data.results.length ? `${answer.data.results.length} result${answer.data.results.length === 1 ? "" : "s"}, best first.` : "Nothing matched in the time that was analyzed."}{" "}
               {answer.data.truncated ? "More objects than can be ranked at once were in range: ask about a shorter time or one camera. " : ""}
               {answer.data.interpretation.cameras.length ? `Cameras: ${answer.data.interpretation.cameras.map(camera => camera.name).join(", ")}. ` : ""}
               {answer.data.interpretation.time_of_day ? `Time of day: ${answer.data.interpretation.time_of_day.from} to ${answer.data.interpretation.time_of_day.to}. ` : ""}
               {answer.data.interpretation.range ? `From ${when(answer.data.interpretation.range.start)} to ${when(answer.data.interpretation.range.end)}. ` : "Last 7 days. "}
               {answer.data.mode_note}
-              {answer.data.unindexed ? ` ${answer.data.unindexed} object${answer.data.unindexed === 1 ? " was" : "s were"} analysed before the image-text model was installed and rank only by their attributes.` : ""}
+              {answer.data.unindexed ? ` ${answer.data.unindexed} object${answer.data.unindexed === 1 ? " was" : "s were"} analyzed before the image-text model was installed and rank only by their attributes.` : ""}
             </p>
             <p className="notice" role="status" data-tone={answer.data.coverage.fully_analysed ? "good" : "warn"}>
               {answer.data.coverage.searched_cameras === 0 ? "No cameras were searched."
                 : answer.data.coverage.analysed_percent === null ? "Nothing to check: no time in range has happened yet."
-                : answer.data.coverage.fully_analysed ? `Every searched camera (${answer.data.coverage.searched_cameras}) was analysed for the whole range.`
-                : `${answer.data.coverage.analysed_percent}% of the searched time was analysed. ${answer.data.coverage.cameras.map(camera => `${camera.camera_name}: ${duration(camera.unanalysed_seconds)} not analysed`).join("; ")}. No match in time that was not analysed means it was not looked at.`}
+                : answer.data.coverage.fully_analysed ? `Every searched camera (${answer.data.coverage.searched_cameras}) was analyzed for the whole range.`
+                : `${answer.data.coverage.analysed_percent}% of the searched time was analyzed. ${answer.data.coverage.cameras.map(camera => `${camera.camera_name}: ${duration(camera.unanalysed_seconds)} not analyzed`).join("; ")}. No match in time that was not analyzed means it was not looked at.`}
             </p>
             <ul className="attr-grid" aria-label="Description matches">
               {answer.data.results.map(result => (
@@ -187,13 +187,13 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
           </Select>
           {people ? (
             <>
-              <Select label="Top colour" value={filters.upper} onChange={upper => change({ upper })}><option value="">Any</option>{colours.map(name => <option key={name} value={name}>{name}</option>)}</Select>
-              <Select label="Lower colour" value={filters.lower} onChange={lower => change({ lower })}><option value="">Any</option>{colours.map(name => <option key={name} value={name}>{name}</option>)}</Select>
+              <Select label="Top color" value={filters.upper} onChange={upper => change({ upper })}><option value="">Any</option>{colours.map(name => <option key={name} value={name}>{name}</option>)}</Select>
+              <Select label="Lower color" value={filters.lower} onChange={lower => change({ lower })}><option value="">Any</option>{colours.map(name => <option key={name} value={name}>{name}</option>)}</Select>
             </>
           ) : null}
           {vehicles ? (
             <>
-              <Select label="Vehicle colour" value={filters.vehicleColour} onChange={vehicleColour => change({ vehicleColour })}><option value="">Any</option>{colours.map(name => <option key={name} value={name}>{name}</option>)}</Select>
+              <Select label="Vehicle color" value={filters.vehicleColour} onChange={vehicleColour => change({ vehicleColour })}><option value="">Any</option>{colours.map(name => <option key={name} value={name}>{name}</option>)}</Select>
               <Select label="Vehicle type" value={filters.vehicleType} onChange={vehicleType => change({ vehicleType })} disabled={options.data ? !options.data.vehicle_type_available : false}
                       hint={options.data && !options.data.vehicle_type_available ? "Needs the vehicle attribute model, which is not installed." : undefined}>
                 <option value="">Any</option>{(options.data?.vehicle_types ?? []).map(name => <option key={name} value={name}>{name}</option>)}
@@ -226,16 +226,16 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
             <section className="attr-coverage" aria-label="Analysis coverage">
               <p className="notice" role="status" data-tone={data.coverage.fully_analysed ? "good" : "warn"}>
                 {data.coverage.searched_cameras === 0 ? "No cameras were searched."
-                  : data.coverage.fully_analysed ? `Every searched camera (${data.coverage.searched_cameras}) was analysed for the whole range.`
-                  : `${data.coverage.analysed_percent}% of the searched time was analysed. A camera with no match in time that was not analysed was not looked at, not empty.`}
+                  : data.coverage.fully_analysed ? `Every searched camera (${data.coverage.searched_cameras}) was analyzed for the whole range.`
+                  : `${data.coverage.analysed_percent}% of the searched time was analyzed. A camera with no match in time that was not analyzed was not looked at, not empty.`}
               </p>
               {data.coverage.cameras.length ? (
                 <details>
-                  <summary>Not analysed: {data.coverage.cameras.length} camera{data.coverage.cameras.length === 1 ? "" : "s"}</summary>
-                  <ul className="plain-list attr-gaps" aria-label="Unanalysed time by camera">
+                  <summary>Not analyzed: {data.coverage.cameras.length} camera{data.coverage.cameras.length === 1 ? "" : "s"}</summary>
+                  <ul className="plain-list attr-gaps" aria-label="Unanalyzed time by camera">
                     {data.coverage.cameras.map(camera => (
                       <li key={camera.camera_id}>
-                        <strong>{camera.camera_name}</strong>: {duration(camera.unanalysed_seconds)} not analysed
+                        <strong>{camera.camera_name}</strong>: {duration(camera.unanalysed_seconds)} not analyzed
                         <ul>
                           {camera.intervals.map(item => (
                             <li key={`${item.state}-${item.starts_at}`}>{STATE_LABEL[item.state] ?? item.state}, {when(item.starts_at)} to {when(item.ends_at)} ({duration(item.seconds)}){item.detail && item.state !== "not_running" ? `: ${item.detail}` : ""}</li>
@@ -248,7 +248,7 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
                 </details>
               ) : null}
             </section>
-            <p className="muted" role="status">{data.results.length ? `${data.results.length}${data.truncated ? "+" : ""} match${data.results.length === 1 ? "" : "es"}, newest first.${data.truncated ? " More matched than are shown: narrow the filters or the time." : ""}` : "No matches in the time that was analysed."}</p>
+            <p className="muted" role="status">{data.results.length ? `${data.results.length}${data.truncated ? "+" : ""} match${data.results.length === 1 ? "" : "es"}, newest first.${data.truncated ? " More matched than are shown: narrow the filters or the time." : ""}` : "No matches in the time that was analyzed."}</p>
             <ul className="attr-grid" aria-label="Search results">
               {data.results.map(result => (
                 <li key={result.track_id}>
@@ -272,8 +272,8 @@ export function AttributeSearch({ settings, range, shownIds }: { settings: Displ
             {alike.data ? (
               <>
                 <p className="muted" role="status">
-                  {alike.data.results.length ? `${alike.data.results.length} similar object${alike.data.results.length === 1 ? "" : "s"} in the last 7 days, in time order. Similarity is how alike they look, not proof they are the same.` : "Nothing similar in the time that was analysed."}
-                  {alike.data.coverage.fully_analysed ? "" : " Some cameras were not analysed for the whole time, so absence here is not proof."}
+                  {alike.data.results.length ? `${alike.data.results.length} similar object${alike.data.results.length === 1 ? "" : "s"} in the last 7 days, in time order. Similarity is how alike they look, not proof they are the same.` : "Nothing similar in the time that was analyzed."}
+                  {alike.data.coverage.fully_analysed ? "" : " Some cameras were not analyzed for the whole time, so absence here is not proof."}
                 </p>
                 <ul className="attr-grid" aria-label="Similar results">
                   {alike.data.results.map(result => (

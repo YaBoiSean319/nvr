@@ -10,11 +10,11 @@ const FINISHED_SHOWN = 3; // Of the jobs that are done (ready, expired, cancelle
 
 function describe(job: ExportJob): string {
   switch (job.status) {
-    case "queued": return job.cancel_requested ? "Cancelling…" : "Queued";
-    case "running": return job.cancel_requested ? "Cancelling…" : `Running · ${job.progress}%`;
+    case "queued": return job.cancel_requested ? "Canceling…" : "Queued";
+    case "running": return job.cancel_requested ? "Canceling…" : `Running · ${job.progress}%`;
     case "completed": return job.download_url ? "Ready" : "Expired";
     case "failed": return "Failed";
-    case "cancelled": return "Cancelled";
+    case "cancelled": return "Canceled";
   }
 }
 

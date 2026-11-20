@@ -147,7 +147,7 @@ class ContentTests(DigestCase):
     def test_time_the_ai_did_not_analyse_is_said_so_a_quiet_digest_is_not_misread(self):
         body = self.preview(self.admin)["digest"]
         self.assertFalse(body["analysis"]["fully_analysed"])
-        self.assertIn("Not all of this time was analysed", self.preview(self.admin)["text"])
+        self.assertIn("Not all of this time was analyzed", self.preview(self.admin)["text"])
 
     def test_the_range_and_times_are_validated(self):
         for params in ({"start": "x", "end": RANGE["end"]}, {"start": RANGE["end"], "end": RANGE["start"]}, {"start": DAY.isoformat(), "end": (DAY + timedelta(days=40)).isoformat()},

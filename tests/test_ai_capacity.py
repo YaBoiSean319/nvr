@@ -385,7 +385,7 @@ class ManagerTests(ManagerCase):
             return self.active(manager)
 
         self.assertEqual(self.run_async(body), 3)
-        self.assertTrue(any(error == "Waiting because the fixed limit of 3 analysed cameras is in use" for _, error in self.states().values()))
+        self.assertTrue(any(error == "Waiting because the fixed limit of 3 analyzed cameras is in use" for _, error in self.states().values()))
         with connect() as db:
             db.execute("UPDATE ai_runtime_settings SET max_active_cameras=40")
         self.assertEqual(self.run_async(body), 20)  # More than sixteen, all of them

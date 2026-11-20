@@ -198,7 +198,7 @@ def get_ai_runtime_settings(_: CurrentUser) -> dict[str, object]:
         status = db.execute("SELECT * FROM ai_capacity_status WHERE singleton_id=1").fetchone()
     return {"max_active_cameras": int(row["max_active_cameras"]), "capacity_mode": row["capacity_mode"], "inflight_inferences": 1, "updated_at": row["updated_at"],
             "capacity": {key: status[key] for key in status.keys()} if status else None,
-            "resource_note": "Inference calls run through one bounded slot to preserve headroom for recording. In automatic mode the number of analysed cameras follows what this machine can carry (CPU, the AI model's time, memory); "
+            "resource_note": "Inference calls run through one bounded slot to preserve headroom for recording. In automatic mode the number of analyzed cameras follows what this machine can carry (CPU, the AI model's time, memory); "
                              "with a fixed number, cameras beyond it are marked skipped. No unbounded analysis queue is maintained.",
             "model": ai_runtime_model_view()}
 

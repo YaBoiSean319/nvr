@@ -165,7 +165,7 @@ test("invalid, out-of-range and empty exports are refused with clear messages, a
   await expect(drawer.getByText("Search start")).toBeVisible();
 });
 
-test("jobs can be cancelled and retried, survive reload and show in another session", async ({ page, browser }) => {
+test("jobs can be canceled and retried, survive reload and show in another session", async ({ page, browser }) => {
   test.setTimeout(120_000);
   const { anchor } = await investigate(page);
   await seekTo(page, anchor, 0);

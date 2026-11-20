@@ -12,7 +12,7 @@ interface Deletion { camera_id: string; camera_name: string; day: string; segmen
 const KEY = ["admin", "privacy-notices"] as const;
 const DETAILS = ["organisation", "contact_name", "contact_email", "contact_phone", "default_purpose", "default_legal_basis"] as const;
 const DETAIL_LABEL: Record<(typeof DETAILS)[number], string> = {
-  organisation: "Organisation", contact_name: "Contact name", contact_email: "Contact email", contact_phone: "Contact phone",
+  organisation: "Organization", contact_name: "Contact name", contact_email: "Contact email", contact_phone: "Contact phone",
   default_purpose: "Purpose of the site default policy", default_legal_basis: "Legal basis of the site default policy",
 };
 

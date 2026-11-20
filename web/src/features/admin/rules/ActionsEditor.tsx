@@ -23,7 +23,7 @@ function ActionFields({ action, cameras, onChange }: { action: ActionDraft; came
     case "webhook":
       return (
         <>
-          <SecretField label="Receiver URL" saved={saved} value={action.url} onChange={url => onChange({ url })} hint="Public HTTPS, or an authorised private IP address." />
+          <SecretField label="Receiver URL" saved={saved} value={action.url} onChange={url => onChange({ url })} hint="Public HTTPS, or an authorized private IP address." />
           <SecretField label="Signing secret" saved={Boolean(action.has_signing_secret)} value={action.signing_secret} onChange={signing_secret => onChange({ signing_secret })}
                        hint="At least 16 characters. Requests are signed like every NVR webhook (X-NVR-Signature)." />
           <label className="check"><input type="checkbox" checked={Boolean(action.allow_private)} onChange={event => onChange({ allow_private: event.target.checked })} /> Allow a private IP address</label>
@@ -33,7 +33,7 @@ function ActionFields({ action, cameras, onChange }: { action: ActionDraft; came
       return (
         <>
           <SecretField label="Broker" saved={saved} value={action.url} onChange={url => onChange({ url })}
-                       hint="mqtts://user:password@host:8883, or mqtt:// for an authorised private IP address." />
+                       hint="mqtts://user:password@host:8883, or mqtt:// for an authorized private IP address." />
           <label className="field"><span>Topic</span><input value={action.topic ?? ""} onChange={event => onChange({ topic: event.target.value })} /></label>
           <label className="check"><input type="checkbox" checked={Boolean(action.retain)} onChange={event => onChange({ retain: event.target.checked })} /> Retain the message</label>
           <label className="check"><input type="checkbox" checked={Boolean(action.allow_private)} onChange={event => onChange({ allow_private: event.target.checked })} /> Allow a private IP address</label>

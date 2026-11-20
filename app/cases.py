@@ -525,7 +525,7 @@ def _advance(db: sqlite3.Connection, package: sqlite3.Row, create_export_record:
               for clip in rows]
     for state in states:
         if state is None or state["status"] is None or state["status"] in ("failed", "cancelled"):
-            _fail(db, package, f"A clip's export {'was cancelled' if state and state['status'] == 'cancelled' else 'failed'}" + (f": {state['error']}" if state and state["error"] else ""))
+            _fail(db, package, f"A clip's export {'was canceled' if state and state['status'] == 'cancelled' else 'failed'}" + (f": {state['error']}" if state and state["error"] else ""))
             return
     if all(state["status"] == "completed" for state in states):
         assemble(db, package)

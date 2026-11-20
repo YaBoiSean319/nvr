@@ -67,8 +67,8 @@ export function DigestBody({ digest }: { digest: Digest }) {
       ) : null}
       {!body.analysis.fully_analysed ? (
         <p className="notice" data-tone="warn" role="status" data-testid="digest-unanalysed">
-          Not all of this time was analysed{body.analysis.analysed_percent !== null ? ` (${body.analysis.analysed_percent}% was)` : ""}: a quiet stretch may mean nothing was looked at.
-          {body.analysis.cameras.length ? ` ${body.analysis.cameras.map(item => `${item.camera_name}: ${minutes(item.unanalysed_seconds)} not analysed`).join("; ")}.` : ""}
+          Not all of this time was analyzed{body.analysis.analysed_percent !== null ? ` (${body.analysis.analysed_percent}% was)` : ""}: a quiet stretch may mean nothing was looked at.
+          {body.analysis.cameras.length ? ` ${body.analysis.cameras.map(item => `${item.camera_name}: ${minutes(item.unanalysed_seconds)} not analyzed`).join("; ")}.` : ""}
         </p>
       ) : null}
       <Section title="Alarms" count={body.alarms.total}>

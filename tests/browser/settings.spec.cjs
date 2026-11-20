@@ -46,7 +46,7 @@ test("Appearance: the draft preview is private until saved, uploads are validate
   await openSettings(page, "Appearance & branding");
   const form = page.getByRole("form", { name: "Appearance and branding" });
   await form.getByLabel("Application name").fill("North Hall");
-  await form.getByLabel("Accent colour hex").fill("#d04a02");
+  await form.getByLabel("Accent color hex").fill("#d04a02");
   await expect(form.getByRole("img", { name: "Branding preview (not saved)" })).toContainText("North Hall");
 
   // Another person sees nothing of the draft.
@@ -237,14 +237,14 @@ test("AI analysis and Diagnostics save for real", async ({ page }) => {
   const runtime = page.getByRole("form", { name: "AI runtime" });
   // Automatic is the default, with no number to set; a fixed number can be any whole number, not only up to sixteen.
   await expect(runtime.getByRole("radio", { name: /^Automatic/ })).toBeChecked();
-  await expect(runtime.getByLabel("Cameras analysed at once")).toHaveCount(0);
+  await expect(runtime.getByLabel("Cameras analyzed at once")).toHaveCount(0);
   await expect(runtime.getByText("The AI worker has not reported yet.").or(runtime.getByRole("status", { name: "AI capacity now" }))).toBeVisible();
   await runtime.getByRole("radio", { name: "A fixed number" }).check();
-  await runtime.getByLabel("Cameras analysed at once").fill("40");
+  await runtime.getByLabel("Cameras analyzed at once").fill("40");
   await press(runtime.getByRole("button", { name: "Save" }));
   await expect(runtime.getByRole("status").last()).toHaveText("Saved.");
   expect(await (await page.request.get("/api/ai/settings")).json()).toMatchObject({ capacity_mode: "fixed", max_active_cameras: 40 });
-  await runtime.getByLabel("Cameras analysed at once").fill("6");
+  await runtime.getByLabel("Cameras analyzed at once").fill("6");
   await press(runtime.getByRole("button", { name: "Validate" }));
   await expect(runtime.locator(".field-actions").getByRole("status").or(runtime.locator(".field-actions").getByRole("alert"))).toBeVisible({ timeout: 20_000 });
   await press(runtime.getByRole("button", { name: "Save" }));

@@ -274,7 +274,7 @@ export function ExportDrawer({ settings, range, shownIds, cameras, timeline }: P
             {kinds.data.map(kind => (
               <label key={kind}>
                 <input type="checkbox" checked={blur.includes(kind)} onChange={event => toggleBlur(kind, event.target.checked)} />
-                {kind === "faces" ? "Faces" : "Licence plates"}
+                {kind === "faces" ? "Faces" : "License plates"}
               </label>
             ))}
             {blurring ? <p className="muted">Blurred exports hold individual camera files only, and you review what is blurred before they are made.</p> : null}

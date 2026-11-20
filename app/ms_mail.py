@@ -60,7 +60,7 @@ MESSAGES = {
 
 # What Microsoft's own error codes usually mean, in words an administrator can act on (the code itself is always shown too).
 HINTS = {
-    "ErrorAccessDenied": "The signed-in account is not allowed to send mail here: it may have no Exchange Online mailbox or licence, or a policy blocks it.",
+    "ErrorAccessDenied": "The signed-in account is not allowed to send mail here: it may have no Exchange Online mailbox or license, or a policy blocks it.",
     "MailboxNotEnabledForRESTAPI": "The signed-in account has no Exchange Online mailbox for the API to use (it may be unlicensed, or its mailbox may be on-premises).",
     "MailboxNotFound": "The mailbox could not be found: check the account, or the shared mailbox in \"Send as\".",
     "ErrorSendAsDenied": "The signed-in account may not send as that shared mailbox: give it the Send As permission in Exchange.",

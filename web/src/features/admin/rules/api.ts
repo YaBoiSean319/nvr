@@ -112,7 +112,7 @@ export const CONDITION_LABEL: Record<Condition["type"], string> = {
   wrong_way: "Moves the wrong way",
   tamper: "Camera is covered, moved or defocused",
   external_event: "An outside event (door, sensor, button)",
-  plate: "A licence plate is read (watch list)",
+  plate: "A license plate is read (watch list)",
   fall: "A person fell (fall detection)",
   face: "A watched face is seen (face watch)",
 };

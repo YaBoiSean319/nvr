@@ -126,7 +126,7 @@ export function LineEditor({ cameraId, line, direction, onChange, label, readOnl
         })}
       </div>
       <p className="muted field-hint">
-        Objects count when their centre crosses the line {direction === "both" ? "in either direction" : direction === "forward" ? "in the arrow's direction" : "against the arrow"}.
+        Objects count when their center crosses the line {direction === "both" ? "in either direction" : direction === "forward" ? "in the arrow's direction" : "against the arrow"}.
         {!readOnly ? " Drag on the frame to draw a new line. Focus end A or B and use arrows to move it." : ""}
       </p>
       {short ? <p className="field-error" role="alert">Make the line at least 2% of the frame long.</p> : null}
