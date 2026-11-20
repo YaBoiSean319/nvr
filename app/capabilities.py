@@ -82,6 +82,16 @@ def view(db: sqlite3.Connection, camera_id: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+async def _write(sql: str, parameters: tuple[object, ...]) -> None:
+    """One write, in a thread. The checks run on the background worker's event loop and on the web server's (an administrator's recheck),
+    and a write waits for the database's lock: on the loop, every other request, delivery and the heartbeat waited with it."""
+    def write() -> None:
+        with connect() as db:
+            db.execute(sql, parameters)
+
+    await asyncio.to_thread(write)
+
+
 def seed(db: sqlite3.Connection, limit: int = 50) -> int:
     """Give cameras saved before capability health existed a video and a motion row, due now, so they are checked once and then kept up to date."""
     rows = db.execute("SELECT id,motion_service_url FROM cameras WHERE enabled=1 AND id NOT IN (SELECT camera_id FROM camera_capabilities WHERE capability='video') LIMIT ?", (limit,)).fetchall()
@@ -114,16 +124,19 @@ async def check_video(row: sqlite3.Row) -> tuple[str, str]:
             return "failed", str(error)[:300]
         stream_url = source.stream_url
         from .credentials import encrypt
-        with connect() as db:
-            db.execute("UPDATE cameras SET stream_url_ciphertext=? WHERE id=?", (encrypt(stream_url), row["id"]))
+        await _write("UPDATE cameras SET stream_url_ciphertext=? WHERE id=?", (encrypt(stream_url), row["id"]))
     result = await probe_stream(stream_url)
     if not result.get("reachable"):
         return "failed", str(result.get("reason") or "The camera's video stream could not be opened")[:300]
     video = result.get("video") or {}
-    with connect() as db:
-        db.execute("UPDATE cameras SET video_codec=?,video_width=?,video_height=?,audio_supported=?,last_probe_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
-                   (video.get("codec"), video.get("width"), video.get("height"), int(bool(result.get("audio"))), row["id"]))
-        record(db, row["id"], "audio", "available" if result.get("audio") else "unsupported", "The camera carries audio" if result.get("audio") else "No audio on the stream")
+
+    def store() -> None:
+        with connect() as db:
+            db.execute("UPDATE cameras SET video_codec=?,video_width=?,video_height=?,audio_supported=?,last_probe_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+                       (video.get("codec"), video.get("width"), video.get("height"), int(bool(result.get("audio"))), row["id"]))
+            record(db, row["id"], "audio", "available" if result.get("audio") else "unsupported", "The camera carries audio" if result.get("audio") else "No audio on the stream")
+
+    await asyncio.to_thread(store)
     return "ok", "Video is flowing" + ("" if row["recording_enabled"] else "; recording is off until you turn it on")
 
 
@@ -168,12 +181,15 @@ async def recheck(camera_id: str, capability: str) -> dict[str, Any] | None:
     except Exception:  # noqa: BLE001 - a test that could not run is a failed check, not a crash
         logger.warning("A camera capability could not be checked")
         state, message = "failed", "The check could not be completed"
-    try:
-        with connect() as db:
-            record(db, camera_id, capability, state, message)
-            return view(db, camera_id)[capability]
-    except sqlite3.IntegrityError:
-        return None  # The camera was deleted while it was being checked
+    def store() -> dict[str, Any] | None:
+        try:
+            with connect() as db:
+                record(db, camera_id, capability, state, message)
+                return view(db, camera_id)[capability]
+        except sqlite3.IntegrityError:
+            return None  # The camera was deleted while it was being checked
+
+    return await asyncio.to_thread(store)
 
 
 class CapabilityManager:
@@ -193,9 +209,12 @@ class CapabilityManager:
         self.task = None
 
     async def process_once(self) -> int:
-        with connect() as db:
-            seed(db)
-            ready = due(db)
+        def find() -> list[tuple[str, str]]:
+            with connect() as db:
+                seed(db)
+                return due(db)
+
+        ready = await asyncio.to_thread(find)
         results = await asyncio.gather(*(recheck(camera_id, capability) for camera_id, capability in ready), return_exceptions=True)
         for failed in (item for item in results if isinstance(item, BaseException)):
             logger.warning("A camera capability recheck failed: %s", type(failed).__name__)

@@ -112,20 +112,21 @@ async def check_support(camera_id: str) -> dict[str, Any]:
         row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
     if row is None:
         raise LookupError("Camera not found")
+    # Asked from the web server: the answer is written in a thread, so a wait for the database's lock never stops every other request.
     try:
         client, services = await _connect(row)
     except OnvifError as exc:
         if exc.code == "unsupported":
-            mark_unsupported(camera_id, NO_ADDRESS)
+            await asyncio.to_thread(mark_unsupported, camera_id, NO_ADDRESS)
         else:
-            _remember_support(camera_id, None, f"Not checked yet: {exc.message}")
+            await asyncio.to_thread(_remember_support, camera_id, None, f"Not checked yet: {exc.message}")
         return support_view(camera_id)
     async with client:
         have = {"search", "replay"} <= set(services.urls)
     if have:
-        _remember_support(camera_id, "supported", SUPPORTED)
+        await asyncio.to_thread(_remember_support, camera_id, "supported", SUPPORTED)
     else:
-        mark_unsupported(camera_id, NOT_SUPPORTED)
+        await asyncio.to_thread(mark_unsupported, camera_id, NOT_SUPPORTED)
     return support_view(camera_id)
 
 
@@ -292,10 +293,9 @@ class BackfillManager:
     async def tick(self, now: datetime | None = None, max_chunks: int | None = None) -> int:
         """Plan outages, then work through the jobs that are due. Returns the chunks fetched. ``max_chunks`` stops early (a test of resuming)."""
         now = now or _now()
-        with connect() as db:
-            cameras = db.execute("SELECT id FROM cameras WHERE backfill_enabled=1 AND enabled=1 AND archived_at IS NULL AND (backfill_support IS NULL OR backfill_support='supported')").fetchall()
-            for camera in cameras:
-                plan_jobs(db, camera["id"], now)
+        # Backfill runs in the recorder worker: every write here waits for the database's lock, so it is made in a thread, and a wait never
+        # stops every camera's recording supervision and the worker's heartbeat (reads stay: they never wait for the lock).
+        await asyncio.to_thread(self._plan, now)
         fetched = 0
         while not self._stopping:
             with connect() as db:
@@ -323,37 +323,47 @@ class BackfillManager:
         else:
             self._update(job["id"], state="pending", attempts=attempts, message=f"Will try again: {message}"[:300], next_attempt_at=(now + backoff(attempts)).isoformat())
 
+    @staticmethod
+    def _plan(now: datetime) -> None:
+        with connect() as db:
+            cameras = db.execute("SELECT id FROM cameras WHERE backfill_enabled=1 AND enabled=1 AND archived_at IS NULL AND (backfill_support IS NULL OR backfill_support='supported')").fetchall()
+            for camera in cameras:
+                plan_jobs(db, camera["id"], now)
+
+    def _fail_fresh(self, job_id: str, now: datetime, message: str) -> None:
+        self._fail(self._fresh(job_id), now, message)
+
     async def _run(self, job: sqlite3.Row, now: datetime, budget: int | None) -> int:
         job_id, camera_id = job["id"], job["camera_id"]
         with connect() as db:
             row = db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        self._update(job_id, state="running")
+        await asyncio.to_thread(self._update, job_id, state="running")
         try:
             client, services = await _connect(row)
         except OnvifError as exc:
             if exc.code == "unsupported":
-                mark_unsupported(camera_id, NO_ADDRESS)
+                await asyncio.to_thread(mark_unsupported, camera_id, NO_ADDRESS)
             else:
-                self._fail(job, now, exc.message)
+                await asyncio.to_thread(self._fail, job, now, exc.message)
             return 0
         fetched = 0
         try:
             async with client:
                 if not {"search", "replay"} <= set(services.urls):
-                    mark_unsupported(camera_id, NOT_SUPPORTED)
+                    await asyncio.to_thread(mark_unsupported, camera_id, NOT_SUPPORTED)
                     return 0
                 if row["backfill_support"] != "supported":
-                    _remember_support(camera_id, "supported", SUPPORTED)
+                    await asyncio.to_thread(_remember_support, camera_id, "supported", SUPPORTED)
                 recordings = await client.recordings(services)
                 fetched = await self._fill(job, row, client, services, recordings, now, budget)
         except OnvifError as exc:
-            self._fail(self._fresh(job_id), now, exc.message)
+            await asyncio.to_thread(self._fail_fresh, job_id, now, exc.message)
         except asyncio.CancelledError:
-            self._update(job_id, state="pending")
+            self._update(job_id, state="pending")  # Stopping: written at once, not in a thread a second cancellation could cut short
             raise
         except Exception as exc:  # noqa: BLE001 - whatever went wrong, the job must not stay "running": it waits and tries again, then gives up
             log.exception("Backfill job %s failed", job_id)
-            self._fail(self._fresh(job_id), now, str(exc)[:200] or "The camera's replay failed")
+            await asyncio.to_thread(self._fail_fresh, job_id, now, str(exc)[:200] or "The camera's replay failed")
         return fetched
 
     @staticmethod
@@ -371,9 +381,10 @@ class BackfillManager:
         gone = False
         while cursor < end and not self._stopping and (budget is None or fetched < budget):
             with connect() as db:
-                if not db.execute("SELECT 1 FROM cameras WHERE id=? AND backfill_enabled=1", (camera_id,)).fetchone():
-                    self._update(job_id, state="pending", message="Backfill was turned off")
-                    return fetched
+                switched_off = not db.execute("SELECT 1 FROM cameras WHERE id=? AND backfill_enabled=1", (camera_id,)).fetchone()
+            if switched_off:
+                await asyncio.to_thread(self._update, job_id, state="pending", message="Backfill was turned off")
+                return fetched
             with connect() as db:
                 # Live footage may have been indexed here since the gap was found: never fetch over it.
                 live_until = db.execute("SELECT MAX(ends_at) FROM recording_segments WHERE camera_id=? AND starts_at<=? AND ends_at>? AND unavailable_at IS NULL",
@@ -408,22 +419,24 @@ class BackfillManager:
             advance = seconds if actual >= seconds - 1.0 else actual  # A chunk that came out short leaves no hole: the next one starts where it ended
             size = target.stat().st_size
             bitrate = size * 8 / 1000 / actual
-            self._store(camera_id, target, cursor, cursor + timedelta(seconds=advance), size)
+            await asyncio.to_thread(self._store, camera_id, target, cursor, cursor + timedelta(seconds=advance), size)
             cursor += timedelta(seconds=advance)
             fetched += 1
             progress = self._fresh(job_id)
-            self._update(job_id, cursor_at=cursor.isoformat(), filled_seconds=float(progress["filled_seconds"]) + advance, bytes_fetched=int(progress["bytes_fetched"]) + size,
-                         observed_kbps=int(size * 8 / 1000 / elapsed), state="running", attempts=0, next_attempt_at=None)
+            await asyncio.to_thread(
+                self._update, job_id, cursor_at=cursor.isoformat(), filled_seconds=float(progress["filled_seconds"]) + advance,
+                bytes_fetched=int(progress["bytes_fetched"]) + size, observed_kbps=int(size * 8 / 1000 / elapsed), state="running", attempts=0, next_attempt_at=None)
         if self._stopping or (budget is not None and fetched >= budget and cursor < end):
-            self._update(job_id, state="pending")
+            await asyncio.to_thread(self._update, job_id, state="pending")
             return fetched
         filled = float(self._fresh(job_id)["filled_seconds"])
         if cursor >= end and not skipped and not gone:
-            self._update(job_id, state="done", cursor_at=end.isoformat(), message="Filled from the camera's own recording")
+            await asyncio.to_thread(self._update, job_id, state="done", cursor_at=end.isoformat(), message="Filled from the camera's own recording")
         else:
-            self._update(job_id, state="partial" if filled else "failed", cursor_at=cursor.isoformat(),
-                         message="The camera's own recording does not cover all of this gap (for example its card was removed or overwritten)" if filled
-                         else "The camera has no recording of this time (for example its card was removed or overwritten)")
+            await asyncio.to_thread(
+                self._update, job_id, state="partial" if filled else "failed", cursor_at=cursor.isoformat(),
+                message="The camera's own recording does not cover all of this gap (for example its card was removed or overwritten)" if filled
+                else "The camera has no recording of this time (for example its card was removed or overwritten)")
         return fetched
 
     @staticmethod
