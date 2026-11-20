@@ -467,6 +467,13 @@ def _plate_refresh(camera_id: str) -> tuple[bool, float, Any]:
         return wanted, minimum, (plates.plate_region(db) if wanted else None)
 
 
+def _face_refresh(camera_id: str) -> tuple[bool, float]:
+    """Whether a camera looks for faces, and how alike a face must be. Blocking, so the analysis loop runs it in a database thread (#279)."""
+    from . import face_scan
+    with connect() as db:
+        return face_scan.scanning(db, camera_id)
+
+
 def _fall_refresh(camera_id: str, at: datetime) -> tuple[Any, ...]:
     """The fall settings for a camera, its picture's aspect and its privacy masks. Blocking, so the analysis loop runs it in a database thread (#279)."""
     from . import falls, privacy
@@ -925,8 +932,7 @@ class _FaceWatch:
         camera_id = self.camera_id
         if time.monotonic() - self.checked >= face_scan.SETTINGS_REFRESH:
             self.checked = time.monotonic()
-            with connect() as db:
-                face_on, face_threshold = face_scan.scanning(db, camera_id)
+            face_on, face_threshold = await self.manager._db(_face_refresh, camera_id)
             face_reader = await self.manager._face_reader(self.provider) if face_on else None
             if face_reader is None:
                 self.scanner = None
