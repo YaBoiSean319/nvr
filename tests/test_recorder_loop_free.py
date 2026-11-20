@@ -74,11 +74,10 @@ class RecorderLoopFreeTests(unittest.TestCase):
 
         async def body() -> float:
             manager = RecordingManager()
-            longest, running = 0.0, True
+            longest, running, last = 0.0, True, time.monotonic()
 
             async def tick() -> None:
-                nonlocal longest
-                last = time.monotonic()
+                nonlocal longest, last
                 while running:
                     await asyncio.sleep(0.01)
                     now = time.monotonic()
@@ -90,6 +89,8 @@ class RecorderLoopFreeTests(unittest.TestCase):
             self.assertTrue(await asyncio.to_thread(taken.wait, 5))
             try:
                 await asyncio.wait_for(work(manager), timeout=20)
+                # Counted here too, before the loop turns again: when the work ends with a stall, the ticker may not get to measure it.
+                longest = max(longest, time.monotonic() - last)
             finally:
                 release.set()
                 await asyncio.to_thread(holder.join)
@@ -154,6 +155,26 @@ class RecorderLoopFreeTests(unittest.TestCase):
         with connect() as db:
             marked = db.execute("SELECT last_video_at FROM cameras WHERE id=?", (self.camera_id,)).fetchone()["last_video_at"]
         self.assertIsNotNone(marked)
+
+    def status(self) -> str:
+        from app.store import connect
+        with connect() as db:
+            return db.execute("SELECT recording_status FROM cameras WHERE id=?", (self.camera_id,)).fetchone()["recording_status"]
+
+    def test_a_camera_switched_off_is_marked_stopped_without_stopping_the_loop(self):
+        # A state change: rarer than the watches, but they come in a burst when many cameras drop at once.
+        from app.store import connect
+        with connect() as db:
+            db.execute("UPDATE cameras SET recording_status='connecting' WHERE id=?", (self.camera_id,))
+        longest = self.longest_stall_while_locked(lambda manager: manager.sync_camera(self.camera_id))
+        self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while a camera's state change waited for the write lock")
+        self.assertEqual(self.status(), "stopped")
+
+    def test_a_recording_that_cannot_start_says_so_without_stopping_the_loop(self):
+        with patch("app.recording.shutil.which", return_value=None):
+            longest = self.longest_stall_while_locked(lambda manager: manager._run_continuous(self.camera_id))
+        self.assertLess(longest, HOLD_SECONDS / 2, "the recorder's event loop stopped while a camera's state change waited for the write lock")
+        self.assertEqual(self.status(), "unavailable")
 
     def test_the_schedule_pass_checks_coverage_without_stopping_the_loop(self):
         async def one_pass(manager):

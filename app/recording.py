@@ -270,6 +270,16 @@ def remove_run_folder_if_empty(folder: Path) -> bool:
         return False
 
 
+async def _write_camera(sql: str, parameters: tuple[object, ...]) -> None:
+    """One write from the recorder's event loop, in a thread: it waits for the database's lock, and while it waits every camera's
+    recording supervision and the worker's heartbeat must not."""
+    def write() -> None:
+        with connect() as db:
+            db.execute(sql, parameters)
+
+    await asyncio.to_thread(write)
+
+
 class RecordingManager:
     def __init__(self) -> None:
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -366,9 +376,9 @@ class RecordingManager:
             self.tasks[camera_id] = asyncio.create_task(self._run(camera_id, desired), name=f"record-{camera_id}")
         elif row and row["enabled"] and row["recording_enabled"] and policy["scheduled"]:
             if row["recording_status"] != "scheduled_idle":
-                self._set_status(camera_id, "scheduled_idle")
+                await self._status(camera_id, "scheduled_idle")
         elif row and not row["archived_at"] and row["recording_status"] != "stopped":
-            self._set_status(camera_id, "stopped")
+            await self._status(camera_id, "stopped")
 
     async def _schedule_loop(self) -> None:
         while not self.stopping:
@@ -521,6 +531,11 @@ class RecordingManager:
         with connect() as db:
             return db.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
 
+    async def _status(self, camera_id: str, value: str, error: str | None = None, fault: str | None = None) -> None:
+        """``_set_status`` from the event loop: in a thread, since the write waits for the database's lock, and while it waits every
+        camera's recording supervision and the worker's heartbeat must not. A burst of these comes when many cameras drop at once."""
+        await asyncio.to_thread(self._set_status, camera_id, value, error, fault)
+
     def _set_status(self, camera_id: str, value: str, error: str | None = None, fault: str | None = None) -> None:
         """Record the recorder's state. ``fault`` says what went wrong when the state is a failure; it is kept while the recorder
         retries and cleared once the stream works (see ``_sync_coverage``) or recording stops."""
@@ -636,7 +651,7 @@ class RecordingManager:
         while not self.stopping:
             row = self._camera(camera_id)
             if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
-                self._set_status(camera_id, "stopped")
+                await self._status(camera_id, "stopped")
                 return
             if expected_mode == "motion":
                 began = time.monotonic()
@@ -678,10 +693,10 @@ class RecordingManager:
     async def _run_motion(self, camera_id: str) -> bool:
         row = self._camera(camera_id)
         if row is None or not row["enabled"] or not row["recording_enabled"]:
-            self._set_status(camera_id, "stopped")
+            await self._status(camera_id, "stopped")
             return False
         fallback_enabled = bool(row["motion_fallback_enabled"])
-        inputs = self._motion_inputs(camera_id, row)
+        inputs = await asyncio.to_thread(self._motion_inputs, camera_id, row)  # It writes the camera's status when it cannot start
         if inputs is None:
             return False
         executable, source, credentials = inputs
@@ -689,10 +704,9 @@ class RecordingManager:
         spool = motion_buffer_path() / camera_id
         spool.mkdir(parents=True, exist_ok=True)
         assembler = MotionClipAssembler(camera_id, spool, row["motion_pre_roll_seconds"], row["motion_post_roll_seconds"])
-        self._set_status(camera_id, "buffering")
-        with connect() as db:
-            db.execute("UPDATE cameras SET motion_source_status=?,server_motion_status=?,last_error=NULL WHERE id=?",
-                       ("connecting" if row["motion_service_url"] else "unsupported", "waiting" if fallback_enabled else "disabled", camera_id))
+        await self._status(camera_id, "buffering")
+        await _write_camera("UPDATE cameras SET motion_source_status=?,server_motion_status=?,last_error=NULL WHERE id=?",
+                            ("connecting" if row["motion_service_url"] else "unsupported", "waiting" if fallback_enabled else "disabled", camera_id))
         event_task: asyncio.Task[None] | None = None
         progress_task: asyncio.Task[None] | None = None
         stderr_task: asyncio.Task[None] | None = None
@@ -745,9 +759,9 @@ class RecordingManager:
         except asyncio.CancelledError:
             raise
         except (OSError, ValueError):
-            with connect() as db:
-                db.execute("UPDATE cameras SET recording_status='reconnecting',motion_source_status='unavailable',last_error='Camera motion buffer could not start',stream_fault=? WHERE id=?",
-                           (await _stream_fault(source), camera_id))
+            fault = await _stream_fault(source)
+            await _write_camera("UPDATE cameras SET recording_status='reconnecting',motion_source_status='unavailable',last_error='Camera motion buffer could not start',stream_fault=? WHERE id=?",
+                                (fault, camera_id))
         finally:
             await _stop_motion_parts([progress_task, stderr_task, event_task, fallback_task], assembler, proc)
             if self.stopping:
@@ -780,8 +794,7 @@ class RecordingManager:
     ) -> None:
         while not self.stopping:
             if source_state["value"] in {"healthy", "connecting"}:
-                with connect() as db:
-                    db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
+                await _write_camera("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
                 source_changed.clear()
                 if source_state["value"] in {"healthy", "connecting"}:
                     await source_changed.wait()
@@ -792,11 +805,9 @@ class RecordingManager:
                 raise
             except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError):
                 if source_state["value"] in {"healthy", "connecting"}:
-                    with connect() as db:
-                        db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
+                    await _write_camera("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
                 else:
-                    with connect() as db:
-                        db.execute("UPDATE cameras SET server_motion_status='unavailable',recording_status='unavailable',last_error='ONVIF events and server motion fallback are unavailable' WHERE id=?", (camera_id,))
+                    await _write_camera("UPDATE cameras SET server_motion_status='unavailable',recording_status='unavailable',last_error='ONVIF events and server motion fallback are unavailable' WHERE id=?", (camera_id,))
             if source_state["value"] not in {"healthy", "connecting"} and not self.stopping:
                 await asyncio.sleep(2)
 
@@ -829,8 +840,7 @@ class RecordingManager:
             process.stdin.write(_manifest_bytes(source))
             await process.stdin.drain()
             process.stdin.close()
-            with connect() as db:
-                db.execute("UPDATE cameras SET server_motion_status='detecting',recording_status='buffering',last_error='ONVIF events are degraded; server motion fallback is active' WHERE id=?", (camera_id,))
+            await _write_camera("UPDATE cameras SET server_motion_status='detecting',recording_status='buffering',last_error='ONVIF events are degraded; server motion fallback is active' WHERE id=?", (camera_id,))
             frame_size = FRAME_WIDTH * FRAME_HEIGHT
             while not self.stopping and source_state["value"] not in {"healthy", "connecting"}:
                 frame = await asyncio.wait_for(process.stdout.readexactly(frame_size), timeout=5)
@@ -904,16 +914,16 @@ class RecordingManager:
     async def _run_continuous(self, camera_id: str, expected_mode: str = "continuous") -> None:
         executable = shutil.which("ffmpeg")
         if not executable:
-            self._set_status(camera_id, "unavailable", "FFmpeg is not installed")
+            await self._status(camera_id, "unavailable", "FFmpeg is not installed")
             return
         segment_duration = segment_seconds()
         failures = 0
         while not self.stopping:
             row = self._camera(camera_id)
             if row is None or not row["enabled"] or not row["recording_enabled"] or self._desired_mode(camera_id) != expected_mode:
-                self._set_status(camera_id, "stopped")
+                await self._status(camera_id, "stopped")
                 return
-            source = self._continuous_source(camera_id, row)
+            source = await asyncio.to_thread(self._continuous_source, camera_id, row)  # It writes the camera's status when the source cannot be used
             if source is None:
                 return
             try:
@@ -921,11 +931,11 @@ class RecordingManager:
                 output_dir = camera_recordings_dir(camera_id) / uuid.uuid4().hex
                 output_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
-                self._set_status(camera_id, "unavailable", "Assigned recording volume is missing or not writable", fault="disk_unavailable")
+                await self._status(camera_id, "unavailable", "Assigned recording volume is missing or not writable", fault="disk_unavailable")
                 await asyncio.sleep(5)
                 continue
             list_path = output_dir / "segments.csv"
-            self._set_status(camera_id, "connecting")
+            await self._status(camera_id, "connecting")
             args = _continuous_args(executable, bool(row["audio_enabled"]), output_dir, list_path, segment_duration)
             env = os.environ.copy()
             env["TZ"] = "UTC"
@@ -945,23 +955,23 @@ class RecordingManager:
                 began = time.monotonic()
                 await self._watch_continuous_output(camera_id, process, list_path, output_dir, segment_duration)
                 await self._end_ffmpeg(process)
-                self._index_csv(camera_id, list_path, output_dir)
+                await asyncio.to_thread(self._index_csv, camera_id, list_path, output_dir)
                 if self.stopping:
                     return
                 failures = failures_after(failures, time.monotonic() - began)
-                self._set_status(camera_id, "reconnecting", "Camera stream interrupted; retrying", fault=await _stream_fault(source))
+                await self._status(camera_id, "reconnecting", "Camera stream interrupted; retrying", fault=await _stream_fault(source))
             except asyncio.CancelledError:
                 await self._end_ffmpeg(process)
                 self._index_csv(camera_id, list_path, output_dir)
                 raise
             except OSError:
                 failures += 1
-                self._set_status(camera_id, "reconnecting", "Camera stream could not start; retrying", fault=await _stream_fault(source))
+                await self._status(camera_id, "reconnecting", "Camera stream could not start; retrying", fault=await _stream_fault(source))
             except Exception:  # noqa: BLE001 - a database error (or anything else) must not end a camera's recording for good (#335)
                 failures += 1
                 logging.getLogger("nvr.recording").exception("Recording for camera %s was interrupted; retrying", camera_id)
                 try:
-                    self._set_status(camera_id, "reconnecting", "Recording was interrupted; retrying")
+                    await self._status(camera_id, "reconnecting", "Recording was interrupted; retrying")
                 except sqlite3.Error:
                     pass
             finally:
