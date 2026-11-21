@@ -67,5 +67,27 @@ class SharedLoadTests(unittest.TestCase):
             self.assertEqual(asyncio.run(run()), (None, "reader"))
 
 
+class FaceSearchReaderTests(unittest.TestCase):
+    def test_two_face_searches_at_once_load_one_reader(self):
+        # The web server's face search loads its reader the first time it is needed, from a request's thread.
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app import face_models, faces
+
+        loads: list[object] = []
+
+        def load(*args, **kwargs):
+            time.sleep(0.05)
+            loads.append(object())
+            return loads[-1]
+
+        with patch.object(faces, "_reader", None), patch.object(faces, "_reader_failed", False), \
+                patch.object(face_models, "installed", lambda: True), patch.object(face_models, "load_reader", load):
+            with ThreadPoolExecutor(max_workers=CAMERAS) as pool:
+                given = list(pool.map(lambda _: faces.reader(), range(CAMERAS)))
+        self.assertEqual(len(loads), 1)
+        self.assertTrue(all(reader is loads[0] for reader in given))
+
+
 if __name__ == "__main__":
     unittest.main()
