@@ -548,34 +548,7 @@ def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dic
     with tempfile.TemporaryDirectory(prefix=".restore-", dir=database.parent) as work:
         work_dir = Path(work)
         os.chmod(work_dir, 0o700)
-        # The backup is decrypted as it is read: the database is the only unencrypted copy written, as when it was made (#328).
-        with archive.open("rb") as sealed:
-            opener = _Opener(sealed, secret)
-            found: dict[str, bytes] = {}
-            with tarfile.open(fileobj=opener, mode="r|") as tar:  # A stream: each piece is checked as it is read
-                for info in tar:
-                    if info.name not in ("manifest.json", *MEMBERS) or info.name in found or not info.isfile():
-                        raise BackupError("The backup does not contain the expected files")
-                    stream = tar.extractfile(info)
-                    if info.name == "manifest.json":
-                        found[info.name] = stream.read()
-                    else:
-                        with (work_dir / info.name).open("wb") as target:
-                            shutil.copyfileobj(stream, target)
-                        found[info.name] = b""
-            opener.finish()
-        if sorted(found) != sorted(("manifest.json", *MEMBERS)):
-            raise BackupError("The backup does not contain the expected files")
-        manifest = json.loads(found["manifest.json"])
-        for member in MEMBERS:
-            if file_sha256(work_dir / member) != manifest["files"][member]:
-                raise BackupError(f"Checksum mismatch for {member}")
-        check = sqlite3.connect(work_dir / "nvr.sqlite3")
-        try:
-            if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise BackupError("The backed-up database failed its integrity check")
-        finally:
-            check.close()
+        manifest = _unpack_checked(archive, secret, work_dir)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         keyfile = key_path()
         preserved = []
@@ -594,6 +567,76 @@ def restore(archive: Path, *, force: bool = False, standby: bool = False) -> dic
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({"restored_at": datetime.now(timezone.utc).isoformat(), "backup_created_at": manifest["created_at"]}))
     return {"restored": str(archive), "backup_created_at": manifest["created_at"], "schema_version": manifest["schema_version"], "previous_files": preserved}
+
+
+def _unpack_checked(archive: Path, secret: str, work_dir: Path) -> dict:
+    """Decrypt ``archive`` into ``work_dir`` and check it whole: the expected files and no others, each matching its checksum in the
+    manifest, and a database that passes SQLite's integrity check. Returns the manifest; raises BackupError on anything else."""
+    # The backup is decrypted as it is read: the database is the only unencrypted copy written, as when it was made (#328).
+    with archive.open("rb") as sealed:
+        opener = _Opener(sealed, secret)
+        found: dict[str, bytes] = {}
+        with tarfile.open(fileobj=opener, mode="r|") as tar:  # A stream: each piece is checked as it is read
+            for info in tar:
+                if info.name not in ("manifest.json", *MEMBERS) or info.name in found or not info.isfile():
+                    raise BackupError("The backup does not contain the expected files")
+                stream = tar.extractfile(info)
+                if info.name == "manifest.json":
+                    found[info.name] = stream.read()
+                else:
+                    with (work_dir / info.name).open("wb") as target:
+                        shutil.copyfileobj(stream, target)
+                    found[info.name] = b""
+        opener.finish()
+    if sorted(found) != sorted(("manifest.json", *MEMBERS)):
+        raise BackupError("The backup does not contain the expected files")
+    manifest = json.loads(found["manifest.json"])
+    for member in MEMBERS:
+        if file_sha256(work_dir / member) != manifest["files"][member]:
+            raise BackupError(f"Checksum mismatch for {member}")
+    check = sqlite3.connect(work_dir / "nvr.sqlite3")
+    try:
+        if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise BackupError("The backed-up database failed its integrity check")
+    finally:
+        check.close()
+    return manifest
+
+
+def verify(archive: Path) -> dict[str, object]:
+    """Check a backup could be restored, without touching the installation: it is decrypted with the passphrase, every file is checked
+    against its checksum and the database against SQLite's integrity check, then everything unpacked is deleted. The unencrypted copy is
+    made beside the live database, where the data is already protected, never in a shared temporary folder."""
+    secret = passphrase()
+    if secret is None:
+        raise BackupError("Set NVR_BACKUP_PASSPHRASE to the passphrase used when the backup was made")
+    if not archive.is_file():
+        raise BackupError(f"There is no backup at {archive}")
+    work_parent = database_path().parent
+    work_parent.mkdir(parents=True, exist_ok=True)
+    needed = archive.stat().st_size + SPACE_MARGIN
+    free = shutil.disk_usage(work_parent).free
+    if free < needed:
+        raise BackupError(f"Not enough free space to check the backup: it needs about {_megabytes(needed)} free in {work_parent}, and there is {_megabytes(free)}.")
+    with tempfile.TemporaryDirectory(prefix=".verify-", dir=work_parent) as work:
+        work_dir = Path(work)
+        os.chmod(work_dir, 0o700)
+        manifest = _unpack_checked(archive, secret, work_dir)
+        check = sqlite3.connect(f"file:{work_dir / 'nvr.sqlite3'}?mode=ro", uri=True)
+        try:
+            counts = {table: _count(check, table) for table in ("cameras", "users")}
+        finally:
+            check.close()
+    return {"verified": str(archive), "backup_created_at": manifest.get("created_at"), "kind": manifest.get("kind"),
+            "app_version": manifest.get("app_version"), "schema_version": manifest.get("schema_version"),
+            "files_checked": list(MEMBERS), "database_integrity": "ok", **counts}
+
+
+def _count(db: sqlite3.Connection, table: str) -> int | None:
+    try:
+        return int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])  # noqa: S608 - the table names are the two literals above
+    except sqlite3.Error:
+        return None
 
 
 def _make_standby(database: Path) -> None:
@@ -675,11 +718,15 @@ def main(argv: list[str] | None = None) -> int:
     restoring.add_argument("archive", type=Path)
     restoring.add_argument("--force", action="store_true", help="restore even if workers reported liveness recently")
     restoring.add_argument("--standby", action="store_true", help="make the restored NVR a failover standby (it does not record until it takes over; enter its peer and secret afterwards)")
+    verifying = commands.add_parser("verify", help="check a backup decrypts and is whole, without changing anything (safe while the NVR runs)")
+    verifying.add_argument("archive", type=Path)
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         if arguments.command == "create":
             print(json.dumps(create_backup("manual"), indent=2))
+        elif arguments.command == "verify":
+            print(json.dumps(verify(arguments.archive), indent=2))
         else:
             print(json.dumps(restore(arguments.archive, force=arguments.force, standby=arguments.standby), indent=2))
     except BackupError as exc:

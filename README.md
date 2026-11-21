@@ -168,6 +168,14 @@ Email alerts go through Microsoft 365 with a Microsoft sign-in (device code) rat
 
 Backups run daily at 02:17 in the site time zone, before every schema migration, and on demand (**Back up now** in **Settings › Recording & storage**, or `POST /api/backups`; administrators only). They are written to `NVR_BACKUP_PATH` (`/backups` in Compose), and the newest `NVR_BACKUP_KEEP` (default 14) are kept. The backups a standby's sync makes are counted on their own (the newest two are kept), so they never push out the others. Mount `/backups` on a different disk or host than the NVR data. A backup needs free space for one copy of the database on the disk that holds the NVR data (the only unencrypted copy, removed when the backup is done), and for the encrypted backup where backups go; both on one disk need about twice the database size. When there is not enough, the backup is refused before anything is written, the message says how much is needed where, and the backup incident is raised. A restore likewise needs room for one copy of the database where the NVR data is, and is refused before anything changes when there is not. `GET /api/backups` reports backup age, the last success and failure, and the stored files. A failed backup, or no success for 26 hours, raises an incident (`system.failure` webhook) that recovers on the next success.
 
+To check that a backup could be restored, without changing anything (safe while the NVR runs), run:
+
+```sh
+docker compose exec nvr python -m app.backup verify /backups/<file>.nvrbackup
+```
+
+It decrypts the backup with the passphrase, checks every file against its checksum and the database against SQLite's integrity check, prints when the backup was made, its schema version and how many cameras and users it holds, and deletes what it unpacked. It needs the same free space as a restore beside the NVR data, where the one unencrypted copy is made while it checks. Run it now and then on the copies kept off the machine: a backup that cannot be read is found before it is needed.
+
 To restore, stop the NVR, then run the restore command in a one-off container with the same volumes and passphrase:
 
 ```sh
