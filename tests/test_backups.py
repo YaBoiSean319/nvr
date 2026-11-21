@@ -23,7 +23,7 @@ PASSPHRASE = "correct horse battery staple"
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-class BackupTests(unittest.TestCase):
+class BackupCase(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -61,6 +61,8 @@ class BackupTests(unittest.TestCase):
             )
             db.execute("UPDATE site_branding SET app_name='North Hall' WHERE singleton_id=1")
 
+
+class BackupTests(BackupCase):
     def test_push_keys_survive_a_backup_and_restore(self):
         from app import push
         from cryptography.hazmat.primitives.asymmetric import ec
@@ -476,6 +478,83 @@ class BackupTests(unittest.TestCase):
         missing.write_bytes(b"junk")
         with patch("sys.stderr", new_callable=io.StringIO) as stderr:
             self.assertEqual(backup.main(["restore", str(missing), "--force"]), 1)
+        self.assertIn("not an NVR configuration backup", stderr.getvalue())
+
+
+class VerifyTests(BackupCase):
+    """``python -m app.backup verify <file>``: whether a backup could be restored, checked without changing anything."""
+
+    def leftovers(self) -> list[str]:
+        return sorted(path.name for path in Path(os.environ["NVR_DB_PATH"]).parent.iterdir() if path.name.startswith(".verify-"))
+
+    def test_a_good_backup_is_reported_and_the_installation_is_untouched(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        database = Path(os.environ["NVR_DB_PATH"])
+        with connect() as db:
+            db.execute("INSERT INTO cameras(id,name,stream_url_ciphertext,recording_mode) VALUES('c2','Added after the backup',X'01','disabled')")
+        before = database.read_bytes()
+        report = backup.verify(archive)
+        self.assertEqual(report["database_integrity"], "ok")
+        self.assertEqual(report["kind"], "manual")
+        self.assertEqual((report["cameras"], report["users"]), (1, 1))  # What the backup holds, not the live database's two cameras
+        self.assertIsNotNone(report["schema_version"])
+        self.assertEqual(database.read_bytes(), before)
+        self.assertEqual(self.leftovers(), [])  # Nothing unencrypted is left behind
+
+    def test_it_runs_while_the_nvr_is_running(self):
+        # Unlike a restore, a check changes nothing, so a running installation is no reason to refuse it.
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        with patch.object(backup, "_installation_running", return_value=True):
+            self.assertEqual(backup.verify(archive)["database_integrity"], "ok")
+
+    def test_a_damaged_or_wrongly_unlocked_backup_fails_and_leaves_nothing_behind(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        original = archive.read_bytes()
+        damaged = self.backups / "damaged.nvrbackup"
+        damaged.write_bytes(original[:200] + bytes([original[200] ^ 1]) + original[201:])
+        with self.assertRaises(backup.BackupError):
+            backup.verify(damaged)
+        with patch.dict(os.environ, {"NVR_BACKUP_PASSPHRASE": "a different passphrase"}):
+            with self.assertRaisesRegex(backup.BackupError, "Wrong passphrase"):
+                backup.verify(archive)
+        with self.assertRaisesRegex(backup.BackupError, "There is no backup"):
+            backup.verify(self.backups / "missing.nvrbackup")
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_database_that_fails_its_integrity_check_is_reported(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        real = backup.sqlite3.connect
+
+        class Damaged:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def execute(self, sql, *args):
+                if sql.startswith("PRAGMA integrity_check"):
+                    return self.connection.execute("SELECT 'row 3 missing from index'")
+                return self.connection.execute(sql, *args)
+
+            def close(self):
+                self.connection.close()
+
+        with patch.object(backup.sqlite3, "connect", lambda *args, **kwargs: Damaged(real(*args, **kwargs))):
+            with self.assertRaisesRegex(backup.BackupError, "failed its integrity check"):
+                backup.verify(archive)
+
+    def test_the_command_prints_the_report_or_the_error(self):
+        self._seed()
+        archive = self.backups / backup.create_backup("manual")["file_name"]
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(backup.main(["verify", str(archive)]), 0)
+        self.assertIn('"database_integrity": "ok"', stdout.getvalue())
+        junk = self.backups / "junk.nvrbackup"
+        junk.write_bytes(b"junk")
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(backup.main(["verify", str(junk)]), 1)
         self.assertIn("not an NVR configuration backup", stderr.getvalue())
 
 
