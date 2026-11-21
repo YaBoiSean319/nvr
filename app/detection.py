@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -150,6 +151,9 @@ class OpenVINODetector:
         configured_threads = max(1, min(configured_threads, 8))
         properties = {"INFERENCE_NUM_THREADS": configured_threads} if provider == "CPU" else {}
         self.compiled = self.core.compile_model(self.core.read_model(str(model_path)), provider, properties)
+        # One inference request per compiled model: a second call while one runs fails with "Infer Request is busy" (#436). Cameras take
+        # turns through the AI worker's inference slot, but a camera stopped mid-frame gives the slot back while its thread is still here.
+        self._lock = threading.Lock()
         self.input = self.compiled.input(0)
         shape = tuple(int(dimension) for dimension in self.input.shape)
         if shape != (1, 3, MODEL_HEIGHT, MODEL_WIDTH):
@@ -169,9 +173,11 @@ class OpenVINODetector:
         image = np.frombuffer(bgr_frame, dtype=np.uint8).reshape(MODEL_HEIGHT, MODEL_WIDTH, 3)
         # The model's graph includes channel reversal and 1/255 scaling.
         tensor = image.astype(np.float32).transpose(2, 0, 1)[None, ...]
-        result = self.compiled([tensor])
-        boxes = np.asarray(result[self.output_by_name["boxes"]]).reshape(-1, 5)
-        labels = np.asarray(result[self.output_by_name["labels"]]).reshape(-1)
+        with self._lock:
+            result = self.compiled([tensor])
+            # Copied while the request is still this call's: the next call reuses its output buffers
+            boxes = np.array(result[self.output_by_name["boxes"]]).reshape(-1, 5)
+            labels = np.array(result[self.output_by_name["labels"]]).reshape(-1)
         events = []
         for box, label in zip(boxes, labels, strict=False):
             score = float(box[4])
