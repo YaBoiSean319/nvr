@@ -41,7 +41,7 @@ CACHE_DEFAULT_BYTES = 2 * 1024**3
 FAILURES_BEFORE_INCIDENT = 3
 BATCH = 20
 POLL_SECONDS = 30.0
-_fetch_locks: dict[str, threading.Lock] = {}
+_fetch_locks: dict[str, list] = {}  # A cache file's lock and how many fetches hold or wait for it; dropped when none do, so it never grows
 _fetch_guard = threading.Lock()
 
 
@@ -250,27 +250,43 @@ def cold_path(relative_path: str) -> Path | None:
 
 def _fetch_cached(store: ObjectStore, tier: Tier, row: sqlite3.Row) -> Path:
     target = _cache_file(row)
+    key = str(target)
     with _fetch_guard:
-        lock = _fetch_locks.setdefault(str(target), threading.Lock())
-    with lock:
-        if target.is_file() and target.stat().st_size == int(row["size_bytes"]):
-            os.utime(target)
-            return target
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(f".{target.name}.{os.getpid()}.partial")
-        try:
-            digest, size = store.fetch(row["tier_key"], partial)
-            if digest != row["tier_sha256"] or size != int(row["size_bytes"]):
-                note_health(tier.id, "A segment came back from the cold tier different from the one that was sent")
-                raise TierError("The footage came back from the cold tier changed")
-            os.replace(partial, target)
-        except S3Error as exc:
-            note_health(tier.id, str(exc))
-            raise TierError(str(exc)) from None
-        finally:
-            partial.unlink(missing_ok=True)
-    evict(keep=target)
+        entry = _fetch_locks.setdefault(key, [threading.Lock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            fetched = _fetch_into(store, tier, row, target)
+    finally:
+        with _fetch_guard:
+            entry[1] -= 1
+            if entry[1] == 0:
+                _fetch_locks.pop(key, None)
+    if fetched:
+        evict(keep=target)
     return target
+
+
+def _fetch_into(store: ObjectStore, tier: Tier, row: sqlite3.Row, target: Path) -> bool:
+    """Fetch a segment from the store into its cache file unless a whole copy is already there; True when it was fetched. The caller holds
+    the file's lock."""
+    if target.is_file() and target.stat().st_size == int(row["size_bytes"]):
+        os.utime(target)
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.{os.getpid()}.partial")
+    try:
+        digest, size = store.fetch(row["tier_key"], partial)
+        if digest != row["tier_sha256"] or size != int(row["size_bytes"]):
+            note_health(tier.id, "A segment came back from the cold tier different from the one that was sent")
+            raise TierError("The footage came back from the cold tier changed")
+        os.replace(partial, target)
+    except S3Error as exc:
+        note_health(tier.id, str(exc))
+        raise TierError(str(exc)) from None
+    finally:
+        partial.unlink(missing_ok=True)
+    return True
 
 
 def evict(keep: Path | None = None, limit: int | None = None) -> int:

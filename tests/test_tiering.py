@@ -462,6 +462,16 @@ class ObjectStoreTierTests(TierCase):
         self.assertEqual(len(list(tiering.cache_dir().glob("*.mp4"))), 1)
         self.assertEqual(len(self.media(self.d1, ids[0]).content), 3 * 1024 * 1024)  # Back from the bucket when asked for again
 
+    def test_fetching_footage_back_leaves_nothing_behind_in_memory(self):
+        # Each fetch from the bucket takes a lock for its cache file, so two viewers of one segment fetch it once. The lock was kept for
+        # good: one more for every segment ever played from the cold tier, for as long as the server ran.
+        ids = [self.segment(self.d1, 40 + index)[0] for index in range(3)]
+        self.policy(self.s3_tier())
+        self.assertEqual(tiering.run_once(), {"moved": 3})
+        for segment_id in ids:
+            self.assertEqual(self.media(self.d1, segment_id).status_code, 200)
+        self.assertEqual(tiering._fetch_locks, {})
+
     def test_two_movers_of_one_segment_leave_its_object_in_place(self):
         segment_id, payload = self.segment(self.d1, 40)
         self.policy(self.s3_tier())
