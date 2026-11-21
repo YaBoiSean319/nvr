@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -192,6 +193,8 @@ class FaceReader:
             core = ov.Core()
         self.detector = core.compile_model(core.read_model(str(detector or MODELS_DIR / DETECTOR.name)), provider)
         self.recogniser = core.compile_model(core.read_model(str(recogniser or MODELS_DIR / RECOGNISER.name)), provider)
+        # Shared by every face-watch camera, each from its own worker thread: one inference at a time per model (#436), as for plates.
+        self._detector_lock, self._recogniser_lock = threading.Lock(), threading.Lock()
 
     @staticmethod
     def _named(result: dict[Any, np.ndarray]) -> dict[str, np.ndarray]:
@@ -207,7 +210,9 @@ class FaceReader:
         rows, columns = frame.shape[:2]
         tensor, scale = letterbox(frame)
         found = []
-        for score, box, points in decode_detections(self._named(self.detector(tensor)), threshold):
+        with self._detector_lock:
+            outputs = {name: np.array(value) for name, value in self._named(self.detector(tensor)).items()}  # Copied before another call writes over them
+        for score, box, points in decode_detections(outputs, threshold):
             box_px, points_px = box / scale, points / scale
             x1, y1 = max(0.0, float(box_px[0])), max(0.0, float(box_px[1]))
             x2, y2 = min(float(columns), float(box_px[2])), min(float(rows), float(box_px[3]))
@@ -223,7 +228,9 @@ class FaceReader:
         points = np.array([[x * columns, y * rows] for x, y in face.landmarks])
         aligned = align(frame, points)[:, :, ::-1]  # BGR to RGB
         tensor = aligned.transpose(2, 0, 1)[None].astype(np.float32)
-        return normalise(np.asarray(next(iter(self.recogniser(tensor).values()))))
+        with self._recogniser_lock:
+            embedding = np.array(next(iter(self.recogniser(tensor).values())))  # Copied before another call writes over it
+        return normalise(embedding)
 
     def faces(self, frame: np.ndarray, threshold: float = DETECTION_THRESHOLD, minimum_pixels: int = MIN_FACE_PIXELS) -> list[Face]:
         """The faces worth recognising (sharp enough detection, wide enough in the picture), each with its embedding."""

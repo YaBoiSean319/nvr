@@ -17,6 +17,7 @@ observer would say at a glance, and as reliable as the pixels are.
 from __future__ import annotations
 
 import os
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -114,6 +115,9 @@ class VehicleAttributeModel:
             import openvino as ov
             core = ov.Core()
         self.compiled = core.compile_model(core.read_model(str(path)), provider)
+        # Shared by every camera, each from its own worker thread: the compiled model has one inference request, which refuses to run
+        # twice at once ("Infer Request is busy", #436).
+        self._lock = threading.Lock()
 
     def classify(self, frame: bytes | None, box: dict[str, float]) -> dict[str, str]:
         image = _crop_image(frame, box, (0.0, 1.0, 0.0, 1.0))
@@ -122,8 +126,10 @@ class VehicleAttributeModel:
         rows = np.minimum((np.arange(self.SIZE) * image.shape[0] / self.SIZE).astype(int), image.shape[0] - 1)
         columns = np.minimum((np.arange(self.SIZE) * image.shape[1] / self.SIZE).astype(int), image.shape[1] - 1)
         tensor = image[rows][:, columns].transpose(2, 0, 1)[None].astype(np.float32)
-        result = self.compiled(tensor)
-        scores = {output.get_any_name(): np.asarray(value).reshape(-1) for output, value in result.items()}
+        with self._lock:
+            result = self.compiled(tensor)
+            # Copied out while the lock is held: the outputs are the request's own buffers, which the next call writes over.
+            scores = {output.get_any_name(): np.array(value).reshape(-1) for output, value in result.items()}
         found: dict[str, str] = {}
         if "color" in scores and scores["color"].size == len(self.COLOURS):
             found["vehicle_colour"] = self.COLOURS[int(scores["color"].argmax())]

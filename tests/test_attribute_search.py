@@ -166,6 +166,17 @@ class AttributeModelTests(unittest.TestCase):
         self.assertEqual(model.classify(frame, box_of(200, 150, 290, 190)), {"vehicle_colour": "red", "vehicle_type": "truck"})
         self.assertEqual(core.seen_shape, (1, 3, 72, 72))
 
+    def test_cameras_describing_vehicles_at_the_same_moment_each_get_the_models_answer(self):
+        # One attribute model serves every camera, each from its own worker thread; the model refuses overlapping calls (#436).
+        from concurrent.futures import ThreadPoolExecutor
+        from tests.test_plate_regions import OneRequest
+        model = attributes.VehicleAttributeModel(Path("/models/vehicle.xml"), core=FakeCore(colour=3, kind=2))
+        model.compiled = OneRequest(model.compiled)
+        frame = frame_with([((200, 150, 290, 190), (30, 30, 220))])
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(lambda _: model.classify(frame, box_of(200, 150, 290, 190)), range(48)))
+        self.assertEqual(results, [{"vehicle_colour": "red", "vehicle_type": "truck"}] * 48)
+
     def test_the_model_is_used_for_vehicles_only_and_a_failing_one_leaves_the_pixel_colours(self):
         model = attributes.VehicleAttributeModel(Path("/models/vehicle.xml"), core=FakeCore(colour=5, kind=1))
         frame = frame_with([((200, 150, 290, 190), (30, 200, 30)), ((100, 40, 124, 104), (30, 30, 220))])
