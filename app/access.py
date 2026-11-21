@@ -65,28 +65,30 @@ def _roles(encoded: str | None) -> list[str]:
     return [role for role in json.loads(encoded or "[]") if isinstance(role, str)]
 
 
+def _held_by(user_id: int, roles: list[str]) -> tuple[str, tuple[str, ...]]:
+    """The condition, and its values, for a grant held by this person: given to them, or to an Entra role they hold."""
+    clause = "(subject_type='user' AND subject=?)"
+    if roles:
+        clause += " OR (subject_type='role' AND subject IN (%s))" % ",".join("?" * len(roles))
+    return clause, (str(user_id), *roles)
+
+
 def live_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = None) -> list[sqlite3.Row]:
     """The grants in force for a user: their own, and those of every Entra role they hold."""
     row = db.execute("SELECT provider_roles_json FROM users WHERE id=?", (user_id,)).fetchone()
     if row is None:
         return []
-    roles = _roles(row["provider_roles_json"])
-    clause = "(subject_type='user' AND subject=?)"
-    if roles:
-        clause += " OR (subject_type='role' AND subject IN (%s))" % ",".join("?" * len(roles))
+    clause, subjects = _held_by(user_id, _roles(row["provider_roles_json"]))
     return db.execute(f"SELECT * FROM access_grants WHERE (expires_at IS NULL OR expires_at>?) AND ({clause})",
-                      ((now or _now()).isoformat(), str(user_id), *roles)).fetchall()
+                      ((now or _now()).isoformat(), *subjects)).fetchall()
 
 
 def live_site_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = None) -> frozenset[str]:
     """The sites of a multi-site console a person has been given, by a grant of their own or of an Entra role they hold."""
     row = db.execute("SELECT provider_roles_json FROM users WHERE id=?", (user_id,)).fetchone()
-    roles = _roles(row["provider_roles_json"]) if row is not None else []
-    clause = "(subject_type='user' AND subject=?)"
-    if roles:
-        clause += " OR (subject_type='role' AND subject IN (%s))" % ",".join("?" * len(roles))
+    clause, subjects = _held_by(user_id, _roles(row["provider_roles_json"]) if row is not None else [])
     return frozenset(item[0] for item in db.execute(f"SELECT site_id FROM site_grants WHERE (expires_at IS NULL OR expires_at>?) AND ({clause})",
-                                                    ((now or _now()).isoformat(), str(user_id), *roles)))
+                                                    ((now or _now()).isoformat(), *subjects)))
 
 
 def effective_grants(db: sqlite3.Connection, user_id: int, now: datetime | None = None) -> list[sqlite3.Row]:
@@ -131,9 +133,6 @@ def ensure_default_grant(db: sqlite3.Connection, user_id: int) -> None:
     if user is None or user["role"] != "operator":
         return
     row = db.execute("SELECT provider_roles_json FROM users WHERE id=?", (user_id,)).fetchone()
-    roles = _roles(row["provider_roles_json"])
-    clause = "(subject_type='user' AND subject=?)"
-    if roles:
-        clause += " OR (subject_type='role' AND subject IN (%s))" % ",".join("?" * len(roles))
-    if not db.execute(f"SELECT 1 FROM access_grants WHERE {clause}", (str(user_id), *roles)).fetchone():
+    clause, subjects = _held_by(user_id, _roles(row["provider_roles_json"]))
+    if not db.execute(f"SELECT 1 FROM access_grants WHERE {clause}", subjects).fetchone():
         db.execute("INSERT INTO access_grants(subject_type,subject,scope_type,default_grant) VALUES ('user',?,'all',1)", (str(user_id),))
