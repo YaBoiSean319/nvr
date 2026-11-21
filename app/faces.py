@@ -11,6 +11,7 @@ import json
 import math
 import shutil
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -35,10 +36,16 @@ class FaceError(Exception):
 
 _reader: face_models.FaceReader | None = None
 _reader_failed = False
+_reader_lock = threading.Lock()  # Two searches at once load one reader, not two (#217)
 
 
 def reader() -> face_models.FaceReader:
     """The face reader, loaded the first time it is needed (the models are 39 MB); a FaceError says why when it cannot be had."""
+    with _reader_lock:
+        return _loaded_reader()
+
+
+def _loaded_reader() -> face_models.FaceReader:
     global _reader, _reader_failed
     if _reader is None:
         if not face_models.installed():
