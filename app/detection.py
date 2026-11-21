@@ -514,6 +514,10 @@ class DetectionManager:
         self._detectors: dict[tuple[str, str, str], Any] = {}
         self._plate_readers: dict[tuple[str, str], Any] = {}
         self._pose_readers: dict[str, Any] = {}
+        self._attribute_models: dict[str, Any] = {}
+        self._face_readers: dict[str, Any] = {}
+        self._reid_models: dict[str, Any] = {}
+        self._model_loads: dict[tuple[str, Any], asyncio.Lock] = {}  # One load at a time per model, so cameras starting together share one copy
         self._model_lock = asyncio.Lock()
         self._sync_lock = asyncio.Lock()  # One camera is settled at a time (see sync_camera)
         # How many times each camera has been settled from its settings as they are now (a save, a message): a reconcile pass leaves a
@@ -711,14 +715,25 @@ class DetectionManager:
     async def _state(self, camera_id: str, state: str, error: str | None = None) -> None:
         await self._db(set_camera_state, camera_id, state, error)
 
+    async def _shared_model(self, name: str, cache: dict[Any, Any], key: Any, load: Any, *args: Any, remember_missing: bool) -> Any:
+        """A model loaded once for every camera that asks, however many ask at once (#217). Cameras start together when the worker does: each
+        used to see no model yet and load its own copy, and keep it for as long as it ran. A missing model is remembered only when
+        ``remember_missing``: the pose, plate and face models can be installed while the worker runs, and are looked for again."""
+        if key in cache and (cache[key] is not None or remember_missing):
+            return cache[key]
+        async with self._model_loads.setdefault((name, key), asyncio.Lock()):
+            if key in cache and (cache[key] is not None or remember_missing):
+                return cache[key]  # Loaded by the camera that asked first
+            model = await asyncio.to_thread(load, *args)
+            if model is not None or remember_missing:
+                cache[key] = model
+            return model
+
     async def _attribute_model(self, provider: str) -> Any:
         """The vehicle attribute model, loaded once for every camera that uses this provider (None when it is not installed)."""
         from . import attributes
-        if not hasattr(self, "_attribute_models"):
-            self._attribute_models: dict[str, Any] = {}
-        if provider not in self._attribute_models:
-            self._attribute_models[provider] = await asyncio.to_thread(attributes.load_attribute_model, attributes.ATTRIBUTE_MODEL_PATH, provider)
-        return self._attribute_models[provider]
+        return await self._shared_model("attributes", self._attribute_models, provider, attributes.load_attribute_model,
+                                        attributes.ATTRIBUTE_MODEL_PATH, provider, remember_missing=True)
 
     async def _db(self, write: Any, *args: Any) -> Any:
         return await asyncio.get_running_loop().run_in_executor(self._db_threads, write, *args)
@@ -726,44 +741,24 @@ class DetectionManager:
     async def _pose_reader(self, provider: str) -> Any:
         """The pose model, loaded once for every camera with fall detection that uses this provider (None when it is not installed or will not load, and then not remembered)."""
         from . import pose_models
-        reader = self._pose_readers.get(provider)
-        if reader is None:
-            reader = await asyncio.to_thread(pose_models.load_reader, provider)
-            if reader is not None:
-                self._pose_readers[provider] = reader
-        return reader
+        return await self._shared_model("pose", self._pose_readers, provider, pose_models.load_reader, provider, remember_missing=False)
 
     async def _plate_reader(self, provider: str, region: str) -> Any:
         """The plate detector and recogniser for a region, loaded once for every plate camera that uses this provider and region (None when they are not installed)."""
         from . import plates
-        key = (provider, region)
-        reader = self._plate_readers.get(key)
-        if reader is None:  # A failed load is not remembered, so installing or re-choosing the models works without a restart.
-            reader = await asyncio.to_thread(plates.load_reader, provider, region)
-            if reader is not None:
-                self._plate_readers[key] = reader
-        return reader
+        # A failed load is not remembered, so installing or re-choosing the models works without a restart.
+        return await self._shared_model("plates", self._plate_readers, (provider, region), plates.load_reader, provider, region, remember_missing=False)
 
     async def _face_reader(self, provider: str) -> Any:
         """The face detector and recogniser, loaded once for every camera that looks for faces on this provider (None when they are not installed)."""
         from . import face_models
-        if not hasattr(self, "_face_readers"):
-            self._face_readers: dict[str, Any] = {}
-        reader = self._face_readers.get(provider)
-        if reader is None:  # A failed load is not remembered, so installing the models works without a restart.
-            reader = await asyncio.to_thread(face_models.load_reader, provider)
-            if reader is not None:
-                self._face_readers[provider] = reader
-        return reader
+        # A failed load is not remembered, so installing the models works without a restart.
+        return await self._shared_model("faces", self._face_readers, provider, face_models.load_reader, provider, remember_missing=False)
 
     async def _reid_model(self, provider: str) -> Any:
         """The person re-identification model, loaded once for every camera that uses this provider (None when it is not installed)."""
         from . import similar
-        if not hasattr(self, "_reid_models"):
-            self._reid_models: dict[str, Any] = {}
-        if provider not in self._reid_models:
-            self._reid_models[provider] = await asyncio.to_thread(similar.load_reid_model, similar.REID_MODEL_PATH, provider)
-        return self._reid_models[provider]
+        return await self._shared_model("reid", self._reid_models, provider, similar.load_reid_model, similar.REID_MODEL_PATH, provider, remember_missing=True)
 
     async def _clip_model(self) -> Any:
         """The administrator's image-text model, loaded once for every camera (None when none is installed)."""
