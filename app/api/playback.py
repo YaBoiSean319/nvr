@@ -19,6 +19,7 @@ from app import ai_coverage, clip_labels, external_events, privacy, track_privac
 from app.clock import canon
 from app.coverage import timeline as coverage_timeline
 from app.principal import CurrentUser, requires_scope
+from app.processes import run_to_end
 from app.store import connect
 from app.retention import acquire_playback, release_playback
 
@@ -181,7 +182,7 @@ async def snapshot_segment(
             "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
-        image, _ = await asyncio.wait_for(process.communicate(), timeout=15)
+        image, _ = await run_to_end(process, timeout=15)
         if process.returncode != 0 or not image.startswith(b"\xff\xd8"):
             raise HTTPException(status_code=422, detail="A snapshot could not be extracted from this interval")
         source_time = at.isoformat()
@@ -201,9 +202,6 @@ async def snapshot_segment(
             "Cache-Control": "no-store", "X-Source-Time": source_time, "X-Audit-Reference": audit_reference,
         })
     except asyncio.TimeoutError as exc:
-        if process and process.returncode is None:
-            process.kill()
-            await process.wait()
         raise HTTPException(status_code=503, detail="Snapshot extraction timed out") from exc
     finally:
         release_playback(path)

@@ -34,6 +34,7 @@ from .credentials import decrypt
 from .onvif_client import OnvifClient, OnvifError, Recording, Services
 from .recording import recordings_path
 from .storage import camera_recordings_dir
+from .processes import run_to_end
 from .store import connect
 from app.clock import now as _now
 
@@ -50,6 +51,7 @@ MIN_LIMIT_KBPS, MAX_LIMIT_KBPS = 64, 1_000_000
 MAX_ATTEMPTS = 6
 BACKOFF_FIRST, BACKOFF_MAX = timedelta(minutes=1), timedelta(minutes=30)
 FETCH_SLACK_SECONDS = 90
+PROBE_TIMEOUT_SECONDS = 30.0  # The most a duration probe of a fetched chunk may take
 PROTOCOLS = "concat,pipe,file,http,https,rtsp,rtsps,tcp,udp,rtp,tls,crypto"
 # Gaps the camera's own recording can fill: it was running; the NVR was not getting its video (or not running).
 OUTAGES = frozenset({"camera_offline", "stream_error", "worker_restart", "unknown"})
@@ -219,7 +221,7 @@ async def _probe_seconds(path: Path) -> float:
         raise RuntimeError("ffprobe is unavailable")
     process = await asyncio.create_subprocess_exec(executable, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path),
                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    out, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+    out, _ = await run_to_end(process, timeout=PROBE_TIMEOUT_SECONDS)
     try:
         return max(0.0, float(out.decode().strip()))
     except ValueError:
