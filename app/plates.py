@@ -29,6 +29,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -209,10 +210,13 @@ class PlateReader:
         self.symbols, self.blank = read_charset(recogniser)
         shape = list(self.recogniser.input(0).shape)
         self.input_height, self.input_width = int(shape[-2]), int(shape[-1])
+        # Shared by every plate camera, each from its own worker thread: one inference at a time per model (#436), as in plate_models.
+        self._detector_lock, self._recogniser_lock = threading.Lock(), threading.Lock()
 
     def _detect(self, frame: np.ndarray) -> list[tuple[float, tuple[float, float, float, float]]]:
         tensor = _resize(frame, DETECTOR_SIZE, DETECTOR_SIZE).transpose(2, 0, 1)[None].astype(np.float32)
-        rows = np.asarray(next(iter(self.detector(tensor).values()))).reshape(-1, 7)
+        with self._detector_lock:
+            rows = np.array(next(iter(self.detector(tensor).values()))).reshape(-1, 7)  # Copied out before another call writes over it
         found = []
         for _, label, confidence, x1, y1, x2, y2 in rows:
             if int(label) == PLATE_LABEL and confidence >= DETECTION_THRESHOLD and x2 > x1 and y2 > y1:
@@ -237,8 +241,11 @@ class PlateReader:
             if crop.size == 0:
                 continue
             tensor = _resize(crop, self.input_height, self.input_width).transpose(2, 0, 1)[None].astype(np.float32)
+            feed = self._feed(tensor)
             try:
-                text, confidence = decode_plate(np.asarray(next(iter(self.recogniser(self._feed(tensor)).values()))), self.symbols, self.blank)
+                with self._recogniser_lock:
+                    output = np.array(next(iter(self.recogniser(feed).values())))  # Copied out before another call writes over it
+                text, confidence = decode_plate(output, self.symbols, self.blank)
             except ValueError:
                 continue
             text = normalise(text)

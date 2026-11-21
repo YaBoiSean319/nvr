@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -207,12 +208,18 @@ class RegionReader:
         self.detector = core.compile_model(core.read_model(str(folder / DETECTOR.name)), provider)
         self.recogniser = core.compile_model(core.read_model(str(folder / region.recogniser.name)), provider)
         self.reader_id = f"{DETECTOR_ID}+{region.recogniser.name.removesuffix('.onnx')}"
+        # One reader serves every plate camera, each from its own worker thread, and each compiled model has one inference request, which
+        # refuses to run twice at once ("Infer Request is busy", #436). One lock per model: one camera's detection can still overlap
+        # another's recognition.
+        self._detector_lock, self._recogniser_lock = threading.Lock(), threading.Lock()
 
     def detect(self, frame: np.ndarray) -> list[tuple[float, tuple[float, float, float, float]]]:
         """Plates as (score, (x1, y1, x2, y2)) in fractions of the frame."""
         rows, columns = frame.shape[:2]
         tensor, scale, left, top = letterbox(frame, DETECTOR_SIZE)
-        found = np.asarray(next(iter(self.detector(tensor).values()))).reshape(-1, 7)
+        with self._detector_lock:
+            # Copied out while the lock is held: the output is the request's own buffer, which the next call writes over.
+            found = np.array(next(iter(self.detector(tensor).values()))).reshape(-1, 7)
         plates = []
         for _, x1, y1, x2, y2, _, score in found:
             if score < DETECTION_THRESHOLD:
@@ -231,9 +238,10 @@ class RegionReader:
         else:
             picture = crop[:, :, ::-1]
         tensor = np.clip(np.rint(resize_bilinear(picture, config.height, config.width)), 0, 255).astype(np.uint8)[None]
-        outputs = self.recogniser(tensor)
-        plate = next((value for key, value in outputs.items() if key.get_any_name() == "plate"), next(iter(outputs.values())))
-        return decode_slots(np.asarray(plate), config)
+        with self._recogniser_lock:
+            outputs = self.recogniser(tensor)
+            plate = np.array(next((value for key, value in outputs.items() if key.get_any_name() == "plate"), next(iter(outputs.values()))))
+        return decode_slots(plate, config)
 
     def read(self, frame: np.ndarray) -> list[Any]:
         from .plates import Plate, normalise, valid_plate

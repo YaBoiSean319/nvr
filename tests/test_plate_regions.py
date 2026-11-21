@@ -123,6 +123,25 @@ class FakeCore:
         return FakeCompiled(self.detector_rows if "yolo" in name else self.recogniser_scores)
 
 
+class OneRequest:
+    """Like an OpenVINO compiled model: one inference request, which refuses to run twice at once ("Infer Request is busy", #436)."""
+
+    def __init__(self, model) -> None:
+        import threading
+        self.model, self.busy, self.calls = model, threading.Lock(), 0
+
+    def __call__(self, tensor):
+        import time
+        if not self.busy.acquire(blocking=False):
+            raise RuntimeError("Infer Request is busy")
+        try:
+            time.sleep(0.003)  # Inference takes a while, so calls from several cameras overlap
+            self.calls += 1
+            return self.model(tensor)
+        finally:
+            self.busy.release()
+
+
 class ReaderTests(unittest.TestCase):
     def reader(self, rows: np.ndarray, scores: np.ndarray) -> plate_models.RegionReader:
         with tempfile.TemporaryDirectory() as temporary:
@@ -131,6 +150,18 @@ class ReaderTests(unittest.TestCase):
             for name in (plate_models.DETECTOR.name, plate_models.WORLDWIDE.recogniser.name):
                 (folder / name).write_bytes(b"model")
             return plate_models.RegionReader(plate_models.WORLDWIDE, core=FakeCore(rows, scores), directory=folder)
+
+    def test_cameras_reading_plates_at_the_same_moment_each_get_their_plate(self):
+        # One reader serves every plate camera, each from its own worker thread.
+        from concurrent.futures import ThreadPoolExecutor
+        rows = np.array([[0, 320, 365, 390, 390, 0, 0.8]], dtype=np.float32)
+        reader = self.reader(rows, one_hot("AB12CDE"))
+        reader.detector, reader.recogniser = OneRequest(reader.detector), OneRequest(reader.recogniser)
+        frame = np.full((720, 1280, 3), 90, dtype=np.uint8)
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(lambda _: reader.read(frame), range(48)))
+        self.assertEqual([[plate.text for plate in found] for found in results], [["AB12CDE"]] * 48)
+        self.assertEqual((reader.detector.calls, reader.recogniser.calls), (48, 48))
 
     def test_the_reader_maps_a_detection_back_to_the_picture_and_reads_the_crop(self):
         # A plate at x 640..780, y 450..500 of a 1280 x 720 picture is, letter-boxed at half size, x 320..390, y 365..390.
