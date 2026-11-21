@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request makes the older run pointless: stop it, so its roughly 60 runner-minutes are not spent on a commit nobody will merge.
+# A newer push to a pull request makes the older run pointless: stop it, so its runner-minutes are not spent on a commit nobody will merge.
 # Runs on main are never cancelled, so every merge is checked and published.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -103,9 +103,16 @@ jobs:
           path: test-results/
           if-no-files-found: warn
 
-  verify:
+  # The unit tests, split over four runners so they take about a quarter of the time. Each shard has a machine to itself, so the
+  # timing-sensitive tests run as they would in one long run; tests/shard.py balances the modules by how long each took (module_seconds.json).
+  unit-tests:
+    name: unit-tests (${{ matrix.shard }} of 4)
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # The unit tests take 27-40 minutes depending on the runner; 40 cut a run short
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       mediamtx:
         image: bluenviron/mediamtx:1.21.0
@@ -116,24 +123,14 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14'
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '26'
       - name: Install FFmpeg
         # Packages are fetched in parallel and from a second mirror on retries (see the script): the Ubuntu mirror has been slow enough to time out a serial install.
         timeout-minutes: 15
         run: bash .github/scripts/install-ffmpeg.sh
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt
-      - name: Check for known vulnerabilities
-        # The locked Python packages and the web interface's packages (#385). Fails on a finding not accepted, with a reason,
-        # in .github/vulnerability-exceptions.txt. pip-audit runs from its own hash-locked environment.
-        run: |
-          python -m venv /tmp/nvr-audit
-          /tmp/nvr-audit/bin/python -m pip install --quiet --require-hashes -r requirements-ci-audit.txt
-          python .github/scripts/check-vulnerabilities.py /tmp/nvr-audit/bin/pip-audit
       - name: Start simulated RTSP camera
-        # The camera must outlive the whole run (the suite takes 36-40 minutes; verify stops at 60): at 2100 s it ended before the last live-recording test.
+        # The camera must outlive the shard's tests (about 10 minutes; the job stops at 30). It ends with the job.
         run: |
           nohup ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 -t 3900 -an \
             -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 10 \
@@ -162,8 +159,36 @@ jobs:
           NVR_RTSP_AUDIO_TEST_URL: rtsp://127.0.0.1:8554/nvr-audio
           NVR_REQUIRE_PLATE_MODELS: "1"  # The real plate models are downloaded and tested here, never silently skipped
           NVR_REQUIRE_POSE_MODELS: "1"  # The real pose model for fall detection is downloaded and tested here, never silently skipped
-        # "-t ." imports the tests package first, which makes password hashing and empty databases cheap for the suite (see tests/__init__.py).
-        run: python -m unittest discover -s tests -t . -v
+        # A quarter of the test modules, chosen by tests/shard.py so the four shards take about as long (see that file).
+        run: python -m tests.shard --shard ${{ matrix.shard }} --of 4 --run
+
+  # Everything else verify used to do after the unit tests: compile, web build, unused-code check, Compose and image checks, the smoke test.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - name: Install FFmpeg
+        # Packages are fetched in parallel and from a second mirror on retries (see the script): the Ubuntu mirror has been slow enough to time out a serial install.
+        timeout-minutes: 15
+        run: bash .github/scripts/install-ffmpeg.sh
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check for known vulnerabilities
+        # The locked Python packages and the web interface's packages (#385). Fails on a finding not accepted, with a reason,
+        # in .github/vulnerability-exceptions.txt. pip-audit runs from its own hash-locked environment.
+        run: |
+          python -m venv /tmp/nvr-audit
+          /tmp/nvr-audit/bin/python -m pip install --quiet --require-hashes -r requirements-ci-audit.txt
+          python .github/scripts/check-vulnerabilities.py /tmp/nvr-audit/bin/pip-audit
+      - name: Every test module is in exactly one shard
+        run: python -m tests.shard --check 4
       - name: Compile Python
         run: python -m compileall -q app tests
       - name: Typecheck and build the browser interface
@@ -268,6 +293,22 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+
+  # The one check to require before merging: it passes only when every unit-test shard and the build passed. It runs even when one of them
+  # failed or was skipped (a skipped job would otherwise count as passed for a required check).
+  verify:
+    needs: [unit-tests, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every unit-test shard and the build passed
+        env:
+          UNIT_TESTS: ${{ needs.unit-tests.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "unit tests: $UNIT_TESTS, build: $BUILD"
+          test "$UNIT_TESTS" = success && test "$BUILD" = success
   publish:
     needs: verify
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
