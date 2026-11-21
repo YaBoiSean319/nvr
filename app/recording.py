@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .credentials import decrypt
+from .processes import end_process
 from .store import connect
 from .motion import MotionClipAssembler
 from .onvif_events import CameraMotionEvent, subscribe_and_pull
@@ -26,6 +27,7 @@ from .health import recording_health
 from .incidents import sync_incident, sync_storage_incidents
 
 RECONNECT_MAX_SECONDS = 30
+RECORDER_GRACE_SECONDS = 5  # How long FFmpeg is given to stop (and finish its last segment) before it is killed; elsewhere 3 s
 # An open coverage interval not confirmed for this long means the recorder was not running.
 RESTART_GAP_AFTER = timedelta(seconds=15)
 
@@ -130,13 +132,7 @@ async def _stop_motion_parts(tasks: list["asyncio.Task[None] | None"], assembler
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     await assembler.stop()
-    if proc and proc.returncode is None:
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+    await end_process(proc, RECORDER_GRACE_SECONDS)
 
 
 def _continuous_args(executable: str, audio: bool, output_dir: Path, list_path: Path, segment_duration: int) -> list[str]:
@@ -856,13 +852,7 @@ class RecordingManager:
                 await assembler.ingest(CameraMotionEvent(
                     False, datetime.now(timezone.utc), "server-motion-difference", source="server",
                 ))
-            if process and process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await end_process(process, RECORDER_GRACE_SECONDS)
             if source_state["value"] in {"healthy", "connecting"}:
                 with connect() as db:
                     db.execute("UPDATE cameras SET server_motion_status='waiting' WHERE id=?", (camera_id,))
@@ -879,13 +869,7 @@ class RecordingManager:
 
     async def _end_ffmpeg(self, process: asyncio.subprocess.Process | None) -> None:
         """Ask FFmpeg to stop, and kill it if it has not within five seconds."""
-        if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+        await end_process(process, RECORDER_GRACE_SECONDS)
 
     async def _watch_continuous_output(self, camera_id: str, process: asyncio.subprocess.Process, list_path: Path, output_dir: Path, segment_duration: int) -> None:
         """Every two seconds while FFmpeg runs: index the finished segments, mark the video fresh when a file is being written, and say whether the

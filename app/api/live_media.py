@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from app.viewing import MAX_LIVE_AUDIO_LISTENERS, MAX_LIVE_TRANSCODES, MAX_LIVE_VIEWERS
 from app import live_variant
 from app.live_hub import LiveHub, Viewer
+from app.processes import end_process
 from app.principal import Administrator, CurrentUser, current_user, requires_scope
 from app.store import connect
 from app import network, privacy, viewing_audit
@@ -208,16 +209,7 @@ def live_camera_audio(
         except (OSError, RuntimeError):
             return
         finally:
-            if process is not None and process.returncode is None:
-                try:
-                    process.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await end_process(process, 3)
             _release_live_audio()
             watching.close()
 
@@ -271,13 +263,7 @@ async def _mjpeg_frames(camera_id: str, source: str, quality: str, zones: list |
                         status_data["last_frame_at"] = datetime.now(timezone.utc).isoformat()
                 yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n"
     finally:
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+        await end_process(process, 3)
 
 
 @router.get("/api/cameras/{camera_id}/live")

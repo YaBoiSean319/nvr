@@ -20,6 +20,7 @@ from typing import IO, Any, Callable
 from . import acceleration, copies_budget, footage_chain, privacy, redaction, viewing_audit
 from . import dewarp as dewarp_geometry
 from .display_settings import format_display_datetime
+from .processes import end_process
 from .recording import recordings_path
 from .retention import acquire_playback, release_playback, unlink_if_unleased
 from .storage import fetch_cold_sources, recording_file_path
@@ -1460,13 +1461,7 @@ class ExportManager:
             await process.wait()
             raise RuntimeError("Export encoding exceeded the one-hour job limit") from exc
         except asyncio.CancelledError:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await end_process(process, 3)
             raise
         finally:
             self._processes.pop(job_id, None)

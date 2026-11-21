@@ -19,6 +19,7 @@ import numpy as np
 
 from . import acceleration, ai_capacity, privacy
 from .credentials import decrypt
+from .processes import end_process
 from .track_privacy import box_touches, box_usable
 from .recording import _manifest_bytes, _PROTOCOLS, safe_stream_url
 from .store import connect
@@ -444,13 +445,7 @@ async def _decode_frames(source: str, fps: float, hardware: bool):
     except asyncio.IncompleteReadError:
         pass
     finally:
-        if proc.returncode is None:
-            proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=3)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        await end_process(proc, 3)
 
 
 def _with_db(write: Any, *args: Any) -> Any:
