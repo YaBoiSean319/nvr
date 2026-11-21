@@ -221,6 +221,15 @@ def remove(entry_id: str, user: Administrator) -> Response:
     return Response(status_code=204)
 
 
+def _stored_box(text: str | None) -> dict | None:
+    """A stored face box, or None when there is none or it cannot be read."""
+    try:
+        box = json.loads(text) if text else None
+    except ValueError:
+        return None
+    return box if isinstance(box, dict) else None
+
+
 @router.get("/api/faces/watch/{entry_id}/picture")
 def picture(entry_id: str, _: Administrator) -> Response:
     with connect() as db:
@@ -229,12 +238,12 @@ def picture(entry_id: str, _: Administrator) -> Response:
         except faces.FaceError as error:
             _raise(error)
         # The picture is a crop of a recorded frame. If a mask has since been drawn over where it was taken, it is not shown (#301). An entry enrolled before the
-        # place was recorded has no box to compare, and stays visible.
+        # place was recorded has no box to compare: any mask on its camera may cover it, so it is hidden while the camera has one, as a sighting is.
         source = db.execute("SELECT camera_id,box_json FROM face_embeddings WHERE entry_id=? ORDER BY rowid LIMIT 1", (entry_id,)).fetchone()
-        if source is not None and source["box_json"]:
+        if source is not None and source["camera_id"]:
             masks = track_privacy.zones_by_camera(db, [source["camera_id"]]).get(source["camera_id"], [])
-            box = json.loads(source["box_json"])
-            if masks and (not track_privacy.box_usable(box) or track_privacy.box_touches(box, masks)):
+            box = _stored_box(source["box_json"])
+            if masks and (box is None or not track_privacy.box_usable(box) or track_privacy.box_touches(box, masks)):
                 raise HTTPException(status_code=404, detail="That entry has no picture")
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 

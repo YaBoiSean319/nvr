@@ -124,12 +124,17 @@ class StoredPictureTests(FacePrivacyCase):
         self.mask()
         self.assertEqual(self.admin.get(f"/api/faces/watch/{entry}/picture").status_code, 200)
 
-    def test_an_entry_enrolled_before_provenance_was_kept_stays_visible(self):
+    def test_an_entry_enrolled_before_provenance_was_kept_is_hidden_on_a_masked_camera(self):
+        # Where its face was cannot be known, so any mask on its camera may cover it: hidden, as a sighting whose box cannot be compared is.
+        # It used to stay visible whatever the masks, the gap left open on #301.
         entry = self.enrol({"x": 0.7, "y": 0.7})
         with connect() as db:
             db.execute("UPDATE face_embeddings SET box_json=NULL")
-        self.mask(BOTTOM_RIGHT)
-        self.assertEqual(self.admin.get(f"/api/faces/watch/{entry}/picture").status_code, 200, "where it was cannot be known, so it is not guessed")
+        self.assertEqual(self.admin.get(f"/api/faces/watch/{entry}/picture").status_code, 200, "no mask, nothing to protect")
+        self.mask(TOP_LEFT)
+        self.assertEqual(self.admin.get(f"/api/faces/watch/{entry}/picture").status_code, 404)
+        self.mask()
+        self.assertEqual(self.admin.get(f"/api/faces/watch/{entry}/picture").status_code, 200, "visible again once the mask is gone")
 
     def sighting(self, entry: str, box: dict, raw_box: str | None = None) -> str:
         track, sighting = str(uuid.uuid4()), str(uuid.uuid4())
