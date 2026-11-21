@@ -113,6 +113,19 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(found[0].crop.shape, (72, 256, 3))  # 0.1 high by 0.2 wide of the frame
         self.assertEqual(found[0].confidence, 0.9)  # The index form carries none of its own: the detector's stands
 
+    def test_cameras_reading_plates_at_the_same_moment_each_get_their_plate(self):
+        # The hand-installed reader is shared by every plate camera too (#436).
+        from concurrent.futures import ThreadPoolExecutor
+        from tests.test_plate_regions import OneRequest
+        core = FakeCore([(0.1, 0.5, 0.3, 0.6)], ["AB12CDE"] * 48)
+        reader = plates.PlateReader(Path("/m/vehicle-license-plate-detection-barrier-0106.xml"), Path("/m/recogniser.xml"), core=core)
+        reader.detector, reader.recogniser = OneRequest(reader.detector), OneRequest(reader.recogniser)
+        reader.recogniser.input = reader.recogniser.model.input
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(lambda _: reader.read(frame), range(48)))
+        self.assertEqual([[plate.text for plate in found] for found in results], [["AB12CDE"]] * 48)
+
     def test_a_recogniser_that_also_takes_a_sequence_indicator_is_given_one(self):
         seen = {}
 

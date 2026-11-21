@@ -168,6 +168,18 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(face.pixels, (96, 128))  # The 48 x 64 found in the half-size picture
         self.assertAlmostEqual(face.box[0], (((20 + 0.25) * 16 - 24) / 0.5) / 1280, places=4)
 
+    def test_cameras_looking_for_faces_at_the_same_moment_each_get_their_faces(self):
+        # One face reader serves every face-watch camera, each from its own worker thread; each model refuses overlapping calls (#436).
+        from concurrent.futures import ThreadPoolExecutor
+        from tests.test_plate_regions import OneRequest
+        reader = self.reader()
+        reader.detector, reader.recogniser = OneRequest(reader.detector), OneRequest(reader.recogniser)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(lambda _: reader.faces(frame), range(48)))
+        self.assertEqual([len(found) for found in results], [1] * 48)
+        np.testing.assert_allclose(results[-1][0].embedding, [0.6, 0.8])
+
     def test_a_face_narrower_than_the_minimum_is_found_but_not_recognised(self):
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         self.assertEqual(len(self.reader().detect(frame)), 1)
