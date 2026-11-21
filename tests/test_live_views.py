@@ -112,6 +112,41 @@ class LiveViewTests(unittest.TestCase):
             self.assertEqual(observed, [(self.camera, "rtsp://camera.local/low", "low")])
         self.assertEqual(self.client.get(f"/api/cameras/{self.camera}/live/status").json()["active_viewers"], 0)
 
+    def test_the_fallback_stream_of_a_quiet_camera_ends_soon_after_access_ends(self):
+        # The MJPEG fallback checked the viewer's access only when a frame arrived. A quiet camera sends none, so a viewer whose access had
+        # ended kept the stream and its live-view slot until FFmpeg's 15-second read gave up; the access page promises about a second (#298).
+        import asyncio
+
+        with connect() as db:
+            db.execute("UPDATE cameras SET stream_url_ciphertext=? WHERE id=?", (encrypt("rtsp://camera.local/primary"), self.camera))
+        allowed = {"now": True}
+
+        async def check(guard):
+            return allowed["now"]
+
+        async def quiet_frames(camera_id, source, quality, zones=None):
+            yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 2\r\n\r\nxx\r\n"
+            await asyncio.Event().wait()  # The camera goes quiet
+
+        async def watch():
+            response = live_camera(self.camera, self.active_user, "low", False)
+            frames = response.body_iterator
+            first = await frames.__anext__()
+            allowed["now"] = False  # The viewer's access ends while nothing is arriving
+            started = asyncio.get_running_loop().time()
+            try:
+                await asyncio.wait_for(frames.__anext__(), timeout=5)
+            except StopAsyncIteration:
+                pass
+            return first, asyncio.get_running_loop().time() - started
+
+        with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch("app.api.live_media._mjpeg_frames", quiet_frames), \
+                patch("app.privacy.StreamGuard.check", check):
+            first, took = asyncio.run(watch())
+        self.assertIn(b"xx", first)
+        self.assertLess(took, 3)
+        self.assertEqual(self.client.get(f"/api/cameras/{self.camera}/live/status").json()["active_viewers"], 0)  # Its slot was given back
+
     def test_full_video_capacity_allows_sixteen_bounded_audio_listeners(self):
         audio_cameras = [self.camera, self.camera_two]
         with connect() as db:

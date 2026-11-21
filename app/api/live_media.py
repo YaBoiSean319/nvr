@@ -298,15 +298,32 @@ def live_camera(
 
     async def stream():
         watching = viewing_audit.LiveSession(user.id, camera_id, quality)
+        frames = _mjpeg_frames(camera_id, source, quality, zones)
+        upcoming: asyncio.Future | None = None
         try:
-            async for frame in _mjpeg_frames(camera_id, source, quality, zones):
+            while True:
+                if upcoming is None:
+                    upcoming = asyncio.ensure_future(frames.__anext__())
+                # Wake every second even when the camera is quiet, so a viewer whose access ended is cut off at once (#298), as on the WebSocket.
+                done, _ = await asyncio.wait({upcoming}, timeout=privacy.ACCESS_RECHECK_SECONDS)
                 if not await guard.check():
                     return  # Masks or grants changed: the viewer reconnects under the new ones.
+                if not done:
+                    continue
+                try:
+                    frame = upcoming.result()
+                except StopAsyncIteration:
+                    return
+                upcoming = None
                 await watching.delivered()
                 yield frame
         except (OSError, RuntimeError, asyncio.TimeoutError):
             return
         finally:
+            if upcoming is not None and not upcoming.done():
+                upcoming.cancel()  # Inside the frame reader, which ends FFmpeg as it unwinds
+                await asyncio.gather(upcoming, return_exceptions=True)
+            await frames.aclose()
             _release_live_view(camera_id)
             watching.close()
 

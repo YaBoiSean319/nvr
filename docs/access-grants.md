@@ -47,7 +47,7 @@ An **API token** has its creator's access, resolved at each request. Tokens are 
 
 ## Expiry and changes take effect at once
 
-A grant that has expired gives nothing from that moment: the next request already sees it gone. **Open live video** (the WebSocket stream and the MJPEG fallback) re-checks the viewer's access about once a second, even when the camera is quiet, and closes with `4403` ("Your access to this camera has ended"). Changing a grant has the same effect.
+A grant that has expired gives nothing from that moment: the next request already sees it gone. **Open live video** (the WebSocket stream and the MJPEG fallback) re-checks the viewer's access about once a second, even when the camera is quiet: the WebSocket stream closes with `4403` ("Your access to this camera has ended"), and the MJPEG fallback ends. Changing a grant has the same effect.
 
 ## Audit
 
