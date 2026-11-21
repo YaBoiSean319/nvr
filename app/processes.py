@@ -26,3 +26,19 @@ async def end_process(process: "asyncio.subprocess.Process | None", grace: float
         except ProcessLookupError:
             pass
         await process.wait()
+
+
+async def run_to_end(process: "asyncio.subprocess.Process", input: bytes | None = None, timeout: float | None = None) -> tuple[bytes | None, bytes | None]:
+    """``process.communicate(input)`` with a deadline, for a run that gives one answer (a frame, a duration). When the deadline passes, or the
+    caller is cancelled, the process is killed and waited for before the error goes on: a cancelled wait does not end it, and an RTSP read
+    from a camera that never answers has nothing else to."""
+    try:
+        return await asyncio.wait_for(process.communicate(input) if input is not None else process.communicate(), timeout)
+    except BaseException:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+        raise

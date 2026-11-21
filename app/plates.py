@@ -40,6 +40,7 @@ from typing import Any, Awaitable, Callable, Iterable
 import numpy as np
 
 from . import jpeg
+from .processes import run_to_end
 
 logger = logging.getLogger("nvr.plates")
 
@@ -536,10 +537,8 @@ async def ffmpeg_snapshot(source: str, timeout: float = 12.0, protocols: str | N
                  "-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1"]
     process = await asyncio.create_subprocess_exec(*arguments, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
-        data, _ = await asyncio.wait_for(process.communicate(_manifest_bytes(source)), timeout)
+        data, _ = await run_to_end(process, _manifest_bytes(source), timeout)
     except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
         return None
     return decode_bmp(data)
 

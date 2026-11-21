@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import metrics
 from .onvif_events import CameraMotionEvent
+from .processes import run_to_end
 from .store import connect
 
 
@@ -257,10 +258,9 @@ class MotionClipAssembler:
         )
         try:
             # Joining is a copy, and takes longer for a longer clip: two minutes, or half a second for each two-second part if that is more (#339).
-            await asyncio.wait_for(proc.wait(), timeout=timeout if timeout is not None else max(120.0, len(files) * 0.5))
+            await run_to_end(proc, timeout=timeout if timeout is not None else max(120.0, len(files) * 0.5))
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            pass  # Killed: the clip is marked failed below
         if proc.returncode != 0 or not output.is_file() or output.stat().st_size < 128:
             output.unlink(missing_ok=True)
             await self._mark_failed(capture, "Motion clip could not be assembled")

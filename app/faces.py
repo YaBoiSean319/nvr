@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from . import face_models, jpeg, plates, privacy, track_privacy
+from .processes import run_to_end
 from .store import connect
 from app.clock import now as _now, parse as _parse
 
@@ -132,10 +133,8 @@ async def frame_at(camera_id: str, at: datetime) -> np.ndarray:
             shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(path), "-frames:v", "1",
             "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         try:
-            data, _ = await asyncio.wait_for(process.communicate(), EXTRACT_TIMEOUT)
+            data, _ = await run_to_end(process, timeout=EXTRACT_TIMEOUT)
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
             raise FaceError(503, "Extracting the picture took too long") from None
     finally:
         release_playback(path)

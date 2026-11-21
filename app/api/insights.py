@@ -14,6 +14,7 @@ from app.api.playback import _segment_zones
 from app.principal import CurrentUser, requires_scope
 from app.retention import acquire_playback, release_playback
 from app.storage import recording_file_path
+from app.processes import run_to_end
 from app.store import connect
 
 router = APIRouter()
@@ -132,14 +133,11 @@ async def reference_frame(camera_id: str, user: CurrentUser, at: str | None = Qu
             ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", "1", "-i", str(path), "-frames:v", "1",
             "-vf", privacy.with_mask("scale=960:-2:force_original_aspect_ratio=decrease", zones), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        image, _ = await asyncio.wait_for(process.communicate(), timeout=15)
+        image, _ = await run_to_end(process, timeout=15)
         if process.returncode != 0 or not image.startswith(b"\xff\xd8"):
             raise HTTPException(status_code=422, detail="A still could not be extracted from the recording")
         return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store", "X-Source-Time": row["starts_at"]})
     except asyncio.TimeoutError:
-        if process and process.returncode is None:
-            process.kill()
-            await process.wait()
         raise HTTPException(status_code=503, detail="Extracting a still timed out") from None
     finally:
         release_playback(path)

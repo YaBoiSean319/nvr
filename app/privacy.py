@@ -23,6 +23,7 @@ from typing import Any, Iterable
 from . import acceleration, copies_budget
 from .access import may_view_camera
 from .credentials import decrypt
+from .processes import run_to_end
 from .store import connect
 from app.clock import now as _now, stamp
 
@@ -255,12 +256,7 @@ async def _ffmpeg(args: list[str], stdin: bytes | None = None, timeout: float = 
     process = await asyncio.create_subprocess_exec(executable, "-nostdin", "-hide_banner", "-loglevel", "error", *args,
                                                    stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    try:
-        output, _ = await asyncio.wait_for(process.communicate(stdin), timeout)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise
+    output, _ = await run_to_end(process, stdin, timeout)
     if process.returncode != 0:
         raise RuntimeError("FFmpeg could not apply the privacy mask")
     return output
