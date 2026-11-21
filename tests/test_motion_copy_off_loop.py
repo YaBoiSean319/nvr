@@ -120,6 +120,41 @@ class MotionCopyOffLoopTests(unittest.TestCase):
         self.assertLess(longest, SLOW_COPY_SECONDS / 2, "the recorder's event loop stopped while a stopped capture's parts were copied")
         self.assertEqual([path.name for path in self.spool.iterdir() if path.name.startswith("capture-")], [])  # Its folder was removed
 
+    def test_a_poll_cancelled_mid_copy_finishes_before_the_stop_copies_again(self):
+        # The recorder cancels the buffer's watch when a camera stops or reconnects, then stops the assembler. The cancelled watch's copy
+        # carries on in its thread, and the stop's copy used to start beside it on the same capture: two copies of one part, as two parts
+        # of the clip (the same seconds twice), or one part written over another.
+        import threading
+
+        assembler, motion = self.started()
+        real = shutil.copyfile
+        guard, running, most, copied = threading.Lock(), [0], [0], []
+
+        def copy(source, destination, *args, **kwargs):
+            with guard:
+                running[0] += 1
+                most[0] = max(most[0], running[0])
+            try:
+                time.sleep(SLOW_COPY_SECONDS)
+                copied.append(Path(source).name)
+                return real(source, destination, *args, **kwargs)
+            finally:
+                with guard:
+                    running[0] -= 1
+
+        async def cancel_then_stop():
+            await assembler.ingest(motion)
+            watch = asyncio.create_task(assembler.poll())
+            await asyncio.sleep(SLOW_COPY_SECONDS / 2)  # The first part is being copied
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+            await assembler.stop()
+
+        with patch("app.motion.shutil.copyfile", copy):
+            asyncio.run(asyncio.wait_for(cancel_then_stop(), timeout=30))
+        self.assertEqual(most[0], 1, "two copies ran on one capture at once")
+        self.assertEqual(sorted(copied), [f"segment-{number:06d}.ts" for number in range(3)])  # Each part copied once
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -161,7 +161,7 @@ class MotionClipAssembler:
         now = datetime.now(timezone.utc)
         # Copying is disk work on the recorder's disk, which is busy writing every camera's stream: when it falls behind, the kernel makes
         # the copy wait. In a thread, that wait never stops every camera's recording supervision. The capture is only touched under the lock.
-        if not await asyncio.to_thread(self._copy_buffered, capture, now):
+        if not await self._copy(capture, now):
             return
         if capture.copied and (capture.active or now < capture.capture_until) and self._length(capture) >= MAX_CLIP_SECONDS:
             # Still going, and long enough: this much is saved now and the event carries on in a new clip from where this one ends.
@@ -197,6 +197,16 @@ class MotionClipAssembler:
                  following.requested_start.isoformat(), following.capture_until.isoformat(), json.dumps(following.source_events, separators=(",", ":"))),
             )
         return following
+
+    async def _copy(self, capture: _Capture, now: datetime) -> bool:
+        """``_copy_buffered`` in a thread, finished even when the caller is cancelled. A cancelled await does not stop the thread: the lock
+        would be given back with the copy still running, and the stop that follows a cancelled poll would copy the same parts beside it."""
+        copying = asyncio.ensure_future(asyncio.to_thread(self._copy_buffered, capture, now))
+        try:
+            return await asyncio.shield(copying)
+        except asyncio.CancelledError:
+            await asyncio.gather(copying, return_exceptions=True)  # Still under the lock
+            raise
 
     def _copy_buffered(self, capture: _Capture, now: datetime) -> bool:
         """Copy the buffer's segments that belong to this capture and are not yet copied into its staging folder. False when the buffer's list cannot be read."""
@@ -299,7 +309,7 @@ class MotionClipAssembler:
             if capture is None:
                 return
             try:
-                await asyncio.to_thread(self._copy_buffered, capture, datetime.now(timezone.utc))
+                await self._copy(capture, datetime.now(timezone.utc))
                 if capture.copied:
                     await self._finalize(capture, timeout=STOP_JOIN_SECONDS, note=ENDED_EARLY)
                     return
