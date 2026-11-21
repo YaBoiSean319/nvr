@@ -230,6 +230,32 @@ class LoopPathTests(SceneTestCase):
         self.assertGreater(keyframes, 0)  # Each object's keyframe was still kept
         self.assertNotIn("failed", [state for state, _ in self.states()])
 
+    # --- memory over a long stream ------------------------------------------------------------------------------------------------------
+
+    def test_objects_that_have_left_are_not_remembered_for_the_rest_of_the_stream(self):
+        # Each object's first frame is kept as its keyframe, once: the loop remembered every object it had keyframed for as long as the
+        # camera's stream stayed open. A busy camera sees thousands of objects a day and a stream can stay open for weeks (#217).
+        from datetime import datetime, timedelta, timezone
+
+        seen: list[set[str]] = []
+        start = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        ticks = iter(range(10_000))
+
+        def prepare(manager):
+            manager.clock = lambda: start + timedelta(seconds=30 * next(ticks))  # Every object has left before the next frame: each is new
+            real = manager._keep_first_sightings
+
+            async def watched(frame, at, track_ids, observations, keyframed, models):
+                if not seen:
+                    seen.append(keyframed)
+                await real(frame, at, track_ids, observations, keyframed, models)
+
+            manager._keep_first_sightings = watched
+
+        self.run_loop(prepare)
+        self.assertGreater(self.tracks(), len(scene.OBJECTS) * 3)  # Many objects came and went
+        self.assertLessEqual(len(seen[0]), len(scene.OBJECTS))  # Only those still in view are remembered
+
     # --- stopping ----------------------------------------------------------------------------------------------------------------------
 
     def test_stopping_in_the_middle_of_a_stream_ends_the_loop_without_calling_the_camera_failed(self):

@@ -813,6 +813,9 @@ class DetectionManager:
             for watch in watches:
                 await watch.after_frame(frame, at, track_ids, observations, tracker)
             await self._keep_first_sightings(frame, at, track_ids, observations, keyframed, models)
+            # An object that has left never comes back under the same track: forgetting it keeps this to the objects in view, where it
+            # used to hold every object seen for as long as the stream stayed open, weeks on a busy camera (#217).
+            keyframed.intersection_update(track.id for track in tracker.active)
         return frames_seen > 0
 
     async def _detect(self, camera_id: str, config: dict[str, Any], detector: Any, frame: Any, frames_seen: int) -> list[dict[str, Any]]:
